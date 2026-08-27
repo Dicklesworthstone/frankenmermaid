@@ -1192,6 +1192,23 @@ pub enum NodeShape {
     /// capsule as [`NodeShape::Cylinder`] rotated a quarter turn, with the inner arc on the LEFT end
     /// rather than the top.
     HorizontalCylinder,
+    /// mermaid's `tag-rect` / `tagged-process`: a COMPLETE rectangle with a 45-degree fold drawn
+    /// over its bottom-right corner.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle: the outline is a full box
+    /// (`M-25.7359375 -27 … L-25.7359375 -27`, uncut) and a SECOND path draws the triangle
+    /// `(14.9359375, 27) (25.7359375, 27) (25.7359375, 16.2)` over it. The fold is 10.8 on each axis
+    /// out of a 51.47 x 54 box — a fifth of the height, at 45 degrees.
+    ///
+    /// ⚠️ THE BOX IS NOT CUT, which is what separates this from [`NodeShape::NotchedRect`]. Cutting
+    /// the corner here would remove area mermaid keeps.
+    TaggedRect,
+    /// mermaid's `lin-cyl` / `disk`: a cylinder with a SECOND rim line below the top ellipse.
+    ///
+    /// Measured — the `cyl` path plus a trailing `M0,12.151 a20.3359375,6.137 0,0,0 40.671875,0`,
+    /// an extra arc at twice the ellipse radius. Its relationship to [`NodeShape::Cylinder`] is
+    /// exactly [`NodeShape::LinedRect`]'s to a plain rectangle: same body, one added rule.
+    LinedCylinder,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1226,6 +1243,12 @@ pub const NOTCHED_PENTAGON_CUT_Y_RATIO: f32 = 0.2;
 /// Measured from mermaid 11.15.0's `sl-rect`: the shape spans y -54..27 (81 units) with its
 /// top-left corner at y=-27, i.e. 27 of 81.
 pub const SLOPED_RECT_DROP_RATIO: f32 = 1.0 / 3.0;
+
+/// Size of [`NodeShape::TaggedRect`]'s corner fold on BOTH axes, as a fraction of the box height.
+///
+/// Measured from mermaid 11.15.0's `tag-rect`: a 10.8 by 10.8 triangle on a box of height 54. Equal
+/// on both axes is what makes the fold read as a 45-degree turn-up rather than a slanted cut.
+pub const TAGGED_RECT_FOLD_RATIO: f32 = 0.2;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

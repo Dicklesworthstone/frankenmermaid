@@ -111,6 +111,11 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // rather than in the wrong place; a rotated capsule builder would be strictly better and is
         // the obvious follow-up.
         NodeShape::HorizontalCylinder => rounded_rect_path(bounds, 0.0),
+        // The tagged rectangle keeps its FULL box — the fold is drawn over the corner, not cut out of
+        // it, so unlike `NotchedRect` there is no removed area to be conservative about. The lined
+        // cylinder is a cylinder with one extra rim, so it shares `cylinder_path` exactly.
+        NodeShape::TaggedRect => rounded_rect_path(bounds, 0.0),
+        NodeShape::LinedCylinder => cylinder_path(bounds),
     }
 }
 

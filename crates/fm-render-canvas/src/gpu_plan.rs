@@ -34,7 +34,9 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::LinedRect
             | NodeShape::DividedRect
             | NodeShape::NotchedPentagon
-            | NodeShape::HorizontalCylinder => Self::Rect,
+            | NodeShape::HorizontalCylinder
+            | NodeShape::TaggedRect => Self::Rect,
+            NodeShape::LinedCylinder => Self::Cylinder,
             NodeShape::SmallCircle | NodeShape::FramedCircle => Self::Circle,
             NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,
             NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => Self::Circle,

@@ -11124,6 +11124,48 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::TaggedRect => {
+            // The box stays WHOLE and the fold is drawn over it — `NotchedRect` is the one that cuts.
+            // Both subpaths live in one `d` so the fold inherits the shape's stroke.
+            let fold = h * fm_core::TAGGED_RECT_FOLD_RATIO;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .close()
+                .move_to(x + w - fold, y + h)
+                .line_to(x + w, y + h)
+                .line_to(x + w, y + h - fold)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::LinedCylinder => {
+            // `Cylinder`'s body plus a SECOND rim at twice the ellipse radius — the cylinder analogue
+            // of `LinedRect`'s rule. Anything that drops that trailing arc renders a plain cylinder.
+            let ry = h * 0.1;
+            let path = PathBuilder::new()
+                .move_to(x, y + ry)
+                .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
+                .line_to(x + w, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
+                .close()
+                .move_to(x, y + ry)
+                .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
+                .move_to(x, y + ry * 2.0)
+                .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry * 2.0)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::SlopedRect => {
             // Top edge rises left-to-right: the left corner drops a third of the height, the right
             // corner sits flush with the top.
@@ -13210,6 +13252,8 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::NotchedPentagon => "fm-node-shape-notched-pentagon",
         NodeShape::SlopedRect => "fm-node-shape-sloped-rect",
         NodeShape::HorizontalCylinder => "fm-node-shape-horizontal-cylinder",
+        NodeShape::TaggedRect => "fm-node-shape-tagged-rect",
+        NodeShape::LinedCylinder => "fm-node-shape-lined-cylinder",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

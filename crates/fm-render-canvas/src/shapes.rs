@@ -42,6 +42,10 @@ pub fn draw_shape<C: Canvas2dContext>(
         // reduces to its box, as the notched shapes do.
         NodeShape::SlopedRect => draw_sloped_rect(ctx, x, y, width, height),
         NodeShape::HorizontalCylinder => draw_rect(ctx, x, y, width, height, 0.0),
+        // The tag fold is a plain triangle canvas can draw; the lined cylinder falls back to the
+        // plain cylinder, its extra rim being interior detail.
+        NodeShape::TaggedRect => draw_tagged_rect(ctx, x, y, width, height),
+        NodeShape::LinedCylinder => draw_cylinder(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -343,6 +347,25 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.line_to(x, y + h);
     ctx.close_path();
     ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a rectangle with a folded bottom-right corner — mermaid's `tag-rect` (bd-7ls21).
+///
+/// The box is drawn WHOLE and the fold laid over it; cutting the corner would be `notch-rect`.
+fn draw_tagged_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let fold = h * f64::from(fm_core::TAGGED_RECT_FOLD_RATIO);
+
+    ctx.begin_path();
+    ctx.rect(x, y, w, h);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.begin_path();
+    ctx.move_to(x + w - fold, y + h);
+    ctx.line_to(x + w, y + h);
+    ctx.line_to(x + w, y + h - fold);
+    ctx.close_path();
     ctx.stroke();
 }
 

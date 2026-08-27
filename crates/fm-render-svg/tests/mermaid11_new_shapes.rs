@@ -26,6 +26,11 @@
 //!               top-left corner sitting 27 of that 81-unit span below the top
 //!   h-cyl       arcs "a5.031948881789138,15.75 0,0,1" capping a body of 23.2 —
 //!               `Cylinder` rotated a quarter turn, inner arc on the LEFT end
+//!   tag-rect    a FULL box plus a second path drawing the triangle
+//!               (14.9359375,27) (25.7359375,27) (25.7359375,16.2) over its
+//!               bottom-right corner — 10.8 on each axis, a fifth of the height
+//!   lin-cyl     the `cyl` path plus a trailing "M0,12.151 a20.3359375,6.137
+//!               0,0,0 40.671875,0" — a SECOND rim at twice the ellipse radius
 //! ```
 //!
 //! ⚠️ MERMAID'S SECOND PATH IS NOT GEOMETRY. These go through rough.js, whose sketch overlay
@@ -143,6 +148,72 @@ fn each_new_shape_draws_its_measured_silhouette() {
         horizontal.contains("A10 33.25"),
         "h-cyl is not capped on its ends: {}",
         silhouette(&horizontal)
+    );
+
+    // Full box, then the fold: 66.50 * 0.2 = 13.30 on each axis at the bottom-right.
+    let tagged = render("tag-rect");
+    assert!(
+        tagged.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z")
+            && tagged.contains("M178.70 158.50 L192 158.50 L192 145.20 Z"),
+        "tag-rect is not a whole box with a corner fold: {}",
+        silhouette(&tagged)
+    );
+
+    // The extra rim sits at twice the ellipse radius: 92 + 2*6.65 = 105.30.
+    let lined_cylinder = render("lin-cyl");
+    assert!(
+        lined_cylinder.contains("M92 105.30 A50 6.65"),
+        "lin-cyl has no second rim: {}",
+        silhouette(&lined_cylinder)
+    );
+}
+
+/// ⚠️ A FOLD IS NOT A CUT. `tag-rect` keeps its whole rectangle and draws a triangle OVER the
+/// bottom-right corner; `notch-rect` REMOVES the top-left corner. Both are "a rectangle with a
+/// triangle involved", and a test asserting "there is a diagonal" or counting path commands passes
+/// on either — but one loses area mermaid keeps.
+#[test]
+fn the_tagged_rectangle_folds_where_the_notched_one_cuts() {
+    let tagged = render("tag-rect");
+    let notched = render("notch-rect");
+    assert!(
+        tagged.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z"),
+        "tag-rect lost its complete box, so the fold became a cut: {}",
+        silhouette(&tagged)
+    );
+    assert!(
+        !notched.contains("M92 92 L192 92 L192 158.50 L92 158.50 Z"),
+        "notch-rect drew a complete box, so its corner is no longer cut: {}",
+        silhouette(&notched)
+    );
+    assert_ne!(
+        silhouette(&tagged),
+        silhouette(&notched),
+        "the folded and cut rectangles render identically"
+    );
+}
+
+/// ⚠️ AND THE LINED CYLINDER IS THE PLAIN ONE PLUS EXACTLY ONE ARC. Dropping that trailing rim
+/// leaves a `cyl` — same element, same command sequence, one subpath shorter. A test asserting "it
+/// is a cylinder" cannot see the difference.
+#[test]
+fn the_lined_cylinder_is_the_plain_one_plus_a_rim() {
+    let plain = render("cyl");
+    let lined = render("lin-cyl");
+    assert!(
+        !plain.contains("M92 105.30 A50 6.65"),
+        "the plain cylinder grew a second rim: {}",
+        silhouette(&plain)
+    );
+    assert!(
+        lined.contains("M92 105.30 A50 6.65"),
+        "the lined cylinder lost its second rim: {}",
+        silhouette(&lined)
+    );
+    assert_ne!(
+        silhouette(&plain),
+        silhouette(&lined),
+        "the plain and lined cylinders render identically"
     );
 }
 
@@ -274,6 +345,8 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "notch-pent",
         "sl-rect",
         "h-cyl",
+        "tag-rect",
+        "lin-cyl",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -291,7 +364,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 9] = [
+    let groups: [(&str, &[&str]); 11] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -312,6 +385,11 @@ fn every_published_alias_draws_the_same_shape() {
         ("notch-pent", &["notched-pentagon", "loop-limit"]),
         ("sl-rect", &["sloped-rectangle", "manual-input"]),
         ("h-cyl", &["horizontal-cylinder", "das"]),
+        (
+            "tag-rect",
+            &["tagged-rectangle", "tag-proc", "tagged-process"],
+        ),
+        ("lin-cyl", &["lined-cylinder", "disk"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -355,6 +433,10 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "manual-input",
         "h-cyl",
         "das",
+        "tag-rect",
+        "tagged-process",
+        "lin-cyl",
+        "disk",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -406,6 +488,8 @@ fn each_new_shape_has_an_accessible_description() {
         ("notch-pent", "notched pentagon"),
         ("sl-rect", "sloped rectangle"),
         ("h-cyl", "horizontal cylinder"),
+        ("tag-rect", "tagged rectangle"),
+        ("lin-cyl", "lined cylinder"),
     ] {
         assert!(
             render(shape).contains(want),
