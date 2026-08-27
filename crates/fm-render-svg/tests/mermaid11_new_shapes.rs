@@ -193,6 +193,47 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "bolt is not the measured six-vertex zigzag: {}",
         silhouette(&lightning)
     );
+
+    // Both edges waved, in opposite phase: bottom control 1.09h (164.49), top control -0.09h (86.01).
+    let banner = render("flag");
+    assert!(
+        banner.contains("Q117 164.49,142 152.51") && banner.contains("Q167 86.01,142 97.99"),
+        "flag does not wave both edges: {}",
+        silhouette(&banner)
+    );
+}
+
+/// The flag's two waves must run in OPPOSITE phase, which is what makes it a banner.
+///
+/// Wave only the bottom and it is a document. Wave both in the SAME phase and it is a ribbon. Either
+/// mistake keeps the curve commands, the closed path and the difference from a rect element — so
+/// "has curves" and this bead's differs-from-Rect rule both pass while the shape is wrong. The phase
+/// shows up as controls on OPPOSITE sides of the box: 164.49 is below its bottom edge (158.50) and
+/// 86.01 is above its top (92).
+#[test]
+fn the_flag_waves_both_edges_in_opposite_phase() {
+    let banner = render("flag");
+    assert!(
+        banner.contains("164.49"),
+        "the bottom wave does not bulge below the box: {}",
+        silhouette(&banner)
+    );
+    assert!(
+        banner.contains("86.01"),
+        "the top wave does not bulge above the box, so both edges wave the same way: {}",
+        silhouette(&banner)
+    );
+    // A document waves ONE edge; the flag must not collapse onto it.
+    assert_ne!(
+        silhouette(&banner),
+        silhouette(&render("doc")),
+        "the flag renders identically to a document"
+    );
+    assert_ne!(
+        silhouette(&banner),
+        silhouette(&render("rect")),
+        "the flag renders identically to a rectangle"
+    );
 }
 
 /// The bolt's two waists sit at DIFFERENT heights, and that asymmetry is the whole shape.
@@ -470,6 +511,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "doc",
         "lin-doc",
         "bolt",
+        "flag",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -487,7 +529,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 14] = [
+    let groups: [(&str, &[&str]); 15] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -516,6 +558,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("doc", &["document"]),
         ("lin-doc", &["lined-document"]),
         ("bolt", &["lightning-bolt", "com-link"]),
+        ("flag", &["paper-tape"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -569,6 +612,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "lined-document",
         "bolt",
         "com-link",
+        "flag",
+        "paper-tape",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -577,8 +622,12 @@ fn implemented_names_stop_warning_and_others_do_not() {
         );
     }
     // `doc` left this list by being implemented; `bang` replaces it so the list keeps its size.
-    // `bolt` left this list by being implemented; `flag` replaces it so the size holds.
-    for name in ["hourglass", "brace", "flag", "bang"] {
+    // ⚠️ ANCHORED ON THE TWO CONFIRMED NON-SHAPES, deliberately. `win-pane` and `datastore` are
+    // names mermaid 11.15.0 publishes and draws as a PLAIN RECTANGLE — measured, recorded on
+    // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
+    // had to be swapped out the moment someone implemented it, three lists at a time; these two
+    // cannot be. The third entry rotates and is expected to churn.
+    for name in ["win-pane", "datastore", "hourglass", "bang"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -627,6 +676,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("doc", "document"),
         ("lin-doc", "lined document"),
         ("bolt", "lightning bolt"),
+        ("flag", "flag"),
     ] {
         assert!(
             render(shape).contains(want),

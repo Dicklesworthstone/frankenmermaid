@@ -39,6 +39,7 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::Document
             | NodeShape::LinedDocument => Self::Rect,
             NodeShape::LightningBolt => Self::Polygon,
+            NodeShape::Flag => Self::Rect,
             NodeShape::LinedCylinder => Self::Cylinder,
             NodeShape::SmallCircle | NodeShape::FramedCircle => Self::Circle,
             NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,

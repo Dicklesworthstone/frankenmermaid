@@ -77,8 +77,12 @@ fn a_still_unimplemented_shape_still_warns() {
             "`shape: {name}` is implemented now and must not warn"
         );
     }
-    // `bolt` left this list by being implemented (bd-7ls21); `flag` replaces it.
-    for name in ["hourglass", "brace", "flag"] {
+    // ⚠️ ANCHORED ON THE TWO CONFIRMED NON-SHAPES, deliberately. `win-pane` and `datastore` are
+    // names mermaid 11.15.0 publishes and draws as a PLAIN RECTANGLE — measured, recorded on
+    // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
+    // had to be swapped out the moment someone implemented it, three lists at a time; these two
+    // cannot be. The third entry rotates and is expected to churn.
+    for name in ["win-pane", "datastore", "hourglass"] {
         assert!(
             !warnings(&format!("flowchart TD\n  A@{{ shape: {name} }}\n")).is_empty(),
             "`shape: {name}` is still unimplemented and must still warn"

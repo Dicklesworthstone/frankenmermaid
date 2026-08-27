@@ -123,6 +123,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The bolt is mostly empty box — a full-box boundary would let edges stop far from any ink.
         // Its own outline is the right stop, and unlike the cylinder there is no rotation subtlety.
         NodeShape::LightningBolt => lightning_bolt_path(bounds),
+        // The flag mostly fills its box (only the wave crests cut in), so the box is the right
+        // conservative boundary — the opposite call from the bolt, which is sparse.
+        NodeShape::Flag => rounded_rect_path(bounds, 0.0),
     }
 }
 

@@ -50,6 +50,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         // The rule is interior detail; canvas draws the document body without it.
         NodeShape::LinedDocument => draw_document(ctx, x, y, width, height),
         NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
+        NodeShape::Flag => draw_flag(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -349,6 +350,20 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a banner with both edges waved in opposite phase — mermaid's `flag` (bd-7ls21).
+fn draw_flag<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x, y + h * 0.917);
+    ctx.quadratic_curve_to(x + w * 0.25, y + h * 1.09, x + w * 0.5, y + h * 0.91);
+    ctx.quadratic_curve_to(x + w * 0.75, y + h * 0.79, x + w, y + h * 0.893);
+    ctx.line_to(x + w, y + h * 0.083);
+    ctx.quadratic_curve_to(x + w * 0.75, y - h * 0.09, x + w * 0.5, y + h * 0.09);
+    ctx.quadratic_curve_to(x + w * 0.25, y + h * 0.21, x, y + h * 0.107);
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

@@ -11143,6 +11143,25 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::Flag => {
+            // Bottom wave left-to-right, up the right side, top wave right-to-left in OPPOSITE
+            // phase. Control points chosen so each quadratic's midpoint lands on the measured
+            // trough/crest; see `NodeShape::Flag` for the sampled figures.
+            let path = PathBuilder::new()
+                .move_to(x, y + h * 0.917)
+                .quadratic_to(x + w * 0.25, y + h * 1.09, x + w * 0.5, y + h * 0.91)
+                .quadratic_to(x + w * 0.75, y + h * 0.79, x + w, y + h * 0.893)
+                .line_to(x + w, y + h * 0.083)
+                .quadratic_to(x + w * 0.75, y - h * 0.09, x + w * 0.5, y + h * 0.09)
+                .quadratic_to(x + w * 0.25, y + h * 0.21, x, y + h * 0.107)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::LightningBolt => {
             // Six vertices, measured. The two waist edges sit at DIFFERENT heights (0.55 and 0.45);
             // equalising them turns the bolt into a wedge.
@@ -13314,6 +13333,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::Document => "fm-node-shape-document",
         NodeShape::LinedDocument => "fm-node-shape-lined-document",
         NodeShape::LightningBolt => "fm-node-shape-lightning-bolt",
+        NodeShape::Flag => "fm-node-shape-flag",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

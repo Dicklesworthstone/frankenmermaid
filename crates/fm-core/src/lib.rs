@@ -1259,6 +1259,23 @@ pub enum NodeShape {
     /// naturally TALL (35 x 70); drawn into this renderer's wider node box it stretches, exactly as
     /// `Triangle` and the other non-boxy shapes already do.
     LightningBolt,
+    /// mermaid's `flag` / `paper-tape`: a banner — straight sides, and BOTH the top and bottom edges
+    /// are waves, mirror images of each other.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a bbox of
+    /// 40.67 x 58.48, normalised to the box:
+    ///
+    /// ```text
+    ///   bottom edge   starts 0.917 h at the left, TROUGHS at 1.000 h (x 0.258 w),
+    ///                 CRESTS at 0.835 h (x 0.776 w), ends 0.893 h at the right
+    ///   top edge      the same wave point-mirrored: 0.107 h at the left, crest
+    ///                 0.000 h (x 0.742 w), trough 0.165 h (x 0.224 w), 0.083 h right
+    /// ```
+    ///
+    /// ⚠️ BOTH EDGES WAVE, AND IN OPPOSITE PHASE. A banner drawn with only the bottom waved is a
+    /// [`NodeShape::Document`]; one with both waved in the SAME phase is a parallelogram-ish ribbon.
+    /// The shape is the phase relationship, not the presence of curves.
+    Flag,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
