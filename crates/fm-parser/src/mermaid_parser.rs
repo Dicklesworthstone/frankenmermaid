@@ -12547,7 +12547,15 @@ fn normalize_compound_identifier(raw: &str) -> String {
     }
 }
 
-fn clean_label(raw: Option<&str>) -> Option<String> {
+/// The label normalizer: quote stripping, markdown strings, `<br>` conversion and entity decode.
+///
+/// ⚠️ `pub(crate)` SO THE IR BUILDER USES THIS ONE (bd-j06n2). `ir_builder` carried a second private
+/// function of the SAME NAME that only trimmed quotes, and every edge label and diagram title went
+/// through that one — so `A -->|"one<br/>two"| B` kept the tag, `&amp;` stayed encoded, and
+/// `#35;` was never decoded, while the identical text in a NODE label came out right. Two helpers
+/// with one name in one crate is the duplicated-helper trap this parser has hit before: the copy
+/// gets fixed, its fork does not.
+pub(crate) fn clean_label(raw: Option<&str>) -> Option<String> {
     parse_label(raw).map(|label| label.text)
 }
 

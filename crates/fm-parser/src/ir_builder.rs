@@ -2032,6 +2032,11 @@ impl IrBuilder {
     /// Routing descriptions through `intern_node` silently dropped every line after the first
     /// (bd-xm62h). Joined with `\n`, which `fm_render_svg::wrap_node_label_lines` already splits on.
     pub(crate) fn append_state_description(&mut self, id: &str, text: &str, span: Span) {
+        // ⚠️ THE THIRD BARE LABEL PATH (bd-j06n2). Node labels went through the parser's normalizer,
+        // edge labels went through a same-named copy that only trimmed quotes, and a state
+        // description went through NEITHER — `s1 : one<br/>two` kept the tag and `&amp;` stayed
+        // encoded, while the identical text in a flowchart node came out right.
+        let text = &clean_label(Some(text)).unwrap_or_else(|| text.to_owned());
         let Some(node_id) = self.intern_node(id, None, NodeShape::Rounded, span) else {
             return;
         };
@@ -2696,19 +2701,18 @@ impl IrBuilder {
     }
 }
 
+/// Delegates to the parser's normalizer (bd-j06n2).
+///
+/// ⚠️ THIS USED TO BE A SECOND, DIFFERENT `clean_label`, and the name collision is what hid it. It
+/// trimmed quotes and stopped there, so every caller below — edge labels and five diagram-title
+/// sites — silently lost the `<br>` conversion, the HTML entity decode and the `#nn;` numeric
+/// decode that node labels got from the parser's version. `A -->|"one<br/>two"| B` drew the tag;
+/// `s1 : a &amp; b` came out as `a &amp`, truncated.
+///
+/// Kept as a wrapper rather than replaced at seven call sites: the point is that there is now ONE
+/// implementation, not that the name disappears.
 fn clean_label(input: Option<&str>) -> Option<String> {
-    let raw = input?;
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches('`')
-        .trim();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned.to_string())
-    }
+    crate::mermaid_parser::clean_label(input)
 }
 
 #[cfg(test)]
