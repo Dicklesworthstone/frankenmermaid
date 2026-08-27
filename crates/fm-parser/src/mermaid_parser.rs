@@ -2439,6 +2439,13 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         // They were listed as unimplemented, so an author writing a correct name was warned that a
         // shape we DO draw was unsupported, and got a plain rectangle instead of the bar.
         "fork" | "join" => NodeShape::HorizontalBar,
+        // ── mermaid 11 shapes drawn for the first time (bd-7ls21) ─────────────────────────────
+        // Aliases taken verbatim from the pinned 11.15.0 shape registry, not invented.
+        "notch-rect" | "card" | "notched-rectangle" => NodeShape::NotchedRect,
+        "lin-rect" | "lined-rectangle" | "lined-process" | "lin-proc" | "shaded-process" => {
+            NodeShape::LinedRect
+        }
+        "sm-circ" | "small-circle" | "start" => NodeShape::SmallCircle,
         _ => return None,
     })
 }
@@ -2497,7 +2504,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 78] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 67] = [
     "bang",
     "bolt",
     "bow-rect",
@@ -2506,7 +2513,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 78] = [
     "brace-l",
     "brace-r",
     "braces",
-    "card",
     "collate",
     "com-link",
     "comment",
@@ -2539,32 +2545,22 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 78] = [
     "lightning-bolt",
     "lin-cyl",
     "lin-doc",
-    "lin-proc",
-    "lin-rect",
     "lined-cylinder",
     "lined-document",
-    "lined-process",
-    "lined-rectangle",
     "loop-limit",
     "manual-file",
     "manual-input",
     "notch-pent",
-    "notch-rect",
     "notched-pentagon",
-    "notched-rectangle",
     "paper-tape",
     "processes",
     "procs",
-    "shaded-process",
     "sl-rect",
     "sloped-rectangle",
-    "sm-circ",
-    "small-circle",
     "st-doc",
     "st-rect",
     "stacked-document",
     "stacked-rectangle",
-    "start",
     "stop",
     "stored-data",
     "tag-doc",
@@ -20727,13 +20723,17 @@ Rel_Back(db, app, "Responds")"#,
     /// nothing pointing at why. Every other unrecognised-input path in this parser already warns.
     #[test]
     fn an_unimplemented_shape_name_warns_and_keeps_the_shape() {
-        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: notch-rect }\n  B[Plain]\n");
+        // `hourglass`, not `notch-rect`: the latter is IMPLEMENTED as of bd-7ls21, so asserting it
+        // warns would assert something false. Any name still in UNIMPLEMENTED_UPSTREAM_SHAPES
+        // exercises this identically -- what is pinned is the message and the recovery, not which
+        // shape happens to be unbuilt this week.
+        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: hourglass }\n  B[Plain]\n");
 
         assert!(
             parsed
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("notch-rect") && warning.contains("not implement")),
+                .any(|warning| warning.contains("hourglass") && warning.contains("not implement")),
             "an unimplemented shape passed in silence; warnings: {:?}",
             parsed.warnings
         );

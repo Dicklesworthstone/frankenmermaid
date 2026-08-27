@@ -1123,7 +1123,31 @@ pub enum NodeShape {
     Cloud,
     Tag,
     CrossedCircle,
+    /// mermaid's `notch-rect` / `card`: a rectangle with the TOP-LEFT corner cut away at 45°.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle:
+    /// `polygon points="12,-39 37.67,-39 37.67,0 0,0 0,-27 12,-39"` — a box spanning x 0..37.67 and
+    /// y -39..0 whose notch runs from (0,-27) to (12,-39), i.e. 12 units on each axis.
+    NotchedRect,
+    /// mermaid's `lin-rect` / `lined-process` / `shaded-process`: a rectangle with a VERTICAL RULE
+    /// near the left edge, like a ruled index card.
+    ///
+    /// Measured: `M-20.34 -27 L28.34 -27 L28.34 27 L-28.34 27 L-28.34 -27 L-20.34 -27 L-20.34 27` —
+    /// the box is x -28.34..28.34 and the rule sits at x = -20.34, 8 units in from the left edge.
+    LinedRect,
+    /// mermaid's `sm-circ` / `start`: a SMALL circle of fixed radius, not one sized to its label.
+    ///
+    /// Measured: `<circle class="state-start" r="7">`. The fixed radius is the point — it is a
+    /// start marker, so it must not grow with the text the way [`NodeShape::Circle`] does.
+    SmallCircle,
 }
+
+/// Radius of [`NodeShape::SmallCircle`], in user units.
+///
+/// Measured from mermaid 11.15.0's `sm-circ`: `<circle class="state-start" r="7">`. Fixed rather than
+/// derived from the label, because the shape is a start marker — one that grew with its text would
+/// stop reading as a marker.
+pub const SMALL_CIRCLE_RADIUS: f32 = 7.0;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

@@ -157,15 +157,20 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// "we have not built this" and "check your spelling" send an author to different fixes, so a name
 /// in the wrong bucket actively misleads. `card` and `notch-rect` are the SAME shape under two
 /// published names and must give the SAME verdict; before this they gave opposite ones.
-/// ⚠️ `join` LEFT THIS LIST BY BEING IMPLEMENTED, not by being excused. It resolves to
-/// `NodeShape::HorizontalBar` now and emits no warning at all, so asserting it is reported as
-/// unimplemented would assert something false. The list keeps five entries and the typo control
-/// below is untouched, so the message split this test exists for is still pinned;
-/// `crates/fm-parser/tests/fork_join_shape_names.rs` takes over the `fork`/`join` half and asserts
-/// both that they no longer warn AND that `hourglass`/`brace`/`bolt` still do.
+/// ⚠️ NAMES LEAVE THIS LIST BY BEING IMPLEMENTED, not by being excused, and the list is REFILLED
+/// rather than allowed to shrink.
+///
+/// `join` went first (`NodeShape::HorizontalBar`), then `card`/`notch-rect`/`start` (bd-7ls21).
+/// Asserting an implemented name is reported as unimplemented would assert something false — but
+/// simply deleting entries would quietly weaken the check, so each departure is replaced by another
+/// name still in `UNIMPLEMENTED_UPSTREAM_SHAPES`. Six entries in, six entries out.
+///
+/// The typo control below is untouched, and the two new-shape suites
+/// (`fm-parser/tests/fork_join_shape_names.rs`, `fm-render-svg/tests/mermaid11_new_shapes.rs`) each
+/// assert that the names they implemented no longer warn AND that unbuilt ones still do.
 #[test]
 fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
-    for name in ["card", "notch-rect", "text", "start", "document"] {
+    for name in ["doc", "hourglass", "text", "brace", "document", "bolt"] {
         let warning = warning_for(name);
         assert!(
             warning.contains("does not implement yet"),

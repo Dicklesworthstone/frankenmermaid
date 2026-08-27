@@ -11010,6 +11010,61 @@ fn render_node(
             }
             return group.child(g);
         }
+        // ── mermaid 11 shapes (bd-7ls21) ──────────────────────────────────────────────────────
+        // Silhouettes read off a Chromium 151 render of the pinned 11.15.0 bundle. mermaid draws
+        // these through rough.js, so its output carries a SECOND path that re-traces the same
+        // outline as dozens of jittered cubics; the first path is the shape and the sketch effect is
+        // deliberately not reproduced.
+        NodeShape::NotchedRect => {
+            // polygon "12,-39 37.67,-39 37.67,0 0,0 0,-27 12,-39": the top-left corner is cut away
+            // at 45°, 12 units on each axis out of a 37.67x39 box. Taken as a proportion of the
+            // shorter side so the notch stays a 45° cut at any label size.
+            let notch = (w.min(h) * 0.31).min(w / 2.0).min(h / 2.0);
+            let path = PathBuilder::new()
+                .move_to(x + notch, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .line_to(x, y + notch)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::LinedRect => {
+            // "M-20.34 -27 L28.34 -27 L28.34 27 L-28.34 27 L-28.34 -27 L-20.34 -27 L-20.34 27":
+            // a plain box plus a VERTICAL RULE 8 units in from the left edge, drawn as one path so
+            // the rule inherits the shape's stroke rather than needing its own element.
+            let rule = (w * 0.14).min(16.0);
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .line_to(x, y)
+                .move_to(x + rule, y)
+                .line_to(x + rule, y + h)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::SmallCircle => {
+            // `<circle r="7">`. The radius is FIXED, not label-derived: this is a start marker, and
+            // one that grew with its text would stop reading as a marker at all.
+            Element::circle()
+                .cx(cx)
+                .cy(cy)
+                .r(fm_core::SMALL_CIRCLE_RADIUS)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
     };
 
     let shape_elem = maybe_add_class(shape_elem, "fm-node-shape", emit_classdef_classes);
@@ -13027,6 +13082,13 @@ fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
 const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     use fm_core::NodeShape;
     match shape {
+        // bd-7ls21. Marker classes with no generated rule behind them, which is this map's norm:
+        // only 5 of its entries are targeted by NODE_SHAPE_THEME_CSS and the rest exist so an
+        // author's stylesheet can reach the shape. Adding a rule here would be a theming decision,
+        // not part of drawing the shape.
+        NodeShape::NotchedRect => "fm-node-shape-notched-rect",
+        NodeShape::LinedRect => "fm-node-shape-lined-rect",
+        NodeShape::SmallCircle => "fm-node-shape-small-circle",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

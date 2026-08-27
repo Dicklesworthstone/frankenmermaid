@@ -85,6 +85,15 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
             rounded_rect_path(bounds, 0.0)
         }
         NodeShape::CrossedCircle => polygon_ellipse_path(bounds, 24),
+        // bd-7ls21. This function returns the OUTER BOUNDARY used for edge clipping and hit
+        // testing, not the drawn decoration — the same reason `Subroutine` returns a plain box
+        // rather than its double frame. A lined rectangle's rule and a notched rectangle's cut are
+        // interior detail; only the notch actually changes the silhouette, and it does so by
+        // REMOVING area, so a full box is the conservative boundary an edge can safely stop at.
+        NodeShape::NotchedRect | NodeShape::LinedRect => rounded_rect_path(bounds, 0.0),
+        // The small circle is a fixed-radius marker, but its BOUNDS still come from layout, so the
+        // boundary follows the bounds like every other round shape.
+        NodeShape::SmallCircle => polygon_ellipse_path(bounds, 24),
     }
 }
 

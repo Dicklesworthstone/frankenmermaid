@@ -25,7 +25,14 @@ pub enum GpuNodeShape {
 impl From<NodeShape> for GpuNodeShape {
     fn from(shape: NodeShape) -> Self {
         match shape {
-            NodeShape::Rect | NodeShape::Note | NodeShape::HorizontalBar => Self::Rect,
+            // bd-7ls21. The shader has no notch or rule primitive, and both shapes ARE rectangles
+            // with interior detail, so `Rect` is the honest reduction rather than a wrong shape.
+            NodeShape::Rect
+            | NodeShape::Note
+            | NodeShape::HorizontalBar
+            | NodeShape::NotchedRect
+            | NodeShape::LinedRect => Self::Rect,
+            NodeShape::SmallCircle => Self::Circle,
             NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,
             NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => Self::Circle,
             NodeShape::Diamond => Self::Diamond,

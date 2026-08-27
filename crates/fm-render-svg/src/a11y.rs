@@ -199,6 +199,12 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         .unwrap_or(&node.id);
 
     let shape_desc = match node.shape {
+        // bd-7ls21. Described by what a reader SEES, not by mermaid's registry key: "notch-rect"
+        // means nothing spoken aloud, and a screen-reader user gets the shape's identity from this
+        // string alone.
+        fm_core::NodeShape::NotchedRect => "notched rectangle",
+        fm_core::NodeShape::LinedRect => "lined rectangle",
+        fm_core::NodeShape::SmallCircle => "small circle",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

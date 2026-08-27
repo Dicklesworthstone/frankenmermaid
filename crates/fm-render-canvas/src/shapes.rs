@@ -24,6 +24,13 @@ pub fn draw_shape<C: Canvas2dContext>(
     ctx.set_line_width(stroke_width);
 
     match shape {
+        // bd-7ls21. Canvas draws the OUTER BOX for both rectangle variants: the notch and the rule
+        // are interior detail this surface has no primitive for, and a box is what the shape reduces
+        // to without them. Unlike the ER crow's feet (bd-hh0o7), a plain box here is not a FALSE
+        // statement — it is the same family of shape, just undecorated. The small circle does draw
+        // correctly, since a circle is a primitive canvas has.
+        NodeShape::NotchedRect | NodeShape::LinedRect => draw_rect(ctx, x, y, width, height, 0.0),
+        NodeShape::SmallCircle => draw_circle(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
