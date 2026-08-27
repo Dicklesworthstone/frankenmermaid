@@ -13066,6 +13066,30 @@ fn compute_edge_label<'a>(
         // and neither matched the incumbent, because a prefix is not what the incumbent produces.
         // The number is now written by `write_sequence_number_into`.
         let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
+
+        // A C4Dynamic relationship is NUMBERED, 1-based, in declaration order.
+        //
+        // ⚠️ THIS IS A RENDERER CONCERN, and mermaid agrees — the prefix is applied in `drawRels`,
+        // not in its parser, so the stored label stays the author's text:
+        //
+        // ```text
+        //   let a = 0;
+        //   for (let s of t) { a = a + 1;
+        //     i.db.getC4Type() === "C4Dynamic" && (s.label.text = a + ": " + s.label.text); … }
+        // ```
+        //
+        // The whole point of a dynamic diagram is the ORDER of the interactions, and we drew them
+        // unnumbered — the one piece of information the diagram type exists to convey. Found by
+        // `scripts/headtohead/chromium_text_diff.mjs`, which reported mermaid drawing
+        // `1: Submits credentials to` where we drew `Submits credentials to`.
+        //
+        // `edge_index` is the position in `ir.edges`, which is declaration order — the same order
+        // mermaid iterates its rels array in.
+        let label_text: Cow<'a, str> = if ir.diagram_type == fm_core::DiagramType::C4Dynamic {
+            Cow::Owned(format!("{}: {label_text}", edge_index + 1))
+        } else {
+            label_text
+        };
         let (lx, ly) = if edge_path.points.len() == 4 {
             let p1 = &edge_path.points[1];
             let p2 = &edge_path.points[2];

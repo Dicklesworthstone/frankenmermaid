@@ -17656,6 +17656,22 @@ fn bundle_parallel_edges(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
         let Some(edge) = ir.edges.get(path.edge_index) else {
             continue;
         };
+        // ⚠️ A LABELLED EDGE IS NEVER BUNDLED, because bundling DELETES it. The representative keeps
+        // its own label and gains a `×N` marker; every other edge in the group is marked `bundled`
+        // and never rendered, so its label — text the author wrote — is gone from the document.
+        //
+        // Measured on `c4_dynamic`: `Rel(signin, store, "select * from users where username = ?")`
+        // and `Rel_Back(store, signin, "Returns the stored hash")` both resolve to signin→store with
+        // an Arrow, so the second collapsed into the first and "Returns the stored hash" appeared
+        // NOWHERE. The reader saw `×2` in its place. mermaid draws both relationships with both
+        // labels; found by `scripts/headtohead/chromium_text_diff.mjs`.
+        //
+        // Bundling stays for the case it was built for — several IDENTICAL unlabelled connections
+        // between the same pair, where collapsing them declutters and discards nothing. The moment
+        // any edge in the group carries a label, the group is not redundant and must not be merged.
+        if edge.label.is_some() {
+            continue;
+        }
         let Some(source) = endpoint_node_index(ir, edge.from) else {
             continue;
         };
