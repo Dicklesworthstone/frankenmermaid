@@ -1772,6 +1772,67 @@ impl CompiledFlowchartPrefix {
 /// lowering and can refer forward into a suffix. Such inputs stay on the ordinary parser. The
 /// accepted subset is therefore an isomorphism, not a best-effort cache: prefix lowering order,
 /// interning order, source lines, warnings, and suffix semantics match a full parse exactly.
+/// The declared id of a `subgraph` header line.
+///
+/// ⚠️ `None` MEANS "COULD NOT READ IT", NOT "HAS NO ID", and every caller treats it as a reason to
+/// refuse a prefix. Over-reading (a quoted title yielding `"Quoted`) only ever costs a refusal.
+fn subgraph_header_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("subgraph")?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let id_end = rest
+        .find(['[', '(', '{', ' ', '\t'])
+        .unwrap_or(rest.len());
+    let id = rest[..id_end].trim();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Is `token` present in `haystack` as a whole identifier rather than inside a longer one?
+///
+/// Deliberately narrow about what continues an identifier: MISSING a mention would admit a prefix
+/// that must be refused, while an extra match only refuses one that was safe.
+fn mentions_identifier(haystack: &str, token: &str) -> bool {
+    fn is_identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+    if token.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0usize;
+    while let Some(found) = haystack[from..].find(token) {
+        let start = from + found;
+        let end = start + token.len();
+        let starts_clean = start == 0 || !is_identifier_byte(bytes[start - 1]);
+        let ends_clean = end == bytes.len() || !is_identifier_byte(bytes[end]);
+        if starts_clean && ends_clean {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Does the SUFFIX declare a subgraph the PREFIX already names?
+///
+/// ⚠️ THIS IS THE PRICE OF THE FORWARD-REFERENCE FIX (bd-dw2a9), AND IT WAS MEASURED, NOT GUESSED.
+/// An endpoint naming a subgraph is resolved from a pre-scan of the document being lowered. The
+/// prefix compiler lowers the prefix as its own document, so a prefix edge naming a subgraph the
+/// suffix declares resolves one way in a batch parse and another in a full parse — proved by
+/// `batch_prefix_forward_reference_into_the_suffix_matches_a_full_parse`, which produced
+/// `["S0", "Late", "L0", "A"]` from the batch path against `["S0", "L0", "A"]` from a full parse.
+///
+/// Refusing the prefix costs an optimization; getting it wrong silently gives two different diagrams
+/// for the same source depending on how the caller batched it.
+fn suffix_declares_a_subgraph_named_in_prefix(prefix: &str, suffix: &str) -> bool {
+    byte_lines(suffix).map(trim_fast).any(|line| {
+        is_subgraph_block_start(line)
+            && subgraph_header_id(line).is_none_or(|id| mentions_identifier(prefix, id))
+    })
+}
+
 pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
     let mut offset = 0usize;
     let mut saw_header = false;
@@ -1842,6 +1903,11 @@ pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
     {
         return None;
     }
+
+    // A subgraph declared in the suffix can answer a reference the prefix makes (bd-dw2a9).
+    if suffix_declares_a_subgraph_named_in_prefix(&input[..end], &input[end..]) {
+        return None;
+    }
     Some(&input[..end])
 }
 
@@ -1884,7 +1950,11 @@ pub(crate) fn reusable_flowchart_prefix_at_or_before(
         offset = line_end;
     }
 
-    candidate_end.map(|end| &input[..end])
+    // ⚠️ RE-CHECKED ON THE FINAL SPLIT. Shortening the prefix moves text INTO the suffix, so a
+    // subgraph that was safely inside the largest prefix can land in this one's suffix (bd-dw2a9).
+    candidate_end
+        .filter(|&end| !suffix_declares_a_subgraph_named_in_prefix(&input[..end], &input[end..]))
+        .map(|end| &input[..end])
 }
 
 /// Check another batch input against an already-validated reusable prefix.

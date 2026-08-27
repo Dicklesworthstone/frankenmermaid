@@ -2701,9 +2701,13 @@ mod tests {
             "    S0-->Late\n",
             "  end\n",
         );
+        // ⚠️ THE TWO INPUTS MUST DIVERGE INSIDE THE `Late` BLOCK. A first attempt at this test
+        // kept `Late` identical, so the byte-LCP swallowed it and the reusable prefix contained the
+        // very declaration the prefix was supposed to be missing — the test passed while exercising
+        // nothing. Diverging inside `Late` forces the prefix to end at `Shared`'s `end`.
         let inputs = [
-            format!("{shared}  subgraph Late\n    L0[Later]\n  end\n  L0-->A\n"),
-            format!("{shared}  subgraph Late\n    L0[Later]\n  end\n  L0-->B\n"),
+            format!("{shared}  subgraph Late\n    L0[\"Later one\"]\n  end\n  L0-->A\n"),
+            format!("{shared}  subgraph Late\n    L0[\"Later two\"]\n  end\n  L0-->B\n"),
         ];
         let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
         let plan =
@@ -2719,12 +2723,10 @@ mod tests {
                     "batch parse of input {index} disagrees with a full parse"
                 );
                 assert_eq!(actual.ir, &expected.ir);
-                eprintln!(
-                    "PREFIX_REUSED={} batch={:?} full={:?}",
-                    actual.reusable_prefix.is_some(),
-                    actual.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
-                    expected.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>()
-                );
+                // Today this passes by REFUSING the prefix, which is why
+                // `batch_plan_reuses_builder_allocations_without_changing_parse_output` matters as
+                // its companion: that one asserts an ordinary batch still reuses its prefix, so a
+                // guard that refused everything would be caught there rather than here.
             });
         }
     }
