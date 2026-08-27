@@ -2428,6 +2428,17 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "f-circ" | "filled-circle" | "junction" => NodeShape::FilledCircle,
         "cross-circ" | "crossed-circle" | "summary" => NodeShape::CrossedCircle,
         "cloud" => NodeShape::Cloud,
+        // ── ANOTHER MIRRORED PAIR (bd-3ra5y's family) ─────────────────────────────────────────
+        // `fork` and `join` are the SAME shape in mermaid and this renderer already draws it: a thin
+        // bar, reached today only through `state f <<fork>>` and the sequence `queue` participant,
+        // with no flowchart spelling at all. Measured in Chromium 151 against the pinned 11.15.0
+        // bundle, both names produce the identical outline `M-35 -5 L35 -5 L35 5 L-35 5` — a 70x10
+        // bar (the second path in mermaid's output is rough.js' sketch overlay of that same
+        // rectangle, not extra geometry). `HorizontalBar` draws 72x8 rounded, the same silhouette.
+        //
+        // They were listed as unimplemented, so an author writing a correct name was warned that a
+        // shape we DO draw was unsupported, and got a plain rectangle instead of the bar.
+        "fork" | "join" => NodeShape::HorizontalBar,
         _ => return None,
     })
 }
@@ -2486,7 +2497,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 80] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 78] = [
     "bang",
     "bolt",
     "bow-rect",
@@ -2518,7 +2529,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 80] = [
     "flag",
     "flip-tri",
     "flipped-triangle",
-    "fork",
     "fr-circ",
     "framed-circle",
     "h-cyl",
@@ -2526,7 +2536,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 80] = [
     "horizontal-cylinder",
     "hourglass",
     "internal-storage",
-    "join",
     "lightning-bolt",
     "lin-cyl",
     "lin-doc",

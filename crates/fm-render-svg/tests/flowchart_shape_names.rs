@@ -157,9 +157,15 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// "we have not built this" and "check your spelling" send an author to different fixes, so a name
 /// in the wrong bucket actively misleads. `card` and `notch-rect` are the SAME shape under two
 /// published names and must give the SAME verdict; before this they gave opposite ones.
+/// ⚠️ `join` LEFT THIS LIST BY BEING IMPLEMENTED, not by being excused. It resolves to
+/// `NodeShape::HorizontalBar` now and emits no warning at all, so asserting it is reported as
+/// unimplemented would assert something false. The list keeps five entries and the typo control
+/// below is untouched, so the message split this test exists for is still pinned;
+/// `crates/fm-parser/tests/fork_join_shape_names.rs` takes over the `fork`/`join` half and asserts
+/// both that they no longer warn AND that `hourglass`/`brace`/`bolt` still do.
 #[test]
 fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
-    for name in ["card", "notch-rect", "text", "start", "join", "document"] {
+    for name in ["card", "notch-rect", "text", "start", "document"] {
         let warning = warning_for(name);
         assert!(
             warning.contains("does not implement yet"),
