@@ -2590,6 +2590,63 @@ pub enum PathCmd {
 }
 
 /// Marker kind for path endpoints (e.g. arrowheads).
+/// The drawable parts of an ER crow's-foot cardinality marker, in local marker space (bd-hh0o7).
+///
+/// Deliberately a description rather than a path: each raster surface draws these with its own best
+/// primitive — SVG with a `<marker>` def, Canvas2D with `arc`/`quadratic_curve_to`, WebGPU with
+/// sampled line segments — while agreeing on WHAT the shape is. A shared path would force the
+/// smoothest surface down to the least capable one; a shared description does not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErMarkerGlyph {
+    /// x positions of the vertical bars, each spanning y in [-9, 9].
+    pub bars: Vec<f32>,
+    /// x position of the hollow "zero" bubble's centre, radius 6.
+    pub bubble: Option<f32>,
+    /// Whether the "many" lens is drawn, centred on the origin and spanning x in [-18, 18].
+    pub foot: bool,
+}
+
+impl ErMarkerGlyph {
+    /// Half-height of a bar, and half-height of the lens at its widest.
+    pub const BAR_HALF_HEIGHT: f32 = 9.0;
+    /// Radius of the hollow "zero" bubble.
+    pub const BUBBLE_RADIUS: f32 = 6.0;
+    /// Half-length of the "many" lens along the path direction.
+    pub const FOOT_HALF_LENGTH: f32 = 18.0;
+
+    /// The lens outline, sampled into `segments` points per half, for a surface that draws only
+    /// straight lines.
+    ///
+    /// Both halves are quadratic B(ezier)s — `(-18,0) Q (0,-18) (18,0)` and its mirror — matching
+    /// the SVG path exactly, so a sampled surface differs from a curved one only in smoothness.
+    #[must_use]
+    pub fn foot_polyline(segments: usize) -> Vec<(f32, f32)> {
+        let steps = segments.max(2);
+        let mut points = Vec::with_capacity(steps * 2);
+        for half in 0..2 {
+            let control_y = if half == 0 {
+                -Self::FOOT_HALF_LENGTH
+            } else {
+                Self::FOOT_HALF_LENGTH
+            };
+            let (from_x, to_x) = if half == 0 {
+                (-Self::FOOT_HALF_LENGTH, Self::FOOT_HALF_LENGTH)
+            } else {
+                (Self::FOOT_HALF_LENGTH, -Self::FOOT_HALF_LENGTH)
+            };
+            for step in 0..steps {
+                let t = step as f32 / steps as f32;
+                let inv = 1.0 - t;
+                // Quadratic Bezier with both endpoints on y=0 and the control at (0, +/-18).
+                let x = inv.mul_add(inv * from_x, t * (t * to_x));
+                let y = 2.0 * inv * t * control_y;
+                points.push((x, y));
+            }
+        }
+        points
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MarkerKind {
     #[default]
@@ -2627,6 +2684,78 @@ pub enum MarkerKind {
 }
 
 impl MarkerKind {
+    /// The drawable parts of this ER cardinality marker, in LOCAL space (bd-hh0o7).
+    ///
+    /// Local space is the marker rotated so +x runs along the path direction, with the origin on
+    /// the path endpoint — which is exactly what SVG's `refX`/`refY` anchor plus `orient="auto"`
+    /// produce, and what a canvas `translate(endpoint)` + `rotate(path_angle)` produces.
+    ///
+    /// ⚠️ ONE SOURCE FOR THE NUMBERS, consumed by every raster surface. fm-render-svg emits these
+    /// same shapes as `<marker>` definitions whose literals were read out of a Chromium render of
+    /// the pinned mermaid 11.15.0 bundle; this returns the same geometry with the `refX`/`refY`
+    /// subtraction already applied. Canvas2D and WebGPU both read it, so those two surfaces cannot
+    /// drift from each other, and fm-render-svg's `er_marker_glyph_agreement` tests pin them
+    /// against the SVG defs read off the SHIPPED bytes, so none of the three can drift alone.
+    ///
+    /// ⚠️ START AND END ARE DIFFERENT GLYPHS, NOT ONE GLYPH ROTATED. Rotation is not mirroring: a
+    /// `one` marker's bars sit on the far side of the foot from the entity, so reusing the start
+    /// glyph at the end puts the bar where the foot belongs and states a different cardinality.
+    #[must_use]
+    pub fn er_glyph(self) -> Option<ErMarkerGlyph> {
+        let glyph = match self {
+            // 18x18, refX=0, refY=9 — bars at marker-x 9 and 15.
+            Self::ErOnlyOneStart => ErMarkerGlyph {
+                bars: vec![9.0, 15.0],
+                bubble: None,
+                foot: false,
+            },
+            // 18x18, refX=18 — the same bars at marker-x 3 and 9.
+            Self::ErOnlyOneEnd => ErMarkerGlyph {
+                bars: vec![-15.0, -9.0],
+                bubble: None,
+                foot: false,
+            },
+            // 30x18, refX=0 — bar at 9, bubble at 21.
+            Self::ErZeroOrOneStart => ErMarkerGlyph {
+                bars: vec![9.0],
+                bubble: Some(21.0),
+                foot: false,
+            },
+            // 30x18, refX=30 — bubble at 9, bar at 21.
+            Self::ErZeroOrOneEnd => ErMarkerGlyph {
+                bars: vec![-9.0],
+                bubble: Some(-21.0),
+                foot: false,
+            },
+            // 45x36, refX=18 — foot centred, bar beyond it at marker-x 42.
+            Self::ErOneOrMoreStart => ErMarkerGlyph {
+                bars: vec![24.0],
+                bubble: None,
+                foot: true,
+            },
+            // 45x36, refX=27 — bar at marker-x 3, foot centred.
+            Self::ErOneOrMoreEnd => ErMarkerGlyph {
+                bars: vec![-24.0],
+                bubble: None,
+                foot: true,
+            },
+            // 57x36, refX=18 — foot centred, bubble beyond it at marker-x 48.
+            Self::ErZeroOrMoreStart => ErMarkerGlyph {
+                bars: Vec::new(),
+                bubble: Some(30.0),
+                foot: true,
+            },
+            // 57x36, refX=39 — bubble at marker-x 9, foot centred.
+            Self::ErZeroOrMoreEnd => ErMarkerGlyph {
+                bars: Vec::new(),
+                bubble: Some(-30.0),
+                foot: true,
+            },
+            _ => return None,
+        };
+        Some(glyph)
+    }
+
     /// Whether this is one of the eight ER crow's-foot shapes.
     ///
     /// ⚠️ SURFACES THAT CANNOT DRAW THESE MUST DRAW NOTHING, never fall through to an arrowhead. An

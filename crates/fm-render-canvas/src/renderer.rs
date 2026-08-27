@@ -5,7 +5,7 @@
 use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
 use crate::shapes::{
     draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
-    draw_open_triangle_marker, draw_shape,
+    draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape,
 };
 use crate::viewport::{Viewport, fit_to_viewport};
 use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
@@ -1957,6 +1957,53 @@ impl Canvas2dRenderer {
             ctx.stroke();
             self.draw_calls += 1;
 
+            // ER crow's-foot cardinality (bd-hh0o7), BEFORE the UML marker path and not through it.
+            //
+            // ⚠️ `legacy_uml_markers` IS KEYED ON `ArrowType`, and ER cardinality is not an
+            // ArrowType — it lives in `edge.er_notation()`. Adding the eight glyphs to
+            // `draw_marker_primitive` alone therefore left them as DEAD CODE: nothing on this
+            // surface ever asked for an `Er*` variant, and a draw-call test still passed because an
+            // ER diagram has plenty of other things to draw. Caught by disarming the arm and
+            // watching nothing fail.
+            //
+            // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
+            // the same pair fm-render-svg and the GPU plan select with, not a second table.
+            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation) {
+                let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+                let start = &points[0];
+                let next = &points[1];
+                let end = &points[points.len() - 1];
+                let prev = &points[points.len() - 2];
+                let placements = [
+                    (
+                        left.map(|form| MarkerKind::er_pair(form).0),
+                        f64::from(start.x) + offset_x,
+                        f64::from(start.y) + offset_y,
+                        f64::from(next.y - start.y).atan2(f64::from(next.x - start.x)),
+                    ),
+                    (
+                        right.map(|form| MarkerKind::er_pair(form).1),
+                        f64::from(end.x) + offset_x,
+                        f64::from(end.y) + offset_y,
+                        f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x)),
+                    ),
+                ];
+                for (kind, mx, my, angle) in placements {
+                    let Some(kind) = kind else {
+                        continue;
+                    };
+                    self.draw_calls += draw_er_cardinality_marker(
+                        ctx,
+                        kind,
+                        mx,
+                        my,
+                        angle,
+                        &self.config.node_fill,
+                        stroke,
+                    );
+                }
+            }
+
             let uml_markers = if edge_path.reversed {
                 None
             } else {
@@ -2887,10 +2934,12 @@ fn draw_marker_primitive<C: Canvas2dContext>(
 ) -> usize {
     match marker {
         MarkerKind::None => 0,
-        // ER crow's-foot cardinality (bd-dun16) is drawn by the SVG renderer only. Canvas2D has no
-        // glyph for these eight shapes yet, and drawing SOMETHING here would be worse than drawing
-        // nothing: an arrowhead where a crow's foot belongs asserts a cardinality the source never
-        // declared. Tracked separately rather than approximated.
+        // ER crow's-foot cardinality (bd-dun16 for the SVG half, bd-hh0o7 for this one). These
+        // eight arms used to return 0 DELIBERATELY: `GpuMarkerKind`'s fallback is `Arrow`, and an
+        // arrowhead where a crow's foot belongs does not read as "cardinality unavailable", it
+        // reads as a DIFFERENT cardinality — the diagram states something false rather than
+        // something incomplete. Now that the eight real glyphs exist, that reasoning is satisfied
+        // by drawing the right shape rather than by drawing none.
         MarkerKind::ErOnlyOneStart
         | MarkerKind::ErOnlyOneEnd
         | MarkerKind::ErZeroOrOneStart
@@ -2898,7 +2947,9 @@ fn draw_marker_primitive<C: Canvas2dContext>(
         | MarkerKind::ErOneOrMoreStart
         | MarkerKind::ErOneOrMoreEnd
         | MarkerKind::ErZeroOrMoreStart
-        | MarkerKind::ErZeroOrMoreEnd => 0,
+        | MarkerKind::ErZeroOrMoreEnd => {
+            draw_er_cardinality_marker(ctx, marker, x, y, angle, node_fill, stroke_color)
+        }
         MarkerKind::Circle => {
             draw_circle_marker(ctx, x, y, 4.0, node_fill, stroke_color);
             1

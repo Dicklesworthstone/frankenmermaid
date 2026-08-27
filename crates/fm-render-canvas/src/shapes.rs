@@ -4,6 +4,7 @@
 
 use crate::context::Canvas2dContext;
 use fm_core::NodeShape;
+use fm_layout::{ErMarkerGlyph, MarkerKind};
 use std::f64::consts::PI;
 
 /// Draw a node shape to the canvas context.
@@ -786,6 +787,90 @@ pub fn draw_open_triangle_marker<C: Canvas2dContext>(
     ctx.close_path();
     ctx.stroke();
     ctx.restore();
+}
+
+/// Draw one of mermaid's eight ER crow's-foot cardinality markers (bd-hh0o7).
+///
+/// GEOMETRY IS THE SVG RENDERER'S, TRANSLATED, NOT REDERIVED. `er_marker_def` in fm-render-svg
+/// holds the numbers read out of a Chromium render of the pinned mermaid 11.15.0 bundle, as
+/// `<marker>` definitions with a `markerWidth`/`markerHeight` box, a `refX`/`refY` anchor and
+/// `orient="auto"`. The mapping into canvas space is exact and mechanical:
+///
+/// * `orient="auto"` aligns the marker's +x with the path direction, which is what the caller's
+///   `ctx.rotate(angle)` already does — the caller passes the PATH direction at both ends
+///   (`start -> next` and `prev -> end`), so no extra half-turn belongs anywhere here.
+/// * The `refX`/`refY` point is the one that sits on the path endpoint, so a marker-space point
+///   `(mx, my)` becomes `(mx - refX, my - refY)` once translated to that endpoint.
+///
+/// Every literal below is that subtraction applied to the SVG path data, so the two renderers
+/// cannot disagree about a shape without one of them being edited.
+///
+/// ⚠️ START AND END ARE DIFFERENT GLYPHS, NOT ONE GLYPH ROTATED. Rotation is not mirroring: the
+/// bar of a `one` marker sits on the far side of the foot from the entity, so reusing the start
+/// glyph at the end puts the bar where the foot belongs and the diagram states a different
+/// cardinality. That is why there are eight arms here and not four.
+///
+/// Returns the number of draw calls issued, so a caller's accounting stays honest.
+pub fn draw_er_cardinality_marker<C: Canvas2dContext>(
+    ctx: &mut C,
+    marker: MarkerKind,
+    x: f64,
+    y: f64,
+    angle: f64,
+    bubble_fill: &str,
+    stroke: &str,
+) -> usize {
+    let Some(glyph) = marker.er_glyph() else {
+        return 0;
+    };
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.set_line_width(1.0);
+
+    let mut calls = 0;
+    // The "many" lens, drawn with the two quadratics the SVG marker uses rather than the sampled
+    // polyline the GPU path needs — same shape, this surface's best primitive for it.
+    if glyph.foot {
+        let half = f64::from(ErMarkerGlyph::FOOT_HALF_LENGTH);
+        ctx.set_stroke_style(stroke);
+        ctx.begin_path();
+        ctx.move_to(-half, 0.0);
+        ctx.quadratic_curve_to(0.0, -half, half, 0.0);
+        ctx.quadratic_curve_to(0.0, half, -half, 0.0);
+        ctx.stroke();
+        calls += 1;
+    }
+    for bar_x in &glyph.bars {
+        let half = f64::from(ErMarkerGlyph::BAR_HALF_HEIGHT);
+        ctx.set_stroke_style(stroke);
+        ctx.begin_path();
+        ctx.move_to(f64::from(*bar_x), -half);
+        ctx.line_to(f64::from(*bar_x), half);
+        ctx.stroke();
+        calls += 1;
+    }
+    if let Some(bubble_x) = glyph.bubble {
+        ctx.begin_path();
+        ctx.arc(
+            f64::from(bubble_x),
+            0.0,
+            f64::from(ErMarkerGlyph::BUBBLE_RADIUS),
+            0.0,
+            std::f64::consts::TAU,
+        );
+        // Filled, not hollow-by-omission: the bubble sits ON the edge line, so an unfilled circle
+        // would have the stroke running straight through it and read as a bead rather than a zero.
+        ctx.set_fill_style(bubble_fill);
+        ctx.fill();
+        ctx.set_stroke_style(stroke);
+        ctx.stroke();
+        calls += 1;
+    }
+
+    ctx.restore();
+    calls
 }
 
 /// Draw a circle marker at the end of an edge.

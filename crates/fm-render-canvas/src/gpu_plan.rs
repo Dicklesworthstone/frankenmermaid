@@ -1265,6 +1265,26 @@ pub struct GpuRenderPlan {
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// ER crow's-foot cardinality glyphs, as line segments (bd-hh0o7).
+    ///
+    /// SEGMENTS RATHER THAN MARKER INSTANCES, deliberately. The arrowhead shader carries six SDF
+    /// glyphs and none of them is a crow's foot; `GpuMarkerKind`'s fallback is `Arrow`, and an
+    /// arrowhead where a crow's foot belongs states a DIFFERENT cardinality rather than an absent
+    /// one. Emitting the real outline through the segment pipeline draws the right shape without
+    /// inventing a shader glyph, and it is the same pipeline the radar wheel already uses.
+    ///
+    /// ⚠️ DECLARED AFTER `edge_segments`, AND THAT POSITION IS THE POINT. This struct documents its
+    /// field order as the SUBMISSION order, so a field declared among the background furniture is
+    /// painted over by the edge that runs through it — which for a cardinality marker means the
+    /// edge line crossing the glyph it is supposed to terminate at. Beside `arrowheads` is where a
+    /// marker belongs: after the edge, before the node box.
+    ///
+    /// The bubble is an OUTLINE here, not an opaque disc: the SVG surface fills it white so the
+    /// edge line does not show through, and the segment pipeline has no fill. Drawing after the
+    /// edge does not hide the line inside the circle, only the line across the glyph as a whole.
+    /// Recorded rather than left to be discovered — bd-vfxu's lesson is that an approximation
+    /// nobody wrote down becomes an assumption.
+    pub er_marker_segments: Vec<GpuEdgeSegment>,
     /// Pie-chart sectors, before their slice labels (bd-adabx).
     pub pie_wedges: Vec<GpuPieWedge>,
     /// ⚠️ AFTER THE EDGES, BECAUSE THE RASTER PASS DRAWS NODES LAST (bd-adabx).
@@ -1356,6 +1376,42 @@ impl GpuRenderPlan {
 
         // BANDS (bd-adabx). Keep the three Canvas2D primitives distinct: lanes are dashed
         // centre-lines, sections are filled rectangles, and columns are right-edge separators.
+        // ER crow's-foot cardinality (bd-hh0o7). `collect_scene_markers` still refuses to map
+        // these onto the arrowhead shader — that refusal is correct and stays — so the outline is
+        // emitted here as segments instead.
+        let mut er_marker_segments = Vec::new();
+        //
+        // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair`, the
+        // SAME pair fm-render-svg selects with — NOT a second notation table. `LayoutEdgePath`
+        // carries no marker fields; the scene `RenderPath` does, and this builder works from the
+        // layout, so the notation is re-read from the IR edge the path points at.
+        for path in &layout.edges {
+            let Some(edge) = ir.edges.get(path.edge_index) else {
+                continue;
+            };
+            let Some(notation) = edge.er_notation() else {
+                continue;
+            };
+            let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+            for (form, placement) in [
+                (
+                    left.map(|f| fm_layout::MarkerKind::er_pair(f).0),
+                    path_marker_start_endpoint(path),
+                ),
+                (
+                    right.map(|f| fm_layout::MarkerKind::er_pair(f).1),
+                    path_marker_end_endpoint(path),
+                ),
+            ] {
+                let (Some(glyph), Some((position, angle))) =
+                    (form.and_then(fm_layout::MarkerKind::er_glyph), placement)
+                else {
+                    continue;
+                };
+                push_er_glyph_segments(&glyph, position, angle, &mut er_marker_segments);
+            }
+        }
+
         // TREEMAP tiles and the RADAR wheel (bd-dw450). Both families keep their whole diagram in
         // a layout extension that only fm-render-svg read, so the GPU plan emitted nothing for them
         // and a `treemap` or `radar-beta` document reached the WebGPU surface as an empty scene.
@@ -2469,6 +2525,7 @@ impl GpuRenderPlan {
             cluster_instances,
             band_lane_segments,
             band_section_instances,
+            er_marker_segments,
             treemap_tile_instances,
             radar_segments,
             band_column_segments,
@@ -2515,6 +2572,86 @@ fn scene_marker_instances(group: &RenderGroup) -> Vec<GpuArrowheadInstance> {
     let mut markers = Vec::new();
     collect_scene_markers(group, &mut markers);
     markers
+}
+
+/// Emit one ER cardinality glyph as world-space line segments.
+///
+/// Local space is the marker rotated so +x runs along the path direction with the origin on the
+/// endpoint, which is exactly what [`fm_layout::MarkerKind::er_glyph`] describes — so this is a
+/// rotate-and-translate of that description and carries no geometry of its own to drift.
+fn push_er_glyph_segments(
+    glyph: &fm_layout::ErMarkerGlyph,
+    position: [f32; 2],
+    angle: f32,
+    out: &mut Vec<GpuEdgeSegment>,
+) {
+    let (sin, cos) = angle.sin_cos();
+    let to_world = |x: f32, y: f32| {
+        [
+            x.mul_add(cos, -(y * sin)) + position[0],
+            x.mul_add(sin, y * cos) + position[1],
+        ]
+    };
+    let mut segment = |from: [f32; 2], to: [f32; 2]| {
+        out.push(GpuEdgeSegment {
+            from,
+            to,
+            edge_index: NO_EDGE_INDEX,
+            color: DEFAULT_EDGE_STROKE_RGBA,
+            dash_phase: 0.0,
+            dash: [0.0, 0.0],
+            width: 1.0,
+        });
+    };
+
+    if glyph.foot {
+        // 12 samples per half is enough that a 36px lens has no visible facet, and it keeps the
+        // segment count per marker in the tens rather than the hundreds.
+        let points = fm_layout::ErMarkerGlyph::foot_polyline(12);
+        for index in 0..points.len() {
+            let (fx, fy) = points[index];
+            let (tx, ty) = points[(index + 1) % points.len()];
+            segment(to_world(fx, fy), to_world(tx, ty));
+        }
+    }
+    for &bar_x in &glyph.bars {
+        let half = fm_layout::ErMarkerGlyph::BAR_HALF_HEIGHT;
+        segment(to_world(bar_x, -half), to_world(bar_x, half));
+    }
+    if let Some(bubble_x) = glyph.bubble {
+        const BUBBLE_SAMPLES: usize = 16;
+        let radius = fm_layout::ErMarkerGlyph::BUBBLE_RADIUS;
+        for step in 0..BUBBLE_SAMPLES {
+            #[allow(clippy::cast_precision_loss)]
+            let a0 = std::f32::consts::TAU * step as f32 / BUBBLE_SAMPLES as f32;
+            #[allow(clippy::cast_precision_loss)]
+            let a1 = std::f32::consts::TAU * (step + 1) as f32 / BUBBLE_SAMPLES as f32;
+            segment(
+                to_world(radius.mul_add(a0.cos(), bubble_x), radius * a0.sin()),
+                to_world(radius.mul_add(a1.cos(), bubble_x), radius * a1.sin()),
+            );
+        }
+    }
+}
+
+/// Where a laid-out edge starts, and the direction it leaves in.
+fn path_marker_start_endpoint(path: &fm_layout::LayoutEdgePath) -> Option<([f32; 2], f32)> {
+    let first = path.points.first()?;
+    let next = path.points.get(1)?;
+    Some((
+        [first.x, first.y],
+        (next.y - first.y).atan2(next.x - first.x),
+    ))
+}
+
+/// Where a laid-out edge ends, and the direction it arrives in.
+fn path_marker_end_endpoint(path: &fm_layout::LayoutEdgePath) -> Option<([f32; 2], f32)> {
+    let last = path.points.last()?;
+    let previous = path.points.get(path.points.len().checked_sub(2)?)?;
+    Some((
+        [last.x, last.y],
+        (last.y - previous.y).atan2(last.x - previous.x),
+    ))
 }
 
 fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInstance>) {

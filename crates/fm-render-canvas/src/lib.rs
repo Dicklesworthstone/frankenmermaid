@@ -37,8 +37,8 @@ mod shapes;
 mod viewport;
 
 pub use context::{
-    Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign, TextBaseline,
-    TextMetrics,
+    Canvas2dContext, Color, DrawOperation, LineCap, LineJoin, MockCanvas2dContext, Point,
+    TextAlign, TextBaseline, TextMetrics,
 };
 pub use gpu_layout::{
     GpuBufferLayout, GpuVertexAttribute, GpuVertexFormat, arrowhead_buffer_layout,
