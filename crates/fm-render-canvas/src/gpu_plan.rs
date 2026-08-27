@@ -108,6 +108,19 @@ pub const DEFAULT_NODE_STROKE_WIDTH: f32 = 1.5;
 /// node width would be a plausible-looking guess that renders a heavier box than the canvas draws.
 pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
 
+/// Semi-transparent default fill for a sequence interaction fragment.
+///
+/// This is the linear-RGBA spelling of the Canvas2D fallback
+/// `rgba(226,232,240,0.2)`. A fragment is not a cluster: the alpha is part of
+/// the visual distinction between an interaction scope and a subgraph.
+pub const SEQUENCE_FRAGMENT_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.2];
+/// Dashed fragment perimeters use the same literal pattern as Canvas2D.
+pub const SEQUENCE_FRAGMENT_BORDER_DASH: [f32; 2] = [4.0, 4.0];
+/// Fragment outlines are deliberately thinner than ordinary node borders.
+pub const SEQUENCE_FRAGMENT_STROKE_WIDTH: f32 = 1.0;
+/// Fragment labels use the 80% font selected by the Canvas2D renderer.
+pub const SEQUENCE_FRAGMENT_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.8;
+
 /// Stroke width of a destroy marker's cross.
 ///
 /// `draw_sequence_lifecycle_markers` sets `line_width(1.5)` literally. That happens to EQUAL
@@ -1116,6 +1129,11 @@ pub enum GpuTextSource {
     /// node of its own, and pointing this at an unrelated node would be exactly the wrong-key
     /// defect the discriminator exists to prevent.
     SequenceNote,
+    /// The caption in a sequence interaction fragment's upper-left corner.
+    ///
+    /// `node_index` indexes `layout.extensions.sequence_fragments`; a fragment
+    /// is layout furniture rather than an IR node.
+    SequenceFragment,
     /// The participant name repeated in a sequence diagram's foot row.
     ///
     /// `node_index` is the participant's index in `ir.nodes`, the same node the head row names --
@@ -1267,6 +1285,13 @@ pub struct GpuRenderPlan {
     /// dividers, axis ticks, state-note leaders) are drawn at DIFFERENT points in the raster pass,
     /// and one buffer submitted at one point cannot match several positions in the draw order.
     pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
+    /// Sequence interaction fragment fills, before their dashed outlines and all message edges.
+    ///
+    /// The node SDF cannot carry a perimeter dash phase, so its stroke is transparent; the border
+    /// lives in `sequence_fragment_border_segments`, whose EDGE shader can express the exact dash.
+    pub sequence_fragment_instances: Vec<GpuNodeInstance>,
+    /// Outer fragment perimeters and `else`/`and` dividers, as dashed segments.
+    pub sequence_fragment_border_segments: Vec<GpuEdgeSegment>,
     /// Sequence notes, as rect instances (bd-adabx).
     ///
     /// After the activation bars and before the edges, matching the raster call order. Their text
@@ -1721,6 +1746,87 @@ impl GpuRenderPlan {
             }
         }
 
+        // SEQUENCE INTERACTION FRAGMENTS. The raster path fills each frame, then draws its dashed
+        // perimeter and any `else` / `and` branch dividers. A node instance can represent the fill
+        // but NOT the perimeter dash: an SDF rect has no distance around its border. Keep its stroke
+        // transparent and represent every visible border as an EDGE segment, whose shader carries
+        // a real dash pattern. Planning only the rect would turn a dashed scope boundary into a
+        // solid one, a different diagram rather than a harmless approximation.
+        let mut sequence_fragment_instances =
+            Vec::with_capacity(layout.extensions.sequence_fragments.len());
+        let mut sequence_fragment_border_segments = Vec::new();
+        for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
+            let bounds = fragment.bounds;
+            let fill = fragment
+                .color
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(SEQUENCE_FRAGMENT_FILL_RGBA);
+            sequence_fragment_instances.push(GpuNodeInstance {
+                center: [
+                    bounds.x + (bounds.width * 0.5),
+                    bounds.y + (bounds.height * 0.5),
+                ],
+                half_extent: [bounds.width * 0.5, bounds.height * 0.5],
+                fill,
+                stroke: [0.0, 0.0, 0.0, 0.0],
+                stroke_width: 0.0,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(fragment_index).unwrap_or(u32::MAX),
+            });
+            let left = bounds.x;
+            let right = bounds.x + bounds.width;
+            let top = bounds.y;
+            let bottom = bounds.y + bounds.height;
+            for (from, to) in [
+                ([left, top], [right, top]),
+                ([right, top], [right, bottom]),
+                ([right, bottom], [left, bottom]),
+                ([left, bottom], [left, top]),
+            ] {
+                sequence_fragment_border_segments.push(GpuEdgeSegment {
+                    from,
+                    to,
+                    edge_index: NO_EDGE_INDEX,
+                    color: DEFAULT_NODE_STROKE_RGBA,
+                    dash_phase: 0.0,
+                    dash: SEQUENCE_FRAGMENT_BORDER_DASH,
+                    width: SEQUENCE_FRAGMENT_STROKE_WIDTH,
+                });
+            }
+
+            let Some(ir_fragment) = ir
+                .sequence_meta
+                .as_ref()
+                .and_then(|meta| meta.fragments.get(fragment_index))
+            else {
+                continue;
+            };
+            let message_y = |edge_index: usize| {
+                layout
+                    .edges
+                    .iter()
+                    .find(|edge| edge.edge_index == edge_index)
+                    .and_then(|edge| edge.points.first())
+                    .map(|point| point.y)
+            };
+            let lead = message_y(ir_fragment.start_edge).map_or(0.0, |first_y| first_y - top);
+            for alternative in &ir_fragment.alternatives {
+                let Some(branch_y) = message_y(alternative.start_edge) else {
+                    continue;
+                };
+                sequence_fragment_border_segments.push(GpuEdgeSegment {
+                    from: [left, branch_y - lead],
+                    to: [right, branch_y - lead],
+                    edge_index: NO_EDGE_INDEX,
+                    color: DEFAULT_NODE_STROKE_RGBA,
+                    dash_phase: 0.0,
+                    dash: SEQUENCE_FRAGMENT_BORDER_DASH,
+                    width: SEQUENCE_FRAGMENT_STROKE_WIDTH,
+                });
+            }
+        }
+
         // SEQUENCE NOTES (bd-adabx). Rect plus centred body text.
         //
         // NO degenerate-size skip here, deliberately: unlike draw_activation_bars and
@@ -2033,6 +2139,27 @@ impl GpuRenderPlan {
                 })
                 .collect()
         });
+        let sequence_fragment_labels: Vec<String> = layout
+            .extensions
+            .sequence_fragments
+            .iter()
+            .map(|fragment| {
+                let kind = match fragment.kind {
+                    fm_core::FragmentKind::Loop => "loop",
+                    fm_core::FragmentKind::Alt => "alt",
+                    fm_core::FragmentKind::Opt => "opt",
+                    fm_core::FragmentKind::Par => "par",
+                    fm_core::FragmentKind::Critical => "critical",
+                    fm_core::FragmentKind::Break => "break",
+                    fm_core::FragmentKind::Rect => "rect",
+                };
+                if fragment.label.is_empty() {
+                    kind.to_owned()
+                } else {
+                    format!("[{kind}] {}", fragment.label)
+                }
+            })
+            .collect();
 
         let glyph_atlas =
             // ⚠️ CLUSTER TITLES AND EDGE LABELS MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
@@ -2080,6 +2207,7 @@ impl GpuRenderPlan {
                             .iter()
                             .map(|note| note.text.as_str()),
                     )
+                    .chain(sequence_fragment_labels.iter().map(String::as_str))
                     // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
                     // feeding that same iterator prevents a future line filter from starving a
                     // run that still looks structurally present.
@@ -2351,6 +2479,22 @@ impl GpuRenderPlan {
             );
         }
 
+        // FRAGMENT CAPTIONS use the Canvas2D upper-left inset. The label vector is built before
+        // the atlas so every emitted glyph has a cell; omitting that feed would create a tidy run
+        // with zero quads for labels containing unique characters.
+        for (index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
+            sink.push_left(
+                sequence_fragment_labels
+                    .get(index)
+                    .map_or("", String::as_str),
+                (fragment.bounds.x + 6.0, fragment.bounds.y + 4.0),
+                SEQUENCE_FRAGMENT_FONT_SIZE_PX,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::SequenceFragment,
+                index,
+            );
+        }
+
         // STATE-NOTE TEXT (bd-adabx). The SVG backend and Canvas2D pass both put this at the
         // layout-reserved `(x + 10, y + 8)` inset, use 80% text, and advance one 16.8px row per
         // source line. Centring it would make an annotation look like a node label and disagree
@@ -2547,6 +2691,8 @@ impl GpuRenderPlan {
             packet_field_continuation_instances,
             activation_instances,
             lifecycle_marker_segments,
+            sequence_fragment_instances,
+            sequence_fragment_border_segments,
             sequence_note_instances,
             edge_segments,
             arrowheads,
@@ -4437,6 +4583,99 @@ mod tests {
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
     }
 
+    /// A parsed interaction fragment reaches the executable GPU plan as a filled frame, a dashed
+    /// perimeter, branch divider, and caption. A count-only test would let a solid rect masquerade
+    /// as the Canvas2D frame, so this pins both the four perimeter sides and the real dash pattern.
+    #[test]
+    fn sequence_fragments_reach_the_gpu_plan_as_dashed_frames_with_captions() {
+        let source = "sequenceDiagram\n  Alice->>Bob: request\n  alt approved\n    Bob-->>Alice: yes\n  else rejected\n    Bob-->>Alice: no\n  end\n";
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let fragment = layout
+            .extensions
+            .sequence_fragments
+            .first()
+            .expect("CONTROL FAILED: parsed alt fixture produced no interaction fragment");
+        assert!(
+            ir.sequence_meta
+                .as_ref()
+                .is_some_and(|meta| !meta.fragments[0].alternatives.is_empty()),
+            "CONTROL FAILED: parsed alt fixture produced no alternative branch"
+        );
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.sequence_fragment_instances.len(), 1);
+        let frame = plan.sequence_fragment_instances[0];
+        assert_eq!(
+            frame.center,
+            [
+                fragment.bounds.x + (fragment.bounds.width * 0.5),
+                fragment.bounds.y + (fragment.bounds.height * 0.5),
+            ]
+        );
+        assert_eq!(
+            frame.half_extent,
+            [fragment.bounds.width * 0.5, fragment.bounds.height * 0.5,]
+        );
+        assert_eq!(frame.stroke, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(frame.stroke_width, 0.0);
+
+        assert!(
+            plan.sequence_fragment_border_segments.len() >= 5,
+            "expected four perimeter sides plus an else divider, got {} segments",
+            plan.sequence_fragment_border_segments.len()
+        );
+        for segment in &plan.sequence_fragment_border_segments {
+            assert_eq!(segment.edge_index, super::NO_EDGE_INDEX);
+            assert_eq!(segment.dash, super::SEQUENCE_FRAGMENT_BORDER_DASH);
+            assert_eq!(segment.width, super::SEQUENCE_FRAGMENT_STROKE_WIDTH);
+        }
+        assert_eq!(
+            plan.sequence_fragment_border_segments[0].from,
+            [fragment.bounds.x, fragment.bounds.y]
+        );
+        assert_eq!(
+            plan.sequence_fragment_border_segments[3].to,
+            [fragment.bounds.x, fragment.bounds.y]
+        );
+
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == super::GpuTextSource::SequenceFragment)
+            .expect("fragment caption reached no GPU text run");
+        assert_eq!(run.node_index, 0);
+        assert!(run.quad_count >= 3, "the [alt] caption emitted no glyphs");
+        assert!(
+            plan.glyph_atlas.cells.iter().any(|cell| cell.glyph == '['),
+            "the fragment-only bracket never reached the atlas"
+        );
+    }
+
+    /// Negative arm for fragment planning: an ordinary sequence must not acquire a synthetic
+    /// frame, border batch, or caption. This fails a naive implementation that emits a default
+    /// rectangle for every sequence diagram rather than only parsed fragment geometry.
+    #[test]
+    fn plain_sequences_do_not_gain_synthetic_gpu_fragment_geometry() {
+        let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: request\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.sequence_fragments.is_empty(),
+            "CONTROL FAILED: the plain sequence unexpectedly has a fragment"
+        );
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert!(plan.sequence_fragment_instances.is_empty());
+        assert!(plan.sequence_fragment_border_segments.is_empty());
+        assert!(
+            !plan
+                .text_runs
+                .iter()
+                .any(|run| run.source == super::GpuTextSource::SequenceFragment),
+            "a plain sequence gained a synthetic fragment caption"
+        );
+    }
+
     /// State notes reach the GPU plan with the same source, bounds, leader and text the SVG
     /// backend renders (bd-adabx).
     ///
@@ -5150,6 +5389,10 @@ mod tests {
                 "pub lifecycle_marker_segments:",
                 "self.draw_sequence_lifecycle_markers(",
             ),
+            (
+                "pub sequence_fragment_instances:",
+                "self.draw_sequence_fragments(",
+            ),
             ("pub sequence_note_instances:", "self.draw_sequence_notes("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
@@ -5215,6 +5458,7 @@ mod tests {
             "draw_sequence_mirror_headers",
             "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
+            "draw_sequence_fragments",
             "draw_sequence_notes",
             "draw_state_notes",
             "draw_bands",
@@ -5247,13 +5491,6 @@ mod tests {
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",
             ),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
-            (
-                "draw_sequence_fragments",
-                "bd-l3nsf, NOT merely unplanned: a fragment box has a DASHED border \
-                 (set_line_dash([4,4])) and the SDF carries no perimeter arc length, so planning \
-                 it as a plain rect instance would draw a solid border where the canvas draws a \
-                 dashed one -- a wrong picture, not a missing one",
-            ),
         ];
 
         let mut found = Vec::new();

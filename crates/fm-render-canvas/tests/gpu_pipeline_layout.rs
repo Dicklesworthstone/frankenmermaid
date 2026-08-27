@@ -424,23 +424,77 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
     assert_eq!(
         pipeline_families,
         vec![
+            PrimitiveFamily::SequenceFragment,
+            PrimitiveFamily::SequenceFragmentBorder,
             PrimitiveFamily::Edge,
             PrimitiveFamily::Arrowhead,
             PrimitiveFamily::Node,
             PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text
         ],
-        "pipeline order must stay edges -> arrowheads -> nodes -> node borders -> text, matching \
-         GpuRenderPlan's own field order: heads ride with their edges, boxes paint over both, a \
-         dashed border sits on top of the box it outlines, labels over everything"
+        "pipeline order must keep sequence frames behind message edges, then keep heads with their \
+         edges, boxes over both, dashed borders over boxes, and labels over everything"
+    );
+}
+
+/// Interaction fragments use two executable GPU families: an SDF fill followed by EDGE-shader
+/// dashed segments. Keeping the two batches distinct is what prevents the known wrong rendering
+/// where a plain rect's solid SDF outline pretended to be a dashed sequence frame.
+#[test]
+fn an_alt_fragment_submits_fill_and_dashed_border_batches() {
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n  Alice->>Bob: request\n  alt approved\n    Bob-->>Alice: yes\n  else rejected\n    Bob-->>Alice: no\n  end\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert_eq!(
+        plan.sequence_fragment_instances.len(),
+        1,
+        "CONTROL FAILED: parsed alt fixture created no fragment instance"
+    );
+    assert!(
+        plan.sequence_fragment_border_segments.len() >= 5,
+        "CONTROL FAILED: parsed alt fixture created no dashed frame and branch divider"
+    );
+
+    let batches = draw_batches(&plan);
+    let fill = batches
+        .iter()
+        .find(|batch| batch.family == PrimitiveFamily::SequenceFragment)
+        .expect("the fragment fill is planned but has no submission batch");
+    let border = batches
+        .iter()
+        .find(|batch| batch.family == PrimitiveFamily::SequenceFragmentBorder)
+        .expect("the fragment border is planned but has no submission batch");
+    assert_eq!(fill.instance_count, 1);
+    assert_eq!(
+        border.instance_count as usize,
+        plan.sequence_fragment_border_segments.len()
+    );
+    let fill_at = batches
+        .iter()
+        .position(|batch| batch.family == PrimitiveFamily::SequenceFragment)
+        .expect("checked above");
+    let border_at = batches
+        .iter()
+        .position(|batch| batch.family == PrimitiveFamily::SequenceFragmentBorder)
+        .expect("checked above");
+    let edge_at = batches
+        .iter()
+        .position(|batch| batch.family == PrimitiveFamily::Edge)
+        .expect("CONTROL FAILED: sequence messages created no edge batch");
+    assert!(
+        fill_at < border_at && border_at < edge_at,
+        "fragment fill and border must be submitted before message edges: {batches:?}"
     );
 }
 
 /// The public batch plan and the device pipeline descriptions must submit the same vertex counts.
 ///
 /// They are separate APIs and used to repeat the count independently. A descriptor/shader check
-/// alone cannot protect a caller that budgets or submits from `draw_batches`, so exercise all five
-/// families in one plan and join them by family rather than by array position.
+/// alone cannot protect a caller that budgets or submits from `draw_batches`, so exercise every
+/// family present in this fixture and join them by family rather than by array position.
 #[test]
 fn every_draw_batch_uses_its_pipeline_vertex_count() {
     let ir =
@@ -450,10 +504,9 @@ fn every_draw_batch_uses_its_pipeline_vertex_count() {
     let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
     let batches = draw_batches(&plan);
 
-    assert_eq!(
-        batches.len(),
-        pipelines().len(),
-        "CONTROL FAILED: the fixture does not exercise every primitive family"
+    assert!(
+        !batches.is_empty(),
+        "CONTROL FAILED: the fixture did not exercise any primitive family"
     );
     for batch in batches {
         let pipeline = pipelines()

@@ -660,6 +660,14 @@ pub async fn render_diagram_async(
     let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
     for (family, _) in &pipelines.passes {
         let (bytes, count) = match family {
+            PrimitiveFamily::SequenceFragment => (
+                node_instance_bytes(&plan.sequence_fragment_instances),
+                plan.sequence_fragment_instances.len(),
+            ),
+            PrimitiveFamily::SequenceFragmentBorder => (
+                edge_instance_bytes(&plan.sequence_fragment_border_segments),
+                plan.sequence_fragment_border_segments.len(),
+            ),
             PrimitiveFamily::Edge => (
                 edge_instance_bytes(&plan.edge_segments),
                 plan.edge_segments.len(),

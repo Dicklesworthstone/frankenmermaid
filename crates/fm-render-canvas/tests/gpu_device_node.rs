@@ -732,6 +732,51 @@ fn one_submission_composes_every_family_into_a_single_image() {
     }
 }
 
+/// A sequence interaction frame must survive the whole device path, not merely exist in a CPU plan.
+/// The sample is deliberately in the lower-right interior: it is away from the caption, dashed
+/// perimeter, participants, and message rows, so opacity there can only come from the fragment fill.
+#[test]
+fn one_submission_paints_a_sequence_fragment_interior() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n  Alice->>Bob: request\n  alt approved\n    Bob-->>Alice: yes\n  else rejected\n    Bob-->>Alice: no\n  end\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let fragment = layout
+        .extensions
+        .sequence_fragments
+        .first()
+        .expect("CONTROL FAILED: parsed alt fixture produced no fragment");
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert_eq!(
+        plan.sequence_fragment_instances.len(),
+        1,
+        "CONTROL FAILED: fragment has no GPU fill instance"
+    );
+    assert!(
+        plan.sequence_fragment_border_segments.len() >= 5,
+        "CONTROL FAILED: fragment has no GPU dashed perimeter and divider"
+    );
+
+    let atlas = GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &solid_coverage(&plan.glyph_atlas));
+    let pipelines = DiagramPipelines::new(&gpu);
+    let image = render_diagram(&gpu, &pipelines, &plan, Some(&atlas), 512, 512)
+        .expect("render diagram with fragment");
+    let sample_x = fragment.bounds.x + (fragment.bounds.width * 0.8);
+    let sample_y = fragment.bounds.y + (fragment.bounds.height * 0.8);
+    let (x, y) = image.pixel_for(&plan.bounds, sample_x, sample_y);
+    let pixel = image.pixel(x, y).expect("interior maps inside the image");
+    assert!(
+        pixel[3] > 0,
+        "fragment interior at ({sample_x}, {sample_y}) is transparent after full device submission; \
+         the frame was planned but not uploaded or drawn"
+    );
+}
+
 /// A diagram with no labels must render without an atlas, or every unlabelled diagram would need a
 /// blank texture invented for it.
 #[test]

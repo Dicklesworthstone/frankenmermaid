@@ -109,6 +109,10 @@ pub enum PrimitiveFamily {
     /// the draw order: edges go under the boxes they connect, a border goes on top of the box it
     /// outlines. Same shader, same layout, different moment.
     NodeBorder,
+    /// Sequence interaction-frame fills, before their dashed boundaries and message edges.
+    SequenceFragment,
+    /// Dashed interaction-frame borders and branch dividers, drawn after their fills.
+    SequenceFragmentBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
 }
@@ -413,14 +417,36 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 5] {
+pub const fn pipelines() -> [PipelineDescriptor; 7] {
     [
+        sequence_fragment_pipeline(),
+        sequence_fragment_border_pipeline(),
         edge_pipeline(),
         arrowhead_pipeline(),
         node_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
     ]
+}
+
+/// Sequence interaction-frame fills use the ordinary rect SDF before message edges.
+#[must_use]
+pub const fn sequence_fragment_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::SequenceFragment,
+        label: "fm-sequence-fragment",
+        ..node_pipeline()
+    }
+}
+
+/// Sequence frame borders reuse the line shader because only it carries a dash pattern.
+#[must_use]
+pub const fn sequence_fragment_border_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::SequenceFragmentBorder,
+        label: "fm-sequence-fragment-border",
+        ..edge_pipeline()
+    }
 }
 
 /// The dashed-node-border pipeline: the EDGE pipeline, drawn in a later slot.
@@ -474,6 +500,22 @@ impl DrawBatch {
 #[must_use]
 pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
     let mut batches = Vec::new();
+    if !plan.sequence_fragment_instances.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::SequenceFragment,
+            instance_count: u32::try_from(plan.sequence_fragment_instances.len())
+                .unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
+    if !plan.sequence_fragment_border_segments.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::SequenceFragmentBorder,
+            instance_count: u32::try_from(plan.sequence_fragment_border_segments.len())
+                .unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
     // EDGES FIRST, matching `pipelines()` and the Canvas2D draw order: a node box paints over the
     // segment that terminates at it, not under it.
     if !plan.edge_segments.is_empty() {
