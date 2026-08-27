@@ -209,6 +209,51 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "delay is not a rectangle with a semicircular right end: {}",
         silhouette(&half_rounded)
     );
+
+    // Three documents stepping from the back top-right (x=125) to the front bottom-left (x=92).
+    let stacked = render("docs");
+    for start in ["M125 92", "M108.50 103.24", "M92 114.48"] {
+        assert!(
+            stacked.contains(start),
+            "docs is missing the copy starting at {start}: {}",
+            silhouette(&stacked)
+        );
+    }
+}
+
+/// ⚠️ THE STACK IS THREE COPIES, AND THE COUNT IS ARITHMETIC RATHER THAN TASTE.
+///
+/// A single `doc` measures 40.67 wide and the stacked bbox 60.67, so 40.67 + 2 x 10 fixes the count
+/// at THREE. Drawing one copy leaves a plain `doc`; drawing two leaves a shape that is still
+/// stacked-looking, still not a rectangle, and still passes this bead's differs-from-Rect rule while
+/// being the wrong shape. The assertion counts the copies and pins that each is offset from the last.
+#[test]
+fn the_stacked_document_is_three_offset_copies() {
+    let stacked = render("docs");
+    let copies = stacked.matches("<path ").count();
+    assert_eq!(
+        copies,
+        3,
+        "expected exactly three stacked copies, found {copies}: {}",
+        silhouette(&stacked)
+    );
+    // Each copy starts further down-left than the one behind it.
+    assert!(
+        stacked.contains("M125 92") && stacked.contains("M92 114.48"),
+        "the copies are not offset from one another: {}",
+        silhouette(&stacked)
+    );
+    // And a single document is NOT the stack.
+    assert_ne!(
+        silhouette(&stacked),
+        silhouette(&render("doc")),
+        "the stacked document renders identically to a single document"
+    );
+    assert_ne!(
+        silhouette(&stacked),
+        silhouette(&render("rect")),
+        "the stacked document renders identically to a rectangle"
+    );
 }
 
 /// ⚠️ ONLY ONE END IS ROUNDED, which is what separates `delay` from `stadium`.
@@ -555,6 +600,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "bolt",
         "flag",
         "delay",
+        "docs",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -572,7 +618,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 16] = [
+    let groups: [(&str, &[&str]); 17] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -603,6 +649,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("bolt", &["lightning-bolt", "com-link"]),
         ("flag", &["paper-tape"]),
         ("delay", &["half-rounded-rectangle"]),
+        ("docs", &["documents", "st-doc", "stacked-document"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -660,6 +707,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "paper-tape",
         "delay",
         "half-rounded-rectangle",
+        "docs",
+        "stacked-document",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -724,6 +773,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("bolt", "lightning bolt"),
         ("flag", "flag"),
         ("delay", "half-rounded rectangle"),
+        ("docs", "stacked documents"),
     ] {
         assert!(
             render(shape).contains(want),

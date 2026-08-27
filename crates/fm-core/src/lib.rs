@@ -1288,6 +1288,21 @@ pub enum NodeShape {
     /// keeps a small round cap; a fraction-of-width radius would balloon it into a lozenge, and on a
     /// square node the two rules coincide, so the difference only shows on the shapes that matter.
     HalfRoundedRect,
+    /// mermaid's `docs` / `stacked-document`: THREE [`NodeShape::Document`]s, offset back to front.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle: a bbox of
+    /// 60.67 x 101.93, with stepped corners at the top left every ~10 in x and ~17 in y. The count
+    /// is arithmetic rather than eyeballed — a single `doc` is 40.67 wide, and 40.67 + 2 x 10 =
+    /// 60.67 is the stacked width exactly, so there are THREE copies and not two or four.
+    ///
+    /// The back copy sits at the top RIGHT and the front at the bottom LEFT, which is the order the
+    /// sampled outline traverses.
+    ///
+    /// ⚠️ THE COPIES MUST BE DRAWN AND FILLED BACK TO FRONT. Three outlines with no fill, or drawn
+    /// front to back, leaves the stack's interior lines showing through and it stops reading as
+    /// depth — while still being three paths, still not a rectangle, and still passing any count-based
+    /// check.
+    StackedDocument,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

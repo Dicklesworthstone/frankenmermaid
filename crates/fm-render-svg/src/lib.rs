@@ -11143,6 +11143,47 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::StackedDocument => {
+            // Three documents, each 2 offsets smaller than the box, stepped back-to-front. Offsets
+            // are the measured 10/60.67 and 17/101.93 of the stacked bbox.
+            let offset_x = w * 0.165;
+            let offset_y = h * 0.169;
+            let leaf_w = w - offset_x * 2.0;
+            let leaf_h = h - offset_y * 2.0;
+            let mut group = Element::group();
+            // BACK TO FRONT: index 0 is the top-right copy, drawn first so the ones in front of it
+            // paint over its lower-left corner. Each is filled, or the stack shows through itself.
+            for step in (0..3).rev() {
+                let leaf_x = x + offset_x * step as f32;
+                let leaf_y = y + offset_y * (2 - step) as f32;
+                let path = PathBuilder::new()
+                    .move_to(leaf_x, leaf_y)
+                    .line_to(leaf_x + leaf_w, leaf_y)
+                    .line_to(leaf_x + leaf_w, leaf_y + leaf_h * 0.80)
+                    .quadratic_to(
+                        leaf_x + leaf_w * 0.75,
+                        leaf_y + leaf_h * 0.84,
+                        leaf_x + leaf_w * 0.5,
+                        leaf_y + leaf_h * 0.95,
+                    )
+                    .quadratic_to(
+                        leaf_x + leaf_w * 0.25,
+                        leaf_y + leaf_h * 1.06,
+                        leaf_x,
+                        leaf_y + leaf_h * 0.90,
+                    )
+                    .close()
+                    .build();
+                group = group.child(
+                    Element::path()
+                        .d(&path)
+                        .fill(&colors.node_fill)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                );
+            }
+            group
+        }
         NodeShape::HalfRoundedRect => {
             // Straight for `w - h/2`, then a true semicircle of radius `h/2` capping the right end.
             // `min` keeps a very wide cap from swallowing the straight portion on a squat node.
@@ -13352,6 +13393,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::LightningBolt => "fm-node-shape-lightning-bolt",
         NodeShape::Flag => "fm-node-shape-flag",
         NodeShape::HalfRoundedRect => "fm-node-shape-half-rounded-rect",
+        NodeShape::StackedDocument => "fm-node-shape-stacked-document",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

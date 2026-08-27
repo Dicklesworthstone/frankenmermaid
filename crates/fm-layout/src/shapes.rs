@@ -129,6 +129,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The half-rounded rectangle fills its box except for the two corners the cap rounds off,
         // so the box is a close superset and the right conservative boundary.
         NodeShape::HalfRoundedRect => rounded_rect_path(bounds, 0.0),
+        // The stack fills its box corner to corner between the back and front copies, so the box is
+        // the right boundary; an edge stopping on it lands on one of the three outlines.
+        NodeShape::StackedDocument => rounded_rect_path(bounds, 0.0),
     }
 }
 

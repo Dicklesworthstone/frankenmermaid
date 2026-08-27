@@ -52,6 +52,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
         NodeShape::Flag => draw_flag(ctx, x, y, width, height),
         NodeShape::HalfRoundedRect => draw_half_rounded_rect(ctx, x, y, width, height),
+        NodeShape::StackedDocument => draw_stacked_document(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -354,6 +355,23 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.close_path();
     ctx.fill();
     ctx.stroke();
+}
+
+/// Draw three offset documents — mermaid's `docs` (bd-7ls21).
+///
+/// Back to front, each FILLED, so the copies in front occlude the ones behind; drawn the other way
+/// the stack shows through itself and stops reading as depth.
+fn draw_stacked_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let offset_x = w * 0.165;
+    let offset_y = h * 0.169;
+    let leaf_w = w - offset_x * 2.0;
+    let leaf_h = h - offset_y * 2.0;
+
+    for step in (0..3).rev() {
+        let leaf_x = x + offset_x * f64::from(step);
+        let leaf_y = y + offset_y * f64::from(2 - step);
+        draw_document(ctx, leaf_x, leaf_y, leaf_w, leaf_h);
+    }
 }
 
 /// Draw a rectangle with a semicircular right end — mermaid's `delay` (bd-7ls21).
