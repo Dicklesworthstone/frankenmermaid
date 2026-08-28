@@ -1,5 +1,39 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### CLOSED: the corpus sweep is exhausted, and the harness's own hashing bounds what the small corpora can show (2026-08-27)
+
+- **Why this sweep existed.** Two of this session's largest wins came from profiling a workload class
+  that had never been profiled: `build_cluster_boxes` at 63.96% self on `arch_200x50` (3.12x, 6b292cd4)
+  and the per-singleton self-loop scan on `edit_trace_200x200` (-5.92%, 1e366650). Both were nested
+  linear scans invisible on the medium ER set. The three remaining unprofiled corpora were the obvious
+  place to look for a third.
+- **`cyclic_scc_100`, `dense_dag_200`, `wide_16x32`: no articulation point.** Top engine frames are
+  `layout_diagram_sugiyama_traced_with_config` 5.43% and `find_obstacle_nudge_x` 5.35% (scc),
+  `FmtNum::write_into` 6.89% (dag2), `build_smooth_path_by_into` 4.85% and
+  `ObstacleSpatialIndex::query_segment` 3.73% (wide). Nothing resembling the 64% or the nested scans
+  found earlier — these profiles are flat.
+- **The classic O(N^2) suspect is measured CLOSED.** `find_obstacle_nudge_x` falls back to scanning
+  every obstacle when the spatial index is absent, which is exactly the shape that paid twice.
+  Instrumented on `wide_16x32`: **`indexed_frac` = 1.0000** (the fallback never runs) and the index
+  returns **4.89 candidates out of 512 obstacles — selectivity 0.96%**. The adaptive-cell-size work
+  (1f8a35c) is doing its job; there is no scan to remove.
+- **⚠️ AND THE HARNESS'S OWN HASHING DOMINATES THESE THREE RUNS**, which is both why their profiles
+  are uninformative and a bound on any A/B taken on them. `sha2::sha256::compress` share of the whole
+  measured process:
+
+      cyclic_scc_100   40.00%      edit_trace_200x200    3.17%
+      dense_dag_200    32.60%      schema_catalog_25     0.49%
+      wide_16x32       27.51%
+
+  `ab_instr` counts instructions for the whole process, so output hashing is inside every arm. On the
+  corpora used for this session's landed levers the dilution is negligible (0.49-3.17%), so those
+  ratios stand as reported — but an engine win measured on scc/dag2/wide would show at roughly 60-73%
+  of its true size. Check this share before choosing a corpus to A/B on, and prefer one where it is
+  small.
+- **Verdict: the corpus sweep is CLOSED.** Every generated corpus item has now been profiled at least
+  once. Further scale-driven discovery needs a NEW workload shape, not another run of the existing
+  set.
+
 ### REJECT: short-circuiting the attribute-name compare — I picked the target by reading code instead of attributing it (2026-08-27)
 
 - **The observation was real.** `Attributes::set` must drop an existing attribute of the same name,
