@@ -1,5 +1,38 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: short-circuiting the attribute-name compare — I picked the target by reading code instead of attributing it (2026-08-27)
+
+- **The observation was real.** `Attributes::set` must drop an existing attribute of the same name,
+  so it compares the candidate against every attribute already present. Measured on
+  `er_schema_10000x8`: **10,800,000 `set` calls at 2.96 comparisons each — about 32 million name
+  comparisons — with a REMOVAL RATE OF 0.00000.** Not one comparison found a duplicate, on either the
+  XL or the medium ER corpus. The scan cannot be deleted (a duplicate name must still overwrite), so
+  the lever was to make each comparison cheaper: check length and first byte before the full compare,
+  which is a `memcmp` call at these lengths.
+- **Measured: essentially nothing.**
+
+      er_schema_10000x8    A/B 0.998772 [0.997966,1.000581]  null 0.999471 [0.998538,1.002118]
+      schema_catalog_25    A/B 0.999670 [0.999394,0.999788]  null 1.000123 [0.999743,1.000617]
+      flowchart_large_500  A/B 0.999911 [0.998656,1.000637]  null 0.999894 [0.998796,1.000414]
+
+  The medium-ER arm is the best of them at -0.045%, and its range still OVERLAPS the null. The other
+  two are flat. Outputs byte-identical throughout.
+- **⚠️ WHY IT FAILED, AND IT IS MY PROCESS AT FAULT.** I justified the target from the profile line
+  `__memcmp_avx2_movbe 3.07%` plus a reading of `set`'s source — I never attributed the symbol.
+  Doing so afterwards, with the frame-pointer recipe that has been available since f10740fd:
+
+      __memcmp_avx2_movbe <- fm_parser::parse <- parse_with_mode_and_config
+                          <- parse_mermaid_with_detection_and_config (1.80%)
+                          <- IrBuilder::push_edge (0.55%)
+
+  **The memcmp is in the PARSER, not the attribute builder.** `set`'s 32 million comparisons are
+  evidently already inlined to a length check plus a few bytes and cost almost nothing, which is why
+  making them cheaper changed nothing. Attribute the symbol before choosing the fix; the instrument
+  exists and takes one build.
+- **Verdict: REJECT.** The 32M-comparisons-zero-removals figure is a genuine curiosity and NOT a
+  lever. The real memcmp lives in flowchart/ER parsing, and that is where a future attempt should
+  look — with the caller graph in hand first.
+
 ### REJECT (SECOND TIME): presizing a render buffer does not pay, even with the regrowth attributed at 5.85% (2026-08-27)
 
 - **A much stronger version of the capacity lever already rejected above, and it still measures
