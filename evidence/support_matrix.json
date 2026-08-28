@@ -1,0 +1,3221 @@
+{
+  "source_rev": "b0204f2aa3d3859b5f3e28f8be133e6a35a474da",
+  "cells": [
+    {
+      "family": "flowchart",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::flowchart_simple",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
+      "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
+      "output_sha256": "11603fd0b7cd0645e33398dc1934963e65deb98898ff653445f263dec25715a4",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "flowchart",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::flowchart_simple",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
+      "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
+      "output_sha256": "22b389670fb53dc77043860adec98cdb8de31983197c087b805056d6292ad7f3",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 5
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "flowchart",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::flowchart_simple",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
+      "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
+      "output_sha256": null,
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "flowchart",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::flowchart_simple",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
+      "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
+      "output_sha256": "11603fd0b7cd0645e33398dc1934963e65deb98898ff653445f263dec25715a4",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sequence",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sequence_advanced",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
+      "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
+      "output_sha256": "be882367a2de93a601ac32308155ccfcef9035630fe19d4dfa08837053569afe",
+      "census": {
+        "nodes": 3,
+        "edges": 11,
+        "text_runs": 22
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 18,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sequence",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sequence_advanced",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
+      "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
+      "output_sha256": "6dde98b49f57955d44b932ce0525513e93f58719bbf5fcbf7b053ab296b131fe",
+      "census": {
+        "nodes": 3,
+        "edges": 11,
+        "text_runs": 14
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sequence",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sequence_advanced",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
+      "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 11,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sequence",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sequence_advanced",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
+      "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
+      "output_sha256": "be882367a2de93a601ac32308155ccfcef9035630fe19d4dfa08837053569afe",
+      "census": {
+        "nodes": 3,
+        "edges": 11,
+        "text_runs": 22
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 18,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "class",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::class_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
+      "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
+      "output_sha256": "a572f9f7d41db65901fd077db7372e032717f27b2f74a823e7773409188b7bb7",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 6,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "class",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::class_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
+      "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
+      "output_sha256": "8493fcc220bf8d0ac5f24fef73139c10f85d96c5a475504370132fb4fff9de7e",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "class",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::class_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
+      "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
+      "output_sha256": null,
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "class",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::class_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
+      "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
+      "output_sha256": "a572f9f7d41db65901fd077db7372e032717f27b2f74a823e7773409188b7bb7",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 6,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "state",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::state_composite",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
+      "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
+      "output_sha256": "b24172f9dd9ac746c84476a6ff9786032f56eb6f38a5e35b7e594da07fceaf32",
+      "census": {
+        "nodes": 15,
+        "edges": 16,
+        "text_runs": 18
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 45,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "state",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::state_composite",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
+      "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
+      "output_sha256": "839256d950a968c381fcddbe5c3e5f85898bcd6993ea05fcecca9ab758bdd0e6",
+      "census": {
+        "nodes": 15,
+        "edges": 16,
+        "text_runs": 13
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "state",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::state_composite",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
+      "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
+      "output_sha256": null,
+      "census": {
+        "nodes": 15,
+        "edges": 16,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "state",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::state_composite",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
+      "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
+      "output_sha256": "b24172f9dd9ac746c84476a6ff9786032f56eb6f38a5e35b7e594da07fceaf32",
+      "census": {
+        "nodes": 15,
+        "edges": 16,
+        "text_runs": 18
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 45,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "er",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::er_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
+      "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
+      "output_sha256": "a76069a931d05672df39749621e82b76b24648eb55a0f3a41193bda41edf2082",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 17
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "er",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::er_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
+      "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
+      "output_sha256": "7af208d8aecf7b77efab16e43d6ffc244b5c1470a6fb2bab9e8b14ee4f350774",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "er",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::er_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
+      "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "er",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::er_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
+      "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
+      "output_sha256": "a76069a931d05672df39749621e82b76b24648eb55a0f3a41193bda41edf2082",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 17
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Context",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
+      "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
+      "output_sha256": "454918d4d926515b6f00c650d5fac9ccd4f9858e6b4cd694e1fc2f5bb218cd00",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Context",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
+      "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
+      "output_sha256": "e8276183b1cda836025df95b7b4e17088dadf5f8a735d9c5df2c24b9f323a2da",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Context",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
+      "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Context",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
+      "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
+      "output_sha256": "454918d4d926515b6f00c650d5fac9ccd4f9858e6b4cd694e1fc2f5bb218cd00",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Container",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_container",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
+      "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
+      "output_sha256": "0e1c75d11e8c8c44bd2a3185ecd2404f9f13aa40813ea856ec76dcd6b5a3957a",
+      "census": {
+        "nodes": 5,
+        "edges": 4,
+        "text_runs": 28
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 15,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Container",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_container",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
+      "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
+      "output_sha256": "e41e14fa7560576174f59926b67e301b8fac97ac7758671f34a3300c2fa1bb50",
+      "census": {
+        "nodes": 5,
+        "edges": 4,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Container",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_container",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
+      "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
+      "output_sha256": null,
+      "census": {
+        "nodes": 5,
+        "edges": 4,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Container",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_container",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
+      "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
+      "output_sha256": "0e1c75d11e8c8c44bd2a3185ecd2404f9f13aa40813ea856ec76dcd6b5a3957a",
+      "census": {
+        "nodes": 5,
+        "edges": 4,
+        "text_runs": 28
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 15,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Component",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_component",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
+      "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
+      "output_sha256": "df8e1eededaa14f3522b457a6998f1191accf220f3c2498586cc30f08d49b970",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 23
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Component",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_component",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
+      "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
+      "output_sha256": "ed30a66beb7198cfa99e4cd5da829552cbad4a5400fcfa31850196e154c83505",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 9
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Component",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_component",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
+      "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
+      "output_sha256": null,
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Component",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_component",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
+      "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
+      "output_sha256": "df8e1eededaa14f3522b457a6998f1191accf220f3c2498586cc30f08d49b970",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 23
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Dynamic",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_dynamic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
+      "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
+      "output_sha256": "255a70931c6894a3c6aebad6d8b395c2655f5f4a4e48d94c312d3ed67459fe58",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 20
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Dynamic",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_dynamic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
+      "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
+      "output_sha256": "dd3ae74349fac72c7bdab56a8623e663b766550cc0d78f6358b3e1ae0709936e",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 13
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Dynamic",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_dynamic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
+      "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
+      "output_sha256": null,
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Dynamic",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_dynamic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
+      "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
+      "output_sha256": "255a70931c6894a3c6aebad6d8b395c2655f5f4a4e48d94c312d3ed67459fe58",
+      "census": {
+        "nodes": 4,
+        "edges": 4,
+        "text_runs": 20
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 13,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Deployment",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_deployment",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
+      "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
+      "output_sha256": "9a3ae39af032490e1d7edef036ea23ad1021f8976d560bc2b6abc5309ac9a462",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 25
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Deployment",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_deployment",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
+      "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
+      "output_sha256": "d96fc6b2303bd3623caacd43f2b05838ba0fca05822d00e39d58c03aef5c841a",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 11
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Deployment",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_deployment",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
+      "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "C4Deployment",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::c4_deployment",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
+      "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
+      "output_sha256": "9a3ae39af032490e1d7edef036ea23ad1021f8976d560bc2b6abc5309ac9a462",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 25
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "architecture-beta",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::architecture_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
+      "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
+      "output_sha256": "595a6bd5717456e2728ef2afce3e9a7551c17bd6d7f607a31e084bacfce3075a",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 3
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "architecture-beta",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::architecture_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
+      "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
+      "output_sha256": "94479c7fc91cb7310d0c085e8ad97fb15b196cf52fc079b105a4779bd44c8aae",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 2
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "architecture-beta",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::architecture_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
+      "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "architecture-beta",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::architecture_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
+      "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
+      "output_sha256": "595a6bd5717456e2728ef2afce3e9a7551c17bd6d7f607a31e084bacfce3075a",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 3
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "block-beta",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::block_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
+      "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
+      "output_sha256": "bd79b494b51a667fdc6ce8a005991cc788c36402260da41ba6da95d13568c023",
+      "census": {
+        "nodes": 5,
+        "edges": 0,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "block-beta",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::block_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
+      "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
+      "output_sha256": "a46f277087107fb6848143f36ff7aaf2542d47a82a9f3e2093d135e74250b50e",
+      "census": {
+        "nodes": 5,
+        "edges": 0,
+        "text_runs": 3
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "block-beta",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::block_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
+      "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
+      "output_sha256": null,
+      "census": {
+        "nodes": 5,
+        "edges": 0,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "block-beta",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::block_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
+      "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
+      "output_sha256": "bd79b494b51a667fdc6ce8a005991cc788c36402260da41ba6da95d13568c023",
+      "census": {
+        "nodes": 5,
+        "edges": 0,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gantt",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gantt_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
+      "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
+      "output_sha256": "2578abb116ca390b2bf7b2b5e6a6ef1f0fe3efd00e764d3a18f2fe6bcf70c190",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 3,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gantt",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gantt_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
+      "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
+      "output_sha256": "adf2968d1d49dbf16f6c3029a8f4cd8e34b3b409cbf9928b7adde808dd96216b",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 5
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gantt",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gantt_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
+      "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
+      "output_sha256": null,
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gantt",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gantt_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
+      "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
+      "output_sha256": "2578abb116ca390b2bf7b2b5e6a6ef1f0fe3efd00e764d3a18f2fe6bcf70c190",
+      "census": {
+        "nodes": 2,
+        "edges": 1,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 3,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "timeline",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::timeline_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
+      "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
+      "output_sha256": "782099608c66decac81bcd27092806de9250686bd1d8cbdf1bd97e19df069ca9",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 11
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 21,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "timeline",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::timeline_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
+      "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
+      "output_sha256": "5ee0de70732b91041d9517d14f4bec05ea578d7579a34a4368dcb61781403457",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 5
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "timeline",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::timeline_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
+      "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
+      "output_sha256": null,
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "timeline",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::timeline_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
+      "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
+      "output_sha256": "782099608c66decac81bcd27092806de9250686bd1d8cbdf1bd97e19df069ca9",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 11
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 21,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "journey",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::journey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
+      "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
+      "output_sha256": "0f6858a96ded6574a8ed1745c7e3f25a754f2a6c8363055996b256a7272adc64",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 21,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "journey",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::journey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
+      "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
+      "output_sha256": "afd20ac5fc4ae11f4492650b1b77a81510805531b40f2412e127097b452ff566",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 3
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "journey",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::journey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
+      "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
+      "output_sha256": null,
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "journey",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::journey_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
+      "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
+      "output_sha256": "0f6858a96ded6574a8ed1745c7e3f25a754f2a6c8363055996b256a7272adc64",
+      "census": {
+        "nodes": 7,
+        "edges": 6,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 21,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gitGraph",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gitgraph_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
+      "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
+      "output_sha256": "b95657236d89b7733726e5a1f986faa7d3757e4e26d3b5aba531590a0d5127db",
+      "census": {
+        "nodes": 6,
+        "edges": 6,
+        "text_runs": 9
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 19,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gitGraph",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gitgraph_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
+      "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
+      "output_sha256": "9ebad521ed20980739a81e9c8cb2bd5e62add3bebc1436ec2378d9bb8f97c480",
+      "census": {
+        "nodes": 6,
+        "edges": 6,
+        "text_runs": 8
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gitGraph",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gitgraph_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
+      "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
+      "output_sha256": null,
+      "census": {
+        "nodes": 6,
+        "edges": 6,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "gitGraph",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::gitgraph_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
+      "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
+      "output_sha256": "b95657236d89b7733726e5a1f986faa7d3757e4e26d3b5aba531590a0d5127db",
+      "census": {
+        "nodes": 6,
+        "edges": 6,
+        "text_runs": 9
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 19,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sankey",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sankey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
+      "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
+      "output_sha256": "a80ea7d8cf356c3ded843db7041e80c11821cab935b472e58a01c69318603ca9",
+      "census": {
+        "nodes": 7,
+        "edges": 8,
+        "text_runs": 15
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 23,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sankey",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sankey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
+      "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
+      "output_sha256": "2283bd6a0a531fc866a8fe6fc82306f6b46f93e3f1d91237f3d3453ba977b60b",
+      "census": {
+        "nodes": 7,
+        "edges": 8,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sankey",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sankey_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
+      "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
+      "output_sha256": null,
+      "census": {
+        "nodes": 7,
+        "edges": 8,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "sankey",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::sankey_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
+      "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
+      "output_sha256": "a80ea7d8cf356c3ded843db7041e80c11821cab935b472e58a01c69318603ca9",
+      "census": {
+        "nodes": 7,
+        "edges": 8,
+        "text_runs": 15
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 23,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "mindmap",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::mindmap_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
+      "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
+      "output_sha256": "f3656125fdfe3785b0c9bc0aeb014d455f3a52197f9c7caeed66feaab6441b78",
+      "census": {
+        "nodes": 6,
+        "edges": 5,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 18,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "mindmap",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::mindmap_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
+      "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
+      "output_sha256": "d8b939e395f300b0b0fdbf9f9e73e0456af840e67831bafd958bff7771bead3f",
+      "census": {
+        "nodes": 6,
+        "edges": 5,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "mindmap",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::mindmap_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
+      "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
+      "output_sha256": null,
+      "census": {
+        "nodes": 6,
+        "edges": 5,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "mindmap",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::mindmap_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
+      "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
+      "output_sha256": "f3656125fdfe3785b0c9bc0aeb014d455f3a52197f9c7caeed66feaab6441b78",
+      "census": {
+        "nodes": 6,
+        "edges": 5,
+        "text_runs": 6
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 18,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "pie",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::pie_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
+      "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
+      "output_sha256": "b90163ab3c11329db5da44eb057945142ad54ac546bd75eaa29a037becab6502",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 7
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 4,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "pie",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::pie_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
+      "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
+      "output_sha256": "6e67322fe9f2bf2955dd275e0ca5f1a532bf13a892b5191a9365596272bf8f88",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "pie",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::pie_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
+      "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "pie",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::pie_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
+      "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
+      "output_sha256": "b90163ab3c11329db5da44eb057945142ad54ac546bd75eaa29a037becab6502",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 7
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 4,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "quadrantChart",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::quadrant_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
+      "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
+      "output_sha256": "0ead538d3defe7942835d44b5139d85399d249172906ada14b77c283423f621f",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 4,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "quadrantChart",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::quadrant_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
+      "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
+      "output_sha256": "1a390ed0ec7bc63255bcc7e9fffa1ea9e4c4ee86f97cff08ea272585f7dce5c3",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 9
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "quadrantChart",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::quadrant_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
+      "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "quadrantChart",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::quadrant_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
+      "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
+      "output_sha256": "0ead538d3defe7942835d44b5139d85399d249172906ada14b77c283423f621f",
+      "census": {
+        "nodes": 3,
+        "edges": 0,
+        "text_runs": 12
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 4,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "xyChart",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::xychart_comprehensive",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
+      "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
+      "output_sha256": "ff21ab2fc827ccea04bab14ddfcb47f006aacbb6e87607b7f82afb4eb947660a",
+      "census": {
+        "nodes": 12,
+        "edges": 3,
+        "text_runs": 22
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "xyChart",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::xychart_comprehensive",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
+      "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
+      "output_sha256": "cbf528db7e3849fa678da281882031c099793c1d30feb23d1d267ca1625decd9",
+      "census": {
+        "nodes": 12,
+        "edges": 3,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "xyChart",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::xychart_comprehensive",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
+      "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
+      "output_sha256": null,
+      "census": {
+        "nodes": 12,
+        "edges": 3,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "xyChart",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::xychart_comprehensive",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
+      "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
+      "output_sha256": "ff21ab2fc827ccea04bab14ddfcb47f006aacbb6e87607b7f82afb4eb947660a",
+      "census": {
+        "nodes": 12,
+        "edges": 3,
+        "text_runs": 22
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "requirementDiagram",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::requirement_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
+      "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
+      "output_sha256": "da3781c0f259fd9b027ea00d05673bce2ff4050f7e8be26781b1994a9ef1cee0",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 17
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "requirementDiagram",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::requirement_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
+      "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
+      "output_sha256": "1a076411f4569c74e5b9e8e977d1a326e85337c66e8eb6722a608db0ef262fd6",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 7
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "requirementDiagram",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::requirement_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
+      "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
+      "output_sha256": null,
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "requirementDiagram",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::requirement_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
+      "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
+      "output_sha256": "da3781c0f259fd9b027ea00d05673bce2ff4050f7e8be26781b1994a9ef1cee0",
+      "census": {
+        "nodes": 3,
+        "edges": 2,
+        "text_runs": 17
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 9,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "packet-beta",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::packet_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
+      "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
+      "output_sha256": "ebe81347cc1d6f8de5ff0e4977f0a24819f0c63c0f0a8f21bccfeb9cec77e4e0",
+      "census": {
+        "nodes": 8,
+        "edges": 0,
+        "text_runs": 24
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 17,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "packet-beta",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::packet_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
+      "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
+      "output_sha256": "24122ac94ff1578241da0458ac9458cf8029443410bcc0c7b37a9432486fc20b",
+      "census": {
+        "nodes": 8,
+        "edges": 0,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "packet-beta",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::packet_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
+      "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
+      "output_sha256": null,
+      "census": {
+        "nodes": 8,
+        "edges": 0,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "packet-beta",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::packet_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
+      "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
+      "output_sha256": "ebe81347cc1d6f8de5ff0e4977f0a24819f0c63c0f0a8f21bccfeb9cec77e4e0",
+      "census": {
+        "nodes": 8,
+        "edges": 0,
+        "text_runs": 24
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 17,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "kanban",
+      "surface": "svg",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::kanban_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
+      "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
+      "output_sha256": "08eceb1ac8ca3c73f14b8298841cc65ac04670ff039c6493dfada7f6588feb1b",
+      "census": {
+        "nodes": 7,
+        "edges": 0,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 15,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "kanban",
+      "surface": "terminal",
+      "tier": "structural",
+      "reasons": [
+        "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::kanban_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
+      "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
+      "output_sha256": "ad0fad1da70468f58a6b15c491ad071879f15a0449a35a3d23b7f8b9a33c3109",
+      "census": {
+        "nodes": 7,
+        "edges": 0,
+        "text_runs": 4
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "kanban",
+      "surface": "canvas",
+      "tier": "unsupported",
+      "reasons": [
+        "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::kanban_basic",
+        "renderer_agreement"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
+      "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
+      "output_sha256": null,
+      "census": {
+        "nodes": 7,
+        "edges": 0,
+        "text_runs": 0
+      },
+      "determinism_repeat_identical": null,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": null,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    {
+      "family": "kanban",
+      "surface": "wasm",
+      "tier": "structural",
+      "reasons": [
+        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
+      ],
+      "evidence_ids": [
+        "golden_svg_test::kanban_basic",
+        "renderer_agreement",
+        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+      ],
+      "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
+      "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
+      "output_sha256": "08eceb1ac8ca3c73f14b8298841cc65ac04670ff039c6493dfada7f6588feb1b",
+      "census": {
+        "nodes": 7,
+        "edges": 0,
+        "text_runs": 10
+      },
+      "determinism_repeat_identical": true,
+      "diagnostics": {
+        "errors": 0,
+        "warnings": 0
+      },
+      "a11y_named_elements": 15,
+      "negative_case": {
+        "handled": true,
+        "diagnostics": {
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    }
+  ]
+}

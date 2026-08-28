@@ -96,7 +96,11 @@ const TERM_COLS: usize = 200;
 const TERM_ROWS: usize = 100;
 
 /// Canvas backdrop for the canvas cells, matching the canvas test suite's standard surface.
+/// Only the feature-gated canvas arm reads it, so it is gated identically to stay dead-code
+/// clean in default builds.
+#[cfg(any(test, feature = "support-matrix"))]
 const CANVAS_WIDTH: f64 = 800.0;
+#[cfg(any(test, feature = "support-matrix"))]
 const CANVAS_HEIGHT: f64 = 600.0;
 
 /// One ingested cross-engine verdict for a (family, surface) cell.
@@ -229,15 +233,6 @@ fn normalized_contains(haystack: &str, needle: &str) -> bool {
     needle
         .split(' ')
         .all(|word| hay.contains(word) || hay.contains(&squeeze(&xml_escaped(word))))
-}
-
-/// Node labels of the IR, resolved through the interner the renderers read.
-fn node_label_texts(ir: &fm_core::MermaidDiagramIr) -> Vec<String> {
-    ir.nodes
-        .iter()
-        .filter_map(|node| node.label.and_then(|id| ir.labels.get(id.0)))
-        .map(|label| label.text.clone())
-        .collect()
 }
 
 fn diagnostics_of(parsed: &fm_parser::ParseResult) -> SupportDiagnostics {
@@ -577,18 +572,58 @@ fn evaluate_cell(
                     }
                 }
             } else {
-                node_label_texts(&parsed.ir)
+                // Every node must appear in the output by its label, or — when the family
+                // stores the display name only in the identifier (class declarations like
+                // `class Animal` with no display label, ER entities) — by its id. A node
+                // that appears as NEITHER is content loss.
+                //
+                // Nodes whose very id is internal machinery are EXEMPT from the id
+                // fallback: state pseudo-states (`__state_start*`/`__state_end*`) render as
+                // start/end marker circles, block-beta spacers (`__space_N`) occupy grid
+                // cells, and none of them carries drawn text. Their presence is witnessed by
+                // the census and by the golden semantic guards, not by text containment.
+                let mut texts = Vec::new();
+                for node in &parsed.ir.nodes {
+                    // Text-free geometry marks never carry drawn text, by design: state
+                    // fork/join synchronization bars (mermaid draws the bar unlabelled),
+                    // start/end markers, and internal machinery (`__`-prefixed ids). Their
+                    // presence is witnessed by the census and the golden semantic guards.
+                    let text_free_shape = matches!(
+                        node.shape,
+                        fm_core::NodeShape::HorizontalBar
+                            | fm_core::NodeShape::FilledCircle
+                            | fm_core::NodeShape::DoubleCircle
+                    );
+                    if node.label.is_none() && (text_free_shape || node.id.starts_with("__")) {
+                        continue;
+                    }
+                    let text = node
+                        .label
+                        .and_then(|id| parsed.ir.labels.get(id.0))
+                        .map(|label| label.text.clone())
+                        .unwrap_or_else(|| node.id.clone());
+                    if !text.trim().is_empty() {
+                        texts.push(text);
+                    }
+                }
+                texts
             };
             let missing: Vec<&String> = witnesses
                 .iter()
                 .filter(|label| !label.trim().is_empty())
                 .filter(|label| !normalized_contains(&drawn_text, label))
                 .collect();
-            // An empty witness set must NEVER promote: containment over nothing is the
-            // tautology this matrix exists to refuse.
-            if !witnesses.is_empty() && missing.is_empty() {
+            // An empty witness set must NEVER promote silently: containment over nothing is
+            // the tautology this matrix exists to refuse.
+            if witnesses.is_empty() {
+                reasons.push(
+                    "no witness available: the fixture's IR carries no node labels, node ids \
+                     or (for value-to-geometry families) chart metadata to assert against"
+                        .to_string(),
+                );
+            } else if missing.is_empty() {
                 tier = SupportTier::Structural;
-            } else if !witnesses.is_empty() {
+            } else {
                 let names: Vec<String> = missing
                     .iter()
                     .take(3)
