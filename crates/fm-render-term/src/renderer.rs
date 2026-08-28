@@ -5202,6 +5202,10 @@ mod tests {
     fn renders_generic_diagram_title_in_compact_mode() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some("Shipping History".to_string());
+        // A flowchart draws its title only with front-matter provenance -- mermaid ignores a
+        // `title` statement there -- so this is the state the parser actually produces for a
+        // titled flowchart. See `MermaidDiagramIr::declared_title_if_drawn`.
+        ir.meta.title_from_front_matter = true;
         ir.nodes.push(IrNode {
             id: "A".to_string(),
             ..IrNode::default()
@@ -5218,6 +5222,10 @@ mod tests {
     fn renders_generic_diagram_title_in_rich_mode() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some("Shipping History".to_string());
+        // A flowchart draws its title only with front-matter provenance -- mermaid ignores a
+        // `title` statement there -- so this is the state the parser actually produces for a
+        // titled flowchart. See `MermaidDiagramIr::declared_title_if_drawn`.
+        ir.meta.title_from_front_matter = true;
         ir.nodes.push(IrNode {
             id: "A".to_string(),
             ..IrNode::default()

@@ -269,7 +269,17 @@ fn every_chart_type_draws_its_title_exactly_once() {
         // the line was dropped and nothing ever called set_title. Not a phantom any more, but not a
         // title either: a compiled run of this test reported "flowchart: title drawn 0 times".
         // extract_generic_diagram_title now promotes it post-parse.
-        ("flowchart", "flowchart LR\n  title ZZTITLE\n  A --> B\n"),
+        //
+        // ⚠️ THE SPELLING CHANGED, AND ONLY BECAUSE THE INCUMBENT SAYS SO. This case used to be
+        // `flowchart LR\n  title ZZTITLE\n  A --> B`, a title STATEMENT. Rendered in Chromium 151,
+        // pinned mermaid 11.15.0 draws NOTHING for that — a flowchart takes its title only from the
+        // front matter, and this row was asserting a title mermaid does not put there. Front matter
+        // is the spelling that gives a flowchart a title, so the case keeps its intent (drawn
+        // exactly once) in the spelling that actually carries one.
+        (
+            "flowchart",
+            "---\ntitle: ZZTITLE\n---\nflowchart LR\n  A --> B\n",
+        ),
     ];
 
     for (name, src) in cases {
