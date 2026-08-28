@@ -27,6 +27,9 @@
       copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
       copy.setAttribute('width', '100%');
       copy.setAttribute('height', '100%');
+      copy.querySelectorAll('style').forEach((style) => {
+        style.textContent = style.textContent.replace(/@import\s+url\([^)]*\)[^;]*;/g, '');
+      });
       copy.querySelectorAll('[id^="fm-node-"]').forEach((node, index) => {
         node.style.setProperty('--i', String(index));
       });
