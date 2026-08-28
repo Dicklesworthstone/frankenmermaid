@@ -12572,6 +12572,23 @@ fn detect_cycle_components(
         }
     }
 
+    // ⚠️ THE SELF-LOOP TEST WAS A FULL EDGE SCAN PER SINGLETON COMPONENT, so this loop cost
+    // O(nodes x edges): in a mostly-acyclic graph nearly every component IS a singleton, and each
+    // one re-read the whole edge list to ask whether one node loops to itself. Measured on
+    // `edit_trace_200x200`, `Iter<OrientedEdge>::any` is **3.17% of the job** — the dominant term
+    // inside `detect_cycle_components` (4.57%), ahead of the Tarjan traversal it belongs to.
+    //
+    // Self-loops are a property of the EDGE LIST, not of the component, so one pass answers every
+    // component. Same predicate, same answer, one traversal instead of one per singleton.
+    let mut has_self_loop = vec![false; node_count];
+    for edge in edges {
+        if edge.source == edge.target
+            && let Some(slot) = has_self_loop.get_mut(edge.source)
+        {
+            *slot = true;
+        }
+    }
+
     let mut cyclic_component_indexes = BTreeSet::new();
     let mut cycle_node_count = 0_usize;
     let mut max_cycle_size = 0_usize;
@@ -12579,10 +12596,10 @@ fn detect_cycle_components(
         let is_cyclic = if component_nodes.len() > 1 {
             true
         } else {
-            let node = component_nodes[0];
-            edges
-                .iter()
-                .any(|edge| edge.source == node && edge.target == node)
+            has_self_loop
+                .get(component_nodes[0])
+                .copied()
+                .unwrap_or(false)
         };
 
         if is_cyclic {
