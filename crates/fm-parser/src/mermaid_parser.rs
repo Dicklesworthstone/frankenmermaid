@@ -1675,6 +1675,13 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
             }
             target = next.as_str();
         }
+        // ⚠️ DO NOT DELETE THIS INSERT. It has now been dropped THREE times (094e6575,
+        // b9be26aa, and 454db70f — the last one titled as this very fix), each time leaving
+        // `resolved` empty so EVERY forward reference interned a phantom. The walk without
+        // the insert is a no-op. `chains_of_any_depth_resolve_to_the_final_member` in
+        // tests/edge_to_subgraph.rs fails on exactly this line's absence; run it before
+        // touching this function.
+        resolved.insert(key.clone(), target.to_string());
     }
     resolved
 }
