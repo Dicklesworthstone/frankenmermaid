@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' frankenmermaid-resource:; connect-src frankenmermaid-resource:; style-src 'unsafe-inline'; img-src data: blob:">
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; width: 100%; height: 100%; background: #061116; }
+    body { display: grid; place-items: center; overflow: auto; }
+    #stage { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 18px; box-sizing: border-box; }
+    #stage > svg { width: 100% !important; height: 100% !important; max-width: 100%; max-height: 100%; filter: drop-shadow(0 12px 28px rgba(34,211,238,.12)); }
+  </style>
+</head>
+<body>
+  <main id="stage" aria-label="Rendered Mermaid diagram"></main>
+  <script type="module">
+    import init, { renderSvg, detectType } from './frankenmermaid.js';
+    const bridge = window.webkit.messageHandlers.frankenBridge;
+    const stage = document.querySelector('#stage');
+    let latestRequest = 0;
+
+    try {
+      const wasmResponse = await fetch('./frankenmermaid_bg.wasm');
+      const wasmBytes = await wasmResponse.arrayBuffer();
+      await init({module_or_path: wasmBytes});
+      window.frankenRender = async (command) => {
+        const requestID = Number(command.requestID);
+        latestRequest = Math.max(latestRequest, requestID);
+        const started = performance.now();
+        try {
+          const source = String(command.source);
+          const svg = renderSvg(source, {theme: 'dark', responsive: true, accessible: true});
+          if (requestID !== latestRequest) return false;
+          stage.innerHTML = svg;
+          const typeResult = detectType(source);
+          const diagramType = typeof typeResult === 'string'
+            ? typeResult
+            : String(typeResult?.diagram_type ?? typeResult?.type ?? 'diagram');
+          bridge.postMessage({
+            type: 'result', requestID,
+            elapsedMS: performance.now() - started,
+            diagramType,
+            nodeCount: stage.querySelectorAll('[id^="fm-node-"]').length,
+            edgeCount: stage.querySelectorAll('[id^="fm-edge-"]').length
+          });
+          return true;
+        } catch (error) {
+          bridge.postMessage({type: 'failure', requestID, message: String(error)});
+          return false;
+        }
+      };
+      bridge.postMessage({type: 'ready'});
+    } catch (error) {
+      bridge.postMessage({type: 'failure', message: `WASM initialization failed: ${error}`});
+    }
+  </script>
+</body>
+</html>

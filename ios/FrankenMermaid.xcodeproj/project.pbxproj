@@ -1,0 +1,347 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		253A6289134C23366FCD9F11 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */; };
+		321FD792EC092CDC0EE8A0EE /* Renderer in Resources */ = {isa = PBXBuildFile; fileRef = 2CC45DF6459061EB2B480E6E /* Renderer */; };
+		882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D72BEE3C3241B52B539BCC /* StudioView.swift */; };
+		95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */; };
+		A4186EDAE7F8F31B496ADCDB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0C48617619448DF0AB92D9A /* Assets.xcassets */; };
+		B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8682A866E00E57A642FB42 /* RendererHost.swift */; };
+		C8EE7E761CA0E1E561C21028 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114A8B45321005FF3AF13396 /* Theme.swift */; };
+		F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		10205D86068DDFD97F9D7196 /* FrankenMermaid.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FrankenMermaid.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		114A8B45321005FF3AF13396 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		2CC45DF6459061EB2B480E6E /* Renderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Renderer; sourceTree = SOURCE_ROOT; };
+		6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrankenMermaidApp.swift; sourceTree = "<group>"; };
+		7D8682A866E00E57A642FB42 /* RendererHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendererHost.swift; sourceTree = "<group>"; };
+		8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidCodeEditor.swift; sourceTree = "<group>"; };
+		C0C48617619448DF0AB92D9A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E3D72BEE3C3241B52B539BCC /* StudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioView.swift; sourceTree = "<group>"; };
+		FE54E15D819A299BF5C0B0D7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		8806C5BF358CE88ECE2CF469 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */,
+				FE54E15D819A299BF5C0B0D7 /* Info.plist */,
+				AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */,
+				8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */,
+				7D8682A866E00E57A642FB42 /* RendererHost.swift */,
+				E3D72BEE3C3241B52B539BCC /* StudioView.swift */,
+				114A8B45321005FF3AF13396 /* Theme.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		969D7E61D272C3C52A68D5B2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				10205D86068DDFD97F9D7196 /* FrankenMermaid.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		ABD606F8FA1D2887E0397839 = {
+			isa = PBXGroup;
+			children = (
+				C0C48617619448DF0AB92D9A /* Assets.xcassets */,
+				2CC45DF6459061EB2B480E6E /* Renderer */,
+				8806C5BF358CE88ECE2CF469 /* Sources */,
+				969D7E61D272C3C52A68D5B2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		71205DB217368F71CE5D1547 /* FrankenMermaid */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9BE016580D9CB9B1C8DF8650 /* Build configuration list for PBXNativeTarget "FrankenMermaid" */;
+			buildPhases = (
+				D629E6EE0BD68628AA94C670 /* Sources */,
+				B8D941AFA2153A3C73E6B9F4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FrankenMermaid;
+			packageProductDependencies = (
+			);
+			productName = FrankenMermaid;
+			productReference = 10205D86068DDFD97F9D7196 /* FrankenMermaid.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3B65434ACF05E04F26BA82E0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					71205DB217368F71CE5D1547 = {
+						DevelopmentTeam = AU8V2Z6NKY;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 8149DA7482BB1930F0D5B16C /* Build configuration list for PBXProject "FrankenMermaid" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = ABD606F8FA1D2887E0397839;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 969D7E61D272C3C52A68D5B2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				71205DB217368F71CE5D1547 /* FrankenMermaid */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B8D941AFA2153A3C73E6B9F4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A4186EDAE7F8F31B496ADCDB /* Assets.xcassets in Resources */,
+				253A6289134C23366FCD9F11 /* PrivacyInfo.xcprivacy in Resources */,
+				321FD792EC092CDC0EE8A0EE /* Renderer in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D629E6EE0BD68628AA94C670 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */,
+				95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */,
+				B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */,
+				882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */,
+				C8EE7E761CA0E1E561C21028 /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		05BB0ADAF21108BF06DDA2F6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.10;
+			};
+			name = Release;
+		};
+		5A1BD8FB79713A796C8680EF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.10;
+			};
+			name = Debug;
+		};
+		8F3D82D29E1953F1B9E7E73E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = FrankenMermaid.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACCATALYST_USE_NATIVE_DESIGN = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankenmermaid.FrankenMermaid;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		E3D6C7BB809E7703094C2537 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = FrankenMermaid.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACCATALYST_USE_NATIVE_DESIGN = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankenmermaid.FrankenMermaid;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8149DA7482BB1930F0D5B16C /* Build configuration list for PBXProject "FrankenMermaid" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A1BD8FB79713A796C8680EF /* Debug */,
+				05BB0ADAF21108BF06DDA2F6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9BE016580D9CB9B1C8DF8650 /* Build configuration list for PBXNativeTarget "FrankenMermaid" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E3D6C7BB809E7703094C2537 /* Debug */,
+				8F3D82D29E1953F1B9E7E73E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 3B65434ACF05E04F26BA82E0 /* Project object */;
+}
