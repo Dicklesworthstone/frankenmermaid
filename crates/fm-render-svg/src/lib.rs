@@ -14206,13 +14206,41 @@ fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String>
     ))
 }
 
-/// Plain decimal, no trailing zeros: 150 renders `150`, 3.75 renders `3.75`.
+/// At most TWO decimal places, trailing zeros trimmed: 150 renders `150`, 3.75 renders `3.75`,
+/// 124.729 renders `124.73`.
+///
+/// ⚠️ THE ROUNDING IS THE POINT, AND IT IS NOT COSMETIC. This printed the raw value, so a flow
+/// written `1234.5678` drew `1234.5677` — digits the author never typed, because the total is
+/// accumulated in `f32` and the nearest `f32` to that sum prints back with the error visible. The
+/// reference draws `1234.57`; rounding to two places both matches it and stops float noise reaching
+/// the picture. Measured in Chromium 151 against the pinned 11.15.0 bundle:
+///
+/// ```text
+///   10           -> 10        (no `.00`: the trailing zeros are trimmed)
+///   124.729      -> 124.73
+///   1.23456789   -> 1.23
+///   1234.5678    -> 1234.57
+///   0.3333333    -> 0.33
+/// ```
+///
+/// ⚠️ ONE RESIDUAL DIVERGENCE, RECORDED RATHER THAN PAPERED OVER. `A,B,0.005` draws `0.01` upstream
+/// and cannot reliably do so here: mermaid parses into `f64`, where the stored value sits just above
+/// the exact half and rounds up, while `sankey_flow_value` parses into `f32`, where the nearest
+/// representable value can fall on the other side. That is a property of the IR's numeric width, not
+/// of this formatter, and closing it means widening the stored flow value — a change to the IR, not
+/// a print. The conformance test pins the FORMAT for that input without asserting a digit this
+/// function cannot promise.
 fn format_sankey_total(total: f32) -> String {
-    if (total.fract()).abs() < f32::EPSILON {
-        format!("{}", total as i64)
+    let rounded = format!("{total:.2}");
+    // Trim only inside the fraction: `trim_end_matches('0')` stops at the first non-`0`, so
+    // `1200.00` loses the two fractional zeros and stops at the dot, never the integer's own.
+    if rounded.contains('.') {
+        rounded
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     } else {
-        let text = format!("{total}");
-        text
+        rounded
     }
 }
 
@@ -14530,6 +14558,24 @@ fn compute_edge_label<'a>(
         // and neither matched the incumbent, because a prefix is not what the incumbent produces.
         // The number is now written by `write_sequence_number_into`.
         let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
+
+        // ⚠️ A SANKEY EDGE LABEL *IS* THE FLOW VALUE, stored as the author's raw text, so it must go
+        // through the same formatter as the node totals. Without this the identical quantity appears
+        // twice in one picture spelled two different ways — the node reading `124.73` and the link
+        // beside it reading `124.729` — and the link carries the `f32` noise the node no longer
+        // does (`1234.5678` drew `1234.5677` here). Found by the conformance test for the node
+        // totals: its "the raw value must not survive" assertion caught this second site, which is
+        // exactly what that assertion is for.
+        let label_text: Cow<'a, str> = if ir.diagram_type == DiagramType::Sankey {
+            match label_text.trim().parse::<f32>() {
+                Ok(value) if value.is_finite() && value > 0.0 => {
+                    Cow::Owned(format_sankey_total(value))
+                }
+                _ => label_text,
+            }
+        } else {
+            label_text
+        };
 
         // A C4Dynamic relationship is NUMBERED, 1-based, in declaration order.
         //
