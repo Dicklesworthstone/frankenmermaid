@@ -146,7 +146,9 @@ fn angle_pairs_inside_a_label_are_not_decorated() {
         "a label containing `<<` and `>>` was rewritten; the reference draws it verbatim: {texts:?}"
     );
     assert!(
-        !texts.iter().any(|text| text.contains('«') || text.contains('»')),
+        !texts
+            .iter()
+            .any(|text| text.contains('«') || text.contains('»')),
         "guillemets were applied to label text that is not a stereotype: {texts:?}"
     );
 }

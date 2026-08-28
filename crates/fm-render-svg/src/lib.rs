@@ -811,13 +811,33 @@ fn strip_unused_accent_css(
     // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
     // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
     // Exact-selector matching makes CSS drift a safe no-op.
+    //
+    // ⚠️ MATCHES BOTH SPELLINGS. The stylesheet may be pretty (`--fm-accent-3: #0d9488;` on its
+    // own line) or whitespace-minified (`.fm-node-accent-3{...}` with no space before the brace),
+    // ever since bd-zrz6r split the pipeline into a minified direct path and a pretty embed path.
+    // The original needles hardcoded the pretty shapes — space before the brace, two-space
+    // declaration indent, `}\n`/`;\n` terminators — so on the minified path every find() missed
+    // and pruning silently became a no-op ("unused palette rule survived").
     for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
         if !is_used {
-            let selector = format!(".fm-node-accent-{n} {{");
-            if let Some(start) = memchr::memmem::find(css.as_bytes(), selector.as_bytes())
-                && let Some(rel_end) = memchr::memmem::find(&css.as_bytes()[start..], b"}\n")
-            {
-                css.replace_range(start..start + rel_end + 2, "");
+            let selector = format!(".fm-node-accent-{n}");
+            while let Some(start) = memchr::memmem::find(css.as_bytes(), selector.as_bytes()) {
+                // The selector ends at the first `{` after optional whitespace; a longer class
+                // name (`-accent-30`) or a var() reference (`var(--fm-accent-3)`) never has it.
+                let after = start + selector.len();
+                let brace = match css.as_bytes()[after..]
+                    .iter()
+                    .position(|&b| !(b as char).is_whitespace())
+                {
+                    Some(rel) if css.as_bytes()[after + rel] == b'{' => after + rel,
+                    _ => break,
+                };
+                let close = match css.as_bytes()[brace..].iter().position(|&b| b == b'}') {
+                    Some(rel) => brace + rel,
+                    None => break,
+                };
+                let end = close + 1;
+                css.replace_range(start..end, "");
             }
         }
     }
@@ -826,17 +846,31 @@ fn strip_unused_accent_css(
         return;
     }
 
-    // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced after
-    // the class-rule pruning above. The stylesheet may include classDef/effect rules, so scan the
+    // Drop each accent custom property `--fm-accent-N` that is no longer referenced after the
+    // class-rule pruning above. The stylesheet may include classDef/effect rules, so scan the
     // completed CSS rather than assume where each reference originates.
     let var_used = scan_accent_var_refs(css);
     for (n, &is_used) in var_used.iter().enumerate().skip(1) {
         if !is_used {
-            let decl = format!("  --fm-accent-{n}:");
-            if let Some(start) = memchr::memmem::find(css.as_bytes(), decl.as_bytes())
-                && let Some(rel_end) = memchr::memmem::find(&css.as_bytes()[start..], b";\n")
+            let decl = format!("--fm-accent-{n}:");
+            let mut search_from = 0;
+            while let Some(rel) =
+                memchr::memmem::find(&css.as_bytes()[search_from..], decl.as_bytes())
             {
-                css.replace_range(start..start + rel_end + 2, "");
+                let start = search_from + rel;
+                // Guard against matching a longer variable (`--fm-accent-30` does not exist, but
+                // stay exact): the next byte after the needle must not be a digit.
+                let next = css.as_bytes().get(start + decl.len()).copied().unwrap_or(0);
+                if next.is_ascii_digit() {
+                    search_from = start + decl.len();
+                    continue;
+                }
+                let end = match css.as_bytes()[start..].iter().position(|&b| b == b';') {
+                    Some(rel) => start + rel + 1,
+                    None => break,
+                };
+                css.replace_range(start..end, "");
+                break;
             }
         }
     }
@@ -1199,7 +1233,7 @@ fn minify_style_block(svg: &mut String) {
 /// all share `:`, so leaving it untouched is the maximally drift-safe choice). The invariant is
 /// machine-checked: stripping ALL whitespace from the input and from the output yields identical
 /// strings (verified per-test and across every golden), proving only whitespace changed.
-fn minify_css(css: &str) -> String {
+pub fn minify_css(css: &str) -> String {
     let b = css.as_bytes();
     let n = b.len();
     let mut out: Vec<u8> = Vec::with_capacity(n);
@@ -22240,7 +22274,8 @@ marker#arrow-open path {
         assert!(svg.contains("prefers-reduced-motion"));
         assert!(svg.contains("fm-edge-flow-animated"));
         assert!(svg.contains("--fm-enter-order:"));
-        assert!(svg.contains("stroke-dasharray: 3 9"));
+        // Shipped spelling: the embedded stylesheet is whitespace-minified.
+        assert!(svg.contains("stroke-dasharray:3 9"));
     }
 
     // ─── Property-based render completeness tests (bd-1br.8) ────────────

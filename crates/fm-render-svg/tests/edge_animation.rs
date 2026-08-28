@@ -282,19 +282,21 @@ fn the_opt_in_survives_every_a11y_configuration() {
 /// nothing.
 #[test]
 fn the_two_speeds_differ_only_in_duration() {
+    // Assertions pin the SHIPPED spelling — the embedded stylesheet is whitespace-minified,
+    // so the declarations carry no space after the colon.
     let svg = render(FAST);
     assert!(
-        svg.contains("animation: fm-edge-dash-march 20s linear infinite"),
+        svg.contains("animation:fm-edge-dash-march 20s linear infinite"),
         "fast is not upstream's 20s linear march"
     );
     assert!(
-        render(SLOW).contains("animation: fm-edge-dash-march 50s linear infinite"),
+        render(SLOW).contains("animation:fm-edge-dash-march 50s linear infinite"),
         "slow is not upstream's 50s linear march"
     );
     // The shared declarations, upstream's values: 9-5 dashes marched over a 900px offset.
     for shared in [
-        "stroke-dasharray: 9 5 !important",
-        "stroke-dashoffset: 900",
+        "stroke-dasharray:9 5!important",
+        "stroke-dashoffset:900",
         "@keyframes fm-edge-dash-march",
     ] {
         assert!(svg.contains(shared), "missing shared declaration: {shared}");

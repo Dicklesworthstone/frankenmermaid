@@ -5491,6 +5491,10 @@ mod tests {
                 "bd-adabx: RenderScene path pipeline, not the layout pipeline",
             ),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
+            (
+                "draw_c4_legend",
+                "bd-adabx (source added by the bd-5k51.1 C4-legend cell): legend text",
+            ),
         ];
 
         let mut found = Vec::new();

@@ -778,7 +778,10 @@ mod tests {
     #[test]
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
-        let style = theme.to_svg_style(true, true);
+        // The pipeline runs the assembled stylesheet through the whitespace-only minifier
+        // before embedding; assert against the same transform so the contract is format-
+        // stable rather than coupled to the writer's indentation.
+        let style = crate::minify_css(&theme.to_svg_style(true, true));
         assert!(style.contains("svg{--fm-bg:"));
         assert!(
             !style.contains(":root{--fm-bg:"),

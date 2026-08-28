@@ -89,7 +89,8 @@ fn a_diagram_that_uses_a_gated_feature_keeps_its_rules() {
     // The SAME unique needle the strip half uses — a bare `.fm-cluster{` would be satisfied by the
     // ungated state rule and pass even with the theme block stripped, making this half tautological.
     assert!(
-        clustered.contains(".fm-cluster{fill: var(--fm-cluster-fill)"),
+        // Shipped spelling: the stylesheet is whitespace-minified.
+        clustered.contains(".fm-cluster{fill:var(--fm-cluster-fill)"),
         "a diagram WITH a subgraph lost its cluster rules"
     );
 

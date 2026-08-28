@@ -91,7 +91,10 @@ fn the_marker_class_has_a_css_rule_behind_it() {
          so the marker cannot change the picture:\n{stylesheet}"
     );
     assert!(
-        stylesheet.contains("stroke: none"),
+        // The shipped stylesheet is whitespace-minified: the declaration spells `stroke:none`.
+        // The selector half above is asserted as the markup spells it; this half pins that the
+        // rule behind it actually removes the border.
+        stylesheet.contains("stroke:none"),
         "the marker's rule does not remove the border:\n{stylesheet}"
     );
 }
