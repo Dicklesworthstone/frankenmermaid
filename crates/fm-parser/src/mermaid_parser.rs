@@ -1660,10 +1660,21 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
         seen.insert(key.as_str());
         let mut target = first.as_str();
         // Bounded by the number of subgraphs: every hop consumes one unvisited key.
-        if let Some(next) = raw.get(target) {
+        //
+        // ⚠️ THIS MUST WALK TO A FIXED POINT, NOT STOP AFTER ONE HOP — and this is the
+        // SECOND time the walk was flattened (094e6575 did it once while bd-dw2a9 was in
+        // flight; b9be26aa did it again inside a test-consolidation commit whose message
+        // never mentioned behaviour). A chain of subgraphs whose first members each
+        // forward-reference the next needs the END of the chain: one hop leaves a phantom
+        // interned for every link past the first. `chains_of_any_depth_resolve_to_the_
+        // final_member` in tests/edge_to_subgraph.rs is the test that discriminates; the
+        // one-hop form passes every shallower test in that file.
+        while let Some(next) = raw.get(target) {
+            if !seen.insert(target) {
+                break;
+            }
             target = next.as_str();
         }
-        resolved.insert(key.clone(), target.to_string());
     }
     resolved
 }

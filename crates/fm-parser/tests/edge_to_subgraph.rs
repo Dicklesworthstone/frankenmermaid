@@ -24,8 +24,13 @@
 //! ⚠️ THREE MEASURED CASES ARE NOT FIXED AND ARE PINNED BELOW, each a different fault:
 //!
 //! ```text
-//!   edge BEFORE the subgraph   forward reference: the subgraph does not exist at intern time,
-//!                              so the phantom is still created (reference: 2 nodes, ours 4)
+//!   edge BEFORE the subgraph   FIXED SINCE, as bd-dw2a9 — and RE-BROKEN once since (b9be26aa
+//!                              flattened the fixed-point walk inside a test-consolidation
+//!                              commit that never mentioned behaviour; bd-sy2pl). Pinned at the
+//!                              broken value, the pin fired, and the note it carried — "fixing it
+//!                              needs IrNodeId compaction" — turned out to be wrong: the document
+//!                              is fully parsed before it is lowered, so nothing ever has to be
+//!                              removed. A chain needs the fixed-point WALK, not one hop.
 //!   empty subgraph             FIXED SINCE, as bd-kat55 — and the note filed here was wrong in
 //!                              the same way bd-honvo's was. The reference does not just drop the
 //!                              cluster, it renders the empty subgraph AS A NODE. Recorded here as
@@ -168,24 +173,103 @@ fn a_node_named_like_a_prefix_of_a_subgraph_is_still_a_node() {
     assert_eq!(counts(&source), (3, 1, 1));
 }
 
-/// ⚠️ RESIDUE 1, PINNED: a forward reference still creates the phantom.
+/// ⚠️ RESIDUE 1 IS NOW FIXED, TWICE — AND BOTH TIMES THE PIN IS WHAT MADE THE FIX HONEST.
 ///
-/// `s1 --> s2` written BEFORE the subgraph blocks cannot resolve — the subgraph does not exist when
-/// the endpoint is interned. Fixing it means a post-lowering pass that repoints edges and removes
-/// the node, which is index surgery over `IrNodeId` and a separate piece of work.
+/// `s1 --> s2` written BEFORE the subgraph blocks resolves, because the document is fully parsed
+/// before it is lowered: the forward-reference map exists when the endpoints are interned (this is
+/// what bd-dw2a9's note "fixing it needs IrNodeId compaction" got wrong — nothing ever has to be
+/// removed). This test used to pin `(4, 1, 2)` at the phantom; the pin fired when bd-dw2a9 landed.
 ///
-/// Asserted at its current value so that fixing it fails HERE and forces this note to be updated.
+/// It fired a SECOND time, from the other side, when b9be26aa flattened the fixed-point walk to a
+/// single `if` inside a test-consolidation commit and re-pinned the phantom with a note claiming
+/// the case was still unfixed (bd-sy2pl). The simple two-subgraph form here does NOT discriminate:
+/// one hop and a full walk agree on it. The two tests below it are the ones that do.
 #[test]
-fn a_forward_reference_still_creates_the_phantom() {
+fn a_forward_reference_resolves_without_a_phantom() {
     let source = format!(
         "flowchart LR\n  s1 {ARROW} s2\n  subgraph s1\n    A\n  end\n  subgraph s2\n    B\n  end\n"
     );
     assert_eq!(
         counts(&source),
-        (4, 1, 2),
-        "the forward-reference phantom is fixed — that is an improvement; update this test and the \
-         notes in this file rather than deleting them"
+        (2, 1, 2),
+        "the forward-reference phantom is back: {:?}",
+        node_ids(&source)
     );
+    let ids = node_ids(&source);
+    assert!(
+        !ids.contains(&"s1".to_string()),
+        "s1 interned as a node: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"s2".to_string()),
+        "s2 interned as a node: {ids:?}"
+    );
+}
+
+/// One hop and a full walk agree when the chain has a single link: this test alone was false
+/// comfort, which is how the flattening survived once. Measured: the reference renders 3 nodes
+/// (`X`, `Y`, `Z`) and 2 clusters.
+#[test]
+fn a_forward_reference_through_another_subgraph_resolves_transitively() {
+    let source = format!(
+        "flowchart LR\n  s1 {ARROW} X\n  subgraph s1\n    s2 {ARROW} Y\n  end\n  subgraph s2\n    Z\n  end\n"
+    );
+    assert_eq!(
+        counts(&source),
+        (3, 2, 2),
+        "expected the reference's 3 nodes / 2 clusters / 2 edges, got {:?}",
+        node_ids(&source)
+    );
+    assert!(
+        !node_ids(&source).iter().any(|id| id == "s2"),
+        "a single-hop resolution left a phantom: {:?}",
+        node_ids(&source)
+    );
+}
+
+/// ⚠️ THE ARM THAT A ONE-HOP RESOLUTION ACTUALLY FAILS.
+///
+/// Each subgraph's first member forward-references the next, so the endpoint must be walked to the
+/// END of the chain. Measured against the pinned bundle:
+///
+/// ```text
+///   depth 2   ref 3 nodes / 2 clusters / 2 edges
+///   depth 3   ref 4 nodes / 3 clusters / 3 edges
+///   depth 4   ref 5 nodes / 4 clusters / 4 edges
+/// ```
+///
+/// A single hop stops one short and interns a phantom for every link past the first.
+#[test]
+fn chains_of_any_depth_resolve_to_the_final_member() {
+    let depth3 = format!(
+        "flowchart LR\n  s1 {ARROW} X\n  subgraph s1\n    s2 {ARROW} Y\n  end\n  \
+         subgraph s2\n    s3 {ARROW} W\n  end\n  subgraph s3\n    Z\n  end\n"
+    );
+    assert_eq!(
+        counts(&depth3),
+        (4, 3, 3),
+        "a 3-link chain left a phantom: {:?}",
+        node_ids(&depth3)
+    );
+
+    let depth4 = format!(
+        "flowchart LR\n  s1 {ARROW} X\n  subgraph s1\n    s2 {ARROW} Y\n  end\n  \
+         subgraph s2\n    s3 {ARROW} W\n  end\n  subgraph s3\n    s4 {ARROW} V\n  end\n  \
+         subgraph s4\n    Z\n  end\n"
+    );
+    assert_eq!(
+        counts(&depth4),
+        (5, 4, 4),
+        "a 4-link chain left a phantom: {:?}",
+        node_ids(&depth4)
+    );
+    let ids = node_ids(&depth4);
+    for phantom in ["s1", "s2", "s3", "s4"] {
+        assert!(
+            !ids.iter().any(|id| id == phantom),
+            "`{phantom}` was interned as a node: {ids:?}"
+        );
+    }
 }
 
 /// ⚠️ RESIDUE 2 IS NOW FIXED, AND THE PIN IS WHY THIS NOTE IS ACCURATE.
