@@ -3921,45 +3921,23 @@ pub(crate) fn svg_frame(
 /// blank strip at the top or a title clipped out of the viewBox, and nothing fails loudly — both
 /// call this, so neither can answer the question differently.
 ///
-/// ⚠️ IT IS NOT "DRAW THE TITLE WHENEVER THERE IS ONE", WHICH IS WHAT THIS USED TO DO — AND IT IS
-/// NOT A PROPERTY OF THE FAMILY ALONE EITHER. mermaid 11.15.0 answers per (family, SPELLING): a
-/// `---\ntitle: …\n---` block and a `title …` statement are drawn for DIFFERENT, nearly
-/// complementary sets. Measured for both forms over every family in Chromium 151 against the pinned
-/// bundle, asking whether the title text appears in the drawn SVG:
+/// ⚠️ THE FAMILY TABLE LIVES IN `MermaidDiagramIr::declared_title_if_drawn`, NOT HERE. Three
+/// backends had their own copy of "draw it whenever there is a title" and all three were wrong the
+/// same way; the measured (family, spelling) table is now stated once in `fm-core` so SVG, canvas
+/// and terminal cannot drift apart again.
 ///
-/// ```text
-///                       title STATEMENT   front-matter title:
-///   flowchart                  no                yes
-///   class                      no                yes
-///   gitgraph                   no                yes
-///   requirement                no                yes
-///   block                      yes               NO
-///   kanban                     yes               NO
-///   timeline                   yes               NO
-///   C4 (every variant)         yes               NO
-///   sequence state er packet treemap radar journey gantt     yes   yes
-///   mindmap architecture sankey info                          —    no
-/// ```
-///
-/// Two mistakes are available here and this table refuses both. Drawing whenever a title exists —
-/// what shipped — put a title on seven families the reference leaves bare. Gating on the family
-/// alone, which is the obvious repair, silently drops the STATEMENT title from `block`, `kanban`,
-/// `timeline` and C4, which the reference does draw; that regression is what `text_parity` caught
-/// when this function first had a family-only gate.
-///
-/// Enumerated rather than blocklisted: the match is exhaustive, so a new `DiagramType` cannot
-/// silently inherit an answer — it will not compile until someone measures it.
-///
-/// `pie`, `xychart` and `quadrant` are titled by the reference but return `None` here, because each
-/// already has a title renderer of its own that places the text inside its chart furniture;
-/// answering again here would draw it twice.
+/// What stays here is the part that really is SVG-specific: `pie`, `xychart` and `quadrant` are
+/// titled by the reference but have their own title renderers in this backend that place the text
+/// inside the chart furniture, so answering again here would draw it twice.
 fn generic_title_for(ir: &MermaidDiagramIr) -> Option<&str> {
     let has_specialized_title_renderer = ir
         .xy_chart_meta
         .as_ref()
+        .as_ref()
         .is_some_and(|meta| !meta.series.is_empty())
         || ir
             .pie_meta
+            .as_ref()
             .as_ref()
             .is_some_and(|meta| !meta.slices.is_empty())
         || ir.quadrant_meta.is_some();
@@ -3967,47 +3945,7 @@ fn generic_title_for(ir: &MermaidDiagramIr) -> Option<&str> {
         return None;
     }
 
-    let from_front_matter = ir.meta.title_from_front_matter;
-    let family_draws_title = match ir.diagram_type {
-        // Both spellings are drawn.
-        DiagramType::Sequence
-        | DiagramType::State
-        | DiagramType::Er
-        | DiagramType::PacketBeta
-        | DiagramType::Treemap
-        | DiagramType::Radar
-        | DiagramType::Journey
-        | DiagramType::Gantt => true,
-        // Reached only when the chart-specific renderer above did not claim the title — an
-        // `xychart` with no series, a `pie` with no slices. Both spellings are drawn upstream, and
-        // with no chart furniture drawn there is nothing left to draw it twice.
-        DiagramType::XyChart | DiagramType::Pie | DiagramType::QuadrantChart => true,
-        // FRONT MATTER ONLY: these grammars ignore a `title` statement.
-        DiagramType::Flowchart
-        | DiagramType::Class
-        | DiagramType::GitGraph
-        | DiagramType::Requirement => from_front_matter,
-        // STATEMENT ONLY: these draw `title …` and ignore the front-matter block.
-        DiagramType::BlockBeta
-        | DiagramType::Kanban
-        | DiagramType::Timeline
-        | DiagramType::C4Context
-        | DiagramType::C4Container
-        | DiagramType::C4Component
-        | DiagramType::C4Dynamic
-        | DiagramType::C4Deployment => !from_front_matter,
-        // Neither spelling is drawn. `mindmap`, `architecture` and `sankey` have no `title`
-        // statement in their grammars at all, and none of the three draws the front-matter one.
-        DiagramType::Mindmap
-        | DiagramType::ArchitectureBeta
-        | DiagramType::Sankey
-        | DiagramType::Info => false,
-        // Not a mermaid family — our own fallback when detection failed. An author who wrote a
-        // title still gets it, which is the same best-effort contract the rest of this path keeps.
-        DiagramType::Unknown => true,
-    };
-
-    family_draws_title.then(|| ir.meta.title.as_deref()).flatten()
+    ir.declared_title_if_drawn()
 }
 
 fn render_layout_to_svg(
@@ -16070,6 +16008,9 @@ mod tests {
     fn svg_frame_reserves_the_generic_title_band() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some("Payments topology".to_string());
+        // See `generic_diagram_title_renders_above_flowchart_content`: a flowchart title is drawn
+        // only with front-matter provenance, so the band is only reserved for that state.
+        ir.meta.title_from_front_matter = true;
         let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
         let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
 
@@ -18402,6 +18343,12 @@ mod tests {
     fn generic_diagram_title_renders_above_flowchart_content() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some(String::from("Flow Title"));
+        // ⚠️ PROVENANCE IS PART OF THE STATE, not decoration. A flowchart draws its title only when
+        // it came from the `---` front matter — mermaid ignores a `title` STATEMENT in a flowchart,
+        // measured against the pinned bundle — so a hand-built IR that sets the text alone is a
+        // state the parser never produces for this family. Setting the flag is what makes this
+        // fixture a flowchart-with-a-title rather than an unreachable one.
+        ir.meta.title_from_front_matter = true;
 
         let svg = render_svg(&ir);
 

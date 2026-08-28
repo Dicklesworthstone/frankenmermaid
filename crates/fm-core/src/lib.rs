@@ -7046,6 +7046,70 @@ pub struct MermaidDiagramIr {
 }
 
 impl MermaidDiagramIr {
+    /// The declared title if this diagram's family draws it, in the spelling the author used.
+    ///
+    /// ⚠️ ONE TABLE FOR EVERY BACKEND, BECAUSE THERE WERE THREE COPIES OF THIS RULE AND ALL THREE
+    /// WERE WRONG THE SAME WAY. `fm-render-svg`, `fm-render-canvas` and `fm-render-term` each
+    /// answered "draw it whenever `meta.title` is set", so every surface put a title on families
+    /// mermaid leaves bare. Fixing one and leaving the others is the inert-guard shape this repo has
+    /// been bitten by before, so the decision lives here and the backends call it.
+    ///
+    /// ⚠️ IT IS A (FAMILY, SPELLING) QUESTION, NOT A FAMILY ONE. mermaid 11.15.0 draws the
+    /// `---\ntitle: …\n---` block and a `title …` statement for DIFFERENT, nearly complementary sets
+    /// of families. Measured for both forms in Chromium 151 against the pinned bundle:
+    ///
+    /// ```text
+    ///                       title STATEMENT   front-matter title:
+    ///   flowchart class gitgraph requirement        no                yes
+    ///   block kanban timeline C4 (all variants)     yes               NO
+    ///   sequence state er packet treemap radar
+    ///     journey gantt pie xychart quadrant        yes               yes
+    ///   mindmap architecture sankey info             —                no
+    /// ```
+    ///
+    /// A backend that renders a family's title inside its own chart furniture (a pie's caption, an
+    /// xychart's header) must still suppress this one itself, or the text is drawn twice — that part
+    /// is genuinely backend-specific and stays with the backend.
+    #[must_use]
+    pub fn declared_title_if_drawn(&self) -> Option<&str> {
+        let from_front_matter = self.meta.title_from_front_matter;
+        let family_draws_title = match self.meta.diagram_type {
+            DiagramType::Sequence
+            | DiagramType::State
+            | DiagramType::Er
+            | DiagramType::PacketBeta
+            | DiagramType::Treemap
+            | DiagramType::Radar
+            | DiagramType::Journey
+            | DiagramType::Gantt
+            | DiagramType::XyChart
+            | DiagramType::Pie
+            | DiagramType::QuadrantChart => true,
+            DiagramType::Flowchart
+            | DiagramType::Class
+            | DiagramType::GitGraph
+            | DiagramType::Requirement => from_front_matter,
+            DiagramType::BlockBeta
+            | DiagramType::Kanban
+            | DiagramType::Timeline
+            | DiagramType::C4Context
+            | DiagramType::C4Container
+            | DiagramType::C4Component
+            | DiagramType::C4Dynamic
+            | DiagramType::C4Deployment => !from_front_matter,
+            DiagramType::Mindmap
+            | DiagramType::ArchitectureBeta
+            | DiagramType::Sankey
+            | DiagramType::Info => false,
+            // Not a mermaid family — our own fallback when detection failed. An author who wrote a
+            // title still gets it, the same best-effort contract the rest of this path keeps.
+            DiagramType::Unknown => true,
+        };
+        family_draws_title
+            .then_some(self.meta.title.as_deref())
+            .flatten()
+    }
+
     #[must_use]
     pub fn empty(diagram_type: DiagramType) -> Self {
         Self {
