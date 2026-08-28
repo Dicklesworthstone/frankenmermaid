@@ -4546,9 +4546,11 @@ fn cmd_support_matrix(options: SupportMatrixCommandOptions<'_>) -> Result<()> {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("failed reading oracle report {path}"))?;
-            Some(serde_json::from_str::<OracleReport>(&text).with_context(|| {
-                format!("oracle report {path} is not a valid OracleReport JSON")
-            })?)
+            Some(
+                serde_json::from_str::<OracleReport>(&text).with_context(|| {
+                    format!("oracle report {path} is not a valid OracleReport JSON")
+                })?,
+            )
         }
         None => None,
     };

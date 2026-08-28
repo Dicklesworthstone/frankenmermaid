@@ -36,9 +36,9 @@ use fm_core::{
     DiagramType, SupportCell, SupportCensus, SupportDiagnostics, SupportMatrix,
     SupportNegativeCase, SupportTier,
 };
-use fm_layout::layout_diagram;
 #[cfg(any(test, feature = "support-matrix"))]
 use fm_layout::build_render_scene;
+use fm_layout::layout_diagram;
 use fm_parser::parse;
 #[cfg(any(test, feature = "support-matrix"))]
 use fm_render_canvas::{
@@ -226,9 +226,9 @@ fn normalized_contains(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
-    needle.split(' ').all(|word| {
-        hay.contains(word) || hay.contains(&squeeze(&xml_escaped(word)))
-    })
+    needle
+        .split(' ')
+        .all(|word| hay.contains(word) || hay.contains(&squeeze(&xml_escaped(word))))
 }
 
 /// Node labels of the IR, resolved through the interner the renderers read.
@@ -383,7 +383,9 @@ fn evaluate_cell(
         evidence_ids.push(String::from("renderer_agreement"));
     }
     if surface == "wasm" {
-        evidence_ids.push(String::from("fm-wasm tests + packaged smoke (build-wasm.sh)"));
+        evidence_ids.push(String::from(
+            "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        ));
     }
 
     let cell = |tier: SupportTier,
@@ -534,19 +536,66 @@ fn evaluate_cell(
             );
         } else if matches!(surface, "svg" | "wasm") {
             let drawn_text = svg_text_content(&rendered.output);
-            let labels = node_label_texts(&parsed.ir);
-            let missing: Vec<&String> = labels
+            // WHAT the drawn text must witness is a per-family contract, not one rule:
+            //
+            // - Most families render each IR node's label as text, so the label set itself
+            //   is the witness.
+            // - xychart is a value-to-geometry family: its per-point IR labels ("Sales
+            //   Q1: 30") are the value→geometry CONTRACT — bar of height 30 at category Q1 —
+            //   and the pinned incumbent draws the axis categories, the axis title and the
+            //   legend, never per-bar values. Requiring those composite labels as text would
+            //   demand chrome mermaid does not draw, so the witness there is: every series
+            //   name, every x-axis category, the title and the y-axis label appear as text,
+            //   while the values are witnessed by the census (12 point marks drawn).
+            let witnesses: Vec<String> = if family == DiagramType::XyChart {
+                match parsed.ir.xy_chart_meta.as_ref() {
+                    Some(xy) => {
+                        let mut labels = Vec::new();
+                        if let Some(title) = &xy.title {
+                            labels.push(title.clone());
+                        }
+                        if let Some(label) = &xy.y_axis.label {
+                            labels.push(label.clone());
+                        }
+                        labels.extend(xy.x_axis.categories.iter().cloned());
+                        labels.extend(
+                            xy.series
+                                .iter()
+                                .filter_map(|series| series.name.clone())
+                                .filter(|name| !name.is_empty()),
+                        );
+                        labels
+                    }
+                    None => {
+                        reasons.push(
+                            "xychart fixture parsed without xy_chart_meta: the \
+                             value-to-geometry witness has nothing to check and the cell \
+                             cannot promote"
+                                .to_string(),
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                node_label_texts(&parsed.ir)
+            };
+            let missing: Vec<&String> = witnesses
                 .iter()
                 .filter(|label| !label.trim().is_empty())
                 .filter(|label| !normalized_contains(&drawn_text, label))
                 .collect();
-            if missing.is_empty() {
+            // An empty witness set must NEVER promote: containment over nothing is the
+            // tautology this matrix exists to refuse.
+            if !witnesses.is_empty() && missing.is_empty() {
                 tier = SupportTier::Structural;
-            } else {
-                let names: Vec<String> =
-                    missing.iter().take(3).map(|label| format!("{label:?}")).collect();
+            } else if !witnesses.is_empty() {
+                let names: Vec<String> = missing
+                    .iter()
+                    .take(3)
+                    .map(|label| format!("{label:?}"))
+                    .collect();
                 reasons.push(format!(
-                    "node labels absent from the drawn output: {}{}",
+                    "labels absent from the drawn output: {}{}",
                     names.join(", "),
                     if missing.len() > 3 {
                         format!(" (+{} more)", missing.len() - 3)
@@ -687,7 +736,10 @@ mod tests {
     fn every_documented_family_maps_to_an_existing_golden_fixture() {
         for family in fm_core::documented_diagram_types() {
             let Some(case) = family_fixture_case(*family) else {
-                panic!("family {} has no canonical fixture mapping", family.as_str());
+                panic!(
+                    "family {} has no canonical fixture mapping",
+                    family.as_str()
+                );
             };
             let path = golden_dir().join(format!("{case}.mmd"));
             assert!(
@@ -707,7 +759,12 @@ mod tests {
             .iter()
             .find(|cell| cell.family == "flowchart" && cell.surface == "svg")
             .expect("flowchart svg cell exists");
-        assert_eq!(cell.tier, SupportTier::Structural, "reasons: {:?}", cell.reasons);
+        assert_eq!(
+            cell.tier,
+            SupportTier::Structural,
+            "reasons: {:?}",
+            cell.reasons
+        );
         assert_eq!(cell.determinism_repeat_identical, Some(true));
         let census = cell.census.as_ref().expect("census present");
         assert!(census.nodes > 0 && census.edges > 0 && census.text_runs > 0);
@@ -721,6 +778,26 @@ mod tests {
     }
 
     #[test]
+    fn xychart_witnesses_series_and_axis_labels_not_composite_point_labels() {
+        let matrix = build_support_matrix(&golden_dir(), "test-rev", None);
+        let cell = matrix
+            .cells
+            .iter()
+            .find(|cell| cell.family == "xyChart" && cell.surface == "svg")
+            .expect("xyChart svg cell exists");
+        // The per-point IR labels ("Sales Q1: 30") are the value→geometry contract; the
+        // drawn-text witness is the series names, categories, title and axis label. If this
+        // regresses to breadth, either the legend/axis drawing broke or the witness picked
+        // the wrong contract.
+        assert_eq!(
+            cell.tier,
+            SupportTier::Structural,
+            "reasons: {:?}",
+            cell.reasons
+        );
+    }
+
+    #[test]
     fn terminal_and_canvas_cells_carry_the_bd_t1jj_cap() {
         let matrix = build_support_matrix(&golden_dir(), "test-rev", None);
         for surface in ["terminal", "canvas"] {
@@ -729,7 +806,12 @@ mod tests {
                 .iter()
                 .find(|cell| cell.family == "flowchart" && cell.surface == surface)
                 .unwrap_or_else(|| panic!("{surface} cell exists"));
-            assert_eq!(cell.tier, SupportTier::Structural, "reasons: {:?}", cell.reasons);
+            assert_eq!(
+                cell.tier,
+                SupportTier::Structural,
+                "reasons: {:?}",
+                cell.reasons
+            );
             assert!(
                 cell.reasons.iter().any(|reason| reason.contains("bd-t1jj")),
                 "the cap must name its bead"
@@ -746,9 +828,16 @@ mod tests {
             .iter()
             .find(|cell| cell.family == "flowchart" && cell.surface == "wasm")
             .expect("wasm cell exists");
-        assert_eq!(cell.tier, SupportTier::Structural, "reasons: {:?}", cell.reasons);
+        assert_eq!(
+            cell.tier,
+            SupportTier::Structural,
+            "reasons: {:?}",
+            cell.reasons
+        );
         assert!(
-            cell.reasons.iter().any(|reason| reason.contains("build-wasm.sh")),
+            cell.reasons
+                .iter()
+                .any(|reason| reason.contains("build-wasm.sh")),
             "the cap must name the authoritative gate"
         );
         assert!(
@@ -778,7 +867,11 @@ mod tests {
             .expect("flowchart svg cell exists");
         // Promotes at least past semantic; visual_a11y/production depend on the fixture's
         // a11y coverage and diagnostic record, which this assertion does not pin.
-        assert!(cell.tier >= SupportTier::Semantic, "reasons: {:?}", cell.reasons);
+        assert!(
+            cell.tier >= SupportTier::Semantic,
+            "reasons: {:?}",
+            cell.reasons
+        );
         assert!(
             cell.evidence_ids
                 .iter()
@@ -804,7 +897,12 @@ mod tests {
             .iter()
             .find(|cell| cell.family == "flowchart" && cell.surface == "svg")
             .expect("flowchart svg cell exists");
-        assert_eq!(cell.tier, SupportTier::Structural, "reasons: {:?}", cell.reasons);
+        assert_eq!(
+            cell.tier,
+            SupportTier::Structural,
+            "reasons: {:?}",
+            cell.reasons
+        );
         assert!(
             cell.reasons
                 .iter()
@@ -841,7 +939,10 @@ mod tests {
     #[test]
     fn normalized_containment_survives_escaping_and_whitespace() {
         assert!(normalized_contains("a<b &amp; c>d", "a<b & c>d"));
-        assert!(normalized_contains("line one\n  line two", "line one line two"));
+        assert!(normalized_contains(
+            "line one\n  line two",
+            "line one line two"
+        ));
         assert!(!normalized_contains("unrelated", "missing label"));
         assert!(!normalized_contains("unrelated", "   "));
     }
@@ -869,6 +970,9 @@ mod tests {
         let fixture = std::fs::read_to_string(golden_dir().join("flowchart_simple.mmd"))
             .expect("fixture readable");
         let negative = negative_case(&fixture, DiagramType::Flowchart);
-        assert!(negative.handled, "flowchart must degrade or diagnose, not silently lose");
+        assert!(
+            negative.handled,
+            "flowchart must degrade or diagnose, not silently lose"
+        );
     }
 }
