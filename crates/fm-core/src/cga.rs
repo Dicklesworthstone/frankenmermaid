@@ -308,6 +308,28 @@ pub struct Rotor {
     pub components: [f64; 8],
 }
 
+/// Failure returned by the checked CGA transform entry points.
+///
+/// The rendering pipeline must never turn a non-finite input into SVG or canvas
+/// coordinates.  The legacy constructors remain available for internal callers
+/// that already validate their inputs; external or fallible callers should use
+/// the `try_*` variants below so rejection is explicit and non-mutating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CgaTransformError {
+    /// A rotor contains `NaN` or infinity and cannot define a transform.
+    #[error("CGA rotor contains a non-finite component")]
+    NonFiniteRotor,
+    /// A point contains `NaN` or infinity and cannot be transformed safely.
+    #[error("CGA transform point contains a non-finite coordinate")]
+    NonFinitePoint,
+    /// A scale is outside the orientation-preserving similarity subgroup.
+    #[error("CGA rotor scale must be finite and positive")]
+    InvalidScale,
+    /// Applying a finite rotor to a finite point overflowed the affine result.
+    #[error("CGA transform produced a non-finite affine result")]
+    NonFiniteResult,
+}
+
 impl Default for Rotor {
     fn default() -> Self {
         Self::identity()
@@ -375,6 +397,25 @@ impl Rotor {
                 0.0,
             ],
         }
+    }
+
+    /// Create a uniform scale rotor without panicking on an invalid scale.
+    ///
+    /// CGA rotors represent orientation-preserving similarities, so a negative
+    /// scale is a reflection rather than a valid rotor.  Returning an error
+    /// makes that structural boundary visible instead of admitting `NaN` from
+    /// `ln` or requiring callers to catch a panic.
+    pub fn try_scale(factor: f64) -> Result<Self, CgaTransformError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(CgaTransformError::InvalidScale);
+        }
+        Ok(Self::scale(factor))
+    }
+
+    /// Whether every component is finite.
+    #[must_use]
+    pub fn is_finite(self) -> bool {
+        self.components.into_iter().all(f64::is_finite)
     }
 
     fn to_multivector(self) -> Multivector {
@@ -560,6 +601,22 @@ impl Rotor {
             c: canonical_zero(sin_theta * scale_factor),
             d: canonical_zero(cos_theta * scale_factor),
             ty: canonical_zero(ty),
+        }
+    }
+
+    /// Convert this rotor to an affine matrix while rejecting non-finite state.
+    pub fn try_to_affine_matrix(self) -> Result<AffineMatrix2D, CgaTransformError> {
+        if !self.is_finite() {
+            return Err(CgaTransformError::NonFiniteRotor);
+        }
+        let matrix = self.to_affine_matrix();
+        if [matrix.a, matrix.b, matrix.tx, matrix.c, matrix.d, matrix.ty]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            Ok(matrix)
+        } else {
+            Err(CgaTransformError::NonFiniteResult)
         }
     }
 }
@@ -884,6 +941,15 @@ impl TransformStack {
         self.stack.push(rotor);
     }
 
+    /// Push a rotor only when it is finite, leaving this stack unchanged on error.
+    pub fn try_push_rotor(&mut self, rotor: Rotor) -> Result<(), CgaTransformError> {
+        if !rotor.is_finite() {
+            return Err(CgaTransformError::NonFiniteRotor);
+        }
+        self.push_rotor(rotor);
+        Ok(())
+    }
+
     /// Push an affine matrix onto the stack (converted to rotor).
     pub fn push_matrix(&mut self, matrix: AffineMatrix2D) {
         let rotor = matrix.to_rotor();
@@ -969,6 +1035,19 @@ impl TransformStack {
     #[must_use]
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         self.composed.to_affine_matrix().apply(x, y)
+    }
+
+    /// Apply this stack without allowing non-finite state to reach a renderer.
+    pub fn try_apply(&self, x: f64, y: f64) -> Result<(f64, f64), CgaTransformError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(CgaTransformError::NonFinitePoint);
+        }
+        let (x, y) = self.composed.try_to_affine_matrix()?.apply(x, y);
+        if x.is_finite() && y.is_finite() {
+            Ok((x, y))
+        } else {
+            Err(CgaTransformError::NonFiniteResult)
+        }
     }
 
     /// Check if the transform stack is empty (identity).
@@ -1839,6 +1918,102 @@ mod transform_stack_tests {
         assert!(svg.starts_with("matrix("));
         assert!(svg.contains("10"));
         assert!(svg.contains("20"));
+    }
+
+    #[test]
+    fn checked_rotor_scale_rejects_reflections_and_non_finite_factors() {
+        // A naive checked constructor could take abs(factor), silently turning
+        // a reflection into a scale.  CGA rotors cannot represent reflections,
+        // so every invalid factor must stay a structured rejection.
+        for factor in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                Rotor::try_scale(factor),
+                Err(CgaTransformError::InvalidScale),
+                "factor {factor:?} was accepted as a rotor scale"
+            );
+        }
+        assert!(Rotor::try_scale(0.5).is_ok());
+    }
+
+    #[test]
+    fn checked_transform_rejects_non_finite_state_without_mutating_the_stack() {
+        let mut stack = TransformStack::new();
+        stack.push_translation(3.0, -4.0);
+        let before = stack.rotor();
+
+        assert_eq!(
+            stack.try_apply(f64::NAN, 0.0),
+            Err(CgaTransformError::NonFinitePoint)
+        );
+        assert_eq!(
+            stack.try_push_rotor(Rotor {
+                components: [f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }),
+            Err(CgaTransformError::NonFiniteRotor)
+        );
+        assert_eq!(stack.rotor().components, before.components);
+        assert_eq!(stack.try_apply(2.0, 5.0), Ok((5.0, 1.0)));
+    }
+
+    #[test]
+    fn long_rotation_chain_stays_normalized_and_matches_the_direct_angle() {
+        let mut rotor = Rotor::identity();
+        for _ in 0..10_000 {
+            rotor = rotor.compose(Rotor::rotation(0.001));
+        }
+
+        assert!(
+            (rotor.norm_squared() - 1.0).abs() < 1e-10,
+            "10,000-step rotor chain drifted to norm {}",
+            rotor.norm_squared()
+        );
+        let expected = Rotor::rotation(10.0).to_affine_matrix();
+        let observed = rotor
+            .try_to_affine_matrix()
+            .expect("finite chain must convert");
+        for (actual, expected) in [
+            (observed.a, expected.a),
+            (observed.b, expected.b),
+            (observed.c, expected.c),
+            (observed.d, expected.d),
+        ] {
+            assert!(
+                (actual - expected).abs() < 1e-10,
+                "chained rotation diverged: actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_transform_covers_extreme_and_rotation_boundaries() {
+        let mut stack = TransformStack::new();
+        stack.push_translation(1.0, -1.0);
+
+        let extreme = stack
+            .try_apply(1e15, -1e15)
+            .expect("finite large coordinates must remain finite");
+        assert!(extreme.0.is_finite() && extreme.1.is_finite());
+
+        for angle in [1e-15, std::f64::consts::PI - 1e-15] {
+            let mut rotated = TransformStack::new();
+            rotated.push_rotation(angle);
+            let (x, y) = rotated
+                .try_apply(1.0, 0.0)
+                .expect("finite boundary-angle rotation must remain finite");
+            assert!((x - angle.cos()).abs() < 1e-12);
+            assert!((y - angle.sin()).abs() < 1e-12);
+        }
+
+        let mut zero_translation = TransformStack::new();
+        zero_translation.push_translation(0.0, 0.0);
+        assert_eq!(zero_translation.try_apply(2.0, -3.0), Ok((2.0, -3.0)));
+
+        let subnormal = f64::MIN_POSITIVE / 2.0;
+        assert_eq!(
+            TransformStack::new().try_apply(subnormal, -subnormal),
+            Ok((subnormal, -subnormal)),
+            "the identity transform must not flush finite subnormal coordinates"
+        );
     }
 
     #[test]
