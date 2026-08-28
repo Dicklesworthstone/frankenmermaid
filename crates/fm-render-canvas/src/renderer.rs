@@ -2605,7 +2605,7 @@ impl Canvas2dRenderer {
                 // written verbatim.
                 if let Some(stereotype) = &meta.stereotype {
                     let stereo_text = stereotype.label();
-                    ctx.fill_text(stereo_text, x + w / 2.0, cursor_y);
+                    ctx.fill_text(&stereo_text, x + w / 2.0, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
                     cursor_y += line_h * 0.8;

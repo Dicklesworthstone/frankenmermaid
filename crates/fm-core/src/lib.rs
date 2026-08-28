@@ -2340,7 +2340,7 @@ pub enum ClassStereotype {
 }
 
 impl ClassStereotype {
-    /// The text a renderer draws for this stereotype, e.g. `<<interface>>` (bd-d48wi).
+    /// The text a renderer draws for this stereotype, e.g. `«interface»` (bd-d48wi).
     ///
     /// Centralised because this mapping was forked FOUR ways — twice in fm-render-svg, once each in
     /// fm-render-canvas and fm-render-term — and fm-layout now needs it too, to MEASURE the box the
@@ -2349,15 +2349,28 @@ impl ClassStereotype {
     /// any row that falls outside the box rather than growing it, so the divergence deletes output
     /// instead of merely looking wrong.
     ///
-    /// `Custom` renders verbatim: the author already wrote their own delimiters.
+    /// ⚠️ GUILLEMETS, NOT THE ASCII ANGLES THE AUTHOR TYPED. mermaid 11.15.0 draws `«interface»`,
+    /// not `<<interface>>` — measured in Chromium 151 against the pinned bundle, reading the drawn
+    /// text of every stereotype form (in-block, the `<<interface>> Name` statement, and a custom
+    /// word). `<<…>>` is INPUT SYNTAX; the guillemets are the UML convention it stands for.
+    ///
+    /// ⚠️ AND `Custom` HELD THE INNER TEXT ALL ALONG, so it rendered BARE. The old comment here
+    /// claimed "the author already wrote their own delimiters" and returned the payload verbatim —
+    /// but `class_stereotype_from_annotation` builds `Custom` from the annotation body with `<<`
+    /// and `>>` already stripped, so `<<Frobnicator>>` drew as `Frobnicator`, a stereotype
+    /// indistinguishable from a member row. Both spellings now get the same decoration, which is
+    /// what the reference does for a custom word as much as for a known one.
+    ///
+    /// Returns `Cow` because the four known stereotypes are still static strings and only `Custom`
+    /// has to build one.
     #[must_use]
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> Cow<'_, str> {
         match self {
-            Self::Interface => "<<interface>>",
-            Self::Abstract => "<<abstract>>",
-            Self::Enum => "<<enumeration>>",
-            Self::Service => "<<service>>",
-            Self::Custom(text) => text.as_str(),
+            Self::Interface => Cow::Borrowed("«interface»"),
+            Self::Abstract => Cow::Borrowed("«abstract»"),
+            Self::Enum => Cow::Borrowed("«enumeration»"),
+            Self::Service => Cow::Borrowed("«service»"),
+            Self::Custom(text) => Cow::Owned(format!("«{text}»")),
         }
     }
 }

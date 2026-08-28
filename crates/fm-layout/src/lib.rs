@@ -12138,7 +12138,7 @@ fn class_compartment_dimensions(
     // omission survive, since a too-narrow box overflows visibly rather than dropping content.
     // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
     let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
-        metrics.estimate_dimensions(stereotype.label()).0 * 0.85
+        metrics.estimate_dimensions(&stereotype.label()).0 * 0.85
     });
 
     Some((member_width.max(stereotype_width) + 16.0, height))
@@ -19339,7 +19339,7 @@ mod tests {
         // overflows visibly instead of silently dropping content.
         let (width, height) = sized.expect("just asserted Some");
         let needed = metrics
-            .estimate_dimensions(meta.stereotype.as_ref().expect("checked above").label())
+            .estimate_dimensions(&meta.stereotype.as_ref().expect("checked above").label())
             .0
             * 0.85;
         assert!(

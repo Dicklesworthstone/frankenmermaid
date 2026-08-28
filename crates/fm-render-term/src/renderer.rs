@@ -3380,7 +3380,7 @@ impl TermRenderer {
             && row < max_content_row
         {
             let stereo_text = stereotype.label();
-            let stereo = self.truncate_label(stereo_text);
+            let stereo = self.truncate_label(&stereo_text);
             let stereo_chars = stereo.chars().count();
             let stereo_x = x + 1 + inner_w.saturating_sub(stereo_chars) / 2;
             write_text(grid, row, stereo_x, &stereo, inner_w);
@@ -4312,9 +4312,17 @@ mod tests {
         );
 
         let out = crate::render_term(&ir);
-        let stereotype = format!("{}interface{}", "<<", ">>");
+        // ⚠️ THE EXPECTED SPELLING MOVED, ON THE INCUMBENT'S AUTHORITY. This asserted the ASCII
+        // `<<interface>>` the author types. mermaid 11.15.0 draws the UML guillemets it stands for
+        // — `«interface»` — measured in Chromium 151 against the pinned bundle. The assertion's
+        // INTENT is unchanged and is the reason it exists: the terminal must not DROP the
+        // stereotype. Only the string it is drawn as is corrected, and it is still a literal so
+        // this backend keeps pinning the spelling rather than deferring to the mapping under test.
+        //
+        // Note this is class-diagram-specific: C4 (`<<person>>`) and requirement (`<<Element>>`)
+        // keep the ASCII angles upstream, and they build those strings on their own paths.
         assert!(
-            out.contains(&stereotype),
+            out.contains("«interface»"),
             "the terminal dropped the stereotype for a memberless class:\n{out}"
         );
         // The name must survive alongside it, not be replaced by it.

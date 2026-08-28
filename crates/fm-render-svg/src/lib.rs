@@ -8806,6 +8806,7 @@ fn write_class_compartments_into(
         .unwrap_or(&node.id);
     if let Some(stereotype) = &meta.stereotype {
         let stereo_text = stereotype.label();
+        let stereo_text = stereo_text.as_ref();
         write_class_text_into(
             f,
             x + w / 2.0,
@@ -12788,7 +12789,7 @@ fn render_class_compartments(
     // Stereotype above class name if present.
     if let Some(ref stereotype) = meta.stereotype {
         let stereo_text = stereotype.label();
-        let stereo_elem = TextBuilder::new(stereo_text)
+        let stereo_elem = TextBuilder::new(stereo_text.as_ref())
             .x(x + w / 2.0)
             .y(cursor_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
