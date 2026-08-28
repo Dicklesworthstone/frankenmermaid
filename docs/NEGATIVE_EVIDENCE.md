@@ -1,5 +1,36 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### FRONTIER STATUS: no qualifying lever left in the current profiles — every candidate this session raised, and why it is closed (2026-08-27)
+
+- **Written because the next agent will otherwise re-derive all of it.** The corpus sweep is closed
+  (previous entry), and re-profiling `flowchart_xl_2000` at HEAD shows the frontier has moved again:
+  `write_fixed2` **7.31%**, `write_common_node_fragment_into` 4.20%, `parse_fast_simple_flowchart_node_borrowed`
+  2.98%, `intern_node_auto_normalized` 2.73%, `trim_fast` 2.72% — with `sha2::sha256::compress` at
+  21.07% of the process (harness output hashing, see the dilution table above).
+  `lower_flow_document_item`, which was 6.29% earlier in the session, has dropped out of the top
+  eight entirely.
+- **Every candidate, and its disposition:**
+
+  | candidate | share | status |
+  |---|---:|---|
+  | `write_fixed2` / `write_uint_into` | 7.31% | LEDGER-CLOSED (inline rejected fe88b9e, from_utf8 rejected). Code confirms it: scaled-`i64` math, `DOTPAIRS3` table, streamed — no buffer, no revalidation |
+  | inline storage for `Attributes` | ~236k allocs/pass | BLOCKED on the consuming builder; arithmetic says 2-4x loss without an `&mut self` rewrite |
+  | parser `memcmp` | 1.80% + 0.55% | attributed but thin, split across `push_edge`/`parse_label_inner`/interning |
+  | obstacle-index fallback | 5.35% frame | CLOSED by measurement: `indexed_frac` 1.0000, selectivity 0.96% |
+  | presizing any render buffer | 5.85% attributed | REJECTED TWICE, both null; `finish_grow` share does not convert |
+  | `Attributes::set` name compare | 32M compares | REJECTED, null; the memcmp is in the parser, not here |
+
+- **The shape that paid this session, and why nothing matches it now.** Both large wins were NESTED
+  LINEAR SCANS — `nodes.iter().find(...)` per cluster member (3.12x, 6b292cd4) and a full edge scan
+  per singleton component (-5.92%, 1e366650). Every remaining frame above is either already
+  table-driven, already indexed (and measured selective), or an inherent per-item cost with no inner
+  loop to remove. Grepping for `.iter().find(` / `.contains(` inside a per-item loop remains the
+  highest-yield search in this codebase; it currently returns nothing in the hot paths.
+- **Verdict: NO LEVER TAKEN.** Forcing one of the sub-3% frames would be the easy widen the standing
+  instruction excludes, and three of the six rows above are already-measured nulls of exactly that
+  kind. The next real win needs either a new workload shape or the `&mut self` builder rewrite, both
+  of which are larger pieces of work than a single turn.
+
 ### CLOSED: the corpus sweep is exhausted, and the harness's own hashing bounds what the small corpora can show (2026-08-27)
 
 - **Why this sweep existed.** Two of this session's largest wins came from profiling a workload class
