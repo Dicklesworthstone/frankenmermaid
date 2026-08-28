@@ -1548,6 +1548,43 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Return the canonical, versioned Mermaid initialization-config schema.
+///
+/// Keeping this export alongside the native CLI endpoint means browser tooling can validate
+/// configuration before it asks the renderer to initialize.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = configSchema))]
+#[must_use]
+pub fn config_schema_json() -> String {
+    fm_core::mermaid_config_schema_json_pretty()
+}
+
+/// Strictly validate Mermaid initialization configuration JSON and return a serializable report.
+///
+/// Unlike the renderer's compatibility adapter, this rejects unknown nested keys so a typo cannot
+/// silently become a default at a browser boundary.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = validateConfig))]
+pub fn validate_config_json(config_json: &str) -> Result<String, JsValue> {
+    let value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|error| js_error(format!("configuration input must be valid JSON: {error}")))?;
+    serde_json::to_string(&fm_core::validate_mermaid_config_value(&value))
+        .map_err(|error| js_error(format!("failed to serialize config validation: {error}")))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(typescript_custom_section)]
+const MERMAID_CONFIG_VALIDATION_TS: &str = r#"
+/** Strict initialization-config validation result (schema 1.0.0). */
+export interface MermaidConfigValidation {
+  schemaVersion: "1.0.0";
+  errors: Array<{ field: string; value: string; message: string }>;
+}
+
+/** Return the JSON Schema used by validateConfig. */
+export function configSchema(): string;
+/** Validate config JSON and return MermaidConfigValidation encoded as JSON. */
+export function validateConfig(configJson: string): string;
+"#;
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderSvg))]
 pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsValue> {
     let prepared = prepare_svg_render(input, config)?;
@@ -2662,10 +2699,11 @@ mod tests {
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
         apply_canvas_theme_preset, build_diagram_geometry, build_webgpu_plan, canvas_font_size_px,
-        collect_source_spans, handle_worker_message, hit_test_layout_edge, hit_test_layout_node,
-        merge_canvas_config, merge_pressure_config, merge_renderer_kind, merge_svg_config,
-        parse_theme_preset, read_runtime_config, render, render_deck, render_svg_js,
-        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
+        collect_source_spans, config_schema_json, handle_worker_message, hit_test_layout_edge,
+        hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
+        merge_svg_config, parse_theme_preset, read_runtime_config, render, render_deck,
+        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
+        validate_config_json, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -2687,6 +2725,25 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn config_schema_and_validation_exports_reject_a_nested_typo() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&config_schema_json()).expect("config schema export must be JSON");
+        assert_eq!(schema["additionalProperties"], false);
+
+        let report: serde_json::Value = serde_json::from_str(
+            &validate_config_json(r#"{"flowchart":{"nodeSpacng":24}}"#)
+                .expect("well-formed config JSON must return a validation report"),
+        )
+        .expect("validation report must be JSON");
+        assert_eq!(report["schemaVersion"], "1.0.0");
+        assert!(report["errors"].as_array().is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|error| error["field"] == "flowchart.nodeSpacng")
+        }));
+    }
 
     #[cfg(feature = "webgpu")]
     use fm_render_canvas::gpu_device::{

@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
 pub use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 // ── Fast hash collections for internal graph IDs ─────────────────────
@@ -3772,6 +3772,182 @@ pub struct MermaidConfigParse {
     pub config: MermaidConfig,
     pub warnings: Vec<MermaidWarning>,
     pub errors: Vec<MermaidConfigError>,
+}
+
+/// The version of the strict, machine-readable Mermaid initialization-config contract.
+///
+/// The permissive `parse_mermaid_js_config_value` adapter deliberately keeps Mermaid's
+/// best-effort warning behavior. Consumers that need an admission boundary should use
+/// [`validate_mermaid_config_value`] against this versioned schema instead.
+pub const MERMAID_CONFIG_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Result of validating Mermaid initialization JSON against the versioned config contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MermaidConfigValidation {
+    pub schema_version: String,
+    pub errors: Vec<MermaidConfigError>,
+}
+
+impl MermaidConfigValidation {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Return the canonical JSON Schema for the strict Mermaid initialization-config contract.
+///
+/// This is intentionally a value, rather than a checked-in JSON artifact, so native callers,
+/// the CLI, and WASM all expose precisely the same versioned contract.
+#[must_use]
+pub fn mermaid_config_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://frankenmermaid.dev/schema/mermaid-config/1.0.0",
+        "title": "FrankenMermaid initialization config",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "theme": { "type": "string" },
+            "themeVariables": {
+                "type": "object",
+                "additionalProperties": { "type": ["string", "number", "boolean"] }
+            },
+            "flowchart": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "direction": { "type": "string", "description": "LR, RL, TB, TD, or BT (case-insensitive)" },
+                    "rankDir": { "type": "string", "description": "LR, RL, TB, TD, or BT (case-insensitive)" },
+                    "curve": { "type": "string" },
+                    "nodeSpacing": { "type": "number", "minimum": 0 },
+                    "rankSpacing": { "type": "number", "minimum": 0 }
+                }
+            },
+            "sequence": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "mirrorActors": { "type": "boolean" },
+                    "showSequenceNumbers": { "type": "boolean" }
+                }
+            },
+            "gantt": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "topAxis": { "type": "boolean" } }
+            },
+            "constraints": { "type": "object" },
+            "securityLevel": { "type": "string", "description": "strict, antiscript, or loose (case-insensitive)" },
+            "startOnLoad": { "type": "boolean", "description": "Accepted for compatibility; currently has no runtime effect" }
+        }
+    })
+}
+
+/// Pretty-print the canonical config schema for text-oriented surfaces.
+#[must_use]
+pub fn mermaid_config_schema_json_pretty() -> String {
+    serde_json::to_string_pretty(&mermaid_config_schema())
+        .expect("the built-in Mermaid config schema must be serializable")
+}
+
+/// Strictly validate Mermaid initialization JSON without changing the permissive parser's
+/// compatibility behavior. In particular, unknown root and nested keys are validation errors,
+/// not merely parser warnings.
+#[must_use]
+pub fn validate_mermaid_config_value(value: &Value) -> MermaidConfigValidation {
+    let mut errors = parse_mermaid_js_config_value(value).errors;
+    let Some(root) = value.as_object() else {
+        return MermaidConfigValidation {
+            schema_version: MERMAID_CONFIG_SCHEMA_VERSION.to_string(),
+            errors,
+        };
+    };
+
+    validate_known_config_keys(
+        root,
+        "",
+        &[
+            "theme",
+            "themeVariables",
+            "flowchart",
+            "sequence",
+            "gantt",
+            "constraints",
+            "securityLevel",
+            "startOnLoad",
+        ],
+        &mut errors,
+    );
+    for (section, allowed) in [
+        (
+            "flowchart",
+            &[
+                "direction",
+                "rankDir",
+                "curve",
+                "nodeSpacing",
+                "rankSpacing",
+            ][..],
+        ),
+        ("sequence", &["mirrorActors", "showSequenceNumbers"][..]),
+        ("gantt", &["topAxis"][..]),
+    ] {
+        if let Some(nested) = root.get(section).and_then(Value::as_object) {
+            validate_known_config_keys(nested, section, allowed, &mut errors);
+        }
+    }
+
+    for (field, accepted) in [
+        ("flowchart.direction", &["lr", "rl", "tb", "td", "bt"][..]),
+        ("flowchart.rankDir", &["lr", "rl", "tb", "td", "bt"][..]),
+        ("securityLevel", &["strict", "antiscript", "loose"][..]),
+    ] {
+        let raw = match field.split_once('.') {
+            Some((section, key)) => root
+                .get(section)
+                .and_then(Value::as_object)
+                .and_then(|obj| obj.get(key)),
+            None => root.get(field),
+        };
+        if let Some(raw) = raw.and_then(Value::as_str)
+            && !accepted.iter().any(|value| raw.eq_ignore_ascii_case(value))
+        {
+            errors.push(MermaidConfigError {
+                field: field.to_string(),
+                value: raw.to_string(),
+                message: format!("must be one of {}", accepted.to_vec().join(", ")),
+            });
+        }
+    }
+
+    MermaidConfigValidation {
+        schema_version: MERMAID_CONFIG_SCHEMA_VERSION.to_string(),
+        errors,
+    }
+}
+
+fn validate_known_config_keys(
+    object: &serde_json::Map<String, Value>,
+    prefix: &str,
+    allowed: &[&str],
+    errors: &mut Vec<MermaidConfigError>,
+) {
+    for (key, value) in object {
+        if !allowed.contains(&key.as_str()) {
+            let field = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            errors.push(MermaidConfigError {
+                field,
+                value: value.to_string(),
+                message: "is not supported by config schema 1.0.0".to_string(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -8926,6 +9102,58 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.message.contains("unknownKey"))
+        );
+    }
+
+    #[test]
+    fn strict_config_validation_rejects_unknown_nested_keys() {
+        let validated = super::validate_mermaid_config_value(&json!({
+            "theme": "dark",
+            "flowchart": {
+                "direction": "LR",
+                "nodeSpacng": 24
+            }
+        }));
+
+        assert_eq!(
+            validated.schema_version,
+            super::MERMAID_CONFIG_SCHEMA_VERSION
+        );
+        assert!(validated.errors.iter().any(|error| {
+            error.field == "flowchart.nodeSpacng"
+                && error.message.contains("not supported by config schema")
+        }));
+        assert!(
+            !validated.is_valid(),
+            "a misspelled nested key must not be silently accepted"
+        );
+    }
+
+    #[test]
+    fn strict_config_schema_matches_the_runtime_contract() {
+        let schema = super::mermaid_config_schema();
+        assert_eq!(
+            schema["$id"],
+            "https://frankenmermaid.dev/schema/mermaid-config/1.0.0"
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["sequence"]["additionalProperties"],
+            false
+        );
+
+        let validated = super::validate_mermaid_config_value(&json!({
+            "theme": "dark",
+            "themeVariables": { "primaryColor": "#111" },
+            "flowchart": { "rankDir": "rl", "nodeSpacing": 12 },
+            "sequence": { "mirrorActors": true },
+            "gantt": { "topAxis": false },
+            "securityLevel": "loose"
+        }));
+        assert!(
+            validated.is_valid(),
+            "unexpected errors: {:?}",
+            validated.errors
         );
     }
 

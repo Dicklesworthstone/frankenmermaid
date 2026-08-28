@@ -52,8 +52,9 @@ use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLinkMode,
     MermaidNativePressureSignals, MermaidParseMode, MermaidPressureReport, MermaidTier,
-    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
-    mermaid_layout_guard_observability,
+    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty, mermaid_config_schema,
+    mermaid_config_schema_json_pretty, mermaid_layout_guard_observability,
+    validate_mermaid_config_value,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
@@ -546,6 +547,24 @@ enum Command {
         /// Optional path to write the JSON artifact.
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Emit the versioned JSON Schema for Mermaid initialization configuration.
+    ConfigSchema {
+        /// Emit compact JSON instead of the default readable schema document.
+        #[arg(long)]
+        compact: bool,
+    },
+
+    /// Strictly validate Mermaid initialization configuration JSON.
+    ValidateConfig {
+        /// JSON file path, inline JSON, or "-" for stdin.
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Pretty-print the validation result JSON.
+        #[arg(long)]
+        pretty: bool,
     },
 
     /// Emit a canonical layout determinism manifest for the embedded golden corpus.
@@ -3621,6 +3640,12 @@ fn run() -> Result<()> {
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
+        Command::ConfigSchema { compact } => cmd_config_schema(compact),
+
+        Command::ValidateConfig { input, pretty } => {
+            cmd_validate_config(&input, pretty, max_input_bytes)
+        }
+
         Command::DeterminismManifest => cmd_determinism_manifest(),
 
         Command::Minimize {
@@ -4433,6 +4458,36 @@ fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
         serde_json::to_string(&capability_matrix())?
     };
     write_output(output, &json)
+}
+
+fn cmd_config_schema(compact: bool) -> Result<()> {
+    let schema = if compact {
+        serde_json::to_string(&mermaid_config_schema())?
+    } else {
+        mermaid_config_schema_json_pretty()
+    };
+    write_output(None, &schema)?;
+    io::stdout().write_all(b"\n")?;
+    Ok(())
+}
+
+fn cmd_validate_config(input: &str, pretty: bool, max_input_bytes: usize) -> Result<()> {
+    let source = load_input(input, max_input_bytes)?;
+    let value = serde_json::from_str(&source).context("configuration input must be valid JSON")?;
+    let validation = validate_mermaid_config_value(&value);
+    let rendered = if pretty {
+        serde_json::to_string_pretty(&validation)?
+    } else {
+        serde_json::to_string(&validation)?
+    };
+    write_output(None, &rendered)?;
+    io::stdout().write_all(b"\n")?;
+    anyhow::ensure!(
+        validation.is_valid(),
+        "configuration violates schema {}",
+        validation.schema_version
+    );
+    Ok(())
 }
 
 fn cmd_determinism_manifest() -> Result<()> {
