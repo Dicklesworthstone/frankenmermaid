@@ -2727,8 +2727,18 @@ mod tests {
             plan.with_parse_scratch(index, input, &mut scratch, |actual| {
                 let expected = parse(input);
                 assert_eq!(
-                    actual.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
-                    expected.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                    actual
+                        .ir
+                        .nodes
+                        .iter()
+                        .map(|n| n.id.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .ir
+                        .nodes
+                        .iter()
+                        .map(|n| n.id.as_str())
+                        .collect::<Vec<_>>(),
                     "batch parse of input {index} disagrees with a full parse"
                 );
                 assert_eq!(actual.ir, &expected.ir);
