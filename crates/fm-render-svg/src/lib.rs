@@ -10030,10 +10030,18 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     for (prefix, value, class) in [
         ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
         ("Text: ", meta.text.as_deref(), "fm-req-text"),
-        ("Risk: ", meta.risk.as_deref(), "fm-req-metadata"),
+        // Risk and verification are drawn through their DISPLAY tables, not echoed: mermaid
+        // prints the enum name (`high` -> `High`, `TEST` -> `Test`), discarding the author's casing.
+        (
+            "Risk: ",
+            meta.risk.as_deref().map(fm_core::requirement_risk_display),
+            "fm-req-metadata",
+        ),
         (
             "Verification: ",
-            meta.verify_method.as_deref(),
+            meta.verify_method
+                .as_deref()
+                .map(fm_core::requirement_verify_method_display),
             "fm-req-metadata",
         ),
         (
@@ -12205,10 +12213,19 @@ fn render_node(
             for (prefix, value, class) in [
                 ("ID: ", req_meta.req_id.as_deref(), "fm-req-id"),
                 ("Text: ", req_meta.text.as_deref(), "fm-req-text"),
-                ("Risk: ", req_meta.risk.as_deref(), "fm-req-metadata"),
+                // ⚠️ THE SECOND OF TWO ROW TABLES. Both must go through the display helpers or the
+                // two requirement render paths disagree on the same diagram.
+                (
+                    "Risk: ",
+                    req_meta.risk.as_deref().map(fm_core::requirement_risk_display),
+                    "fm-req-metadata",
+                ),
                 (
                     "Verification: ",
-                    req_meta.verify_method.as_deref(),
+                    req_meta
+                        .verify_method
+                        .as_deref()
+                        .map(fm_core::requirement_verify_method_display),
                     "fm-req-metadata",
                 ),
                 (

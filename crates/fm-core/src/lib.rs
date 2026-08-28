@@ -7243,6 +7243,56 @@ pub fn requirement_type_display(raw: &str) -> &str {
     }
 }
 
+/// The display name mermaid draws for a requirement's `risk:` keyword.
+///
+/// ```text
+///   high -> High      medium -> Medium      low -> Low
+/// ```
+///
+/// ⚠️ A TABLE, NOT A CAPITALISATION. We echoed the author's keyword, so `risk: high` drew
+/// `Risk: high` where mermaid draws `Risk: High`. The obvious repair — upper-case the first letter —
+/// is WRONG, and one measurement says so: `risk: HIGH` draws `Risk: High` upstream, and `risk: hIgH`
+/// does too, which a first-letter transform renders `HIGH` and `HIgH`. mermaid parses the keyword
+/// into an enum and prints the enum's own name, so the author's casing is discarded entirely. Both
+/// measured in Chromium 151 against the pinned 11.15.0 bundle.
+///
+/// Matching is case-insensitive for that reason. An unrecognised keyword is returned unchanged:
+/// mermaid's grammar rejects one outright (`risk: bogus` is a parse error there), and this parser's
+/// contract is best-effort recovery, so the author's own text is a better answer than an invented
+/// one. That divergence is deliberate and is pinned in the conformance test.
+#[must_use]
+pub fn requirement_risk_display(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "high" => "High",
+        "medium" => "Medium",
+        "low" => "Low",
+        _ => trimmed,
+    }
+}
+
+/// The display name mermaid draws for a requirement's `verifymethod:` keyword.
+///
+/// ```text
+///   analysis -> Analysis    inspection -> Inspection
+///   test     -> Test        demonstration -> Demonstration
+/// ```
+///
+/// Same shape and same reasoning as [`requirement_risk_display`]: a table keyed case-insensitively,
+/// because `verifymethod: TEST` draws `Verification: Test` upstream and a first-letter transform
+/// would leave `TEST`. Unrecognised keywords pass through unchanged.
+#[must_use]
+pub fn requirement_verify_method_display(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "analysis" => "Analysis",
+        "inspection" => "Inspection",
+        "test" => "Test",
+        "demonstration" => "Demonstration",
+        _ => trimmed,
+    }
+}
+
 /// Requirement-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrRequirementNodeMeta {
