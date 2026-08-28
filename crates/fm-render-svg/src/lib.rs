@@ -14579,6 +14579,25 @@ fn compute_edge_label<'a>(
     offset_x: f32,
     offset_y: f32,
 ) -> Option<(Cow<'a, str>, f32, f32)> {
+    // ⚠️ A SANKEY LINK CARRIES NO LABEL AT ALL, and this is parity, not a simplification. mermaid
+    // 11.15.0 draws text only on the NODES: for `A,B,10` its drawn text is exactly
+    // `["A\n10", "B\n10"]`, with no standalone `10` anywhere — measured in Chromium 151 against the
+    // pinned bundle. We drew a label on every link.
+    //
+    // Nothing is hidden by dropping it. A sankey link's label IS its flow value, and that value
+    // already reaches the picture through the node totals on both ends: `A,B,3` / `A,C,7` draws
+    // `A 10`, `B 3`, `C 7`, so each flow is legible from the node it terminates at — which is
+    // precisely how the reference conveys it.
+    //
+    // ⚠️ THIS SUPERSEDES THE FORMATTING THAT WAS HERE. The previous bead routed this label through
+    // `format_sankey_total` so the link would stop disagreeing with the node beside it. That was
+    // the right fix for the question then being asked (which digits?) and is simply moot once the
+    // right answer to the prior question (is there a label at all?) is "no". The element-existence
+    // question was deliberately deferred rather than folded into a formatting change; this is it
+    // being answered, and the formatting branch went with it rather than being left unreachable.
+    if ir.diagram_type == DiagramType::Sankey {
+        return None;
+    }
     let ir_edge = ir.edges.get(edge_index);
     if detail.show_edge_labels
         && edge_path.points.len() >= 2
@@ -14593,23 +14612,6 @@ fn compute_edge_label<'a>(
         // The number is now written by `write_sequence_number_into`.
         let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
 
-        // ⚠️ A SANKEY EDGE LABEL *IS* THE FLOW VALUE, stored as the author's raw text, so it must go
-        // through the same formatter as the node totals. Without this the identical quantity appears
-        // twice in one picture spelled two different ways — the node reading `124.73` and the link
-        // beside it reading `124.729` — and the link carries the `f32` noise the node no longer
-        // does (`1234.5678` drew `1234.5677` here). Found by the conformance test for the node
-        // totals: its "the raw value must not survive" assertion caught this second site, which is
-        // exactly what that assertion is for.
-        let label_text: Cow<'a, str> = if ir.diagram_type == DiagramType::Sankey {
-            match label_text.trim().parse::<f32>() {
-                Ok(value) if value.is_finite() && value > 0.0 => {
-                    Cow::Owned(format_sankey_total(value))
-                }
-                _ => label_text,
-            }
-        } else {
-            label_text
-        };
 
         // A C4Dynamic relationship is NUMBERED, 1-based, in declaration order.
         //
