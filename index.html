@@ -673,6 +673,14 @@
     #deck-dots i[data-active] {
       background: #34d399;
     }
+    /* On phones the fixed bottom dock covers the stage's lower edge, hiding a bottom-left
+       slide card — anchor the card to the stage TOP there instead. */
+    @media (max-width: 767px) {
+      #deck-card {
+        bottom: auto;
+        top: 0.9rem;
+      }
+    }
     /* Keyboard-navigation skip link (bd-cwas8): visually hidden until focused. */
     .skip-link {
       position: fixed;
