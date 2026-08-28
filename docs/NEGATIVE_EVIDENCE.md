@@ -1,5 +1,41 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT (SECOND TIME): presizing a render buffer does not pay, even with the regrowth attributed at 5.85% (2026-08-27)
+
+- **A much stronger version of the capacity lever already rejected above, and it still measures
+  nothing.** Profiling `er_schema_10000x8` — a scale never profiled before — showed copies at
+  **23.5% of the job** (`_mi_memcpy` 14.99% + `__memmove_avx` 8.48%) against ~8% on the medium ER
+  set. Frame-pointer attribution resolved it precisely:
+
+      _mi_memcpy <- render_node_into <- write_er_node_fragment_into
+                 <- write_er_entity_into (6.97%) <- do_reserve_and_handle
+                 <- finish_grow (5.85%)
+
+- **The under-reserve is real and large.** The per-thread node buffer reserves a flat 640 bytes per
+  node. Instrumented on the same corpus: a node fragment averages **3,342 bytes**, i.e. a **5.22x
+  shortfall**, with 8.00 attribute rows per node at **338 bytes each** — so the 640 base is correct
+  for a row-less node and the rows were simply unaccounted, exactly the defect shape.
+- **Measured effect of fixing it: NOTHING**, on three corpora spanning two orders of magnitude
+  (reserve changed to `640 + rows * 352`, applied to both the parallel and serial buffers):
+
+      er_schema_10000x8    A/B 0.999887 [0.991720,1.006218]  null 1.000042 [0.991600,1.003283]
+      schema_catalog_25    A/B 1.000171 [0.999162,1.001434]  null 1.000122 [0.999379,1.000469]
+      flowchart_large_500  A/B 0.999930 [0.999642,1.000577]  null 1.000326 [0.999550,1.001440]
+
+  Every A/B overlaps its null; outputs byte-identical throughout. The XL arm's null is wide
+  (+-0.4%, only 3 reps fit in the time budget), so it could not resolve a sub-1% effect — but the
+  attributed cost was 5.85%, an order of magnitude above that floor, and the median is dead flat.
+- **⚠️ THE PATTERN, NOW TWICE MEASURED: `finish_grow` attributed at N% does not convert into N%
+  saved by presizing.** Geometric growth already bounds total copied bytes at ~2x the final size, and
+  the allocator can often extend a large block in place, so removing the *reallocations* removes far
+  less work than their profile share suggests. Do not price a presize lever off its `finish_grow`
+  attribution. Both attempts are now in this file; a third should measure a prototype before writing
+  the real thing.
+- **Verdict: REJECT.** The estimate is genuinely 5.22x wrong and correcting it is free of risk — it
+  is simply not a lever. What the profiling DID earn is the attribution recipe and the finding that
+  copies scale from 8% to 23.5% between medium and XL ER, which is where a future lever should aim
+  (at the copying itself, not at the reallocation count).
+
 ### REJECT: inline (small-vec) storage for `Attributes` — blocked by the CONSUMING builder, with the arithmetic (2026-08-27)
 
 - **This is the lever the previous entry pointed at**, so it gets a verdict rather than another
