@@ -6698,6 +6698,85 @@ pub struct IrPieMeta {
     pub slices: Vec<IrPieSlice>,
 }
 
+/// Serde adapters that render integer-like map keys as STRING keys.
+///
+/// ⚠️ WITHOUT THIS THE WASM `parse()` API FAILS OUTRIGHT for any diagram carrying such a map.
+/// `fm-wasm` serializes with `serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true)`
+/// — required, because the published TS contract declares `Record<string, …>` and the default JS
+/// `Map` output silently broke consumers (bd-tm1q7). That serializer rejects a non-string map key
+/// with `Map key is not a string and cannot be an object key`, so `parse()` threw for EVERY gitGraph
+/// and for EVERY diagram using a markdown label, while `renderSvg` on the same input succeeded.
+///
+/// ⚠️ AND NO NATIVE SERIALIZER REPRODUCES THAT CONSTRAINT, which is why this cannot be guarded by an
+/// ordinary Rust test: `serde_json` and `toml` both stringify integer keys silently (verified —
+/// `toml` emits `[commit_lanes]\n0 = 0`). The boundary guard is
+/// `scripts/headtohead/wasm_parse_conformance.mjs`, which drives the built bundle.
+///
+/// The emitted JSON is unchanged: `serde_json` already wrote these keys as strings, so this makes
+/// the WASM path agree with the native one rather than altering the wire format.
+pub mod string_keyed_map {
+    use super::{BTreeMap, IrLabelId};
+    use serde::de::{Deserialize, Deserializer, Error as _};
+    use serde::ser::{Serialize, SerializeMap, Serializer};
+
+    /// A map key that can round-trip through a JSON object key.
+    pub trait KeyAsString: Sized + Ord {
+        /// Render as an object key.
+        fn to_key(&self) -> String;
+        /// Parse back from an object key.
+        fn from_key(key: &str) -> Option<Self>;
+    }
+
+    impl KeyAsString for usize {
+        fn to_key(&self) -> String {
+            self.to_string()
+        }
+        fn from_key(key: &str) -> Option<Self> {
+            key.parse().ok()
+        }
+    }
+
+    impl KeyAsString for IrLabelId {
+        fn to_key(&self) -> String {
+            self.0.to_string()
+        }
+        fn from_key(key: &str) -> Option<Self> {
+            key.parse().ok().map(IrLabelId)
+        }
+    }
+
+    /// Serialize `map` with each key rendered by [`KeyAsString::to_key`].
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: KeyAsString,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut out = serializer.serialize_map(Some(map.len()))?;
+        for (key, value) in map {
+            out.serialize_entry(&key.to_key(), value)?;
+        }
+        out.end()
+    }
+
+    /// Deserialize a map whose keys were rendered by [`KeyAsString::to_key`].
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: KeyAsString,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let raw = BTreeMap::<String, V>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|(key, value)| {
+                K::from_key(&key)
+                    .map(|parsed| (parsed, value))
+                    .ok_or_else(|| D::Error::custom(format!("invalid map key: {key}")))
+            })
+            .collect()
+    }
+}
+
 /// Git-graph-specific metadata that extends the generic IR.
 ///
 /// Branch membership also reaches the renderer as a `git-branch-N` CSS class, but that index is
@@ -6710,7 +6789,11 @@ pub struct IrGitGraphMeta {
     pub branches: Vec<String>,
     /// Lane index per commit node, keyed by the node's index in [`MermaidDiagramIr::nodes`].
     /// Commits absent from the map belong to lane 0.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "string_keyed_map"
+    )]
     pub commit_lanes: BTreeMap<usize, usize>,
 }
 
@@ -6895,7 +6978,11 @@ pub struct MermaidDiagramIr {
     pub clusters: Vec<IrCluster>,
     pub graph: MermaidGraphIr,
     pub labels: Vec<IrLabel>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "string_keyed_map"
+    )]
     pub label_markup: BTreeMap<IrLabelId, Vec<IrLabelSegment>>,
     pub constraints: Vec<IrConstraint>,
     /// Style references from `classDef`, `style`, and `linkStyle` directives.

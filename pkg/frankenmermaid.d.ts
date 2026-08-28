@@ -54,6 +54,19 @@ export interface WasmDeckOutput {
 
 
 
+/** Strict initialization-config validation result (schema 1.0.0). */
+export interface MermaidConfigValidation {
+    schemaVersion: "1.0.0";
+    errors: Array<{ field: string; value: string; message: string }>;
+}
+
+/** Return the JSON Schema used by validateConfig. */
+export function configSchema(): string;
+/** Validate config JSON and return MermaidConfigValidation encoded as JSON. */
+export function validateConfig(configJson: string): string;
+
+
+
 export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
@@ -129,6 +142,14 @@ export function applyParseLensInsertLineAfter(input: string, element_id: string,
  */
 export function chooseCanvasTarget(capabilities_json: string): string;
 
+/**
+ * Return the canonical, versioned Mermaid initialization-config schema.
+ *
+ * Keeping this export alongside the native CLI endpoint means browser tooling can validate
+ * configuration before it asks the renderer to initialize.
+ */
+export function configSchema(): string;
+
 export function describeDiagram(input: string): string;
 
 export function detectType(input: string): any;
@@ -184,6 +205,14 @@ export function renderDeck(input: string, config?: any | null): any;
 export function renderSvg(input: string, config?: any | null): string;
 
 /**
+ * Strictly validate Mermaid initialization configuration JSON and return a serializable report.
+ *
+ * Unlike the renderer's compatibility adapter, this rejects unknown nested keys so a typo cannot
+ * silently become a default at a browser boundary.
+ */
+export function validateConfig(config_json: string): string;
+
+/**
  * The worker entry point: hand it a [`WorkerRenderMessage`] as JSON, get a
  * [`WorkerRenderResponse`] as JSON, or `null` when the message needs no reply (a cancel, or an id
  * that is not the live request).
@@ -205,6 +234,7 @@ export interface InitOutput {
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly chooseCanvasTarget: (a: number, b: number, c: number) => void;
+    readonly configSchema: (a: number) => void;
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
@@ -223,6 +253,7 @@ export interface InitOutput {
     readonly planWebGpu: (a: number, b: number, c: number, d: number) => void;
     readonly renderDeck: (a: number, b: number, c: number, d: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
+    readonly validateConfig: (a: number, b: number, c: number) => void;
     readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
