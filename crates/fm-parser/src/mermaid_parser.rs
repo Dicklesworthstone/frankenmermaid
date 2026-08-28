@@ -937,20 +937,60 @@ fn flow_statement_parser<'a>()
     // the rect rule below. Each pair must be tried whole: `[/Trap\]` shares its opener with
     // `[/Para/]`, so the closing delimiter is what separates them and a rule that matched on the
     // opener alone would mis-assign them to each other.
+    //
+    // ⚠️ AND EACH MUST ALSO STOP AT THE FIRST `]`, WHICH IS WHAT `and_is(just(']').not())` BUYS.
+    // Stopping only at its OWN closer let a matcher whose closer is absent from its node run past
+    // the end of that node and match a LATER one's — the arrow between them swallowed as label text:
+    //
+    // ```text
+    //   A[/t\] --> B[/x/]    `parallelogram` is tried first, opens at `A[/`, finds no `/]` until
+    //                        the SECOND node, and takes `t\] --> B[/x` as its label
+    // ```
+    //
+    // The whole statement then failed to parse: mermaid 11.15.0 draws two nodes and an edge, we drew
+    // NOTHING. It is not about mixed slash directions — `A[/t/] --> B[/x\]` was always fine, because
+    // the first node carries the `/]` the matcher is looking for. It is about a closer that appears
+    // only later, so `trap -> para` and `invtrap -> invpara` died too, and a 3-hop chain died across
+    // two arrows. A `]` can no longer be consumed as label text, matching the rect rule that has
+    // always excluded it.
     let parallelogram_content = just("[/")
-        .ignore_then(any().and_is(just("/]").not()).repeated().to_slice())
+        .ignore_then(
+            any()
+                .and_is(just("/]").not())
+                .and_is(just(']').not())
+                .repeated()
+                .to_slice(),
+        )
         .then_ignore(just("/]"));
 
     let inv_parallelogram_content = just("[\\")
-        .ignore_then(any().and_is(just("\\]").not()).repeated().to_slice())
+        .ignore_then(
+            any()
+                .and_is(just("\\]").not())
+                .and_is(just(']').not())
+                .repeated()
+                .to_slice(),
+        )
         .then_ignore(just("\\]"));
 
     let trapezoid_content = just("[/")
-        .ignore_then(any().and_is(just("\\]").not()).repeated().to_slice())
+        .ignore_then(
+            any()
+                .and_is(just("\\]").not())
+                .and_is(just(']').not())
+                .repeated()
+                .to_slice(),
+        )
         .then_ignore(just("\\]"));
 
     let inv_trapezoid_content = just("[\\")
-        .ignore_then(any().and_is(just("/]").not()).repeated().to_slice())
+        .ignore_then(
+            any()
+                .and_is(just("/]").not())
+                .and_is(just(']').not())
+                .repeated()
+                .to_slice(),
+        )
         .then_ignore(just("/]"));
 
     let rect_content = just('[')
@@ -12644,25 +12684,52 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         // where it was unreachable: `[/Para/]` opens `[` and closes `]`, so the Rect probe matched
         // first and produced a Rect labelled "/Para/" — delimiters and all — and these four probes
         // could never run for a well-formed token.
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
-        {
-            return Some(parsed);
+        // ⚠️ TWO ROUNDS, EXACT BEFORE SALVAGE — the four probes may NOT simply run in order.
+        //
+        // `auto_close_delimiters` (ON by default) tells `parse_wrapped_str_with_config` to accept a
+        // token that does NOT end with its closer, so it can rescue an unterminated `[/x`. Run in a
+        // single pass, that turns the FIRST probe into a probe that matches almost anything opening
+        // `[/`, and it consumed the two shapes listed after it:
+        //
+        // ```text
+        //   A[/a\]   parallelogram wants `[/`…`/]`; the token ends `\]`, so auto-close salvaged it
+        //            as an UNTERMINATED parallelogram labelled `a\]` — and the unmatched `]` then
+        //            tripped `warn_if_label_holds_unmatched_bracket`, which DROPPED the node
+        // ```
+        //
+        // A well-formed `[/Trap\]` / `[\InvTrap/]` on this path therefore vanished from the diagram
+        // entirely; mermaid 11.15.0 draws it. It survived in short statements only because those
+        // reach the chumsky grammar instead — this path takes over for 3+-hop chains, so
+        // `A[/a\] --> B[/b\] --> C[/c\]` drew NOTHING while the 2-hop prefix was fine. Proven by
+        // mechanism, not inference: the same five chains all parse correctly with
+        // `auto_close_delimiters: false`, and the rect control is unchanged either way.
+        //
+        // So: match a token against the probe whose closer it ACTUALLY carries first. Only when no
+        // probe claims it exactly does the salvage round run, which is the only round that ever
+        // needed the auto-close relaxation. All four resolve unambiguously in round one — a token
+        // ending `/]` opens either `[/` or `[\`, and the opener separates them.
+        const SLANTED: [(&str, &str, NodeShape); 4] = [
+            ("[/", "/]", NodeShape::Parallelogram),
+            ("[\\", "\\]", NodeShape::InvParallelogram),
+            ("[/", "\\]", NodeShape::Trapezoid),
+            ("[\\", "/]", NodeShape::InvTrapezoid),
+        ];
+        for (open, close, shape) in SLANTED {
+            if core.ends_with(close)
+                && let Some(parsed) =
+                    parse_wrapped_str_with_config(core, open, close, shape, config)
+            {
+                return Some(parsed);
+            }
         }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
-        {
-            return Some(parsed);
+        if config.auto_close_delimiters {
+            for (open, close, shape) in SLANTED {
+                if let Some(parsed) =
+                    parse_wrapped_str_with_config(core, open, close, shape, config)
+                {
+                    return Some(parsed);
+                }
+            }
         }
         if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
             return Some(parsed);
