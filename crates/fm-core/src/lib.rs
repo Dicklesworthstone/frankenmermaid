@@ -559,6 +559,112 @@ pub struct CapabilityMatrix {
     pub project: String,
     pub status_counts: BTreeMap<String, usize>,
     pub claims: Vec<CapabilityClaim>,
+    /// Per-family × per-surface semantic support cells (bd-5k51.1).
+    ///
+    /// Empty unless a caller with access to the full pipeline (fm-cli, the release gauntlet)
+    /// fills it: fm-core only defines the contract. `skip_serializing_if` keeps the
+    /// fm-core-only emitters (`update_evidence.rs`, this crate's tests) byte-compatible with
+    /// the artifact they wrote before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support_cells: Vec<SupportCell>,
+}
+
+/// One family × one delivery surface, as a PROMOTION LADDER rung rather than a boolean
+/// (bd-5k51.1). The rungs are ordered: a cell reaches a tier only by satisfying every tier
+/// below it, and the `reasons` name exactly which gate it stopped at.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportTier {
+    /// The family does not render on this surface, or renders empty.
+    Unsupported,
+    /// Renders non-empty output. A no-throw smoke: NEVER promotes a public claim alone.
+    Breadth,
+    /// Output is deterministic across repeats and carries the fixture's IR content
+    /// (nodes, edges, labels). In-process evidence only.
+    Structural,
+    /// A cross-engine semantic oracle (pinned mermaid-js, semantic normalization) agrees
+    /// with the output. Requires ingested oracle results; an in-process run cannot grant it.
+    Semantic,
+    /// Semantic agreement plus per-element accessible names covering the diagram's elements.
+    VisualA11y,
+    /// Visual/a11y fidelity plus a clean diagnostic record on the well-formed fixture and a
+    /// handled, explicitly diagnosed malformed negative case.
+    Production,
+}
+
+impl SupportTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Breadth => "breadth",
+            Self::Structural => "structural",
+            Self::Semantic => "semantic",
+            Self::VisualA11y => "visual_a11y",
+            Self::Production => "production",
+        }
+    }
+}
+
+/// What the fixture put into the pipeline and what came out, counted the same way on every
+/// family so a cell can be compared to its siblings without re-running anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportCensus {
+    pub nodes: usize,
+    pub edges: usize,
+    /// Text-bearing output units on the measured surface: `<text>` elements (SVG/WASM),
+    /// `FillText` operations (Canvas), text-bearing lines (terminal).
+    pub text_runs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportDiagnostics {
+    pub errors: usize,
+    pub warnings: usize,
+}
+
+/// The malformed-negative case for one cell: the fixture plus a deliberately malformed
+/// construct must not panic, must not silently lose the malformation, and the counts here
+/// are the record of what it did instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportNegativeCase {
+    pub handled: bool,
+    pub diagnostics: SupportDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportCell {
+    /// `DiagramType::as_str()`.
+    pub family: String,
+    /// `svg` | `terminal` | `canvas` | `wasm`.
+    pub surface: String,
+    pub tier: SupportTier,
+    /// Why the cell sits at `tier` and not one rung higher — or, for `Unsupported`, why it
+    /// does not render at all. Every cap names its gate; a cell with an empty `reasons` at a
+    /// capped tier is a bug in the emitter.
+    pub reasons: Vec<String>,
+    /// Ids of the EXISTING guards this cell binds to (golden semantic guard, cross-engine
+    /// oracle corpus item, cross-renderer agreement test). No cell invents a new oracle.
+    pub evidence_ids: Vec<String>,
+    pub fixture: Option<String>,
+    pub fixture_sha256: Option<String>,
+    pub output_sha256: Option<String>,
+    pub census: Option<SupportCensus>,
+    pub determinism_repeat_identical: Option<bool>,
+    pub diagnostics: Option<SupportDiagnostics>,
+    /// Count of per-element accessible names (`<title>`/`aria-label` on SVG; `FillText`
+    /// carrying a non-empty label on Canvas). `None` where the surface has no notion of one.
+    pub a11y_named_elements: Option<usize>,
+    pub negative_case: Option<SupportNegativeCase>,
+}
+
+/// The emitted support matrix: which revision measured it, and the 24 × 4 cells.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportMatrix {
+    /// Git revision the measurement ran against, or `unknown` when the caller did not stamp
+    /// one. A consumer that makes a public claim from a cell MUST refuse `unknown`.
+    pub source_rev: String,
+    pub cells: Vec<SupportCell>,
 }
 
 #[must_use]
@@ -578,6 +684,7 @@ pub fn capability_matrix() -> CapabilityMatrix {
         project: String::from("frankenmermaid"),
         status_counts,
         claims,
+        support_cells: Vec::new(),
     }
 }
 
@@ -1045,7 +1152,7 @@ fn surface_capability_claims() -> Vec<CapabilityClaim> {
     ]
 }
 
-const fn documented_diagram_types() -> &'static [DiagramType] {
+pub const fn documented_diagram_types() -> &'static [DiagramType] {
     const DOCUMENTED: &[DiagramType] = &[
         DiagramType::Flowchart,
         DiagramType::Sequence,

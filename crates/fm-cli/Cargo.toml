@@ -40,6 +40,9 @@ default = []
 watch = ["dep:notify"]
 serve = ["dep:tiny_http"]
 png = ["dep:resvg", "dep:usvg"]
+# Canvas measurement for `support-matrix` (bd-5k51.1). Optional so the shipped binary keeps
+# the fm-render-canvas link out of the default build (bd-53p4); the gauntlet enables it.
+support-matrix = ["dep:fm-render-canvas"]
 fnx-integration = ["fm-layout/fnx-integration"]
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
 
@@ -50,6 +53,7 @@ crossterm = "0.29"
 fm-core.workspace = true
 fm-layout.workspace = true
 fm-parser.workspace = true
+fm-render-canvas = { workspace = true, optional = true }
 fm-render-svg.workspace = true
 fm-render-term.workspace = true
 # Shipped dependency, not just bench scaffolding: `render-batch` runs whole diagram pipelines

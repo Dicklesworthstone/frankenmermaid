@@ -28,6 +28,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod minimize;
+mod support_matrix;
 
 #[cfg(feature = "png")]
 use std::collections::BTreeMap;
@@ -548,6 +549,32 @@ enum Command {
         /// Optional path to write the JSON artifact.
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Emit the semantic support promotion matrix: one ladder rung per diagram family x
+    /// delivery surface, measured live against the golden corpus (bd-5k51.1).
+    SupportMatrix {
+        /// Pretty-print JSON output.
+        #[arg(long)]
+        pretty: bool,
+
+        /// Optional path to write the JSON artifact.
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Golden fixture directory; defaults to the repo's crates/fm-cli/tests/golden.
+        #[arg(long)]
+        golden_dir: Option<String>,
+
+        /// Cross-engine oracle report JSON to ingest (see scripts/headtohead/
+        /// chromium_text_diff.mjs). Without it no cell promotes past structural.
+        #[arg(long)]
+        oracle_results: Option<String>,
+
+        /// Git revision stamped into the artifact. Defaults to `git rev-parse HEAD`, or
+        /// `unknown` outside a repository — consumers must refuse `unknown` for claims.
+        #[arg(long)]
+        source_rev: Option<String>,
     },
 
     /// Emit the versioned JSON Schema for Mermaid initialization configuration.
@@ -3649,6 +3676,19 @@ fn run() -> Result<()> {
                 },
             )
         }
+        Command::SupportMatrix {
+            pretty,
+            output,
+            golden_dir,
+            oracle_results,
+            source_rev,
+        } => cmd_support_matrix(SupportMatrixCommandOptions {
+            pretty,
+            output: output.as_deref(),
+            golden_dir: golden_dir.as_deref(),
+            oracle_results: oracle_results.as_deref(),
+            source_rev: source_rev.as_deref(),
+        }),
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
@@ -4474,6 +4514,67 @@ fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
         serde_json::to_string(&capability_matrix())?
     };
     write_output(output, &json)
+}
+
+/// Everything `support-matrix` needs, bundled so the entry point stays one argument wide.
+struct SupportMatrixCommandOptions<'a> {
+    pretty: bool,
+    output: Option<&'a str>,
+    golden_dir: Option<&'a str>,
+    oracle_results: Option<&'a str>,
+    source_rev: Option<&'a str>,
+}
+
+fn cmd_support_matrix(options: SupportMatrixCommandOptions<'_>) -> Result<()> {
+    use support_matrix::{OracleReport, build_support_matrix};
+
+    let golden_dir = match options.golden_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            // Default to the repo corpus relative to the manifest — this binary is built
+            // from this workspace, and the golden fixtures travel with it.
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+        }
+    };
+    anyhow::ensure!(
+        golden_dir.is_dir(),
+        "golden fixture directory {} does not exist; pass --golden-dir",
+        golden_dir.display()
+    );
+
+    let oracle = match options.oracle_results {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("failed reading oracle report {path}"))?;
+            Some(serde_json::from_str::<OracleReport>(&text).with_context(|| {
+                format!("oracle report {path} is not a valid OracleReport JSON")
+            })?)
+        }
+        None => None,
+    };
+
+    // Stamp the revision the measurement ran against: explicit flag wins, then the working
+    // tree's HEAD, then the honest `unknown` that public claims must refuse.
+    let source_rev = match options.source_rev {
+        Some(rev) => rev.to_string(),
+        None => std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|rev| !rev.is_empty())
+            .unwrap_or_else(|| String::from("unknown")),
+    };
+
+    let matrix = build_support_matrix(&golden_dir, &source_rev, oracle.as_ref());
+    let json = if options.pretty {
+        serde_json::to_string_pretty(&matrix).context("serialize support matrix")?
+    } else {
+        serde_json::to_string(&matrix).context("serialize support matrix")?
+    };
+    write_output(options.output, &json)
 }
 
 fn cmd_config_schema(compact: bool) -> Result<()> {
