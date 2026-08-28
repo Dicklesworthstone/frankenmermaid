@@ -204,6 +204,13 @@ pub struct IrBuilder {
     /// subgraphs declared LATER in the document than the edge naming them (bd-dw2a9). Empty for
     /// every other diagram type, so their paths pay one hash miss.
     flow_forward_subgraph_members: FxHashMap<String, String>,
+    /// Subgraph PUBLIC key -> index into `ir.graph.subgraphs`.
+    ///
+    /// ⚠️ NOT `subgraph_index_by_key`, WHICH IS KEYED DIFFERENTLY. That map holds
+    /// `flow_subgraph_lookup_key` (`"{id}@title:{title}"`), which is exactly why two earlier attempts
+    /// at bd-pfibz looked up the wrong thing and were inert. This one holds `IrSubgraph::key`, the id
+    /// an author actually writes, so the endpoint lookup is a hash instead of a scan.
+    subgraph_index_by_public_key: FxHashMap<String, usize>,
     /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
     /// `cluster.members`/`subgraph.members` Vecs are append-only and grow to the subgraph size, so
     /// the old `members.contains(&id)` linear dedup-on-insert was O(subgraph²) (measured ~58% of a
@@ -549,6 +556,7 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::default(),
@@ -597,6 +605,7 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::with_capacity(estimated_labels),
@@ -1922,6 +1931,11 @@ impl IrBuilder {
         }
         self.subgraph_index_by_key
             .insert(normalized_lookup_key.to_string(), subgraph_index);
+        // First declaration wins, matching the `find` this replaces: it returned the FIRST subgraph
+        // whose public key matched, so a repeated id keeps resolving to the same subgraph.
+        self.subgraph_index_by_public_key
+            .entry(normalized_public_key.to_string())
+            .or_insert(subgraph_index);
         Some(subgraph_index)
     }
 
@@ -2020,17 +2034,21 @@ impl IrBuilder {
     ///
     /// An empty subgraph has no member to stand in for it, so it falls through to the old behaviour.
     pub(crate) fn subgraph_endpoint_member(&self, id: &str) -> Option<IrNodeId> {
-        // A subgraph-free diagram pays one `is_empty` check; the scan below is over subgraphs, of
-        // which a diagram has a handful, not over nodes.
-        if self.ir.graph.subgraphs.is_empty() {
+        // ⚠️ THIS WAS A LINEAR SCAN OVER EVERY SUBGRAPH, ONCE PER EDGE ENDPOINT, and the comment it
+        // replaces claimed a diagram carries "a handful" of subgraphs. Architecture diagrams carry
+        // hundreds: `arch_200x50` has 200, and after 6b292cd4 removed the cluster-box scan this
+        // function became the TOP engine frame of that job at 7.78% self — a cost I introduced in
+        // bd-pfibz and then under-read at 2.60% while a larger scan was masking it.
+        //
+        // The public-key map makes it a hash lookup. A subgraph-free diagram still pays one
+        // `is_empty` check and nothing else.
+        if self.subgraph_index_by_public_key.is_empty() {
             return None;
         }
         let key = id.trim();
-        self.ir
-            .graph
-            .subgraphs
-            .iter()
-            .find(|subgraph| subgraph.key == key)
+        self.subgraph_index_by_public_key
+            .get(key)
+            .and_then(|&index| self.ir.graph.subgraphs.get(index))
             .and_then(|subgraph| subgraph.members.first().copied())
     }
 
