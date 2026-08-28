@@ -16438,6 +16438,40 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// ⚠️ LIB-LEVEL GUARD, PLACED IN THE SAME FILE AS THE FUNCTION IT PROTECTS.
+    ///
+    /// `flow_forward_subgraph_members` has had its `resolved.insert` deleted THREE times
+    /// (094e6575, b9be26aa, 454db70f — the last titled as the fix itself). The integration
+    /// tests in tests/edge_to_subgraph.rs discriminate too, but they live in another file and
+    /// were not run before two of those landings. This one sits beside the function so a
+    /// same-file edit collides with it visibly.
+    #[test]
+    fn flow_forward_subgraph_walk_returns_the_chain_end_not_an_empty_map() {
+        let source = concat!(
+            "flowchart LR\n",
+            "  s1 --> s2\n",
+            "  subgraph s1\n",
+            "    s2 --> Y\n",
+            "  end\n",
+            "  subgraph s2\n",
+            "    Z\n",
+            "  end\n",
+        );
+        let document = crate::mermaid_parser::parse_flowchart_document(
+            source,
+            0,
+            &crate::ParserConfig::default(),
+        );
+        let resolved = crate::mermaid_parser::flow_forward_subgraph_members(&document.items);
+        assert_eq!(
+            resolved.get("s1").map(String::as_str),
+            Some("Z"),
+            "the walk must reach the chain end; an empty map means resolved.insert was              deleted again"
+        );
+        assert_eq!(resolved.get("s2").map(String::as_str), Some("Z"));
+        assert!(!resolved.is_empty(), "resolved.insert was deleted again");
+    }
+
     #[test]
     fn shared_css_color_catalogue_matches_the_legacy_parser_oracle() {
         for value in [
