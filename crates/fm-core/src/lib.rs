@@ -3926,9 +3926,17 @@ pub fn mermaid_config_schema() -> Value {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "direction": { "type": "string", "description": "LR, RL, TB, TD, or BT (case-insensitive)" },
-                    "rankDir": { "type": "string", "description": "LR, RL, TB, TD, or BT (case-insensitive)" },
-                    "curve": { "type": "string" },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["lr", "rl", "tb", "td", "bt"],
+                        "description": "Case-insensitive layout direction: LR, RL, TB, TD, or BT."
+                    },
+                    "rankDir": {
+                        "type": "string",
+                        "enum": ["lr", "rl", "tb", "td", "bt"],
+                        "description": "Case-insensitive rank direction: LR, RL, TB, TD, or BT. Alias of direction."
+                    },
+                    "curve": { "type": "string", "description": "Edge curve style, e.g. basis, linear, natural." },
                     "nodeSpacing": { "type": "number", "minimum": 0 },
                     "rankSpacing": { "type": "number", "minimum": 0 }
                 }
@@ -3946,8 +3954,11 @@ pub fn mermaid_config_schema() -> Value {
                 "additionalProperties": false,
                 "properties": { "topAxis": { "type": "boolean" } }
             },
-            "constraints": { "type": "object" },
-            "securityLevel": { "type": "string", "description": "strict, antiscript, or loose (case-insensitive)" },
+            "securityLevel": {
+                "type": "string",
+                "enum": ["strict", "antiscript", "loose"],
+                "description": "Case-insensitive sanitization level: strict, antiscript, or loose."
+            },
             "startOnLoad": { "type": "boolean", "description": "Accepted for compatibility; currently has no runtime effect" }
         },
         "$defs": {
@@ -3972,11 +3983,226 @@ pub fn mermaid_config_schema_json_pretty() -> String {
         .expect("the built-in Mermaid config schema must be serializable")
 }
 
+/// TypeScript declarations for the strict Mermaid initialization-config contract, DERIVED
+/// from [`mermaid_config_schema`].
+///
+/// This (and [`config_reference_markdown`]) is the "generated types" half of the config
+/// contract: the schema is the source of truth, and walking it here — rather than
+/// hand-maintaining a parallel `.d.ts` — is what makes drift between the schema, the Rust
+/// validator, and the TypeScript surface structurally impossible. Regenerate the committed
+/// artifact with `fm-cli config-schema --typescript <path>`; the drift test fails closed.
+#[must_use]
+pub fn config_typescript_declarations() -> String {
+    fn ts_type_of(property: &Value) -> String {
+        if let Some(variants) = property["enum"].as_array()
+            && variants.iter().all(Value::is_string)
+        {
+            return variants
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|v| format!("\"{v}\""))
+                .collect::<Vec<_>>()
+                .join(" | ");
+        }
+        match property["type"].as_str() {
+            Some("string") => "string".into(),
+            Some("number") => "number".into(),
+            Some("boolean") => "boolean".into(),
+            Some("object") => match property["additionalProperties"].as_object() {
+                Some(inner) => {
+                    format!(
+                        "Record<string, {}>",
+                        ts_type_of_inner(&Value::Object(inner.clone()))
+                    )
+                }
+                None => "Record<string, unknown>".into(),
+            },
+            _ => "unknown".into(),
+        }
+    }
+    fn ts_type_of_inner(property: &Value) -> String {
+        match property["type"].as_array() {
+            Some(variants) => variants
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|t| match t {
+                    "string" => "string".to_string(),
+                    "number" => "number".to_string(),
+                    "boolean" => "boolean".to_string(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" | "),
+            None => ts_type_of(property),
+        }
+    }
+    fn interface_name(key: &str) -> String {
+        let mut out = String::new();
+        for word in key.split('_') {
+            let mut chars = word.chars();
+            if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+                out.push_str(chars.as_str());
+            }
+        }
+        format!("{out}Config")
+    }
+    fn emit_interface<'a>(
+        out: &mut String,
+        name: &str,
+        object: &'a Value,
+        nested: &mut Vec<(String, &'a Value)>,
+    ) {
+        out.push_str(&format!("export interface {name} {{\n"));
+        let Some(properties) = object["properties"].as_object() else {
+            out.push_str("}\n\n");
+            return;
+        };
+        for (key, property) in properties {
+            if let Some(description) = property["description"].as_str() {
+                for line in description.lines() {
+                    out.push_str(&format!("  /** {line} */\n"));
+                }
+            }
+            let property_type =
+                if property["type"] == "object" && property["properties"].as_object().is_some() {
+                    let nested_name = interface_name(key);
+                    nested.push((nested_name.clone(), property));
+                    nested_name
+                } else {
+                    ts_type_of(property)
+                };
+            // Every key is optional: the config object is a partial-override contract
+            // (absent keys fall back to the runtime defaults), so the TS surface must say so.
+            out.push_str(&format!("  {key}?: {property_type};\n"));
+        }
+        out.push_str("}\n\n");
+    }
+
+    let schema = mermaid_config_schema();
+    let mut out = String::from(
+        "// GENERATED from mermaid_config_schema() (fm-core) — do not edit by hand.\n\
+         // Regenerate: fm-cli config-schema --typescript <path>\n\n",
+    );
+    let mut nested: Vec<(String, &Value)> = Vec::new();
+    emit_interface(&mut out, "MermaidConfig", &schema, &mut nested);
+    while let Some((name, object)) = nested.pop() {
+        emit_interface(&mut out, &name, object, &mut nested);
+    }
+    for (name, def) in schema["$defs"].as_object().into_iter().flatten() {
+        let type_name = name
+            .split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(description) = def["description"].as_str() {
+            out.push_str(&format!("/** {description} */\n"));
+        }
+        out.push_str(&format!(
+            "export type {type_name} = {};\n\n",
+            ts_type_of(def)
+        ));
+    }
+    out
+}
+
+/// The generated configuration reference, DERIVED from [`mermaid_config_schema`].
+///
+/// The README/config story for bd-6qd.4: one table per config section, walked from the
+/// schema so a new key documents itself. Regenerate the committed artifact with
+/// `fm-cli config-schema --reference <path>`; the drift test fails closed.
+#[must_use]
+pub fn config_reference_markdown() -> String {
+    fn emit_property<'a>(
+        out: &mut String,
+        key: &str,
+        property: &'a Value,
+        prefix: &str,
+        sections: &mut Vec<(String, &'a Value)>,
+    ) {
+        let dotted = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        let description = property["description"].as_str().unwrap_or("");
+        let property_type;
+        if property["type"] == "object" && property["properties"].as_object().is_some() {
+            sections.push((dotted.clone(), property));
+            property_type = format!("object — see [`{dotted}`](#{dotted})");
+        } else if let Some(variants) = property["enum"].as_array() {
+            let values = variants
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|v| format!("`{v}`"))
+                .collect::<Vec<_>>()
+                .join(" \\| ");
+            property_type = format!("string — one of {values} (case-insensitive)");
+        } else {
+            property_type = match property["type"].as_str() {
+                Some("string") => "string".into(),
+                Some("number") => "number (minimum 0)".into(),
+                Some("boolean") => "boolean".into(),
+                Some("object") => "object (free-form)".into(),
+                other => other.unwrap_or("unknown").to_string(),
+            };
+        };
+        out.push_str(&format!(
+            "| `{dotted}` | {property_type} | {description} |\n"
+        ));
+    }
+    fn emit_section(out: &mut String, title: &str, object: &Value, prefix: &str) {
+        out.push_str(&format!("### {title}\n\n"));
+        out.push_str("| Key | Type | Notes |\n|---|---|---|\n");
+        let mut sections = Vec::new();
+        if let Some(properties) = object["properties"].as_object() {
+            for (key, property) in properties {
+                emit_property(out, key, property, prefix, &mut sections);
+            }
+        }
+        out.push('\n');
+        for (section_title, section_object) in sections {
+            emit_section(out, &section_title, section_object, &section_title);
+        }
+    }
+
+    let schema = mermaid_config_schema();
+    let mut out = String::from(
+        "<!-- GENERATED from mermaid_config_schema() (fm-core) — do not edit by hand.\n\
+         Regenerate: fm-cli config-schema --reference <path> -->\n\n\
+         # Mermaid initialization configuration reference\n\n\
+         Strict contract for `%%{init: …}%%` payloads and API consumers (schema version 1.0.0). \
+         Unknown keys are rejected with an actionable diagnostic naming the offending key. \
+         String fields marked case-insensitive accept the listed spellings in any case.\n\n",
+    );
+    emit_section(&mut out, "Root", &schema, "");
+    let defs = schema["$defs"].as_object();
+    if let Some(defs) = defs {
+        out.push_str("## Directive forms\n\n");
+        out.push_str("These one-line directive forms embed the configuration object above:\n\n");
+        for (name, def) in defs {
+            let description = def["description"].as_str().unwrap_or("");
+            let pattern = def["pattern"].as_str().unwrap_or("");
+            out.push_str(&format!(
+                "- `{name}` — {description} Pattern: `{pattern}`\n"
+            ));
+        }
+    }
+    out
+}
+
 /// Strictly validate Mermaid initialization JSON without changing the permissive parser's
 /// compatibility behavior. In particular, unknown root and nested keys are validation errors,
 /// not merely parser warnings.
 #[must_use]
 pub fn validate_mermaid_config_value(value: &Value) -> MermaidConfigValidation {
+    let schema = mermaid_config_schema();
     let mut errors = parse_mermaid_js_config_value(value).errors;
     let Some(root) = value.as_object() else {
         return MermaidConfigValidation {
@@ -3985,59 +4211,56 @@ pub fn validate_mermaid_config_value(value: &Value) -> MermaidConfigValidation {
         };
     };
 
-    validate_known_config_keys(
-        root,
-        "",
-        &[
-            "theme",
-            "themeVariables",
-            "flowchart",
-            "sequence",
-            "gantt",
-            "constraints",
-            "securityLevel",
-            "startOnLoad",
-        ],
-        &mut errors,
-    );
-    for (section, allowed) in [
-        (
-            "flowchart",
-            &[
-                "direction",
-                "rankDir",
-                "curve",
-                "nodeSpacing",
-                "rankSpacing",
-            ][..],
-        ),
-        ("sequence", &["mirrorActors", "showSequenceNumbers"][..]),
-        ("gantt", &["topAxis"][..]),
-    ] {
-        if let Some(nested) = root.get(section).and_then(Value::as_object) {
-            validate_known_config_keys(nested, section, allowed, &mut errors);
-        }
+    // The SCHEMA is the single source of truth for what validation accepts: the allowed key
+    // sets and the enum memberships below are WALKED out of `mermaid_config_schema()`, so a
+    // schema edit cannot drift from validation. (A hand-maintained parallel list here was how
+    // the two could silently disagree; `strict_config_schema_matches_the_runtime_contract`
+    // pins the agreement end to end.)
+    let properties = schema["properties"]
+        .as_object()
+        .expect("schema has properties");
+
+    let root_keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+    validate_known_config_keys(root, "", &root_keys, &mut errors);
+    for (section, section_schema) in properties {
+        let Some(nested) = root.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(nested_properties) = section_schema["properties"].as_object() else {
+            // A free-form object (e.g. `constraints`, `themeVariables`): the schema imposes
+            // no key contract of its own, so only the projection rules apply.
+            continue;
+        };
+        let nested_keys: Vec<&str> = nested_properties.keys().map(String::as_str).collect();
+        validate_known_config_keys(nested, section, &nested_keys, &mut errors);
     }
 
-    for (field, accepted) in [
-        ("flowchart.direction", &["lr", "rl", "tb", "td", "bt"][..]),
-        ("flowchart.rankDir", &["lr", "rl", "tb", "td", "bt"][..]),
-        ("securityLevel", &["strict", "antiscript", "loose"][..]),
-    ] {
+    // Enum membership, case-insensitively, walked the same way: every `enum` in the schema is
+    // the set of accepted spellings for that dotted field.
+    for (field, variants) in schema_enums(&schema, "") {
         let raw = match field.split_once('.') {
             Some((section, key)) => root
                 .get(section)
                 .and_then(Value::as_object)
                 .and_then(|obj| obj.get(key)),
-            None => root.get(field),
+            None => root.get(field.as_str()),
         };
         if let Some(raw) = raw.and_then(Value::as_str)
-            && !accepted.iter().any(|value| raw.eq_ignore_ascii_case(value))
+            && !variants
+                .iter()
+                .any(|value| value.as_str().is_some_and(|v| raw.eq_ignore_ascii_case(v)))
         {
             errors.push(MermaidConfigError {
-                field: field.to_string(),
+                field: field.clone(),
                 value: raw.to_string(),
-                message: format!("must be one of {}", accepted.to_vec().join(", ")),
+                message: format!(
+                    "must be one of {} (case-insensitive)",
+                    variants
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             });
         }
     }
@@ -4068,6 +4291,30 @@ fn validate_known_config_keys(
             });
         }
     }
+}
+
+/// Every `enum` in the schema, as `(dotted-field, variants)` pairs, walked recursively so a
+/// nested section added later is validated without touching this function. `prefix` carries
+/// the dotted path of the object currently being walked (`""` at the root).
+fn schema_enums<'a>(schema: &'a Value, prefix: &str) -> Vec<(String, &'a Vec<Value>)> {
+    let mut out = Vec::new();
+    let Some(properties) = schema["properties"].as_object() else {
+        return out;
+    };
+    for (key, property) in properties {
+        let field = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if let Some(variants) = property["enum"].as_array() {
+            out.push((field.clone(), variants));
+        }
+        if property["type"] == "object" {
+            out.extend(schema_enums(property, &field));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -9306,6 +9553,140 @@ mod tests {
 
         let warnings = ir.diagnostics_by_severity(DiagnosticSeverity::Warning);
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn typescript_declarations_cover_every_schema_property_and_stay_deterministic() {
+        let first = super::config_typescript_declarations();
+        assert_eq!(
+            first,
+            super::config_typescript_declarations(),
+            "generated TS must be deterministic"
+        );
+        let schema = super::mermaid_config_schema();
+
+        fn assert_covered(ts: &str, schema: &serde_json::Value, prefix: &str) {
+            let properties = schema["properties"].as_object().expect("object properties");
+            for (key, property) in properties {
+                let dotted = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                let leaf = dotted.rsplit('.').next().unwrap();
+                assert!(
+                    ts.contains(&format!("  {leaf}?: ")),
+                    "TS surface is missing {dotted}: regenerate docs/generated/mermaid-config.d.ts"
+                );
+                if property["type"] == "object" && property["properties"].as_object().is_some() {
+                    assert_covered(ts, property, &dotted);
+                }
+            }
+        }
+        assert_covered(&first, &schema, "");
+
+        assert!(
+            first.contains("\"lr\" | \"rl\" | \"tb\" | \"td\" | \"bt\""),
+            "schema enums must surface as string-literal unions"
+        );
+        assert!(first.contains("export interface FlowchartConfig {"));
+        assert!(first.contains("export type InitDirective = string;"));
+    }
+
+    #[test]
+    fn reference_markdown_covers_every_schema_property_and_stays_deterministic() {
+        let first = super::config_reference_markdown();
+        assert_eq!(
+            first,
+            super::config_reference_markdown(),
+            "generated reference must be deterministic"
+        );
+        let schema = super::mermaid_config_schema();
+
+        fn assert_covered(md: &str, schema: &serde_json::Value, prefix: &str) {
+            let properties = schema["properties"].as_object().expect("object properties");
+            for (key, property) in properties {
+                let dotted = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                assert!(
+                    md.contains(&format!("| `{dotted}` |")),
+                    "reference markdown is missing {dotted}: regenerate docs/generated/CONFIG_REFERENCE.md"
+                );
+                if property["type"] == "object" && property["properties"].as_object().is_some() {
+                    assert_covered(md, property, &dotted);
+                }
+            }
+        }
+        assert_covered(&first, &schema, "");
+        assert!(first.contains("## Directive forms"));
+    }
+
+    #[test]
+    fn validation_walks_its_key_contract_from_the_schema() {
+        // Both directions of the binding: every schema-declared section key is accepted...
+        let schema = super::mermaid_config_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        for (section, section_schema) in properties {
+            let Some(section_properties) = section_schema["properties"].as_object() else {
+                continue;
+            };
+            let section_keys: Vec<String> = section_properties
+                .keys()
+                .map(|k| format!("\"{k}\": null"))
+                .collect();
+            let probe = format!("{{ \"{section}\": {{ {} }} }}", section_keys.join(", "));
+            let parsed: serde_json::Value = serde_json::from_str(&probe).unwrap();
+            let validated = super::validate_mermaid_config_value(&parsed);
+            assert!(
+                validated.is_valid(),
+                "schema-declared {section} keys must validate: {:?} / probe {probe}",
+                validated.errors
+            );
+        }
+        // ...and an unknown key at any depth is refused with the dotted key named.
+        let unknown_root = super::validate_mermaid_config_value(&json!({ "logLevel": 3 }));
+        assert_eq!(unknown_root.errors[0].field, "logLevel");
+        let unknown_nested = super::validate_mermaid_config_value(&json!({
+            "flowchart": { "diagramPadding": 8 }
+        }));
+        assert_eq!(unknown_nested.errors[0].field, "flowchart.diagramPadding");
+    }
+
+    #[test]
+    fn validation_accepts_declared_enum_variants_case_insensitively_from_the_schema() {
+        let schema = super::mermaid_config_schema();
+        for (field, variants) in super::schema_enums(&schema, "") {
+            for variant in variants {
+                let spelling = variant
+                    .as_str()
+                    .expect("enum variants are strings")
+                    .to_uppercase();
+                let value = match field.split_once('.') {
+                    Some((section, key)) => json!({ section: { key: spelling } }),
+                    None => json!({ field.clone(): spelling }),
+                };
+                let validated = super::validate_mermaid_config_value(&value);
+                assert!(
+                    validated.is_valid(),
+                    "{field} must accept {spelling:?}: {:?}",
+                    validated.errors
+                );
+            }
+            // And an undeclared spelling is refused with a remediation hint.
+            let bad = match field.split_once('.') {
+                Some((section, key)) => json!({ section: { key: "diagonal" } }),
+                None => json!({ field.clone(): "diagonal" }),
+            };
+            let validated = super::validate_mermaid_config_value(&bad);
+            assert!(!validated.is_valid(), "{field} must refuse \"diagonal\"");
+            assert!(
+                validated.errors[0].message.contains("case-insensitive"),
+                "the refusal must carry the remediation hint"
+            );
+        }
     }
 
     #[test]

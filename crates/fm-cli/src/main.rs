@@ -582,6 +582,16 @@ enum Command {
         /// Emit compact JSON instead of the default readable schema document.
         #[arg(long)]
         compact: bool,
+
+        /// Write the generated TypeScript declarations for the config contract to this
+        /// path (bd-6qd.4). Combine with --reference; stdout stays empty when either
+        /// emission path is given.
+        #[arg(long)]
+        typescript: Option<String>,
+
+        /// Write the generated configuration reference markdown to this path (bd-6qd.4).
+        #[arg(long)]
+        reference: Option<String>,
     },
 
     /// Strictly validate Mermaid initialization configuration JSON.
@@ -3692,7 +3702,11 @@ fn run() -> Result<()> {
 
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
-        Command::ConfigSchema { compact } => cmd_config_schema(compact),
+        Command::ConfigSchema {
+            compact,
+            typescript,
+            reference,
+        } => cmd_config_schema(compact, typescript.as_deref(), reference.as_deref()),
 
         Command::ValidateConfig { input, pretty } => {
             cmd_validate_config(&input, pretty, max_input_bytes)
@@ -4579,7 +4593,23 @@ fn cmd_support_matrix(options: SupportMatrixCommandOptions<'_>) -> Result<()> {
     write_output(options.output, &json)
 }
 
-fn cmd_config_schema(compact: bool) -> Result<()> {
+fn cmd_config_schema(
+    compact: bool,
+    typescript: Option<&str>,
+    reference: Option<&str>,
+) -> Result<()> {
+    // Artifact emission (bd-6qd.4): the committed docs/generated files are written from the
+    // same fm-core generators the drift test compares against, so regeneration and the test
+    // can never disagree about what "current" means.
+    if typescript.is_some() || reference.is_some() {
+        if let Some(path) = typescript {
+            write_output(Some(path), &fm_core::config_typescript_declarations())?;
+        }
+        if let Some(path) = reference {
+            write_output(Some(path), &fm_core::config_reference_markdown())?;
+        }
+        return Ok(());
+    }
     let schema = if compact {
         serde_json::to_string(&mermaid_config_schema())?
     } else {
@@ -9847,6 +9877,81 @@ mod config_tests {
     };
     use fm_layout::{CycleStrategy, EdgeRouting};
     use fm_render_svg::ThemePreset;
+
+    /// bd-6qd.4: the committed generated artifacts must equal what the fm-core generators
+    /// produce RIGHT NOW. Fail-closed drift check — when this fires, regenerate with
+    /// `fm-cli config-schema --typescript docs/generated/mermaid-config.d.ts --reference
+    /// docs/generated/CONFIG_REFERENCE.md` and commit both files together with the schema
+    /// change that caused the drift.
+    #[test]
+    fn committed_config_artifacts_match_the_generators() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (relative, generated) in [
+            (
+                "docs/generated/mermaid-config.d.ts",
+                fm_core::config_typescript_declarations(),
+            ),
+            (
+                "docs/generated/CONFIG_REFERENCE.md",
+                fm_core::config_reference_markdown(),
+            ),
+        ] {
+            let committed = std::fs::read_to_string(repo.join(relative)).unwrap_or_else(|err| {
+                panic!("{relative} is missing ({err}); regenerate it with fm-cli config-schema")
+            });
+            assert_eq!(
+                committed, generated,
+                "{relative} drifted from the schema; regenerate with fm-cli config-schema"
+            );
+        }
+    }
+
+    /// bd-6qd.4: the checked-in sample configs pin the contract end to end — every valid_*
+    /// sample validates, every invalid_* sample is refused naming the offending dotted key.
+    /// The samples travel with the repo so the release gauntlet (bd-6qd.5) can run the same
+    /// set through the real CLI.
+    #[test]
+    fn checked_in_config_samples_validate_through_the_contract() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evidence/config_samples");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("config_samples dir exists") {
+            let path = entry.expect("readable sample").path();
+            let name = path
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .to_string();
+            if !name.ends_with(".json") {
+                continue;
+            }
+            checked += 1;
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("sample is readable"))
+                    .expect("sample is valid JSON");
+            let validated = fm_core::validate_mermaid_config_value(&value);
+            if name.starts_with("valid_") {
+                assert!(
+                    validated.is_valid(),
+                    "{name} must validate: {:?}",
+                    validated.errors
+                );
+            } else if name.starts_with("invalid_") {
+                assert!(
+                    !validated.is_valid(),
+                    "{name} must be refused: the contract is fail-closed"
+                );
+                assert!(
+                    validated.errors.iter().all(|e| !e.field.is_empty()),
+                    "{name}: every refusal names the offending dotted key"
+                );
+            }
+        }
+        assert!(
+            checked >= 7,
+            "expected the full sample set, found {checked}"
+        );
+    }
 
     #[test]
     fn documented_config_sections_parse_successfully() {
