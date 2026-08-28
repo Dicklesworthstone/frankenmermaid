@@ -7,7 +7,7 @@ focus classes, staggered step reveals, slide navigation, overview tour rect (pre
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
 layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
-drag spring-back. 33 checks; exit 0 = all pass.
+drag spring-back, self-loop edges gluing to their node, and variant followers. 36 checks; exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
 chromium (any venv works: /path/to/venv/bin/python scripts/deck_runtime_e2e.py). The
@@ -83,6 +83,27 @@ with sync_playwright() as p:
         "el => (el.tagName === 'path' ? el : el.querySelector('path'))"
         ".classList.contains('fm-deck-parked')")
     check("engine edge path parked", parked)
+    # Self-loop (fm-edge-4 on node c): no degenerate live segment; the engine loop path
+    # stays visible and the whole edge group rides the node's displacement instead.
+    loop_parked = page.eval_on_selector(
+        "#fm-edge-4 path", "el => el.classList.contains('fm-deck-parked')")
+    check("self-loop engine path NOT parked", not loop_parked)
+    # Read companions in ONE evaluate so the sampled transforms come from the same frame
+    # (separate round-trips race the animation loop).
+    companions = page.evaluate(
+        "() => { const g = s => document.querySelector(s);"
+        " return { c: g('#fm-node-c-2').getAttribute('transform') || '',"
+        "   loop: g('#fm-edge-4').getAttribute('transform') || '',"
+        "   mirror: g('#fm-node-c-2-mirror-header').getAttribute('transform') || '',"
+        "   mirrorDim: g('#fm-node-c-2-mirror-header').classList.contains('fm-deck-dim') }; }")
+    check("self-loop group rides its node (both displaced together)",
+          push_mag(companions["c"]) > 30 and companions["loop"] == companions["c"],
+          companions)
+    # Variant follower (fm-node-c-2-mirror-header, a sequence-style bottom mirror): not a
+    # manifest member, but it must mirror c's focus classes and ride c's exact transform.
+    check("variant follower mirrors dim + exact transform of its base",
+          companions["mirrorDim"] and companions["mirror"] == companions["c"],
+          companions)
     # Drag member a and release: it follows the pointer, then springs back home.
     box = page.eval_on_selector("#fm-node-a-0", "el => { const r = el.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }")
     page.mouse.move(box["x"], box["y"]); page.mouse.down()

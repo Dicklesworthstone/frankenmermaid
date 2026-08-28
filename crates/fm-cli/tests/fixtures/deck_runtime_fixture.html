@@ -56,10 +56,12 @@ var SVG =
   '<path id="fm-edge-1" d="M 500 140 L 500 260" stroke="#7c9" stroke-width="2" fill="none"/>' +
   '<path id="fm-edge-2" d="M 540 280 L 720 280" stroke="#7c9" stroke-width="2" fill="none"/>' +
   '<path id="fm-edge-3" d="M 740 300 L 740 380 L 180 380 L 160 140" stroke="#7c9" stroke-width="2" fill="none"/>' +
+  '<g id="fm-edge-4"><path d="M 500 254 C 530 210, 470 210, 500 254" stroke="#7c9" stroke-width="2" fill="none"/></g>' +
   '<g id="fm-node-a-0" data-id="a"><rect x="60" y="90" width="100" height="52" rx="8" fill="#1c4" /><text x="110" y="122" text-anchor="middle">a</text></g>' +
   '<g id="fm-node-b-1" data-id="b"><rect x="420" y="94" width="100" height="52" rx="8" fill="#2c5"/><text x="470" y="126" text-anchor="middle">b</text></g>' +
   '<g id="fm-node-c-2" data-id="c"><rect x="450" y="254" width="100" height="52" rx="8" fill="#3c6"/><text x="500" y="286" text-anchor="middle">c</text></g>' +
   '<g id="fm-node-d-3" data-id="d"><rect x="700" y="254" width="100" height="52" rx="8" fill="#4c7"/><text x="750" y="286" text-anchor="middle">d</text></g>' +
+  '<g id="fm-node-c-2-mirror-header"><rect x="450" y="430" width="100" height="30" rx="8" fill="#3c6"/><text x="500" y="450" text-anchor="middle">c (mirror)</text></g>' +
   "</svg>";
 
 /* Hand-written DeckManifest 1.1.0. Slide 1: a + b (b at step 1; a→b edge follows). Slide 2:
@@ -129,7 +131,8 @@ var MANIFEST = {
     "fm-edge-0": { fromElementId: "fm-node-a-0", toElementId: "fm-node-b-1" },
     "fm-edge-1": { fromElementId: "fm-node-b-1", toElementId: "fm-node-c-2" },
     "fm-edge-2": { fromElementId: "fm-node-c-2", toElementId: "fm-node-d-3" },
-    "fm-edge-3": { fromElementId: "fm-node-d-3", toElementId: "fm-node-a-0" }
+    "fm-edge-3": { fromElementId: "fm-node-d-3", toElementId: "fm-node-a-0" },
+    "fm-edge-4": { fromElementId: "fm-node-c-2", toElementId: "fm-node-c-2" }
   }
 };
 

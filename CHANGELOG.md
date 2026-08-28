@@ -70,6 +70,22 @@ The CLI shipped concurrent multi-diagram `render-batch` and reused renders acros
 - [`1228089e`](https://github.com/Dicklesworthstone/frankenmermaid/commit/1228089ec7cf7fbdb8fd930dcccaf972c9b48a32) — relocate `FEATURE_PARITY.md`, `UPGRADE_LOG.md`, and `EXISTING_FRANKENTUI_MERMAID_STRUCTURE.md` into `docs/planning/`; move `update_evidence.rs` into `scripts/`.
 - [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82) — move `CRATES_IO_PUBLISHING.md` to [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md).
 
+### Graph-deck polish — narrative demo, visible-member camera, edge cases (2026-08-27, bd-sofet)
+
+The showcase demo grew from a 20-node pipeline chart into a 46-node, 9-slide talk the
+engine gives about itself (eight classDef color chapters, hub constellations, tooltips,
+reveal beats). The runtime's camera now fits the VISIBLE members of the current step —
+graphcon's computeFit skips hidden nodes — so reveal-gated slides open as close-ups and
+zoom out beat by beat instead of framing empty space. A fresh-eyes review then fixed
+three morph-mode bugs: self-loop edges are glued to their node's displacement instead of
+collapsing into a parked zero-length live segment; still-hidden members (opacity 0 but
+hit-testable) can no longer be grabbed by the drag gesture; and the overview tour parks
+its animation frames while the stage is scrolled off screen. Variant elements such as a
+sequence actor's bottom mirror-header — never manifest members — now register as
+followers that mirror their base node's focus classes and motion, fixing bottom actor
+boxes staying lit and stranded during sequence decks (a gap dating to the original epic).
+`scripts/deck_runtime_e2e.py` covers all of it at 36 headless checks.
+
 ### Graph-deck morphing — the graph rearranges live (2026-08-27, bd-tm1q7)
 
 Deck presentations now morph the way graphcon-deck does instead of only panning a static

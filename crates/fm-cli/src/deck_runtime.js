@@ -183,10 +183,30 @@
       });
     }
     var elements = Object.create(null); // elementId -> Element
+    var followersOf = Object.create(null); // base elementId -> [variant Elements]
     var all = svgRoot.querySelectorAll("[id]");
     for (var i = 0; i < all.length; i += 1) {
       var candidate = all[i];
-      if (wanted[candidate.id]) elements[candidate.id] = candidate;
+      if (wanted[candidate.id]) {
+        elements[candidate.id] = candidate;
+        continue;
+      }
+      // Variant elements (e.g. a sequence actor's bottom mirror-header,
+      // `fm-node-{slug}-{index}-mirror-header`) are not manifest members but belong to one:
+      // walk suffix segments off until a known node id appears, and make the element a
+      // FOLLOWER — it mirrors its base's focus classes and, in morph mode, its motion.
+      if (candidate.id.indexOf("fm-node-") === 0) {
+        var baseId = candidate.id;
+        var cut = baseId.lastIndexOf("-");
+        while (cut > 0) {
+          baseId = baseId.slice(0, cut);
+          if (wanted[baseId]) {
+            (followersOf[baseId] = followersOf[baseId] || []).push(candidate);
+            break;
+          }
+          cut = baseId.lastIndexOf("-");
+        }
+      }
     }
 
     /* ── Morph model (graphcon parity, bd-tm1q7) ─────────────────── */
@@ -241,6 +261,7 @@
           fx: rect.x + rect.width / 2, // current rendered center, filled per frame
           fy: rect.y + rect.height / 2,
           dragging: false,
+          followers: followersOf[id] || null,
         };
         morphNodeIds.push(id);
       });
@@ -259,6 +280,13 @@
         var from = ends && morphNodes[ends.fromElementId];
         var to = ends && morphNodes[ends.toElementId];
         if (!group || !from || !to) return;
+        // A self-loop cannot be redrawn as a segment between two border points (they
+        // coincide); keep the engine's loop path visible and glue the whole edge group to
+        // its node's displacement instead.
+        if (from === to) {
+          liveEdges.push({ group: group, live: null, from: from, to: to, selfLoop: true });
+          return;
+        }
         // Engine edges are groups wrapping a path; hand-authored fixtures may use bare paths.
         var enginePath =
           group.tagName === "path" ? group : group.querySelector("path");
@@ -447,12 +475,19 @@
       if (!el) return;
       if (on) el.classList.add(className);
       else el.classList.remove(className);
-      // Live edge paths mirror their engine group's focus classes (single choke point:
-      // every dim/half/hidden change anywhere flows through here).
+      // Live edge paths and variant followers mirror their base element's focus classes
+      // (single choke point: every dim/half/hidden change anywhere flows through here).
       var live = el.id && liveOf[el.id];
       if (live) {
         if (on) live.classList.add(className);
         else live.classList.remove(className);
+      }
+      var followers = el.id && followersOf[el.id];
+      if (followers) {
+        for (var f = 0; f < followers.length; f += 1) {
+          if (on) followers[f].classList.add(className);
+          else followers[f].classList.remove(className);
+        }
       }
     }
 
@@ -710,13 +745,25 @@
         var bobY = Math.cos(now * FLOAT_SPEED_Y + n.phase * 1.4) * FLOAT_AMP;
         n.fx = n.hx + bobX + n.px + n.tx;
         n.fy = n.hy + bobY + n.py + n.ty;
-        n.el.setAttribute(
-          "transform",
-          "translate(" + (n.fx - n.hx).toFixed(2) + " " + (n.fy - n.hy).toFixed(2) + ")"
-        );
+        var nodeTransform =
+          "translate(" + (n.fx - n.hx).toFixed(2) + " " + (n.fy - n.hy).toFixed(2) + ")";
+        n.el.setAttribute("transform", nodeTransform);
+        if (n.followers) {
+          for (var fi = 0; fi < n.followers.length; fi += 1) {
+            n.followers[fi].setAttribute("transform", nodeTransform);
+          }
+        }
       }
       for (i = 0; i < liveEdges.length; i += 1) {
         var edge = liveEdges[i];
+        if (edge.selfLoop) {
+          var loop = edge.from;
+          edge.group.setAttribute(
+            "transform",
+            "translate(" + (loop.fx - loop.hx).toFixed(2) + " " + (loop.fy - loop.hy).toFixed(2) + ")"
+          );
+          continue;
+        }
         var a = borderPoint(edge.from, edge.to.fx, edge.to.fy);
         var b = borderPoint(edge.to, edge.from.fx, edge.from.fy);
         edge.live.setAttribute(
@@ -737,7 +784,9 @@
       state.raf = 0;
       if (state.destroyed) return;
       var busy = false;
-      if (state.tour) {
+      // The tour freezes while the stage is off-screen (stageOnScreen only ever goes false
+      // when the IntersectionObserver is active); its wake() restarts the loop on return.
+      if (state.tour && stageOnScreen) {
         tourStep(now);
         busy = true;
       }
@@ -858,7 +907,14 @@
         // back on release (graphcon view-mode drag). Exiles still click-to-travel.
         var grabId = elementIdAt(event.target);
         var grab = grabId && morphNodes[grabId];
-        if (grab && !grab.el.classList.contains("fm-deck-dim")) {
+        // Never grab an exile (dim: click travels instead) or a not-yet-revealed member
+        // (hidden: opacity 0 but still hit-testable — grabbing it would drag an invisible
+        // node and swallow the pan gesture).
+        if (
+          grab &&
+          !grab.el.classList.contains("fm-deck-dim") &&
+          !grab.el.classList.contains("fm-deck-hidden")
+        ) {
           nodeDrag = {
             node: grab,
             startX: event.clientX,
