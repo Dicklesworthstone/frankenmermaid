@@ -3806,6 +3806,7 @@ pub fn mermaid_config_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://frankenmermaid.dev/schema/mermaid-config/1.0.0",
         "title": "FrankenMermaid initialization config",
+        "description": "Strict configuration object used by %%{init: …}%% directives and API consumers.",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -3841,6 +3842,18 @@ pub fn mermaid_config_schema() -> Value {
             "constraints": { "type": "object" },
             "securityLevel": { "type": "string", "description": "strict, antiscript, or loose (case-insensitive)" },
             "startOnLoad": { "type": "boolean", "description": "Accepted for compatibility; currently has no runtime effect" }
+        },
+        "$defs": {
+            "initDirective": {
+                "type": "string",
+                "description": "One-line Mermaid directive: %%{init: <config-object>}%%. The payload must validate against this root schema.",
+                "pattern": "^%%\\\\{init:[^\\n]+}%%$"
+            },
+            "constraintsDirective": {
+                "type": "string",
+                "description": "One-line Mermaid directive: %%{constraints: <object>}%%.",
+                "pattern": "^%%\\\\{constraints:[^\\n]+}%%$"
+            }
         }
     })
 }
@@ -9227,6 +9240,11 @@ mod tests {
         assert_eq!(
             schema["properties"]["sequence"]["additionalProperties"],
             false
+        );
+        assert!(
+            schema["$defs"]["initDirective"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("%%{init:"))
         );
 
         let validated = super::validate_mermaid_config_value(&json!({

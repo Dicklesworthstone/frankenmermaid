@@ -1570,6 +1570,16 @@ pub fn validate_config_json(config_json: &str) -> Result<String, JsValue> {
         .map_err(|error| js_error(format!("failed to serialize config validation: {error}")))
 }
 
+/// Strictly validate Mermaid initialization directives in source and return a serializable report.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = validateInitDirectives))]
+pub fn validate_init_directives_js(source: &str) -> Result<String, JsValue> {
+    serde_json::to_string(&fm_parser::validate_mermaid_init_directives(source)).map_err(|error| {
+        js_error(format!(
+            "failed to serialize init-directive validation: {error}"
+        ))
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(typescript_custom_section)]
 const MERMAID_CONFIG_VALIDATION_TS: &str = r#"
@@ -1583,6 +1593,8 @@ export interface MermaidConfigValidation {
 export function configSchema(): string;
 /** Validate config JSON and return MermaidConfigValidation encoded as JSON. */
 export function validateConfig(configJson: string): string;
+/** Validate Mermaid init/constraints directives and return MermaidConfigValidation encoded as JSON. */
+export function validateInitDirectives(source: string): string;
 "#;
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderSvg))]
@@ -2703,7 +2715,7 @@ mod tests {
         hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
         merge_svg_config, parse_theme_preset, read_runtime_config, render, render_deck,
         render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        validate_config_json, write_runtime_config,
+        validate_config_json, validate_init_directives_js, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -2742,6 +2754,23 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error["field"] == "flowchart.nodeSpacng")
+        }));
+    }
+
+    #[test]
+    fn directive_validation_export_rejects_an_unknown_nested_key() {
+        let report: serde_json::Value = serde_json::from_str(
+            &validate_init_directives_js(
+                "%%{init: { flowchart: { nodeSpacng: 24 } }}%%\nflowchart LR\nA --> B",
+            )
+            .expect("directive validation must return JSON"),
+        )
+        .expect("directive validation report must be JSON");
+
+        assert!(report["errors"].as_array().is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|error| error["field"] == "init[1].flowchart.nodeSpacng")
         }));
     }
 

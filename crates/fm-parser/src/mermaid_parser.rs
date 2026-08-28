@@ -9,8 +9,10 @@ use fm_core::{
     DiagramType, EdgeAnimation, GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval,
     GraphDirection, IrAttributeKey, IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy,
     IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId,
-    IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel,
-    NodeShape, Position, Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MERMAID_CONFIG_SCHEMA_VERSION,
+    MermaidConfigError, MermaidConfigValidation, MermaidParseMode, MermaidSupportLevel, NodeShape,
+    Position, Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    validate_mermaid_config_value,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
@@ -13326,6 +13328,122 @@ pub(crate) fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+/// Strict counterpart to [`parse_init_directives`]. Rendering keeps Mermaid's warning-oriented
+/// behavior, but config tooling needs a precise error for an ignored key or malformed directive.
+pub(crate) fn validate_init_directives(input: &str) -> MermaidConfigValidation {
+    let mut errors = Vec::new();
+
+    for (index, line) in byte_lines(input).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if !trimmed.starts_with("%%{") {
+            continue;
+        }
+        // Deck directives are structural declarations with a dedicated parser. In particular,
+        // a multi-line deck block must not become a false config-validation error.
+        if trimmed
+            .get(3..7)
+            .is_some_and(|name| name.eq_ignore_ascii_case("deck"))
+        {
+            continue;
+        }
+
+        let Some(inner) = trimmed
+            .strip_prefix("%%{")
+            .and_then(|body| body.strip_suffix("}%%"))
+        else {
+            errors.push(directive_validation_error(
+                line_number,
+                "$directive",
+                trimmed,
+                "must be a complete one-line %%{init: <object>}%% or %%{constraints: <object>}%% directive",
+            ));
+            continue;
+        };
+        let Some((directive, payload)) = inner.trim().split_once(':') else {
+            errors.push(directive_validation_error(
+                line_number,
+                "$directive",
+                trimmed,
+                "must name a directive and provide a JSON or JSON5 payload",
+            ));
+            continue;
+        };
+        let directive = directive.trim();
+        let payload = payload.trim();
+        if payload.is_empty() {
+            errors.push(directive_validation_error(
+                line_number,
+                directive,
+                "",
+                "must provide a JSON or JSON5 payload",
+            ));
+            continue;
+        }
+        let config_value = match directive.to_ascii_lowercase().as_str() {
+            "init" => match parse_init_payload_value(payload) {
+                Ok(value) => value,
+                Err(message) => {
+                    errors.push(directive_validation_error(
+                        line_number,
+                        "init",
+                        payload,
+                        &format!("payload is not valid JSON or JSON5: {message}"),
+                    ));
+                    continue;
+                }
+            },
+            "constraints" => match parse_init_payload_value(payload) {
+                Ok(value) => Value::Object(serde_json::Map::from_iter([(
+                    "constraints".to_string(),
+                    value,
+                )])),
+                Err(message) => {
+                    errors.push(directive_validation_error(
+                        line_number,
+                        "constraints",
+                        payload,
+                        &format!("payload is not valid JSON or JSON5: {message}"),
+                    ));
+                    continue;
+                }
+            },
+            other => {
+                errors.push(directive_validation_error(
+                    line_number,
+                    other,
+                    payload,
+                    "is not a supported Mermaid configuration directive; use init or constraints",
+                ));
+                continue;
+            }
+        };
+
+        for mut error in validate_mermaid_config_value(&config_value).errors {
+            error.field = format!("{directive}[{line_number}].{}", error.field);
+            errors.push(error);
+        }
+    }
+
+    MermaidConfigValidation {
+        schema_version: MERMAID_CONFIG_SCHEMA_VERSION.to_string(),
+        errors,
+    }
+}
+
+fn directive_validation_error(
+    line_number: usize,
+    field: &str,
+    value: &str,
+    message: &str,
+) -> MermaidConfigError {
+    MermaidConfigError {
+        field: format!("{field}[{line_number}]"),
+        value: value.to_string(),
+        message: message.to_string(),
+    }
+}
+
 const MAX_DECK_BLOCK_LINES: usize = 400;
 const MAX_DECK_BLOCK_BYTES: usize = 32 * 1024;
 
@@ -16198,7 +16316,7 @@ mod tests {
         CLASS_OPERATORS, ER_OPERATORS, FLOW_OP_GATE, FLOW_OPERATORS, PACKET_OPERATORS,
         SEQUENCE_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines, flow_statement_parser,
         is_dangling_placeholder_node_id, parse_edge_statement_asts,
-        parse_fast_simple_flowchart_statement_ast, parse_mermaid,
+        parse_fast_simple_flowchart_statement_ast, parse_mermaid, validate_init_directives,
     };
     use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
 
@@ -19255,6 +19373,27 @@ merge develop id: merge1 tag: release",
             }),
             "merge source edge should say which branch was merged"
         );
+    }
+
+    #[test]
+    fn strict_init_directive_validation_rejects_unknown_nested_config_keys() {
+        let validation = validate_init_directives(
+            "%%{init: { flowchart: { nodeSpacng: 24 } }}%%\nflowchart LR\nA --> B",
+        );
+
+        assert!(!validation.is_valid());
+        assert!(validation.errors.iter().any(|error| {
+            error.field == "init[1].flowchart.nodeSpacng"
+                && error.message.contains("not supported by config schema")
+        }));
+    }
+
+    #[test]
+    fn strict_init_directive_validation_ignores_deck_blocks() {
+        let validation =
+            validate_init_directives("%%{deck:\n  title: Demo\n}%%\nflowchart LR\nA --> B");
+
+        assert!(validation.is_valid(), "{:#?}", validation.errors);
     }
 
     #[test]

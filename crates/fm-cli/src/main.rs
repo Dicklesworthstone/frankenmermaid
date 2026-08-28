@@ -67,6 +67,7 @@ use fm_parser::{
     FlowchartBatchParsePlan, FlowchartBatchParseRef, FlowchartBatchParseScratch, ParserConfig,
     capture_format_complement, detect_type_with_confidence_and_config, first_significant_line,
     parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
+    validate_mermaid_init_directives,
 };
 use fm_render_svg::{
     A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgBatchRendererSeed, SvgRenderConfig,
@@ -559,6 +560,17 @@ enum Command {
     /// Strictly validate Mermaid initialization configuration JSON.
     ValidateConfig {
         /// JSON file path, inline JSON, or "-" for stdin.
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Pretty-print the validation result JSON.
+        #[arg(long)]
+        pretty: bool,
+    },
+
+    /// Strictly validate Mermaid %%{init: …}%% and %%{constraints: …}%% directives in source.
+    ValidateDirectives {
+        /// Mermaid source file path, inline source, or "-" for stdin.
         #[arg(default_value = "-")]
         input: String,
 
@@ -3646,6 +3658,10 @@ fn run() -> Result<()> {
             cmd_validate_config(&input, pretty, max_input_bytes)
         }
 
+        Command::ValidateDirectives { input, pretty } => {
+            cmd_validate_directives(&input, pretty, max_input_bytes)
+        }
+
         Command::DeterminismManifest => cmd_determinism_manifest(),
 
         Command::Minimize {
@@ -4485,6 +4501,24 @@ fn cmd_validate_config(input: &str, pretty: bool, max_input_bytes: usize) -> Res
     anyhow::ensure!(
         validation.is_valid(),
         "configuration violates schema {}",
+        validation.schema_version
+    );
+    Ok(())
+}
+
+fn cmd_validate_directives(input: &str, pretty: bool, max_input_bytes: usize) -> Result<()> {
+    let source = load_input(input, max_input_bytes)?;
+    let validation = validate_mermaid_init_directives(&source);
+    let rendered = if pretty {
+        serde_json::to_string_pretty(&validation)?
+    } else {
+        serde_json::to_string(&validation)?
+    };
+    write_output(None, &rendered)?;
+    io::stdout().write_all(b"\n")?;
+    anyhow::ensure!(
+        validation.is_valid(),
+        "Mermaid initialization directives violate schema {}",
         validation.schema_version
     );
     Ok(())

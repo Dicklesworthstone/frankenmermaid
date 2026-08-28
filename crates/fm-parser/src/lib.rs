@@ -18,6 +18,15 @@ use unicode_segmentation::UnicodeSegmentation;
 pub use dot_parser::{looks_like_dot, parse_dot};
 pub use mermaid_parser::first_significant_line;
 
+/// Strictly validate every one-line Mermaid initialization/configuration directive in source.
+///
+/// Parsing remains best-effort for rendering compatibility; this explicit endpoint is for callers
+/// that need unknown keys and malformed directives to stop a configuration rollout before render.
+#[must_use]
+pub fn validate_mermaid_init_directives(source: &str) -> fm_core::MermaidConfigValidation {
+    mermaid_parser::validate_init_directives(source)
+}
+
 /// Normalize a Mermaid identifier by trimming, stripping quotes, and replacing unsafe characters
 /// with underscores -- BORROWING when the input already normalizes to itself.
 ///
