@@ -4562,8 +4562,14 @@ fn lower_sequence_statement(
 
 fn parse_class(input: &str, builder: &mut IrBuilder) {
     let mut in_block: Option<String> = None; // Currently open class block name
-    // Stack of (namespace_name, subgraph_index) for nested namespace blocks.
-    let mut namespace_stack: Vec<(String, usize)> = Vec::new();
+    // Stack of (namespace_name, subgraph_index, cluster_index) for nested namespace blocks.
+    //
+    // ⚠️ THE CLUSTER INDEX IS CARRIED BECAUSE MEMBERSHIP HAS TO BE WRITTEN TWICE, and writing only
+    // the subgraph is what made `namespace` invisible. `build_cluster_boxes` wraps
+    // `ir.clusters[i].members`; the subgraph list is a different index that it never reads. This
+    // path registered the classes as subgraph members only, so every namespace produced a cluster
+    // that owned nothing, no box was built for it, and the name the author wrote was never drawn.
+    let mut namespace_stack: Vec<(String, usize, Option<usize>)> = Vec::new();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -4598,7 +4604,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
                 .trim();
             if !ns_name.is_empty() {
                 let span = span_for(line_number, line);
-                let parent = namespace_stack.last().map(|(_, idx)| *idx);
+                let parent = namespace_stack.last().map(|(_, sg_idx, _)| *sg_idx);
                 let cluster_index = builder.ensure_cluster(ns_name, Some(ns_name), span);
                 if let Some(sg_idx) = builder.ensure_subgraph(
                     ns_name,
@@ -4608,7 +4614,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
                     parent,
                     cluster_index,
                 ) {
-                    namespace_stack.push((ns_name.to_string(), sg_idx));
+                    namespace_stack.push((ns_name.to_string(), sg_idx, cluster_index));
                 }
             }
             continue;
@@ -4679,14 +4685,24 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
                 }
                 _ => None,
             };
-            let ns_sg_idx = namespace_stack.last().map(|(_, idx)| *idx);
+            let ns_indices = namespace_stack
+                .last()
+                .map(|(_, sg_idx, cluster_idx)| (*sg_idx, *cluster_idx));
 
             lower_class_statement(statement, line_number, line, builder);
 
-            if let (Some(key), Some(sg_idx)) = (ns_node_key, ns_sg_idx)
+            if let (Some(key), Some((sg_idx, cluster_idx))) = (ns_node_key, ns_indices)
                 && let Some(node_id) = builder.node_id_by_key(&key)
             {
                 builder.add_node_to_subgraph(sg_idx, node_id);
+                // ⚠️ BOTH, NOT EITHER. The subgraph list and the cluster list are separate indices
+                // and only the CLUSTER one is read by `build_cluster_boxes`, so registering the
+                // subgraph alone left the namespace owning no members: no box was ever built, and
+                // the namespace name never reached the SVG. mermaid 11.15.0 draws a labelled
+                // cluster per namespace, measured in Chromium 151 against the pinned bundle.
+                if let Some(cluster_idx) = cluster_idx {
+                    builder.add_node_to_cluster(cluster_idx, node_id);
+                }
             }
         }
     }
