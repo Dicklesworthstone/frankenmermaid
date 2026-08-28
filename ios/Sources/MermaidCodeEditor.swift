@@ -22,9 +22,11 @@ struct MermaidCodeEditor: UIViewRepresentable {
         view.smartQuotesType = .no
         view.spellCheckingType = .no
         view.alwaysBounceVertical = true
+        view.alwaysBounceHorizontal = true
         view.showsVerticalScrollIndicator = true
-        view.showsHorizontalScrollIndicator = false
-        view.textContainer.widthTracksTextView = true
+        view.showsHorizontalScrollIndicator = true
+        view.textContainer.widthTracksTextView = false
+        view.textContainer.size = CGSize(width: .greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         view.tintColor = UIColor(Lab.cyan)
         view.selectedTextRange = view.textRange(from: view.beginningOfDocument, to: view.beginningOfDocument)
         view.accessibilityLabel = "Mermaid source editor"
@@ -98,6 +100,8 @@ struct MermaidCodeEditor: UIViewRepresentable {
 
             apply(Self.keywordRegex, color: UIColor(Lab.cyan), fontWeight: .bold,
                   to: storage, source: source, range: fullRange)
+            apply(Self.statementKeywordRegex, color: UIColor(Lab.cyan).withAlphaComponent(0.9),
+                  fontWeight: .semibold, to: storage, source: source, range: fullRange)
             apply(Self.arrowRegex, color: UIColor(Lab.emerald), fontWeight: .semibold,
                   to: storage, source: source, range: fullRange)
             apply(Self.nodeLabelRegex, color: UIColor(red: 0.75, green: 0.63, blue: 1, alpha: 1),
@@ -110,9 +114,13 @@ struct MermaidCodeEditor: UIViewRepresentable {
                   italic: true, to: storage, source: source, range: fullRange)
             apply(Self.directiveRegex, color: UIColor(Lab.amber), fontWeight: .bold,
                   to: storage, source: source, range: fullRange)
+            apply(Self.numberRegex, color: UIColor(red: 0.96, green: 0.62, blue: 0.36, alpha: 1),
+                  to: storage, source: source, range: fullRange)
 
             view.attributedText = storage
-            view.selectedRange = NSIntersectionRange(selectedRange, NSRange(location: 0, length: fullRange.length))
+            let selectionLocation = min(selectedRange.location, fullRange.length)
+            let selectionLength = min(selectedRange.length, fullRange.length - selectionLocation)
+            view.selectedRange = NSRange(location: selectionLocation, length: selectionLength)
             refreshTypingAttributes(in: view)
             view.setNeedsDisplay()
             isApplyingHighlight = false
@@ -164,12 +172,17 @@ struct MermaidCodeEditor: UIViewRepresentable {
         private static let keywordRegex = regex(
             #"(?m)^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|quadrantChart|requirementDiagram|gitGraph|mindmap|timeline|sankey-beta|xychart-beta|block-beta|packet-beta|kanban|architecture-beta|C4(?:Context|Container|Component|Dynamic|Deployment))\b"#
         )
+        private static let statementKeywordRegex = regex(
+            #"\b(?:title|participant|actor|section|class|state|direction|dateFormat|axisFormat|excludes|todayMarker|autonumber|loop|alt|else|opt|par|and|critical|break|rect|note|activate|deactivate|branch|checkout|commit|merge|cherry-pick|column|requirement|element|Person|System|System_Ext|Container|ContainerDb|Container_Boundary|Component|Deployment_Node|Rel|group|service|columns|block|end|root|bar|line)\b"#,
+            options: [.caseInsensitive]
+        )
         private static let arrowRegex = regex(#"(?:<-->|-->|---|-.->|==>|~~~|--o|--x|<--|--|\.->|\.=)"#)
         private static let nodeLabelRegex = regex(#"(?<=\[)[^\]\n]+(?=\])|(?<=\{)[^}\n]+(?=\})"#)
         private static let edgeLabelRegex = regex(#"(?<=\|)[^|\n]+(?=\|)"#)
         private static let stringRegex = regex(#"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'"#)
         private static let commentRegex = regex(#"(?m)%%(?!\{).*$"#)
         private static let directiveRegex = regex(#"(?m)%%\{.*?\}%%"#)
+        private static let numberRegex = regex(#"(?<![A-Za-z_])\d+(?:\.\d+)?(?:d|w|h|m|s)?\b"#)
     }
 }
 
