@@ -9,6 +9,13 @@ private enum StudioLane: String, CaseIterable, Identifiable {
 }
 
 struct StudioView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @AppStorage("diagramTheme") private var diagramTheme = "dark"
+    @AppStorage("renderFontScale") private var renderFontScale = 1.0
+    @AppStorage("diagramShadows") private var diagramShadows = true
+    @AppStorage("diagramGradients") private var diagramGradients = true
+    @AppStorage("diagramCornerRadius") private var diagramCornerRadius = 10.0
+    @AppStorage("diagramPadding") private var diagramPadding = 18.0
     @StateObject private var renderer = MermaidRendererModel()
     @State private var lane: StudioLane = .code
     @State private var editorFocused = false
@@ -31,7 +38,17 @@ struct StudioView: View {
                 LaboratoryBackground()
                 VStack(spacing: 14) {
                     masthead
+#if targetEnvironment(macCatalyst)
+                    if geometry.size.width >= 1_080 {
+                        desktopStudio
+                    } else if geometry.size.width >= 760 {
+                        wideStudio
+                    } else {
+                        compactStudio
+                    }
+#else
                     if geometry.size.width >= 760 { wideStudio } else { compactStudio }
+#endif
                     footer
                 }
                 .padding(.horizontal, geometry.size.width >= 760 ? 22 : 14)
@@ -39,6 +56,20 @@ struct StudioView: View {
             }
         }
         .onChange(of: renderer.source) { _, _ in renderer.scheduleRender() }
+        .onChange(of: diagramTheme) { _, _ in applyRenderStyle() }
+        .onChange(of: renderFontScale) { _, value in
+            let clamped = clampedRenderFontScale(value)
+            if clamped != value { renderFontScale = clamped }
+            applyRenderStyle()
+        }
+        .onChange(of: diagramShadows) { _, _ in applyRenderStyle() }
+        .onChange(of: diagramGradients) { _, _ in applyRenderStyle() }
+        .onChange(of: diagramCornerRadius) { _, _ in applyRenderStyle() }
+        .onChange(of: diagramPadding) { _, _ in applyRenderStyle() }
+        .onAppear {
+            renderFontScale = clampedRenderFontScale(renderFontScale)
+            applyRenderStyle(renderImmediately: false)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in renderer.renderNow() }
         .sheet(isPresented: $showingSamples) {
             DiagramSampleGallery { sample in
@@ -124,6 +155,14 @@ struct StudioView: View {
         }
     }
 
+    private var desktopStudio: some View {
+        HStack(spacing: 14) {
+            editorPanel.frame(minWidth: 320, maxWidth: .infinity)
+            diagramPanel.frame(minWidth: 380, maxWidth: .infinity)
+            inspectorPanel.frame(width: 286)
+        }
+    }
+
     private var editorPanel: some View {
         LabPanel {
             VStack(alignment: .leading, spacing: 12) {
@@ -146,19 +185,24 @@ struct StudioView: View {
                 MermaidCodeEditor(text: $renderer.source, isFocused: $editorFocused)
                     .background(Color.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 12))
                     .frame(minHeight: 320)
-                HStack {
-                    Button {
-                        editorFocused = false
-                        renderer.renderNow()
-                    } label: {
-                        Label("Energize Graph", systemImage: "point.3.connected.trianglepath.dotted")
+#if !targetEnvironment(macCatalyst)
+                if horizontalSizeClass == .compact {
+                    HStack {
+                        Button {
+                            editorFocused = false
+                            renderer.renderNow()
+                            withAnimation(.snappy) { lane = .diagram }
+                        } label: {
+                            Label("View Diagram", systemImage: "point.3.connected.trianglepath.dotted")
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                        Spacer()
+                        Text("⌘R")
+                            .font(.system(size: Lab.size(10), design: .monospaced))
+                            .foregroundStyle(Lab.secondary)
                     }
-                    .buttonStyle(PrimaryButtonStyle())
-                    Spacer()
-                    Text("⌘R")
-                        .font(.system(size: Lab.size(10), design: .monospaced))
-                        .foregroundStyle(Lab.secondary)
                 }
+#endif
             }
         }
     }
@@ -214,18 +258,105 @@ struct StudioView: View {
 
     private var inspectorPanel: some View {
         LabPanel {
-            VStack(alignment: .leading, spacing: 14) {
-                LabLabel(text: "03 · The Cartography Bench")
-                Label("Real nodes and edges only", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                Label("External diagram links stay disabled", systemImage: "lock.shield")
-                Label("The exact Rust/WASM renderer is bundled", systemImage: "shippingbox")
-                Text("Lens editing, diagnostics, themes, SVG/PNG/PDF export, Graph Deck, documents, widgets, and Shortcuts remain tracked milestones—not fake controls.")
-                    .foregroundStyle(Lab.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    LabLabel(text: "03 · Style Laboratory")
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("THEME")
+                            .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+                            .foregroundStyle(Lab.secondary)
+                        Picker("Diagram theme", selection: $diagramTheme) {
+                            ForEach(Self.themes, id: \.id) { theme in
+                                Text(theme.name).tag(theme.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(Lab.cyan)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("RENDERED TEXT SIZE")
+                            .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+                            .foregroundStyle(Lab.secondary)
+                        renderFontSizeControl
+                    }
+
+                    Divider().background(Lab.stroke)
+
+                    Toggle("Cast node shadows", isOn: $diagramShadows)
+                    Toggle("Illuminate gradients", isOn: $diagramGradients)
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("CORNER ENERGY")
+                            Spacer()
+                            Text("\(Int(diagramCornerRadius.rounded()))")
+                        }
+                        .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+                        .foregroundStyle(Lab.secondary)
+                        Slider(value: $diagramCornerRadius, in: 0...24, step: 2)
+                            .tint(Lab.cyan)
+                    }
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("CANVAS BREATHING ROOM")
+                            Spacer()
+                            Text("\(Int(diagramPadding.rounded()))")
+                        }
+                        .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+                        .foregroundStyle(Lab.secondary)
+                        Slider(value: $diagramPadding, in: 8...48, step: 2)
+                            .tint(Lab.cyan)
+                    }
+
+                    Divider().background(Lab.stroke)
+
+                    Label("Real nodes and edges only", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    Label("External links stay disabled", systemImage: "lock.shield")
+                    Label("Exact bundled Rust/WASM renderer", systemImage: "shippingbox")
+                }
+                .font(.system(size: Lab.size(12)))
+                .foregroundStyle(Lab.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .font(.system(size: Lab.size(13)))
-            .foregroundStyle(Lab.text)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var renderFontSizeControl: some View {
+        HStack(spacing: 8) {
+            Button {
+                renderFontScale = clampedRenderFontScale(renderFontScale - 0.1)
+            } label: {
+                Image(systemName: "textformat.size.smaller")
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.bordered)
+            .disabled(renderFontScale <= 0.7)
+            .accessibilityLabel("Decrease rendered diagram text size")
+
+            Button {
+                renderFontScale = 1.0
+            } label: {
+                Text("\(Int((renderFontScale * 100).rounded()))%")
+                    .font(.system(size: Lab.size(11), weight: .black, design: .monospaced))
+                    .frame(minWidth: 48)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Rendered diagram text size \(Int((renderFontScale * 100).rounded())) percent. Reset to 100 percent")
+
+            Button {
+                renderFontScale = clampedRenderFontScale(renderFontScale + 0.1)
+            } label: {
+                Image(systemName: "textformat.size.larger")
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.bordered)
+            .disabled(renderFontScale >= 1.6)
+            .accessibilityLabel("Increase rendered diagram text size")
+        }
+        .tint(Lab.cyan)
     }
 
     private var footer: some View {
@@ -249,6 +380,35 @@ struct StudioView: View {
         case .failed(let message): message
         }
     }
+
+    private func applyRenderStyle(renderImmediately: Bool = true) {
+        renderer.updateStyle(
+            theme: diagramTheme,
+            fontSize: 14.0 * clampedRenderFontScale(renderFontScale),
+            padding: diagramPadding,
+            shadows: diagramShadows,
+            roundedCorners: diagramCornerRadius,
+            nodeGradients: diagramGradients,
+            renderImmediately: renderImmediately
+        )
+    }
+
+    private func clampedRenderFontScale(_ value: Double) -> Double {
+        min(1.6, max(0.7, (value * 10).rounded() / 10))
+    }
+
+    private static let themes: [(id: String, name: String)] = [
+        ("dark", "Dark Laboratory"),
+        ("neon", "Neon Current"),
+        ("blueprint", "Blueprint"),
+        ("forest", "Forest"),
+        ("pastel", "Pastel"),
+        ("corporate", "Corporate"),
+        ("neutral", "Neutral"),
+        ("monochrome", "Monochrome"),
+        ("high-contrast", "High Contrast"),
+        ("default", "Default")
+    ]
 
     private var statusSymbol: String {
         switch renderer.phase {

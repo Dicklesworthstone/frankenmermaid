@@ -65,7 +65,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
         const started = performance.now();
         try {
           const source = String(command.source);
-          const svg = renderSvg(source, {theme: 'dark', responsive: true, accessible: true});
+          const svg = renderSvg(source, command.options || {theme: 'dark', responsive: true, accessible: true});
           if (requestID !== latestRequest) return false;
           stage.innerHTML = svg;
           const typeResult = detectType(source);

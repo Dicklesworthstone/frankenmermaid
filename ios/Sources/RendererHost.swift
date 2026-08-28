@@ -54,6 +54,12 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     private var requestID = 0
     private var scheduledRender: Task<Void, Never>?
     private var debugExportProbePending = false
+    private var theme = "dark"
+    private var fontSize = 14.0
+    private var padding = 18.0
+    private var shadows = true
+    private var roundedCorners = 10.0
+    private var nodeGradients = true
 
     override init() {
         debugExportProbePending = ProcessInfo.processInfo.environment["FM_EXPORT_PROBE"] == "1"
@@ -73,6 +79,24 @@ final class MermaidRendererModel: NSObject, ObservableObject {
 
     deinit { scheduledRender?.cancel() }
 
+    func updateStyle(
+        theme: String,
+        fontSize: Double,
+        padding: Double,
+        shadows: Bool,
+        roundedCorners: Double,
+        nodeGradients: Bool,
+        renderImmediately: Bool
+    ) {
+        self.theme = theme
+        self.fontSize = min(22, max(9, fontSize))
+        self.padding = min(48, max(8, padding))
+        self.shadows = shadows
+        self.roundedCorners = min(24, max(0, roundedCorners))
+        self.nodeGradients = nodeGradients
+        if renderImmediately { renderNow() }
+    }
+
     func scheduleRender() {
         scheduledRender?.cancel()
         let expectedSource = source
@@ -86,7 +110,21 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     func renderNow() {
         guard phase != .loading, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         requestID += 1
-        let command: [String: Any] = ["requestID": requestID, "source": source]
+        let command: [String: Any] = [
+            "requestID": requestID,
+            "source": source,
+            "options": [
+                "theme": theme,
+                "responsive": true,
+                "accessible": true,
+                "fontSize": fontSize,
+                "padding": padding,
+                "shadows": shadows,
+                "roundedCorners": roundedCorners,
+                "nodeGradients": nodeGradients,
+                "enableLinks": false
+            ]
+        ]
         phase = .rendering
         Task { [weak self, weak webView] in
             do {
