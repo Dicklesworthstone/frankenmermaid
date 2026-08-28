@@ -58,7 +58,7 @@ fn every_pie_slice_carries_an_accessible_name() {
     let svg = render(WITH_DATA, A11yConfig::full());
     assert_eq!(
         slice_names(&svg),
-        vec!["Alpha: 10 (66.7%)", "Beta: 5 (33.3%)"],
+        vec!["Alpha [10]", "Beta [5]"],
         "pie slices are missing or mis-formatting their accessible names"
     );
 }
@@ -70,7 +70,7 @@ fn every_pie_slice_carries_an_accessible_name() {
 #[test]
 fn a_whole_pie_slice_is_named_too() {
     let svg = render(WHOLE_PIE, A11yConfig::full());
-    assert_eq!(slice_names(&svg), vec!["Only: 7 (100.0%)"]);
+    assert_eq!(slice_names(&svg), vec!["Only [7]"]);
     // CONTROL: it really is the full-circle path being exercised.
     assert!(
         svg.contains("fm-pie-slice-full"),

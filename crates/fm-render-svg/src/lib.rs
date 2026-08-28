@@ -7551,7 +7551,6 @@ fn render_pie_svg(
                 pie_meta.show_data,
                 &slice.label,
                 value,
-                (value / total) * 100.0,
                 "circle",
             );
             have_prev_end = false;
@@ -7590,7 +7589,6 @@ fn render_pie_svg(
                 pie_meta.show_data,
                 &slice.label,
                 value,
-                (value / total) * 100.0,
                 "path",
             );
         }
@@ -7660,9 +7658,22 @@ fn render_pie_svg(
     for (index, slice) in pie_meta.slices.iter().enumerate() {
         let row_y = legend_y + 18.0 + index as f32 * 24.0;
         let color = accent_colors[index % accent_colors.len()];
-        let pct = (slice.value.max(0.0) / total) * 100.0;
+        // ⚠️ `{label} [{value}]`, AND THE VALUE IS NOT ROUNDED. This read
+        // `format!("{}: {:.0} ({:.1}%)", …)`, which was wrong twice over. mermaid 11.15.0 labels a
+        // `showData` legend row `Dogs [30]` — measured in Chromium 151 against the pinned bundle,
+        // reading the drawn legend text — so the separator, the brackets and the absence of a
+        // percentage are all parity, not taste. The share is still drawn: it is the slice label on
+        // the wedge, which both engines already render.
+        //
+        // ⚠️ THE `{:.0}` WAS DATA LOSS, NOT A FORMATTING QUIRK. It rounded the author's own number
+        // to an integer, so `"A" : 0.25` published `A: 0` — a legend asserting the value is ZERO
+        // when the author wrote a quarter. Measured against the reference: 0.25 draws `[0.25]`,
+        // 1.5 draws `[1.5]`, 1.23456 draws `[1.23456]`, and 30.0 draws `[30]`. Rust's `f32`
+        // `Display` is the shortest round-trip form and agrees with JavaScript's on every one of
+        // those, so the value is written as the author wrote it and a whole number keeps no
+        // trailing `.0`.
         let entry_label = if pie_meta.show_data {
-            format!("{}: {:.0} ({:.1}%)", slice.label, slice.value.max(0.0), pct)
+            format!("{} [{}]", slice.label, slice.value.max(0.0))
         } else {
             slice.label.clone()
         };
@@ -7738,7 +7749,6 @@ fn write_pie_slice_accessible_name(
     show_data: bool,
     label: &str,
     value: f32,
-    percent: f32,
     tag: &str,
 ) {
     use crate::attributes::write_escaped_text;
@@ -7751,10 +7761,21 @@ fn write_pie_slice_accessible_name(
     out.push_str("><title>");
     let _ = write_escaped_text(out, label);
     if show_data {
-        // `{:.0}` and `{:.1}` are the LEGEND's own `entry_label` formatting, so the spoken name and
-        // the printed one agree digit for digit. `write_number_into` renders 66.7 as `66.70`, which
-        // would have made the accessible name disagree with the legend beside it.
-        let _ = write!(out, ": {value:.0} ({percent:.1}%)");
+        // EXACTLY THE LEGEND'S `entry_label`, so the spoken name and the printed one are the SAME
+        // STRING — which `the_accessible_name_matches_the_printed_legend` asserts by looking the
+        // name up among the drawn legend `<text>` bodies. Its purpose is that a screen reader never
+        // reads different numbers than the chart displays, and that matters more after this change,
+        // not less: `{:.0}` used to round `0.25` to `0` in BOTH places, so the two agreed on a
+        // number the author never wrote.
+        //
+        // ⚠️ I FIRST KEPT THE PERCENTAGE HERE AFTER THE LEGEND DROPPED IT, reasoning that this
+        // `<title>` is the only per-wedge place a screen reader gets the proportion. That broke the
+        // mirror contract above, and the contract is right: a name that disagrees with the visible
+        // legend is the exact drift it exists to catch, and the share is NOT lost from the document
+        // — it is the wedge's own drawn `60%` slice label. Whether an accessible name should carry
+        // more than the legend is the product question bd-uf3p1 already raises; it is not settled
+        // here by widening this string until a test goes green.
+        let _ = write!(out, " [{value}]");
     }
     out.push_str("</title></");
     out.push_str(tag);
@@ -18465,8 +18486,10 @@ mod tests {
         assert!(svg.contains("Browser Usage"));
         assert!(svg.contains("fm-pie-legend"));
         assert!(svg.contains("fm-pie-legend-entry"));
-        assert!(svg.contains("Chrome: 50 (50.0%)"));
-        assert!(svg.contains("Firefox: 30 (30.0%)"));
+        // mermaid labels a showData legend row `Chrome [50]` — measured in Chromium 151 against
+        // the pinned bundle. The separator, the brackets and the absent percentage are parity.
+        assert!(svg.contains("Chrome [50]"));
+        assert!(svg.contains("Firefox [30]"));
     }
 
     #[test]
