@@ -64,6 +64,8 @@ export interface MermaidConfigValidation {
 export function configSchema(): string;
 /** Validate config JSON and return MermaidConfigValidation encoded as JSON. */
 export function validateConfig(configJson: string): string;
+/** Validate Mermaid init/constraints directives and return MermaidConfigValidation encoded as JSON. */
+export function validateInitDirectives(source: string): string;
 
 
 
@@ -213,6 +215,11 @@ export function renderSvg(input: string, config?: any | null): string;
 export function validateConfig(config_json: string): string;
 
 /**
+ * Strictly validate Mermaid initialization directives in source and return a serializable report.
+ */
+export function validateInitDirectives(source: string): string;
+
+/**
  * The worker entry point: hand it a [`WorkerRenderMessage`] as JSON, get a
  * [`WorkerRenderResponse`] as JSON, or `null` when the message needs no reply (a cancel, or an id
  * that is not the live request).
@@ -254,6 +261,7 @@ export interface InitOutput {
     readonly renderDeck: (a: number, b: number, c: number, d: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
     readonly validateConfig: (a: number, b: number, c: number) => void;
+    readonly validateInitDirectives: (a: number, b: number, c: number) => void;
     readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

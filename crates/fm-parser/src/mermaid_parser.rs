@@ -1781,9 +1781,7 @@ fn subgraph_header_id(line: &str) -> Option<&str> {
         return None;
     }
     let rest = rest.trim_start();
-    let id_end = rest
-        .find(['[', '(', '{', ' ', '\t'])
-        .unwrap_or(rest.len());
+    let id_end = rest.find(['[', '(', '{', ' ', '\t']).unwrap_or(rest.len());
     let id = rest[..id_end].trim();
     (!id.is_empty()).then_some(id)
 }
@@ -2995,6 +2993,91 @@ fn parse_edge_animation_value(key: &str, value: &str) -> Result<Option<EdgeAnima
     }
 }
 
+/// What an `@{ … }` body asked for.
+///
+/// ⚠️ ONE SCANNER, TWO CALLERS, DELIBERATELY. `@{ shape: …, label: … }` reaches the parser two ways:
+/// as a whole statement (`A@{ shape: cyl }`) and as an EDGE ENDPOINT (`A@{ shape: cyl } --> B`).
+/// Only the first was ever handled, so an endpoint fell through to the generic token parser, which
+/// saw `A@` followed by `{ … }` and read it as the CLASSIC diamond spelling — every such node came
+/// out `Diamond` with the raw body as its visible label, e.g. `shape: cyl, label: "DB`. A second
+/// copy of the key handling here would be free to drift from the first; there is one.
+struct FlowMetadataBody {
+    shape: NodeShape,
+    label: Option<ParsedLabel>,
+    /// A key describing a NODE (`shape`/`label`/`title`) was present.
+    saw_node_key: bool,
+    /// The march speed an `animate:`/`animation:` key asked for.
+    animation: Option<EdgeAnimation>,
+    /// An `animate:`/`animation:` key was present, even one that set no speed.
+    saw_animation_key: bool,
+}
+
+/// Read an `@{ … }` body over a base shape/label.
+///
+/// `warnings` is optional because the edge-endpoint caller has none in scope: `parse_node_token_core`
+/// is reached through `parse_node_list_with_config` from `parse_edge_statement_asts`, none of which
+/// carry a diagnostics sink. An unrecognised shape name there leaves the shape alone exactly as it
+/// does on the statement path — it simply does not say so, which is a smaller divergence than the
+/// garbage label it replaces and is recorded in the conformance test.
+fn scan_flowchart_metadata_body(
+    body: &str,
+    base_shape: NodeShape,
+    base_label: Option<ParsedLabel>,
+    mut warnings: Option<&mut Vec<String>>,
+) -> FlowMetadataBody {
+    let mut out = FlowMetadataBody {
+        shape: base_shape,
+        label: base_label,
+        saw_node_key: false,
+        animation: None,
+        saw_animation_key: false,
+    };
+    for pair in split_metadata_pairs(body) {
+        let Some((key, value)) = pair.split_once(':') else {
+            continue;
+        };
+        let value = trim_fast(value).trim_matches('"').trim_matches('\'');
+        match trim_fast(key).to_ascii_lowercase().as_str() {
+            // An unrecognised shape name leaves the shape alone rather than inventing one -- and
+            // says so where a sink exists (bd-laocw). Falling back silently meant an author who
+            // wrote valid mermaid 11 got a plain rectangle with nothing pointing at why.
+            "shape" => {
+                out.saw_node_key = true;
+                let lowered = value.to_ascii_lowercase();
+                if let Some(mapped) = flowchart_metadata_shape(&lowered) {
+                    out.shape = mapped;
+                } else if !lowered.is_empty()
+                    && let Some(sink) = warnings.as_deref_mut()
+                {
+                    sink.push(unimplemented_shape_warning(&lowered));
+                }
+            }
+            "label" | "title" => {
+                out.saw_node_key = true;
+                if !value.is_empty() {
+                    out.label = Some(ParsedLabel::plain(value));
+                }
+            }
+            key @ ("animate" | "animation") => {
+                out.saw_animation_key = true;
+                match parse_edge_animation_value(key, value) {
+                    Ok(speed) => out.animation = speed,
+                    Err(()) => {
+                        if let Some(sink) = warnings.as_deref_mut() {
+                            sink.push(format!(
+                                "edge animation '{value}' is not a speed this renderer draws; \
+                                 the edge is drawn unanimated"
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn parse_flowchart_node_metadata(
     statement: &str,
     config: &ParserConfig,
@@ -3012,55 +3095,20 @@ fn parse_flowchart_node_metadata(
     // Reuse the ordinary token parser for the id so shaped spellings and `:::class` keep working.
     let base = parse_node_token_with_config(id, config)?;
 
-    let mut shape = base.shape;
-    let mut label = base.label;
-    // Whether any key that describes a NODE was present. `e1@{ animate: true }` names an EDGE, and
-    // mermaid declares no node for it; declaring one leaves a stray empty box in the diagram
-    // (bd-yrxu). Recognising the statement but emitting nothing is the honest outcome: we cannot
-    // attach the metadata to its edge without an edge-id concept, but we can stop inventing a node.
-    let mut saw_node_key = false;
-    // The march speed an `animate:`/`animation:` key asked for, and whether such a key was present
-    // at all — `animate: false` sets the flag while leaving the speed `None`, so it stays a
-    // recognised statement rather than falling through to be interned as a node.
-    let mut animation = None;
-    let mut saw_animation_key = false;
-    for pair in split_metadata_pairs(&statement[at_pos + 2..close]) {
-        let Some((key, value)) = pair.split_once(':') else {
-            continue;
-        };
-        let value = trim_fast(value).trim_matches('"').trim_matches('\'');
-        match trim_fast(key).to_ascii_lowercase().as_str() {
-            // An unrecognised shape name leaves the shape alone rather than inventing one -- and
-            // now SAYS SO (bd-laocw). Falling back silently meant an author who wrote valid
-            // mermaid 11 got a plain rectangle with nothing pointing at why.
-            "shape" => {
-                saw_node_key = true;
-                let lowered = value.to_ascii_lowercase();
-                if let Some(mapped) = flowchart_metadata_shape(&lowered) {
-                    shape = mapped;
-                } else if !lowered.is_empty() {
-                    warnings.push(unimplemented_shape_warning(&lowered));
-                }
-            }
-            "label" | "title" => {
-                saw_node_key = true;
-                if !value.is_empty() {
-                    label = Some(ParsedLabel::plain(value));
-                }
-            }
-            key @ ("animate" | "animation") => {
-                saw_animation_key = true;
-                match parse_edge_animation_value(key, value) {
-                    Ok(speed) => animation = speed,
-                    Err(()) => warnings.push(format!(
-                        "edge animation '{value}' is not a speed this renderer draws; \
-                         the edge is drawn unanimated"
-                    )),
-                }
-            }
-            _ => {}
-        }
-    }
+    let scanned = scan_flowchart_metadata_body(
+        &statement[at_pos + 2..close],
+        base.shape,
+        base.label,
+        Some(warnings),
+    );
+    let FlowMetadataBody {
+        shape,
+        label,
+        saw_node_key,
+        animation,
+        saw_animation_key,
+    } = scanned;
+
     // A node key WINS over an animation key on the same statement. `animate:` addresses the edge
     // namespace, so on a statement that also declares a node the id is a node id, which no edge
     // can be registered under — routing it to the edge map could only ever miss.
@@ -12533,6 +12581,31 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     };
     if core.is_empty() {
         return None;
+    }
+
+    // ⚠️ `id@{ … }` MUST BE READ BEFORE THE SHAPE PROBES BELOW, because `{` is also the classic
+    // diamond delimiter: without this, `A@{ shape: cyl, label: "DB" } --> B` matched `A@` + `{…}`
+    // and produced a Diamond captioned `shape: cyl, label: "DB`. The pinned mermaid 11.15.0 bundle
+    // draws a cylinder captioned `DB`, verified by rendering it in Chromium.
+    if let Some(at_pos) = core.find("@{")
+        && core.ends_with('}')
+        && at_pos + 2 < core.len() - 1
+    {
+        let id_part = trim_fast(&core[..at_pos]);
+        if !id_part.is_empty() && !id_part.contains(char::is_whitespace) {
+            let mut base = parse_node_token_core(id_part, config)?;
+            let scanned = scan_flowchart_metadata_body(
+                &core[at_pos + 2..core.len() - 1],
+                base.shape,
+                base.label.take(),
+                None,
+            );
+            if scanned.saw_node_key {
+                base.shape = scanned.shape;
+                base.label = scanned.label;
+            }
+            return Some(base);
+        }
     }
 
     // Fast path: every shaped token — `((…))`, `[(…)]`, `[[…]]`, `[…]`, `(…)`, `{…}`, `>…]`,

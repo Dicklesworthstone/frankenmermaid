@@ -28,6 +28,7 @@ export const planWebGpu: (a: number, b: number, c: number, d: number) => void;
 export const renderDeck: (a: number, b: number, c: number, d: number) => void;
 export const renderSvg: (a: number, b: number, c: number, d: number) => void;
 export const validateConfig: (a: number, b: number, c: number) => void;
+export const validateInitDirectives: (a: number, b: number, c: number) => void;
 export const workerHandleMessage: (a: number, b: number, c: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;
 export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
