@@ -14454,15 +14454,88 @@ fn blank_multiline_deck_directives<'a>(
     Cow::Owned(String::from_utf8(blanked).expect("spaces preserve UTF-8 validity"))
 }
 
+/// Read the `---` YAML front matter block: the diagram `title` and any `config:` it carries.
+///
+/// ⚠️ THIS USED TO DISCARD THE WHOLE BLOCK ON wasm32, TITLE INCLUDED. The early return warned that
+/// "YAML config is unavailable in wasm32 builds", which was true of the CONFIG and not of the
+/// title — so in the BROWSER, the surface the demo site and every embedder actually run,
+/// `---\ntitle: … \n---` drew no title at all. Measured against the pinned mermaid 11.15.0 bundle in
+/// Chromium 151: it draws that title for fifteen diagram families, and we drew it for none of them.
+/// A title is a scalar on one line; it never needed a YAML engine.
+///
+/// ⚠️ `config:` REMAINS NATIVE-ONLY, DELIBERATELY, AND STILL WARNS. `serde_yaml` is excluded from
+/// the wasm build by `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`, and that exclusion
+/// is load-bearing: `build-wasm.sh` enforces a 700 KiB gzip ceiling that the bundle currently sits
+/// 2,104 bytes under, so linking a YAML scanner into every browser payload would need a budget
+/// raise of a different order than the ~5 KiB a whole diagram family costs. Reading the one scalar
+/// the gap was actually about costs nothing; the rest keeps the honest diagnostic it always had.
+/// The `title:` scalar of a front matter block, without a YAML parser.
+///
+/// ⚠️ TOP LEVEL ONLY, WHICH IS THE WHOLE DIFFICULTY. `title:` is also a legal key INSIDE `config:`
+/// and inside the deck blocks, where it means something else entirely; a scan that took the first
+/// `title:` anywhere would caption a diagram with a slide's name. An unindented line is the one
+/// thing that distinguishes the document's own title, so indentation is the test — the same rule
+/// YAML itself applies.
+///
+/// Handles the spellings mermaid's own docs use: bare, single- and double-quoted. Anything else
+/// (block scalars, anchors, flow mappings) is left to the native path, which has a real parser.
+#[cfg(target_arch = "wasm32")]
+fn front_matter_scalar_title(payload: &str) -> Option<&str> {
+    payload.lines().find_map(|line| {
+        if line.starts_with([' ', '\t', '#', '-']) {
+            return None;
+        }
+        let value = trim_fast(line.strip_prefix("title:")?);
+        if value.is_empty() {
+            return None;
+        }
+        // A quoted scalar keeps its inner text; an unquoted one keeps everything but a trailing
+        // comment, which YAML would strip.
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+            });
+        Some(unquoted.unwrap_or(value))
+    })
+}
+
+/// Whether the block carries a top-level key other than `title:`, i.e. something the scalar scan
+/// above cannot honour and the reader should be told about.
+#[cfg(target_arch = "wasm32")]
+fn front_matter_has_non_title_key(payload: &str) -> bool {
+    payload.lines().any(|line| {
+        let trimmed = trim_fast(line);
+        !line.starts_with([' ', '\t'])
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("title:")
+    })
+}
+
 fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder) {
     let span = Span::at_line(1, front_matter_payload.chars().count());
     #[cfg(target_arch = "wasm32")]
     {
-        let message = String::from(
-            "Front matter: YAML config is unavailable in wasm32 builds; ignoring front matter",
-        );
-        builder.add_warning(message.clone());
-        builder.add_init_error(message, span);
+        if let Some(title) = front_matter_scalar_title(front_matter_payload)
+            && let Some(title) = clean_label(Some(title))
+        {
+            builder.set_front_matter_title(title);
+        }
+        // Only complain when there is something a scalar scan cannot carry. A front matter block
+        // that is nothing but a title is now fully honoured here, and warning about it would report
+        // a loss that no longer happens.
+        if front_matter_has_non_title_key(front_matter_payload) {
+            let message = String::from(
+                "Front matter: YAML config is unavailable in wasm32 builds; the title is applied \
+                 and the remaining config keys are ignored",
+            );
+            builder.add_warning(message.clone());
+            builder.add_init_error(message, span);
+        }
         return;
     }
 
@@ -14481,7 +14554,7 @@ fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder
         if let Some(title) = yaml_value.get("title").and_then(Value::as_str)
             && let Some(title) = clean_label(Some(title))
         {
-            builder.set_title(title);
+            builder.set_front_matter_title(title);
         }
 
         let config_value = yaml_value

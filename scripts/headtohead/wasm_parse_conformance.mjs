@@ -69,5 +69,55 @@ for (const [name, source] of CASES) {
   console.log(`${name.padEnd(26)} ${verdict}`);
 }
 
+// ── FRONT MATTER MUST SURVIVE THE wasm32 BUILD ────────────────────────────────────────────────
+//
+// ⚠️ ANOTHER GUARD THAT CANNOT LIVE IN A RUST TEST, for the same structural reason as the rest of
+// this file: the bug was a `#[cfg(target_arch = "wasm32")]` early return in
+// `parse_front_matter_config` that discarded the ENTIRE front-matter block. Every native test
+// compiles the other branch, so all of them passed while the shipped browser bundle silently threw
+// away `title`, `config: theme:` and every other key. Only the real wasm32 artifact can fail here.
+const FRONT_MATTER_CASES = [
+  ['front matter title', '---\ntitle: FMTITLE\n---\nflowchart LR\n  A --> B',
+    (ir) => (ir.meta?.title === 'FMTITLE' ? null : `title=${JSON.stringify(ir.meta?.title)}`)],
+  // A `title:` nested under `config:` is NOT the document title -- an indentation-blind scan would
+  // caption the diagram with it.
+  ['nested title is not the title', '---\nconfig:\n  title: NESTED\n---\nflowchart LR\n  A --> B',
+    (ir) => (ir.meta?.title === undefined || ir.meta?.title === null
+      ? null
+      : `a nested key became the document title: ${JSON.stringify(ir.meta?.title)}`)],
+  // ⚠️ ASSERTS THE DIAGNOSTIC, NOT AN `init` RECORD. `config:` is deliberately still native-only
+  // here (serde_yaml is excluded from the wasm build to hold the gzip ceiling), so the contract
+  // this case pins is that the reader is TOLD. An earlier draft checked `ir.meta.init` existed --
+  // which passes even with the config ignored, because recording the diagnostic itself creates
+  // that record. It would have gone green whether or not anything worked.
+  ['front matter config notice', '---\nconfig:\n  theme: dark\n---\nflowchart LR\n  A --> B',
+    (ir, warnings) => (warnings.some((w) => w.includes('wasm32'))
+      ? null
+      : `config keys dropped with no warning: ${JSON.stringify(warnings)}`)],
+  // The title-only block must NOT draw that warning: there is nothing left to ignore.
+  ['front matter title is silent', '---\ntitle: FMTITLE\n---\nflowchart LR\n  A --> B',
+    (ir, warnings) => (warnings.some((w) => w.includes('wasm32'))
+      ? `a title-only block warned about ignored config: ${JSON.stringify(warnings)}`
+      : null)],
+];
+
+for (const [name, source, check] of FRONT_MATTER_CASES) {
+  let verdict;
+  try {
+    const parsed = fm.parse(source);
+    const complaint = check(parsed.ir, parsed.warnings ?? []);
+    if (complaint) {
+      failures += 1;
+      verdict = `FAIL ${complaint}`;
+    } else {
+      verdict = 'ok   front matter survived the wasm32 boundary';
+    }
+  } catch (error) {
+    failures += 1;
+    verdict = `FAIL ${String(error).slice(0, 90)}`;
+  }
+  console.log(`${name.padEnd(26)} ${verdict}`);
+}
+
 console.log(failures === 0 ? '\nALL FAMILIES CROSS THE BOUNDARY' : `\n${failures} FAMILIES CANNOT CROSS THE BOUNDARY`);
 process.exit(failures === 0 ? 0 : 1);

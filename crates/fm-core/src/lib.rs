@@ -5725,6 +5725,17 @@ pub struct MermaidDiagramMeta {
     /// Visible diagram title from front matter `title:` or inline `title ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Whether [`Self::title`] came from the `---` front matter rather than a `title ...` statement.
+    ///
+    /// ⚠️ THE TWO SPELLINGS ARE NOT INTERCHANGEABLE UPSTREAM, WHICH IS WHY THIS IS RECORDED.
+    /// Renderers must not treat "there is a title" as the whole question: mermaid 11.15.0 draws the
+    /// front-matter title for `flowchart`, `class`, `gitgraph` and `requirement` but ignores a
+    /// `title` STATEMENT there, and does the exact opposite for `block`, `kanban`, `timeline` and
+    /// every C4 variant, which draw the statement and ignore the front matter. Measured per
+    /// (family, form) in Chromium 151 against the pinned bundle. Collapsing the two forms into one
+    /// flag would get four families wrong whichever way it collapsed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_from_front_matter: bool,
     /// Accessibility title from `accTitle: ...` directive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acc_title: Option<String>,
@@ -7064,6 +7075,7 @@ impl MermaidDiagramIr {
                 c4_show_legend: false,
                 guard: MermaidGuardReport::default(),
                 title: None,
+                title_from_front_matter: false,
                 acc_title: None,
                 acc_descr: None,
             },

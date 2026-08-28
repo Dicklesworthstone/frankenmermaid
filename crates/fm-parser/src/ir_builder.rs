@@ -694,6 +694,19 @@ impl IrBuilder {
 
     pub(crate) fn set_title(&mut self, title: String) {
         self.ir.meta.title = Some(title);
+        self.ir.meta.title_from_front_matter = false;
+    }
+
+    /// Record a title that came from the `---` front matter block.
+    ///
+    /// ⚠️ SEPARATE FROM [`Self::set_title`] BECAUSE RENDERERS MUST TELL THE TWO APART. mermaid draws
+    /// the front-matter title for a different set of families than the `title ...` statement — see
+    /// `MermaidDiagramMeta::title_from_front_matter`. Only the front matter parser calls this; every
+    /// statement path keeps `set_title`, so a new statement parser cannot claim front-matter
+    /// provenance by accident.
+    pub(crate) fn set_front_matter_title(&mut self, title: String) {
+        self.ir.meta.title = Some(title);
+        self.ir.meta.title_from_front_matter = true;
     }
 
     /// Whether no diagram title has been recorded yet.
