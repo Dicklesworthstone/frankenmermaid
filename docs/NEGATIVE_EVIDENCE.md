@@ -21797,3 +21797,54 @@ these is true, and state which:
 
 Until then the standing campaign figures are the ones already banked; this session adds none, and
 adding one from a contended worker would have been strictly worse than adding nothing.
+
+## SWEPT AND DRY: four candidate parity gaps examined, three rejected, one blocked (2026-08-28)
+
+A visibility-aware drawn-text sweep across fourteen diagram families found only two divergences, and
+neither is takeable. Recorded because three of the four candidates below LOOK like defects from a
+naive probe, and one of them has already been implemented and reverted once.
+
+**⚠️ TEXTCONTENT IS NOT "WHAT A READER SEES", AND IT MANUFACTURED TWO PHANTOM DEFECTS.** Both cost
+real time before the markup was checked:
+
+* **sequence `link`.** `link A: Docs @ https://e.com` — the reference's drawn text contains `Docs`,
+  ours does not, which reads as a missing feature. It is not: mermaid's `Docs` sits inside
+  `g.actorPopupMenu` with `display: none` — a hidden interactive menu — and `textContent` reports
+  hidden subtrees just as happily as visible ones. We carry the same datum as `data-menu-links` on
+  the participant node plus a `fm-node-has-menu-links` class. NO DIVERGENCE. The sweep now excludes
+  any node with a `display:none` / `visibility:hidden` ancestor.
+* **sankey node labels.** The reference reads `"A\n10"` and ours `"A10"`, which reads as name and
+  value run together. They are not: our `<text>` carries `<tspan dy="0">A</tspan>` and
+  `<tspan dy="20.70">10</tspan>`, so the value is on its own line; `textContent` simply concatenates
+  tspans with no separator. NO DIVERGENCE.
+
+**REJECTED AS A TARGET: numeric character references.** `&#35;hash` draws `&#hash` upstream and
+`&#x23;hash` draws `&&x23;hash` — note the DOUBLED ampersand. mermaid mangles numeric entities; we
+decode both correctly to `#hash`. Matching would mean reproducing an upstream defect. Every NAMED
+entity (`&amp;` `&lt;` `&gt;` `&nbsp;` `&copy;` `&quot;`) already agrees, and `gantt` — flagged by an
+older MULTISET comparison — turns out to agree exactly once compared as sets.
+
+**BLOCKED, AND ALREADY REVERTED ONCE: ER cardinality labels.** We draw `1`, `0..*`, `1..*`, `0..1`
+as `<text class="fm-er-cardinality">`; mermaid draws none, carrying cardinality in the crow's-foot
+markers alone. We DO emit those markers, correctly typed and referenced
+(`er-onlyOneStart`/`er-zeroOrMoreEnd`/`er-oneOrMoreStart`/`er-zeroOrOneEnd`), so on SVG the text is
+redundant. It is still not takeable, and the reason is already written at the emission site: the
+suppression "was written, measured green (chromium_text_diff.mjs er_basic: AGREE, 13 runs, full text
+parity) and then REVERTED", because `the_three_renderers_agree_on_declared_text` in fm-cli then
+fails — the terminal is a character grid and can never carry a marker, so SVG dropping the text
+breaks cross-surface agreement permanently. That gate is correct and editing it to admit this change
+would be weakening a gate to land a change.
+
+**Do-not-retry predicate for ER cardinality.** Do not re-attempt until bd-5k51.1's
+"backend-specific legitimate differences" question is decided — i.e. until there is a ruling that one
+datum MAY be carried by different means on different surfaces (a marker on SVG, text on a terminal).
+The renderer is not where that ruling belongs. A future agent measuring only SVG will find this
+change green and two lines long, exactly as the previous one did; the blocker is a cross-surface
+policy, not the diff.
+
+**One candidate left unexamined, with its open question stated.** A `state c <<choice>>` pseudo-state
+draws its IDENTIFIER `c` here and nothing upstream (mermaid draws a bare diamond). Unlike ER
+cardinality this is arguably not "one datum, two means" — `c` is an identifier the author typed as a
+handle, not content — and no case in the agreement corpus covers it. Before taking it, confirm what
+the SVG draws for the pseudo-state SHAPE: if it is a labelled rectangle rather than a diamond,
+removing the text leaves an unlabelled box, which is worse than the divergence.
