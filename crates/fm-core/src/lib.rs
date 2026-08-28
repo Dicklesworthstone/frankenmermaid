@@ -9696,9 +9696,24 @@ mod tests {
             let Some(section_properties) = section_schema["properties"].as_object() else {
                 continue;
             };
+            // Placeholder values are TYPE-VALID, derived from the schema itself: the probe
+            // asserts the KEY contract (every declared key is accepted), so a null would
+            // conflate key acceptance with value-type rejection.
+            fn placeholder(property: &serde_json::Value) -> serde_json::Value {
+                if let Some(variants) = property["enum"].as_array() {
+                    return variants.first().cloned().unwrap_or(serde_json::Value::Null);
+                }
+                match property["type"].as_str() {
+                    Some("string") => serde_json::json!(""),
+                    Some("number") => serde_json::json!(0),
+                    Some("boolean") => serde_json::json!(false),
+                    Some("object") => serde_json::json!({}),
+                    _ => serde_json::Value::Null,
+                }
+            }
             let section_keys: Vec<String> = section_properties
-                .keys()
-                .map(|k| format!("\"{k}\": null"))
+                .iter()
+                .map(|(k, property)| format!("\"{k}\": {}", placeholder(property)))
                 .collect();
             let probe = format!("{{ \"{section}\": {{ {} }} }}", section_keys.join(", "));
             let parsed: serde_json::Value = serde_json::from_str(&probe).unwrap();
