@@ -1675,6 +1675,7 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
             }
             target = next.as_str();
         }
+        resolved.insert(key.clone(), target.to_string());
     }
     resolved
 }
