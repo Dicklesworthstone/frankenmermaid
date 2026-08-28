@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private enum StudioLane: String, CaseIterable, Identifiable {
     case code = "Code"
@@ -11,10 +12,17 @@ struct StudioView: View {
     @StateObject private var renderer = MermaidRendererModel()
     @State private var lane: StudioLane = .code
     @State private var editorFocused = false
+    @State private var showingSamples = false
+    @State private var sharedArtifact: SharedArtifact?
+    @State private var exporting = false
+    @State private var exportError: String?
 
     init() {
         let requested = ProcessInfo.processInfo.environment["FM_INITIAL_LANE"]
         _lane = State(initialValue: StudioLane(rawValue: requested ?? "") ?? .code)
+        _showingSamples = State(
+            initialValue: ProcessInfo.processInfo.environment["FM_SHOW_SAMPLES"] == "1"
+        )
     }
 
     var body: some View {
@@ -32,6 +40,24 @@ struct StudioView: View {
         }
         .onChange(of: renderer.source) { _, _ in renderer.scheduleRender() }
         .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in renderer.renderNow() }
+        .sheet(isPresented: $showingSamples) {
+            DiagramSampleGallery { sample in
+                editorFocused = false
+                renderer.source = sample.source
+                lane = .diagram
+            }
+        }
+        .sheet(item: $sharedArtifact) { artifact in
+            SystemShareSheet(activityItems: [artifact.url])
+        }
+        .alert("Couldn’t prepare that export", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "Unknown export error")
+        }
     }
 
     private var masthead: some View {
@@ -104,6 +130,15 @@ struct StudioView: View {
                 HStack {
                     LabLabel(text: "01 · The Graph Source")
                     Spacer()
+                    Button {
+                        editorFocused = false
+                        showingSamples = true
+                    } label: {
+                        Label("Samples", systemImage: "square.grid.2x2")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(Lab.cyan)
                     Text("\(renderer.source.utf8.count) bytes")
                         .font(.system(size: Lab.size(9), design: .monospaced))
                         .foregroundStyle(Lab.secondary)
@@ -145,9 +180,34 @@ struct StudioView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Lab.stroke))
                     .frame(minHeight: 320)
-                Text(renderer.diagramType)
-                    .font(.system(size: Lab.size(10), weight: .bold, design: .monospaced))
-                    .foregroundStyle(Lab.cyan)
+                HStack {
+                    Text(renderer.diagramType)
+                        .font(.system(size: Lab.size(10), weight: .bold, design: .monospaced))
+                        .foregroundStyle(Lab.cyan)
+                    Spacer()
+                    if exporting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Lab.cyan)
+                            .accessibilityLabel("Preparing export")
+                    } else {
+                        Menu {
+                            ForEach(MermaidExportKind.allCases) { kind in
+                                Button {
+                                    prepareExport(kind)
+                                } label: {
+                                    Label(kind.title, systemImage: kind.symbol)
+                                }
+                            }
+                        } label: {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(Lab.cyan)
+                        .accessibilityHint("Share source, vector art, or a self-contained animated web page")
+                    }
+                }
             }
         }
     }
@@ -206,4 +266,32 @@ struct StudioView: View {
         case .failed: Lab.danger
         }
     }
+
+    private func prepareExport(_ kind: MermaidExportKind) {
+        guard !exporting else { return }
+        exporting = true
+        Task {
+            do {
+                sharedArtifact = SharedArtifact(url: try await renderer.prepareExport(kind))
+            } catch {
+                exportError = error.localizedDescription
+            }
+            exporting = false
+        }
+    }
+}
+
+private struct SharedArtifact: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+private struct SystemShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

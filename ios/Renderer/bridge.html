@@ -20,6 +20,38 @@
     const stage = document.querySelector('#stage');
     let latestRequest = 0;
 
+    function serializedDiagram() {
+      const rendered = stage.querySelector('svg');
+      if (!rendered) throw new Error('Render a diagram before sharing it.');
+      const copy = rendered.cloneNode(true);
+      copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      copy.setAttribute('width', '100%');
+      copy.setAttribute('height', '100%');
+      copy.querySelectorAll('[id^="fm-node-"]').forEach((node, index) => {
+        node.style.setProperty('--i', String(index));
+      });
+      return new XMLSerializer().serializeToString(copy);
+    }
+
+    function animatedDocument(svg, title) {
+      const safeTitle = String(title || 'FrankenMermaid Diagram')
+        .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+      return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>${safeTitle}</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#020a08;color:#e7eef0}
+body{display:grid;place-items:center;padding:clamp(16px,4vw,56px);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:radial-gradient(circle at 20% 10%,#0e749044,transparent 45%),radial-gradient(circle at 80% 90%,#10b98126,transparent 48%),#020a08}
+main{width:min(1400px,100%);height:min(88vh,960px);padding:clamp(12px,2vw,28px);border:1px solid #22d3ee42;border-radius:28px;background:#030d0dcc;box-shadow:0 28px 90px #000b,0 0 64px #22d3ee18;overflow:hidden}
+svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;filter:drop-shadow(0 14px 34px #22d3ee22)}
+[id^="fm-edge-"] path,[id^="fm-edge-"] line,[id^="fm-edge-"] polyline{stroke-dasharray:10 8;animation:current 1.35s linear infinite}
+[id^="fm-node-"]{animation:nodeCharge 3.2s ease-in-out infinite;animation-delay:calc(var(--i,0)*45ms)}
+@keyframes current{to{stroke-dashoffset:-36}}
+@keyframes nodeCharge{0%,100%{opacity:.86;filter:drop-shadow(0 0 0 #22d3ee00)}50%{opacity:1;filter:drop-shadow(0 0 7px #22d3ee80)}}
+@media(prefers-reduced-motion:reduce){[id^="fm-edge-"] path,[id^="fm-edge-"] line,[id^="fm-edge-"] polyline,[id^="fm-node-"]{animation:none}}
+</style></head><body><main aria-label="Animated FrankenMermaid diagram">${svg}</main></body></html>`;
+    }
+
     try {
       const wasmResponse = await fetch('./frankenmermaid_bg.wasm');
       const wasmBytes = await wasmResponse.arrayBuffer();
@@ -49,6 +81,13 @@
           bridge.postMessage({type: 'failure', requestID, message: String(error)});
           return false;
         }
+      };
+      window.frankenExport = (command) => {
+        const svg = serializedDiagram();
+        if (command.kind === 'animatedHTML') {
+          return animatedDocument(svg, command.title);
+        }
+        return svg;
       };
       bridge.postMessage({type: 'ready'});
     } catch (error) {

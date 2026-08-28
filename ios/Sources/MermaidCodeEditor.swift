@@ -26,7 +26,11 @@ struct MermaidCodeEditor: UIViewRepresentable {
         view.showsVerticalScrollIndicator = true
         view.showsHorizontalScrollIndicator = true
         view.textContainer.widthTracksTextView = false
-        view.textContainer.size = CGSize(width: .greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        view.textContainer.lineBreakMode = .byClipping
+        view.textContainer.size = CGSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
         view.tintColor = UIColor(Lab.cyan)
         view.selectedTextRange = view.textRange(from: view.beginningOfDocument, to: view.beginningOfDocument)
         view.accessibilityLabel = "Mermaid source editor"

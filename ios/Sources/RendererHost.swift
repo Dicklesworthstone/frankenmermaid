@@ -9,6 +9,38 @@ enum GraphPhase: Equatable {
     case failed(String)
 }
 
+enum MermaidExportKind: String, CaseIterable, Identifiable {
+    case source
+    case svg
+    case animatedHTML
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .source: "Mermaid Source"
+        case .svg: "Vector SVG"
+        case .animatedHTML: "Animated Web Page"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .source: "chevron.left.forwardslash.chevron.right"
+        case .svg: "scribble.variable"
+        case .animatedHTML: "sparkles.rectangle.stack"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .source: "mmd"
+        case .svg: "svg"
+        case .animatedHTML: "html"
+        }
+    }
+}
+
 @MainActor
 final class MermaidRendererModel: NSObject, ObservableObject {
     @Published var source = MermaidRendererModel.sample
@@ -21,8 +53,10 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     let webView: WKWebView
     private var requestID = 0
     private var scheduledRender: Task<Void, Never>?
+    private var debugExportProbePending = false
 
     override init() {
+        debugExportProbePending = ProcessInfo.processInfo.environment["FM_EXPORT_PROBE"] == "1"
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(MermaidResourceSchemeHandler(), forURLScheme: "frankenmermaid-resource")
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -68,6 +102,39 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         }
     }
 
+    func prepareExport(_ kind: MermaidExportKind) async throws -> URL {
+        let contents: String
+        if kind == .source {
+            contents = source
+        } else {
+            let command: [String: Any] = [
+                "kind": kind.rawValue,
+                "title": "FrankenMermaid \(diagramType) diagram"
+            ]
+            let result = try await webView.callAsyncJavaScript(
+                "return window.frankenExport(command)",
+                arguments: ["command": command],
+                in: nil,
+                contentWorld: .page
+            )
+            guard let exported = result as? String, !exported.isEmpty else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [
+                    NSLocalizedDescriptionKey: "The rendered diagram was not available to export."
+                ])
+            }
+            contents = exported
+        }
+
+        let safeType = diagramType
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let filename = "FrankenMermaid-\(safeType.isEmpty ? "diagram" : safeType)-\(UUID().uuidString.prefix(8)).\(kind.fileExtension)"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try Data(contents.utf8).write(to: url, options: .atomic)
+        return url
+    }
+
     static let sample = """
     flowchart TD
         Source[Mermaid source] --> Parse{Rust parser}
@@ -97,6 +164,20 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             nodeCount = payload["nodeCount"] as? Int ?? 0
             edgeCount = payload["edgeCount"] as? Int ?? 0
             phase = .ready
+#if DEBUG
+            if debugExportProbePending {
+                debugExportProbePending = false
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let url = try await self.prepareExport(.animatedHTML)
+                        UserDefaults.standard.set(url.path, forKey: "FM_LAST_EXPORT_PROBE_PATH")
+                    } catch {
+                        UserDefaults.standard.set(error.localizedDescription, forKey: "FM_LAST_EXPORT_PROBE_ERROR")
+                    }
+                }
+            }
+#endif
         case "failure":
             phase = .failed(payload["message"] as? String ?? "Renderer failed")
         default:

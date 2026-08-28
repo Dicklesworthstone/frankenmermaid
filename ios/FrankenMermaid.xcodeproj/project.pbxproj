@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		05C42C83CFE30B89F3D4A9E5 /* DiagramSamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928415AEC457CE85623EEEFC /* DiagramSamples.swift */; };
 		253A6289134C23366FCD9F11 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */; };
 		321FD792EC092CDC0EE8A0EE /* Renderer in Resources */ = {isa = PBXBuildFile; fileRef = 2CC45DF6459061EB2B480E6E /* Renderer */; };
 		882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D72BEE3C3241B52B539BCC /* StudioView.swift */; };
@@ -24,6 +25,7 @@
 		6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrankenMermaidApp.swift; sourceTree = "<group>"; };
 		7D8682A866E00E57A642FB42 /* RendererHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendererHost.swift; sourceTree = "<group>"; };
 		8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		928415AEC457CE85623EEEFC /* DiagramSamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagramSamples.swift; sourceTree = "<group>"; };
 		AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidCodeEditor.swift; sourceTree = "<group>"; };
 		C0C48617619448DF0AB92D9A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E3D72BEE3C3241B52B539BCC /* StudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioView.swift; sourceTree = "<group>"; };
@@ -34,6 +36,7 @@
 		8806C5BF358CE88ECE2CF469 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				928415AEC457CE85623EEEFC /* DiagramSamples.swift */,
 				6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */,
 				FE54E15D819A299BF5C0B0D7 /* Info.plist */,
 				AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */,
@@ -136,6 +139,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				05C42C83CFE30B89F3D4A9E5 /* DiagramSamples.swift in Sources */,
 				F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */,
 				95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */,
 				B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */,
