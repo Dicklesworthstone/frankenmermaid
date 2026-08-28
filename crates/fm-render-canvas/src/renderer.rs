@@ -4128,7 +4128,13 @@ fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
-    ir.meta.title.as_deref()
+    //
+    // ⚠️ WHICH FAMILIES TAKE A TITLE IS NOT THIS BACKEND'S DECISION. This used to return
+    // `ir.meta.title` outright, so the canvas drew a title on every family — including the ones
+    // mermaid leaves bare — and so did the SVG and terminal backends, each from its own copy of the
+    // same wrong rule. The measured (family, spelling) table now lives in
+    // `MermaidDiagramIr::declared_title_if_drawn`; only the pie exclusion above is genuinely local.
+    ir.declared_title_if_drawn()
 }
 
 fn canvas_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {

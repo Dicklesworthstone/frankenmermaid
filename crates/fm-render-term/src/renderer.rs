@@ -3785,7 +3785,13 @@ fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // If a specialized renderer ever does start drawing its own title, the fix is for THAT renderer
     // to stop, or for this to test what it actually drew -- not to suppress unconditionally.
     // `every_chart_type_draws_its_title_exactly_once` fails on a double-draw.
-    ir.meta.title.as_deref()
+    //
+    // ⚠️ WHICH FAMILIES TAKE A TITLE IS NOT THIS BACKEND'S DECISION EITHER. Returning
+    // `ir.meta.title` outright drew one on families mermaid leaves bare -- the same rule, copied
+    // into three backends and wrong in all three. The measured (family, spelling) table now lives in
+    // `MermaidDiagramIr::declared_title_if_drawn`; the reasoning above about specialized renderers
+    // is what remains local to the terminal.
+    ir.declared_title_if_drawn()
 }
 
 /// Render a pie chart as an ASCII ellipse with wedge detection and a side legend.
