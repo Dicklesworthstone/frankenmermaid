@@ -73,6 +73,64 @@ pub const fn is_east_asian_wide(c: char) -> bool {
     )
 }
 
+/// U+200D ZERO WIDTH JOINER — fuses the following character into the preceding glyph.
+const ZERO_WIDTH_JOINER: char = '\u{200D}';
+
+/// Whether a code point renders with zero advance width.
+///
+/// These characters draw nothing of their own: a combining mark composes onto the preceding base
+/// glyph, a variation selector picks a presentation form, a skin-tone modifier recolours the
+/// preceding emoji, and the zero-width space/joiner family are invisible formatting controls. Billing
+/// them as full characters sizes a node box for glyphs that are never drawn — and because `Café` has
+/// two Unicode spellings (`caf\u{e9}` and `cafe\u{301}`), it also makes the SAME label measure two
+/// different widths depending on how the author's editor normalised the file.
+///
+/// ⚠️ THIS MUST BE TESTED BEFORE [`is_east_asian_wide`] IN [`CharWidthClass::classify`]. The skin-tone
+/// modifiers `U+1F3FB..=U+1F3FF` sit INSIDE the `0x1F300..=0x1F9FF` emoji block that
+/// `is_east_asian_wide` reports as full-width, so checking wide-ness first bills a zero-width
+/// modifier at the widest multiplier there is.
+///
+/// This is a curated range list covering the marks that appear in diagram labels, not a full Unicode
+/// character-database lookup — the crate carries no UCD table and this runs per character on the
+/// measurement hot path. Every range below is general category `Mn`, `Me`, or `Cf`.
+#[must_use]
+pub const fn is_zero_width(c: char) -> bool {
+    let cp = c as u32;
+    // Fast path, mirroring `is_east_asian_wide`: every range below starts at U+0300, so all ASCII
+    // and Latin-1 text answers in one comparison instead of walking the list. The ASCII width table
+    // is built from `classify`, so this must stay false below 0x80 for that table to be unchanged.
+    if cp < 0x0300 {
+        return false;
+    }
+    matches!(cp,
+        // Combining Diacritical Marks (and its supplement/extended/symbol blocks)
+        0x0300..=0x036F
+        | 0x1AB0..=0x1AFF
+        | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20F0
+        // Combining marks for Cyrillic, Hebrew, Arabic and Devanagari
+        | 0x0483..=0x0489
+        | 0x0591..=0x05BD
+        | 0x0610..=0x061A
+        | 0x064B..=0x065F
+        | 0x0670
+        | 0x0900..=0x0903
+        | 0x093A..=0x093C
+        | 0x0941..=0x0948
+        | 0x094D
+        // Zero-width space, ZWNJ, ZWJ, and the bidi marks
+        | 0x200B..=0x200F
+        // Combining Half Marks
+        | 0xFE20..=0xFE2F
+        // Variation selectors: presentation form of the PRECEDING character
+        | 0xFE00..=0xFE0F
+        // Emoji skin-tone modifiers — inside the full-width emoji block, hence the ordering note
+        | 0x1F3FB..=0x1F3FF
+        // Variation Selectors Supplement
+        | 0xE0100..=0xE01EF
+    )
+}
+
 /// Font metrics preset for known font families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FontPreset {
@@ -180,6 +238,9 @@ pub enum CharWidthClass {
     VeryWide,
     /// Full-width: CJK ideographs, emoji, East Asian wide characters
     FullWidth,
+    /// Zero-width: combining marks, variation selectors, joiners — they draw onto or modify the
+    /// preceding glyph and advance the pen by nothing. See [`is_zero_width`].
+    ZeroWidth,
 }
 
 impl CharWidthClass {
@@ -192,6 +253,9 @@ impl CharWidthClass {
             ' ' => Self::Half,
             'w' | 'm' => Self::Wide,
             'W' | 'M' | '@' | '%' | '&' => Self::VeryWide,
+            // BEFORE the wide check: the skin-tone modifiers live inside the emoji block that
+            // `is_east_asian_wide` matches, so testing wide-ness first bills them at 2.0.
+            c if is_zero_width(c) => Self::ZeroWidth,
             c if is_east_asian_wide(c) => Self::FullWidth,
             _ => Self::Normal,
         }
@@ -208,6 +272,7 @@ impl CharWidthClass {
             Self::Wide => 1.2,
             Self::VeryWide => 1.5,
             Self::FullWidth => 2.0,
+            Self::ZeroWidth => 0.0,
         }
     }
 }
@@ -339,7 +404,16 @@ impl FontMetrics {
             // label that is mostly ASCII with an accent or a dash is exactly its common case, and
             // it was taking the slow path end to end.
             //
-            // BIT-IDENTICAL, and the identity is structural rather than a claim: `ASCII_WIDTH_MULT`
+            // ⚠️ THE BIT-IDENTITY BELOW IS ABOUT THE *ASCII* CHARACTERS OF A MIXED LABEL, AND IS
+            // NARROWER THAN IT WAS. Non-ASCII widths deliberately MOVED when zero-width code points
+            // stopped being billed as full characters: a combining mark, variation selector,
+            // skin-tone modifier or joiner now contributes 0.0 (see `is_zero_width`), and a
+            // ZWJ-joined character contributes 0.0 via the loop below. That was a correctness fix —
+            // `Café` measured 29.7 spelled NFC and 37.95 spelled NFD, two widths for one label — so
+            // any golden containing those code points is EXPECTED to change, and a golden that does
+            // not contain them cannot.
+            //
+            // For ASCII the identity is structural rather than a claim: `ASCII_WIDTH_MULT`
             // is BUILT at compile time as `classify(i as char).multiplier()` for every i < 128, so
             // for an ASCII char the table and the match chain are the same f32 by construction.
             // Every term is still `avg * multiplier(c)` and the terms are still summed
@@ -349,17 +423,34 @@ impl FontMetrics {
             // The monospace branch of `char_width` is also hoisted out of the loop: the preset
             // cannot change per character, so testing it once is the same answer with one branch
             // instead of one per char.
-            return text
-                .chars()
-                .map(|c| {
-                    let multiplier = if c.is_ascii() {
-                        ASCII_WIDTH_MULT[c as usize]
-                    } else {
-                        CharWidthClass::classify(c).multiplier()
-                    };
-                    avg * multiplier
-                })
-                .sum();
+            // A ZERO-WIDTH JOINER FUSES THE FOLLOWING CHARACTER INTO THE PRECEDING GLYPH, so the
+            // sequence `👨 ZWJ 👩 ZWJ 👧` draws as ONE family emoji roughly one emoji wide — not as
+            // three emoji plus two joiners. Classifying the joiner itself as zero-width is not
+            // enough: without this, the family still measures 3x a single emoji. One bool of state
+            // is the whole grapheme-clustering this needs, because the only character that fuses a
+            // following glyph is the joiner.
+            //
+            // The accumulation is still `avg * multiplier` summed left-to-right over `chars()`, and
+            // a joined character contributes a literal `0.0` term rather than being skipped, so the
+            // f32 addition SEQUENCE is unchanged for every string that contains no joiner.
+            let mut total = 0.0_f32;
+            let mut after_joiner = false;
+            for c in text.chars() {
+                let (multiplier, is_full_width) = if c.is_ascii() {
+                    (ASCII_WIDTH_MULT[c as usize], false)
+                } else {
+                    let class = CharWidthClass::classify(c);
+                    (class.multiplier(), matches!(class, CharWidthClass::FullWidth))
+                };
+                // ⚠️ A JOINER FUSES AN EMOJI, NOT ANY CHARACTER. `👨 ZWJ 👩` is one family glyph, but
+                // `a ZWJ b` still draws two Latin letters — the joiner only requests a joined form,
+                // which Latin fonts do not provide. Suppressing every character after a joiner
+                // measured `a\u{200D}b` as one character wide, which is why only a FULL-WIDTH
+                // follower is treated as fused.
+                total += avg * if after_joiner && is_full_width { 0.0 } else { multiplier };
+                after_joiner = c == ZERO_WIDTH_JOINER;
+            }
+            return total;
         }
         text.chars().map(|c| self.char_width(c)).sum()
     }
