@@ -21746,3 +21746,54 @@ harness's docstring long before these runs — not that the number is bigger.
 **Do-not-retry note:** do not re-attempt this certification on a converged-but-busy host. Converged
 load is not an idle host — 64/64 cpus were over 20% busy in every admitted run above while the
 1-minute loadavg looked acceptable. Run `scripts/window_check.sh` FIRST and believe its verdict.
+
+## REFUSED: the whole head-to-head on an rch worker — the fleet cannot give the exclusivity the harness requires (2026-08-28)
+
+**Method attempted, and it is the right one.** Local builds are unavailable this session, so the
+cross-engine measurement was attempted the only way that keeps both arms honest under that
+constraint: the ENTIRE head-to-head inside ONE `rch exec --job` invocation on ONE worker — stage the
+pinned bundle, build the harness, run both arms — so there is no local ELF, no second invocation,
+and no cross-worker comparison. That much worked:
+
+* the pinned bundle staged onto the worker at `~/.cache/fm-headtohead/`, sha256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, matching `pins.json`;
+* `cargo build --release -p frankenmermaid-cli --example headtohead` completed ON the worker in
+  14m29s;
+* the browserless transport (bd-9jm6) means parse mode needs no Chromium, which the worker lacks.
+
+**THE HARNESS THEN REFUSED, and it is right to.**
+
+```text
+[run] agent-mail store not found; fleet serialisation cannot be verified here
+[run] --mode parse requires --exclusive-host-claim trj-booking:<Agent-Mail-CLAIM-message-id>
+```
+
+**⚠️ THE GATE IS SYNTAX-ONLY, WHICH IS EXACTLY WHY IT MUST NOT BE FED.** `validExclusiveHostClaim`
+tests `/^trj-booking:[1-9]\d*$/` and nothing else; `run.mjs` says so itself two lines below — "this
+driver only checks its syntax. Do not emit it under a name that makes a typed string look like
+verified ownership." So `--exclusive-host-claim trj-booking:123456` would have been ACCEPTED and a
+ratio would have printed. That number would have carried a provenance field asserting an exclusive
+host claim that was never made. The measurement is not blocked by a missing formality; it is blocked
+by a fact, and typing the token fabricates the fact.
+
+**The fact, measured rather than assumed:** the worker is shared and was busy with other projects
+during this very run. `rch queue` during the window showed concurrent builds for `ft-pj66w-wt-…`,
+`franken_numpy-…` and `frankenscipy-…` on hz3/hz4, and rch selected hz4 with "0 slots remaining
+after reservation". An rch worker is a contended multi-tenant host by construction, which is the
+opposite of the exclusivity the row would assert.
+
+**Worker capability probe (hz3, same fleet):** `node v18.20.8`, `nproc=64`, `wasm-pack MISSING`,
+no Chromium, no `~/.cache/fm-headtohead`. Consequences beyond this refusal: RENDER mode is
+impossible on the fleet (no browser), and the WASM bundle cannot be rebuilt there either, so a
+Node-hosted single-process h2h — mermaid-js and our own `pkg/` in one process, which WOULD be
+literally one process — cannot be freshened to match a new Rust revision.
+
+**Do-not-retry predicate.** Do not re-attempt the cross-engine ratio on the rch fleet until ONE of
+these is true, and state which:
+1. a worker can be exclusively claimed for the window AND the agent-mail store is reachable from it,
+   so `--exclusive-host-claim` names a real booking rather than a well-formed string; or
+2. the harness gains a transport that certifies contention directly (e.g. reading the worker's own
+   run-queue during the timed region) instead of delegating the question to a claim token.
+
+Until then the standing campaign figures are the ones already banked; this session adds none, and
+adding one from a contended worker would have been strictly worse than adding nothing.
