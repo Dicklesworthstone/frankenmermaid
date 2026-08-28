@@ -19042,11 +19042,12 @@ mod tests {
 
     #[test]
     fn deck_directive_is_inert_on_dot_input() {
-        // The DOT branch never scans Mermaid directives — a documented v1 limitation. The
-        // DOT probe now also requires the text to END on the body's closing brace, so an
-        // input with a trailing `%%{…}%%` directive is not DOT at all: it reroutes to the
-        // Mermaid path (where the deck legitimately lands on the best-effort parse). The
-        // DOT-branch invariant is therefore asserted on the DOT parser directly.
+        // Mermaid metadata does not change the grammar of a valid DOT body (a4a105b6, the
+        // bd-23lf0 resolution). The DOT probe strips trailing directive lines before its
+        // end-on-brace check, so an appended directive cannot change WHAT KIND of graph the
+        // document is — bd-pdz8z measured the alternative routing losing a node and the edge
+        // outright. b9be26aa re-pinned this test to the reroute 90 minutes after a4a105b6
+        // landed it; the probe behaviour was never the reroute, so only the test was stale.
         let parsed = crate::dot_parser::parse_dot("digraph G {\n  a -> b\n}\n");
         assert!(
             parsed.ir.deck.is_none(),
@@ -19056,10 +19057,16 @@ mod tests {
             "digraph G {\n  a -> b\n}\n%%{deck: {slides: [{id: 's', nodes: ['a']}]}}%%\n",
         );
         assert_eq!(parsed.ir.diagram_type, fm_core::DiagramType::Flowchart);
-        assert_ne!(
+        assert_eq!(parsed.ir.nodes.len(), 2, "DOT body survives the directive");
+        assert_eq!(parsed.ir.edges.len(), 1, "DOT edge survives the directive");
+        assert!(
+            parsed.ir.deck.is_none(),
+            "DOT must not acquire a Mermaid deck"
+        );
+        assert_eq!(
             parsed.detection_method,
             crate::DetectionMethod::DotFormat,
-            "a directive-bearing brace graph is Mermaid, not DOT"
+            "a valid DOT body remains DOT when followed by Mermaid metadata"
         );
     }
 
