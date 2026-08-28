@@ -7,7 +7,7 @@ focus classes, staggered step reveals, slide navigation, overview tour rect (pre
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
 layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
-drag spring-back, self-loop edges gluing to their node, and variant followers. 36 checks; exit 0 = all pass.
+drag spring-back, self-loop edges gluing to their node, and variant followers. 37 checks; exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
 chromium (any venv works: /path/to/venv/bin/python scripts/deck_runtime_e2e.py). The
@@ -174,6 +174,7 @@ with sync_playwright() as p:
     page.click("#kill"); page.wait_for_timeout(200)
     check("destroy removes viewport", page.locator(".fm-deck-viewport").count() == 0)
     check("destroy removes tooltip el", page.locator(".fm-deck-tip").count() == 0)
+    check("destroy clears nav dots (no zombie handlers)", page.locator("#deck-dots i").count() == 0)
     check("no page errors at teardown", not errors, errors)
 
     browser.close()

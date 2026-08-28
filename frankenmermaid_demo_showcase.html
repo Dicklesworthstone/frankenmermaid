@@ -7000,6 +7000,10 @@ Shared IR,Terminal ANSI,20`
       if (ui.nextBtn) ui.nextBtn.removeEventListener("click", api.next);
       if (ui.prevBtn) ui.prevBtn.removeEventListener("click", api.prev);
       if (ui.overviewBtn) ui.overviewBtn.removeEventListener("click", api.overview);
+      // The dots (and their click closures over this instance) are mount-owned content;
+      // leaving them would keep zombie handlers alive on a destroyed deck.
+      if (ui.dots) ui.dots.textContent = "";
+      dots = [];
       if (viewport.parentNode) viewport.parentNode.removeChild(viewport);
       if (style.parentNode) style.parentNode.removeChild(style);
       if (tip.parentNode) tip.parentNode.removeChild(tip);
