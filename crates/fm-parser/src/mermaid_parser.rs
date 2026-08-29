@@ -7867,7 +7867,9 @@ struct TreemapEntry {
 fn parse_treemap_entry(text: &str) -> Option<TreemapEntry> {
     let rest = text.strip_prefix('"')?;
     let close = rest.find('"')?;
-    let label = rest[..close].to_string();
+    // Entity codes decode here as in every other label position (bd-j06n2); the pinned
+    // mermaid-11.15.0 draws `#35;` as `#` in a treemap leaf label.
+    let label = decode_mermaid_entities(&rest[..close]);
     let mut tail = trim_fast(&rest[close + 1..]);
 
     let mut classes = Vec::new();
@@ -8335,9 +8337,11 @@ fn parse_timeline_events(
             continue;
         }
 
-        // Create event node and link to period
+        // Create event node and link to period. Entity codes decode here as in every other label
+        // position (bd-j06n2); the pinned mermaid-11.15.0 draws `#35;` as `#` in a timeline event.
+        let event_label = decode_mermaid_entities(event_text);
         if let Some(event_node_id) =
-            builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span)
+            builder.intern_node(&event_id, Some(&event_label), NodeShape::Rounded, span)
         {
             builder.add_class_to_node_id(event_node_id, "timeline-event");
             if let Some(section_idx) = current_section {
@@ -9313,7 +9317,9 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         };
 
         pie_meta.slices.push(fm_core::IrPieSlice {
-            label: slice_name.to_string(),
+            // Entity codes are decoded here as they are in every other label position (bd-j06n2);
+            // the pinned mermaid-11.15.0 draws `#35;` as `#` in a pie slice label.
+            label: decode_mermaid_entities(slice_name),
             value,
         });
 
@@ -9463,7 +9469,9 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         };
 
         meta.points.push(fm_core::IrQuadrantPoint {
-            label: point_name.to_string(),
+            // Entity codes decode here as in every other label position (bd-j06n2); the pinned
+            // mermaid-11.15.0 draws `#35;` as `#` in a quadrant point label.
+            label: decode_mermaid_entities(point_name),
             x: x.clamp(0.0, 1.0),
             y: y.clamp(0.0, 1.0),
         });
