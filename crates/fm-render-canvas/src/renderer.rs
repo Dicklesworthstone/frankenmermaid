@@ -2214,7 +2214,7 @@ impl Canvas2dRenderer {
                 }
             }
 
-            // CARDINALITIES reach the canvas (bd-rk14).
+            // CLASS cardinalities reach the canvas (bd-rk14).
             //
             // `"1" --> "many"` lives in `IrEdgeExtras`, not in `edge.label`, and this path drew the
             // label and nothing else — measured drawing in the SVG and absent from the canvas. Last
@@ -2227,23 +2227,14 @@ impl Canvas2dRenderer {
             // Unlike the terminal, this needs no blank-cell search: the canvas has real coordinates
             // rather than a character grid, so the numbers are simply inset along the edge — the
             // same approach fm-render-svg takes.
-            // ⚠️ ER CARDINALITY WAS DRAWN BY THE SVG ALONE. `}o--o|` declares "0..*" and "0..1",
-            // fm-render-svg writes both, and this surface wrote neither — the relationship line
-            // appeared with no cardinality at all, which is the bd-039t family (declared content one
-            // renderer draws and another silently omits).
             //
-            // Nothing new is placed: the class-diagram cardinality block below already insets a
-            // label along the edge at each end, so ER only has to supply the text. The class values
-            // take precedence where both somehow exist; in practice an edge carries one or the
-            // other, since `er_notation` is set by the ER path and `*_cardinality` by the class one.
+            // ⚠️ ER cardinality is NOT placed here (bd-b1sy2): the crow's-foot markers drawn above
+            // carry it, matching the incumbent, which renders no cardinality text at all. The
+            // terminal keeps the text because a character grid has no marker carrier.
             if let Some(edge) = ir_edge.filter(|e| {
-                e.source_cardinality().is_some()
-                    || e.target_cardinality().is_some()
-                    || e.er_cardinality_labels().is_some()
+                e.source_cardinality().is_some() || e.target_cardinality().is_some()
             }) && points.len() >= 2
             {
-                // Resolved ONCE for the edge: both ends read it, and it parses the notation string.
-                let er_labels = edge.er_cardinality_labels();
                 let inset = self.config.font_size * 1.2;
                 let font =
                     edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
@@ -2276,18 +2267,8 @@ impl Canvas2dRenderer {
                 let second = points[1];
                 let last = points[points.len() - 1];
                 let penultimate = points[points.len() - 2];
-                place(
-                    edge.source_cardinality()
-                        .or_else(|| er_labels.map(|(source, _)| source)),
-                    &first,
-                    &second,
-                );
-                place(
-                    edge.target_cardinality()
-                        .or_else(|| er_labels.map(|(_, target)| target)),
-                    &last,
-                    &penultimate,
-                );
+                place(edge.source_cardinality(), &first, &second);
+                place(edge.target_cardinality(), &last, &penultimate);
             }
 
             // Draw edge label if present

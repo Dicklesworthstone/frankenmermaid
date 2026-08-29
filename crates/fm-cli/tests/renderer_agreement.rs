@@ -43,15 +43,12 @@ const CASES: &[(&str, &str, &str)] = &[
         "erDiagram\n  A {\n    string name \"who they are\"\n  }\n",
         "who they are",
     ),
-    // Cardinality was drawn by the SVG ALONE until bd-2h3pp; the canvas and terminal drew the
-    // relationship line and no numbers. Gated here so that agreement is ENFORCED rather than
-    // incidental — the three surfaces reached it through different code (a shared fm-core mapping,
-    // then each surface's own existing label placement), and nothing else makes them stay together.
-    (
-        "er_cardinality",
-        "erDiagram\n  CUSTOMER }o--o| ORDER : places\n",
-        "0..*",
-    ),
+    // er_cardinality MOVED OUT of this corpus (bd-b1sy2): cardinality is now carried
+    // surface-appropriately — crow's-foot markers on SVG and Canvas (what the incumbent draws;
+    // the duplicated text was the last parity divergence on er_basic), text on the terminal (a
+    // character grid has no marker carrier). A single `want` string cannot express "marker here,
+    // text there", so `cardinality_is_carried_surface_appropriately` below pins each surface's
+    // carrier explicitly.
     (
         "class_member",
         "classDiagram\n  class Alpha {\n    +String name\n  }\n",
@@ -329,6 +326,50 @@ const CASES: &[(&str, &str, &str)] = &[
 /// mechanism only works for a case the gate actually renders, so an entry here MUST name a case
 /// above.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
+
+/// Cardinality is carried surface-appropriately (bd-b1sy2): crow's-foot markers on SVG and
+/// Canvas — what the pinned incumbent draws, which renders NO cardinality text — and plain text
+/// on the terminal, whose character grid has no marker carrier. The three-renderer text-agreement
+/// corpus cannot express "different carriers, same datum", so this gate pins each surface's
+/// carrier explicitly and fails if any surface loses its half of the datum.
+#[test]
+fn cardinality_is_carried_surface_appropriately() {
+    let source = "erDiagram\n  CUSTOMER }o--o| ORDER : places\n";
+    let ir = fm_parser::parse(source).ir;
+
+    let svg = fm_render_svg::render_svg(&ir);
+    // The marker ids come from parse_er_cardinality_forms: `}o--o|` is zero-or-more on the left,
+    // zero-or-one on the right.
+    assert!(
+        svg.contains("er-zeroOrMoreStart") && svg.contains("er-zeroOrOneEnd"),
+        "the SVG must carry ER cardinality as crow's-foot markers"
+    );
+    assert!(
+        !svg.contains("0..*"),
+        "the SVG must NOT also draw cardinality as text: it duplicates the markers and is the          last parity divergence on er_basic"
+    );
+
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let canvas_text: Vec<String> = canvas_text(&format!("{:?}", context.operations()));
+    assert!(
+        canvas_text.iter().all(|t| !t.contains("0..*")),
+        "the canvas must not draw cardinality as text either: {canvas_text:?}"
+    );
+    // The marker draws as raw paths, so the operation stream carries no name to grep; assert the
+    // source-level carrier the same way the gpu_plan accounting guard reads renderer.rs.
+    let renderer_src = include_str!("../../fm-render-canvas/src/renderer.rs");
+    assert!(
+        renderer_src.contains("draw_er_cardinality_marker"),
+        "the canvas must carry ER cardinality as markers"
+    );
+
+    let term = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(
+        term.contains("0..*"),
+        "the terminal's only cardinality carrier is text; it must keep drawing it"
+    );
+}
 
 #[test]
 fn the_three_renderers_agree_on_declared_text() {

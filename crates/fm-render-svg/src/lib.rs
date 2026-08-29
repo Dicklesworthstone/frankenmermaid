@@ -5147,19 +5147,11 @@ fn render_layout_to_svg(
                 render_edges_serial(out, &layout.edges, &edge_context);
             }
             // Cardinality labels sit between edges and nodes in the slow path's child order; stream them in
-            // the same position. Each writer self-guards (ER emits only for ER edges, class only for edges
-            // with source/target cardinality), so both are no-ops for a plain flowchart.
-            if ir.diagram_type == fm_core::DiagramType::Er {
-                write_er_cardinality_labels_into(
-                    out,
-                    ir,
-                    layout,
-                    offset_x,
-                    offset_y,
-                    config,
-                    &theme.colors,
-                );
-            }
+            // the same position. The class writer self-guards (emits only for edges with
+            // source/target cardinality), so it is a no-op for a plain flowchart. ER cardinality is
+            // carried by the crow's-foot markers (bd-b1sy2: the text duplicated the markers, and the
+            // incumbent draws none); the terminal keeps the text because a character grid has no
+            // marker carrier.
             write_class_cardinality_labels_into(
                 out,
                 ir,
@@ -5313,23 +5305,6 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render ER cardinality labels near edge endpoints — one raw fragment, byte-identical to the
-    // per-label `Element::text()` (shared with the streaming fast path via `write_er_cardinality_labels_into`).
-    if ir.diagram_type == fm_core::DiagramType::Er {
-        let mut cardinality_svg = String::new();
-        write_er_cardinality_labels_into(
-            &mut cardinality_svg,
-            ir,
-            layout,
-            offset_x,
-            offset_y,
-            config,
-            &theme.colors,
-        );
-        if !cardinality_svg.is_empty() {
-            doc = doc.child(Element::raw_svg(cardinality_svg));
-        }
-    }
 
     // Render class diagram cardinality labels near edge endpoints — one raw fragment, byte-identical to the
     // per-label `Element::text()` (shared with the streaming fast path via `write_class_cardinality_labels_into`).
@@ -6211,81 +6186,11 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 /// for the left and right endpoints.
 /// Stream every ER cardinality `<text>` (left-then-right per edge, edge order) into `out`. Extracted from
 /// the slow-path loop so both the slow path and the whole-document streaming fast path share ONE
-/// implementation; emits nothing for non-ER edges. Byte-identical to the slow path's `cardinality_svg`.
-fn write_er_cardinality_labels_into(
-    out: &mut String,
-    ir: &MermaidDiagramIr,
-    layout: &DiagramLayout,
-    offset_x: f32,
-    offset_y: f32,
-    config: &SvgRenderConfig,
-    colors: &ThemeColors,
-) {
-    for edge_path in &layout.edges {
-        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-            && let Some(notation) = ir_edge.er_notation()
-            && edge_path.points.len() >= 2
-        {
-            // Shared with fm-render-canvas via fm-core (bd-2h3pp). This crate carried the only
-            // copy of the mapping while it was the only surface drawing cardinality; a second copy
-            // in the canvas would have been the forked-helper drift this repo keeps getting bitten
-            // by, so the logic moved to the IR — it is a fact about the notation, not about drawing.
-            let (left_label, right_label) = fm_core::parse_er_cardinality(notation);
-            // ⚠️ THIS TEXT DUPLICATES THE CROW'S-FOOT MARKERS AND IS DRAWN ANYWAY. bd-m2t99 is
-            // BLOCKED, not merely unfinished, and this comment is here so the next person does not
-            // spend the afternoon rediscovering why.
-            //
-            // mermaid draws no cardinality text at all — it encodes cardinality as markers, which
-            // this renderer now draws too (bd-dun16). So er_basic reports 17 drawn text runs against
-            // the incumbent's 13, and the four extra are these labels. Suppressing them is two lines,
-            // and those two lines were written, measured green (chromium_text_diff.mjs er_basic:
-            // AGREE, 13 runs, full text parity) and then REVERTED.
-            //
-            // WHAT STOPS IT: `the_three_renderers_agree_on_declared_text` in fm-cli. The terminal is
-            // a character grid and can never carry a marker, so the moment SVG stops drawing this
-            // text the three surfaces no longer agree on it — permanently, not until some follow-up
-            // lands. That gate is CORRECT; the divergence it reports is real, and editing it to let
-            // this through would be weakening a gate to land a change.
-            //
-            // WHAT IT NEEDS: a decision on whether one datum may be carried by DIFFERENT means on
-            // different surfaces (a shape on SVG, text on a terminal). That is bd-5k51.1's
-            // "backend-specific legitimate differences" question and does not belong in a renderer.
-            let font_size = config.font_size * 0.7;
-            if !left_label.is_empty() {
-                let p = &edge_path.points[0];
-                write_cardinality_text_into(
-                    out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
-                    &colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-er-cardinality",
-                    left_label,
-                );
-            }
-            if !right_label.is_empty() {
-                let p = &edge_path.points[edge_path.points.len() - 1];
-                write_cardinality_text_into(
-                    out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
-                    &colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-er-cardinality",
-                    right_label,
-                );
-            }
-        }
-    }
-}
 
 /// Stream every class-relation cardinality `<text>` (source-then-target per edge, edge order) into `out`.
-/// Extracted twin of [`write_er_cardinality_labels_into`]; emits nothing for edges without source/target
-/// cardinality. Byte-identical to the slow path's `class_cardinality_svg`.
+/// Emits nothing for edges without source/target cardinality. Byte-identical to the slow path's
+/// `class_cardinality_svg`. (The ER twin was removed in bd-b1sy2: ER cardinality is carried by
+/// crow's-foot markers on this surface, matching the incumbent; the terminal keeps the text.)
 fn write_class_cardinality_labels_into(
     out: &mut String,
     ir: &MermaidDiagramIr,
@@ -6337,7 +6242,8 @@ fn write_class_cardinality_labels_into(
 /// path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
 /// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
 /// shared 2-decimal `AttributeValue::Number` serializer; the label/fill escape identically to the element.
-/// `class_name` is `fm-er-cardinality` (ER) or `fm-class-cardinality` (class relations).
+/// `class_name` is `fm-class-cardinality` (class relations); the ER caller was removed with the
+/// ER text emission (bd-b1sy2).
 #[allow(clippy::too_many_arguments)]
 fn write_cardinality_text_into(
     out: &mut String,
