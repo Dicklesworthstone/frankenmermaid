@@ -50,11 +50,27 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # labelled-endpoint subgraph resolution (bd-honvo), and cluster classDef propagation (bd-6cdzy).
 # wasm-opt still runs -Oz --converge. Headroom after raise: ~8.3K.
 #
+# Raised 700K -> 701K on 2026-08-29 (bd-zrz6r): the parity/support-matrix wave since the 700K
+# raise (bd-zlmow) consumed the ~8.3K headroom and left HEAD 180 bytes over. MEASURED at HEAD:
+# 716980 gzip, +180 (0.025%) over the 700K ceiling. Attribution: ~60 engine commits since
+# bd-zlmow, dominated by the bd-1buv incumbent-parity sweep (title table, subgraph fixed-point,
+# autonumber circles, ER crow's-foot markers, sankey rounding), the bd-5k51.1 support-matrix
+# wave (C4 directional relationships/legends/numbering, WebGPU sequence fragments, canvas
+# dividers), the bd-1t7l lens family (rank-local LayoutLens, wasm DiagramLens composition), and
+# the bd-6qd.4 config-schema validators. Shrink levers were attempted FIRST, per the doctrine
+# above: 20d8d9b4 already trimmed the embedded style payload for this bead; re-running wasm-opt
+# (-Oz --converge, and with --gufa) on the already-optimized module GROWS output (718159-719789
+# gzip); the module carries no name/producers/DWARF sections to strip; fm-render-term is already
+# outside the wasm surface. Next structural lever when this ratchet next binds:
+# -Zbuild-std=std,panic_abort with panic_immediate_abort (wasm-only panic machinery).
+# Headroom after raise: ~820 bytes -- deliberately tight; do not land a feature on this margin
+# without paying its own attribution.
+#
 # ⚠️ RAISED IN THE COMMIT THAT NEEDED IT, which is what the raises above also did, and it is
 # stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
 # measured-justification procedure, not a correctness gate to be quietly relaxed — if a future
 # change cannot say what it cost and why, it should shrink instead of raising.
-MAX_GZIP_BYTES=$((700 * 1024))
+MAX_GZIP_BYTES=$((701 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
