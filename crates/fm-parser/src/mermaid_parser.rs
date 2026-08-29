@@ -3703,8 +3703,20 @@ fn parse_subgraph_statement_raw(
     // Prefer explicit node-style labels (`id[Title]`, `id(Title)`, etc.) when
     // delimiter characters are present. This preserves the same title
     // normalization behavior as normal node parsing.
-    let has_explicit_label_delimiters =
-        body.contains('[') || body.contains('(') || body.contains('{') || body.contains('>');
+    // ⚠️ A `<br/>` TAG CONTAINS `>`, WHICH IS ALSO THE ASYMMETRIC-SHAPE DELIMITER. Testing the raw
+    // body sent `subgraph "Q<br/>Z"` down the node-token branch, where the `>` was read as a shape
+    // delimiter — and the title did not merely keep its tag, it was LOST: the cluster came out
+    // captioned by the derived key instead. The pinned mermaid-11.15.0 converts a line-break tag in
+    // a subgraph title, so this diverged in the worst direction, silently dropping author text.
+    //
+    // The probe resolves line-break tags FIRST, so a `>` that belongs to one cannot be mistaken for
+    // a delimiter. Only the gate is affected — the branches below still parse the raw body, so every
+    // genuinely bracketed form is unchanged.
+    let delimiter_probe = replace_br_with_newlines(body);
+    let has_explicit_label_delimiters = delimiter_probe.contains('[')
+        || delimiter_probe.contains('(')
+        || delimiter_probe.contains('{')
+        || delimiter_probe.contains('>');
     if has_explicit_label_delimiters && let Some(node) = parse_node_token_with_config(body, config)
     {
         let key = normalize_identifier(&node.id);
