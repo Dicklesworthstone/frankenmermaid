@@ -60,8 +60,8 @@
       "family": "er",
       "surface": "svg",
       "oracle": "chromium_text_diff",
-      "verdict": "diverge",
-      "detail": "we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only"
+      "verdict": "agree",
+      "detail": "fixed in bd-b1sy2: cardinality is carried by crow's-foot markers only (er_basic AGREE, 13 runs)"
     },
     {
       "family": "flowchart",
@@ -74,8 +74,8 @@
       "family": "gantt",
       "surface": "svg",
       "oracle": "chromium_text_diff",
-      "verdict": "diverge",
-      "detail": "mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")"
+      "verdict": "agree",
+      "detail": "per-diagram AGREE after --dump counts: mermaid draws each date tick x2 (axis double-render its visibility filter misses), we draw x1; both engines draw all seven dates. Our axis adds 01-08 (extent +1 day)"
     },
     {
       "family": "gitGraph",
@@ -137,8 +137,8 @@
       "family": "sankey",
       "surface": "svg",
       "oracle": "chromium_text_diff",
-      "verdict": "diverge",
-      "detail": "we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")"
+      "verdict": "agree",
+      "detail": "per-diagram verdict AGREE (7 runs); the all-goldens pooled DIVERGE was a cross-golden multiset artifact \u2014 node totals are drawn by both engines"
     },
     {
       "family": "sequence",
@@ -165,8 +165,8 @@
       "family": "xyChart",
       "surface": "svg",
       "oracle": "chromium_text_diff",
-      "verdict": "diverge",
-      "detail": "we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")"
+      "verdict": "agree",
+      "detail": "legend removed (bd-b33ab decision: parity; series identity survives via per-mark <title>); per-diagram AGREE 19 runs"
     }
   ],
   "run": {
@@ -175,8 +175,8 @@
     "bundle": "mermaid@11.15.0 (npm dist, version-pinned)",
     "date": "2026-08-28",
     "totals": {
-      "agree": 28,
-      "diverge": 5,
+      "agree": 33,
+      "diverge": 1,
       "undecidable": 6,
       "incumbent_dnf": 2
     },
@@ -184,6 +184,7 @@
       "fuzzy_keyword_recovery",
       "malformed_recovery"
     ],
-    "exclusion_reason": "resilience fixtures: the incumbent refusing deliberately-broken input is expected, not a parity signal"
+    "exclusion_reason": "resilience fixtures: the incumbent refusing deliberately-broken input is expected, not a parity signal",
+    "note": "per-diagram verdicts are authoritative; the pooled all-goldens multiset produced one artifact (sankey), re-verified per golden"
   }
 }

@@ -1,5 +1,5 @@
 {
-  "source_rev": "fbe9d3540cd0acfb319f4b5f5bd0ef462d85f49e",
+  "source_rev": "f125fb0ab2de8adbd4aa06c5cf6a7402dc90c4c7",
   "cells": [
     {
       "family": "flowchart",
@@ -536,21 +536,20 @@
     {
       "family": "er",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::er_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:er_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
-      "output_sha256": "c82b1fd4ecf6ff9e238ebd9c98a306d54cd70a8a319513467b6efddcc8a498f2",
+      "output_sha256": "64e4fdbd9a9bc77eca70339ca34ecb625af6357fd582a03f9570de1840b8b5bc",
       "census": {
         "nodes": 3,
         "edges": 2,
-        "text_runs": 17
+        "text_runs": 13
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
@@ -637,21 +636,21 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::er_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:er_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
-      "output_sha256": "c82b1fd4ecf6ff9e238ebd9c98a306d54cd70a8a319513467b6efddcc8a498f2",
+      "output_sha256": "64e4fdbd9a9bc77eca70339ca34ecb625af6357fd582a03f9570de1840b8b5bc",
       "census": {
         "nodes": 3,
         "edges": 2,
-        "text_runs": 17
+        "text_runs": 13
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
@@ -1606,13 +1605,12 @@
     {
       "family": "gantt",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::gantt_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:gantt_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
@@ -1707,13 +1705,13 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::gantt_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:gantt_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
@@ -2141,13 +2139,12 @@
     {
       "family": "sankey",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::sankey_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:sankey_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
@@ -2242,13 +2239,13 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::sankey_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:sankey_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
@@ -2674,28 +2671,27 @@
     {
       "family": "xyChart",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::xychart_comprehensive",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:xychart_comprehensive"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
-      "output_sha256": "8142f959c82474540ccf95d1fadbe9eefdd49c29b347f10e71df0f98f70de5c2",
+      "output_sha256": "6de317c4e356f79411714c96cb9091b7505a148d1eb8d7733cc69d12bbba11ac",
       "census": {
         "nodes": 12,
         "edges": 3,
-        "text_runs": 22
+        "text_runs": 19
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
         "errors": 0,
         "warnings": 0
       },
-      "a11y_named_elements": 9,
+      "a11y_named_elements": 13,
       "negative_case": {
         "handled": true,
         "diagnostics": {
@@ -2717,7 +2713,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
-      "output_sha256": "cbf528db7e3849fa678da281882031c099793c1d30feb23d1d267ca1625decd9",
+      "output_sha256": "f8dccaa22eabe00bc8bf3e50b13a5649ded7b3617e2aa4f6f605b15cc9e0e669",
       "census": {
         "nodes": 12,
         "edges": 3,
@@ -2775,28 +2771,28 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::xychart_comprehensive",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:xychart_comprehensive"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
-      "output_sha256": "8142f959c82474540ccf95d1fadbe9eefdd49c29b347f10e71df0f98f70de5c2",
+      "output_sha256": "6de317c4e356f79411714c96cb9091b7505a148d1eb8d7733cc69d12bbba11ac",
       "census": {
         "nodes": 12,
         "edges": 3,
-        "text_runs": 22
+        "text_runs": 19
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
         "errors": 0,
         "warnings": 0
       },
-      "a11y_named_elements": 9,
+      "a11y_named_elements": 13,
       "negative_case": {
         "handled": true,
         "diagnostics": {

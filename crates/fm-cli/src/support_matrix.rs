@@ -221,6 +221,24 @@ fn svg_text_content(svg: &str) -> String {
     content
 }
 
+/// The character data inside `<title>` elements, concatenated. Titles carry per-mark accessible
+/// names (e.g. "Sales Q1: 30"), which witness series identity for charts whose visible legend the
+/// parity contract removed.
+fn svg_title_content(svg: &str) -> String {
+    let mut content = String::with_capacity(64);
+    let mut rest = svg;
+    while let Some(start) = rest.find("<title>") {
+        let after = start + "<title>".len();
+        let Some(close) = rest[after..].find("</title>") else {
+            break;
+        };
+        content.push_str(&rest[after..after + close]);
+        content.push(' ');
+        rest = &rest[after + close..];
+    }
+    content
+}
+
 /// Whitespace-collapsed containment: a label the renderer wrapped across tspans or padded
 /// still matches (every word of it), while a genuinely absent one still fails.
 fn normalized_contains(haystack: &str, needle: &str) -> bool {
@@ -530,7 +548,13 @@ fn evaluate_cell(
                     .to_string(),
             );
         } else if matches!(surface, "svg" | "wasm") {
-            let drawn_text = svg_text_content(&rendered.output);
+            // Per-mark <title> tooltips are part of the accessibility surface: a series name
+            // witnessed only there (bd-b33ab removed the visible legend) is still witnessed.
+            let drawn_text = format!(
+                "{} {}",
+                svg_text_content(&rendered.output),
+                svg_title_content(&rendered.output)
+            );
             // WHAT the drawn text must witness is a per-family contract, not one rule:
             //
             // - Most families render each IR node's label as text, so the label set itself

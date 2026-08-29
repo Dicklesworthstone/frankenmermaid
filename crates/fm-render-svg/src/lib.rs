@@ -8174,7 +8174,7 @@ fn render_xychart_svg(
                 );
 
                 if config.include_source_spans {
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
                         let center = node.bounds.center();
                         let point = Element::circle()
                             .cx(center.x + offset_x)
@@ -8184,6 +8184,18 @@ fn render_xychart_svg(
                             .stroke(&theme.colors.background)
                             .stroke_width(2.0)
                             .class("fm-xychart-point");
+                        // Same per-mark accessible name as the bar path (bd-sdhzh): with the legend
+                        // gone (bd-b33ab) the point's <title> is the line's series-identity carrier.
+                        let point = match series_value_indices
+                            .get(position)
+                            .and_then(|index| {
+                                xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                            })
+                            .filter(|_| config.a11y.text_alternatives)
+                        {
+                            Some(name) => point.child(Element::title(&name)),
+                            None => point,
+                        };
                         doc = doc.child(apply_span_metadata(point, node.span));
                     }
                 } else {
@@ -8198,7 +8210,7 @@ fn render_xychart_svg(
                     let mut esc_bg = String::new();
                     let _ = write_escaped_attr(&mut esc_bg, &theme.colors.background);
                     let mut point_svg = String::new();
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
                         let center = node.bounds.center();
                         point_svg.push_str("<circle cx=\"");
                         let _ = crate::attributes::write_number_into(
@@ -8219,7 +8231,18 @@ fn render_xychart_svg(
                         point_svg.push_str(&esc_color);
                         point_svg.push_str("\" stroke=\"");
                         point_svg.push_str(&esc_bg);
-                        point_svg.push_str("\" stroke-width=\"2\" class=\"fm-xychart-point\"/>");
+                        point_svg.push_str("\" stroke-width=\"2\" class=\"fm-xychart-point\"");
+                        // Per-mark accessible name, same contract as the bar path (bd-sdhzh): the
+                        // line's series identity lives in these titles now that the legend is gone.
+                        let name = series_value_indices.get(position).and_then(|index| {
+                            xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                        });
+                        write_xychart_mark_accessible_name(
+                            &mut point_svg,
+                            config.a11y.text_alternatives,
+                            name.as_deref(),
+                            "circle",
+                        );
                     }
                     doc = doc.child(Element::raw_svg(point_svg));
                 }
