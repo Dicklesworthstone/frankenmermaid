@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 private enum StudioLane: String, CaseIterable, Identifiable {
     case code = "Code"
@@ -79,7 +80,7 @@ struct StudioView: View {
             }
         }
         .sheet(item: $sharedArtifact) { artifact in
-            SystemShareSheet(activityItems: [artifact.url])
+            SystemShareSheet(fileURL: artifact.url)
         }
         .alert("Couldn’t prepare that export", isPresented: Binding(
             get: { exportError != nil },
@@ -447,10 +448,24 @@ private struct SharedArtifact: Identifiable {
 }
 
 private struct SystemShareSheet: UIViewControllerRepresentable {
-    let activityItems: [Any]
+    let fileURL: URL
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+        let contentType = UTType(filenameExtension: fileURL.pathExtension) ?? .data
+        let provider = NSItemProvider()
+        provider.suggestedName = fileURL.lastPathComponent
+        provider.registerFileRepresentation(
+            forTypeIdentifier: contentType.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            // Register only a copied file representation. A bare HTML URL can
+            // otherwise be interpreted as a web link or text by destinations.
+            completion(fileURL, false, nil)
+            return nil
+        }
+        let configuration = UIActivityItemsConfiguration(itemProviders: [provider])
+        return UIActivityViewController(activityItemsConfiguration: configuration)
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
