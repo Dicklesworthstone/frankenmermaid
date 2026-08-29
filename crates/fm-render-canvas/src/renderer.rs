@@ -2231,9 +2231,9 @@ impl Canvas2dRenderer {
             // ⚠️ ER cardinality is NOT placed here (bd-b1sy2): the crow's-foot markers drawn above
             // carry it, matching the incumbent, which renders no cardinality text at all. The
             // terminal keeps the text because a character grid has no marker carrier.
-            if let Some(edge) = ir_edge.filter(|e| {
-                e.source_cardinality().is_some() || e.target_cardinality().is_some()
-            }) && points.len() >= 2
+            if let Some(edge) = ir_edge
+                .filter(|e| e.source_cardinality().is_some() || e.target_cardinality().is_some())
+                && points.len() >= 2
             {
                 let inset = self.config.font_size * 1.2;
                 let font =

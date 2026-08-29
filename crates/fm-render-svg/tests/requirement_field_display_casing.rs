@@ -79,13 +79,13 @@ fn render_requirement(risk: &str, verify: &str) -> Vec<String> {
 fn risk_and_verification_draw_their_display_names() {
     for (risk, verify, risk_row, verify_row) in [
         ("high", "test", "Risk: High", "Verification: Test"),
-        ("medium", "analysis", "Risk: Medium", "Verification: Analysis"),
         (
-            "low",
-            "inspection",
-            "Risk: Low",
-            "Verification: Inspection",
+            "medium",
+            "analysis",
+            "Risk: Medium",
+            "Verification: Analysis",
         ),
+        ("low", "inspection", "Risk: Low", "Verification: Inspection"),
         (
             "low",
             "demonstration",
@@ -124,7 +124,9 @@ fn a_shouted_or_mixed_keyword_is_normalised_to_the_enum_name() {
         );
         // Name the failure directly rather than only asserting the success.
         assert!(
-            !texts.iter().any(|text| text == "Risk: HIGH" || text == "Risk: hIgH"),
+            !texts
+                .iter()
+                .any(|text| text == "Risk: HIGH" || text == "Risk: hIgH"),
             "{risk}: the author's casing survived into the picture: {texts:?}"
         );
     }
@@ -170,7 +172,11 @@ fn an_unrecognised_keyword_keeps_the_authors_text() {
 #[test]
 fn the_display_tables_normalise_case_insensitively() {
     for input in ["high", "HIGH", "hIgH", "High", "  high  "] {
-        assert_eq!(fm_core::requirement_risk_display(input), "High", "{input:?}");
+        assert_eq!(
+            fm_core::requirement_risk_display(input),
+            "High",
+            "{input:?}"
+        );
     }
     assert_eq!(fm_core::requirement_risk_display("medium"), "Medium");
     assert_eq!(fm_core::requirement_risk_display("low"), "Low");

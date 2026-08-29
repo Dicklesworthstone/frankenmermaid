@@ -1,4 +1,5 @@
-//! ER cardinality is drawn ONCE — as a marker, not also as text (bd-m2t99).
+//! ER cardinality is drawn ONCE — as a marker, not also as text (bd-m2t99; the carrier
+//! question it was blocked on is DECIDED in bd-b1sy2: markers on SVG/Canvas, text on terminal).
 //!
 //! REFERENCE BEHAVIOR, measured with `scripts/headtohead/chromium_text_diff.mjs` against the pinned
 //! mermaid 11.15.0 bundle in Chromium 151, on `crates/fm-cli/tests/golden/er_basic.mmd`:
@@ -51,13 +52,11 @@ fn marker_refs(svg: &str) -> Vec<String> {
 
 /// The four labels er_basic used to draw are gone, and the diagram still says what it said.
 ///
-/// ⚠️ IGNORED BECAUSE THE CHANGE IT PINS WAS REVERTED, NOT BECAUSE IT IS FLAKY. Suppressing the text
-/// measured green against the incumbent (chromium_text_diff.mjs er_basic: AGREE, 13 runs) and was
-/// reverted anyway: it breaks `the_three_renderers_agree_on_declared_text`, because the terminal is
-/// a character grid that can never carry a marker, so the three surfaces stop agreeing on this datum
-/// permanently. That gate is correct and editing it to pass would be weakening a gate to land a
-/// change. Un-ignore this when bd-m2t99's carrier question is decided.
-#[ignore = "bd-m2t99: blocked on whether one datum may use different carriers per surface"]
+/// Re-armed by bd-b1sy2: the carrier question is decided (markers on SVG/Canvas, text on the
+/// terminal — pinned by `cardinality_is_carried_surface_appropriately` in renderer_agreement.rs,
+/// which carries the surface-split for the text-agreement gate rather than weakening it). The
+/// terminal kept the text, so the three surfaces still agree on the datum; only the SVG's
+/// duplicate channel is gone.
 #[test]
 fn a_recognised_notation_draws_a_marker_and_no_text() {
     let svg = render("erDiagram\n  A ||--o{ B : places\n");
@@ -77,20 +76,18 @@ fn a_recognised_notation_draws_a_marker_and_no_text() {
     );
 }
 
-/// ⚠️ THE FALLBACK, AND WHY THIS IS NOT AN UNCONDITIONAL DELETION.
-///
-/// The label mapping and the shape mapping do not cover the same inputs, deliberately:
-/// `parse_er_cardinality` degrades an unrecognised marker containing `{` to `*`, while
-/// `parse_er_cardinality_forms` has no fallback arm at all, because there is no "approximately a
-/// crow's foot". A side with a label but no shape therefore draws no marker, and dropping its text
-/// too would remove the cardinality from the document entirely.
-///
-/// ⚠️ THE IR IS HAND-BUILT HERE FOR A MEASURED REASON, not for convenience. The parser NORMALISES an
+/// ⚠️ THE HAND-BUILT IR IS FOR A MEASURED REASON, not for convenience. The parser NORMALISES an
 /// unrecognised marker away — `A o--|| B` arrives as notation `"--"` with empty labels, verified by
 /// probe — so no parser input can reach this branch. `er_notation` is a public field, so any IR
 /// consumer (the WASM API, a downstream tool) can. This is that path.
+///
+/// bd-b1sy2 removed the text fallback with the rest of the channel: the SVG now draws neither
+/// text nor marker for a shape the table does not know — "draw nothing" instead of inventing a
+/// cardinality, which is the same no-fallback principle `parse_er_cardinality_forms` documents.
+/// (For the PARSER-reachable bare-`o` input, the incumbent draws the raw notation text — that
+/// split is bd-5ir5r's.)
 #[test]
-fn a_side_with_no_marker_shape_keeps_its_text() {
+fn a_side_with_no_marker_shape_draws_neither_text_nor_marker() {
     let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
     ir.nodes.push(IrNode {
         id: "A".to_string(),
@@ -113,42 +110,14 @@ fn a_side_with_no_marker_shape_keeps_its_text() {
     });
 
     let svg = fm_render_svg::render_svg(&ir);
-    assert_eq!(
-        cardinality_texts(&svg),
-        vec!["0".to_string(), "0".to_string()],
-        "a side whose marker shape is unknown lost its cardinality entirely"
+    assert!(
+        cardinality_texts(&svg).is_empty(),
+        "a shape the table does not know must not fall back to text on this surface: {:?}",
+        cardinality_texts(&svg)
     );
     assert!(
         !marker_refs(&svg).iter().any(|m| m.contains("er-")),
         "a shape was invented for a marker the table does not know"
-    );
-}
-
-/// NON-VACUITY: the reader finds text when text is drawn. A helper that always returned an empty
-/// vector would satisfy the first test and prove nothing.
-#[test]
-fn the_reader_actually_finds_cardinality_text() {
-    let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
-    ir.nodes.push(IrNode {
-        id: "A".to_string(),
-        ..IrNode::default()
-    });
-    ir.nodes.push(IrNode {
-        id: "B".to_string(),
-        ..IrNode::default()
-    });
-    ir.edges.push(IrEdge {
-        from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
-        to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
-        extras: Some(Box::new(IrEdgeExtras {
-            er_notation: Some("o--o".into()),
-            ..IrEdgeExtras::default()
-        })),
-        ..IrEdge::default()
-    });
-    assert!(
-        !cardinality_texts(&fm_render_svg::render_svg(&ir)).is_empty(),
-        "the reader found no cardinality text even where it is drawn"
     );
 }
 

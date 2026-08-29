@@ -154,7 +154,9 @@ fn each_flow_is_still_legible_from_its_target_node() {
         );
     }
     assert!(
-        !drawn_text(&svg).iter().any(|text| text == "3" || text == "7"),
+        !drawn_text(&svg)
+            .iter()
+            .any(|text| text == "3" || text == "7"),
         "a standalone flow value is still drawn on a link in the fan case"
     );
 }

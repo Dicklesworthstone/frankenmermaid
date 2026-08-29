@@ -118,7 +118,8 @@ fn path_data_numbers(svg: &str) -> Vec<String> {
 
         let mut current = String::new();
         for ch in data.chars() {
-            if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' || ch == 'e' || ch == 'E' {
+            if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' || ch == 'e' || ch == 'E'
+            {
                 // `e`/`E` only continue a number already in progress; a bare `E` is a path command.
                 if (ch == 'e' || ch == 'E') && current.is_empty() {
                     continue;
@@ -149,8 +150,14 @@ fn path_data_numbers(svg: &str) -> Vec<String> {
 fn degenerate_sources() -> Vec<(&'static str, String)> {
     let arrow = "-->";
     let mut cases: Vec<(&'static str, String)> = vec![
-        ("pie every slice zero", "pie showData\n  \"A\" : 0\n  \"B\" : 0\n".to_string()),
-        ("pie single slice", "pie showData\n  \"Only\" : 5\n".to_string()),
+        (
+            "pie every slice zero",
+            "pie showData\n  \"A\" : 0\n  \"B\" : 0\n".to_string(),
+        ),
+        (
+            "pie single slice",
+            "pie showData\n  \"Only\" : 5\n".to_string(),
+        ),
         (
             "xychart flat axis",
             format!("xychart-beta\n  x-axis [a, b]\n  y-axis \"R\" 0 {arrow} 0\n  bar [0, 0]\n"),
@@ -161,8 +168,14 @@ fn degenerate_sources() -> Vec<(&'static str, String)> {
         ),
         ("sankey zero flow", "sankey-beta\n\nA,B,0\n".to_string()),
         ("sankey huge flow", "sankey-beta\n\nA,B,1e30\n".to_string()),
-        ("radar all zero", "radar-beta\n  axis a, b, c\n  curve x{0,0,0}\n".to_string()),
-        ("treemap all zero", "treemap-beta\n\"A\": 0\n\"B\": 0\n".to_string()),
+        (
+            "radar all zero",
+            "radar-beta\n  axis a, b, c\n  curve x{0,0,0}\n".to_string(),
+        ),
+        (
+            "treemap all zero",
+            "treemap-beta\n\"A\": 0\n\"B\": 0\n".to_string(),
+        ),
         (
             "gantt zero duration",
             "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  A :a1, 2024-01-01, 0d\n".to_string(),
@@ -174,7 +187,10 @@ fn degenerate_sources() -> Vec<(&'static str, String)> {
         ("empty flowchart", "flowchart LR\n".to_string()),
         ("single node", "flowchart LR\n  A\n".to_string()),
         ("self loop only", format!("flowchart LR\n  A {arrow} A\n")),
-        ("very long label", format!("flowchart LR\n  A[\"{}\"]\n", "W".repeat(4000))),
+        (
+            "very long label",
+            format!("flowchart LR\n  A[\"{}\"]\n", "W".repeat(4000)),
+        ),
     ];
 
     // Deep nesting: a structural extreme rather than a numeric one, but the same class of input.

@@ -5305,7 +5305,6 @@ fn render_layout_to_svg(
         }
     }
 
-
     // Render class diagram cardinality labels near edge endpoints — one raw fragment, byte-identical to the
     // per-label `Element::text()` (shared with the streaming fast path via `write_class_cardinality_labels_into`).
     let mut class_cardinality_svg = String::new();
@@ -6184,9 +6183,7 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 
 /// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
 /// for the left and right endpoints.
-/// Stream every ER cardinality `<text>` (left-then-right per edge, edge order) into `out`. Extracted from
-/// the slow-path loop so both the slow path and the whole-document streaming fast path share ONE
-
+///
 /// Stream every class-relation cardinality `<text>` (source-then-target per edge, edge order) into `out`.
 /// Emits nothing for edges without source/target cardinality. Byte-identical to the slow path's
 /// `class_cardinality_svg`. (The ER twin was removed in bd-b1sy2: ER cardinality is carried by
@@ -7733,7 +7730,7 @@ fn render_xychart_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let plot_bounds = xychart_plot_bounds(layout, xy_chart_meta);
+    let plot_bounds = xychart_plot_bounds(layout);
     let plot_x = plot_bounds.x + offset_x;
     let plot_y = plot_bounds.y + offset_y;
     let plot_bottom = plot_y + plot_bounds.height;
@@ -8011,73 +8008,11 @@ fn render_xychart_svg(
         doc = doc.child(Element::raw_svg(tick_svg));
     }
 
-    // Legend for named series.
-    let named_series: Vec<(usize, &str)> = xy_chart_meta
-        .series
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.name.as_deref().map(|n| (i, n)))
-        .collect();
-    if !named_series.is_empty() {
-        let legend_x = plot_right + 16.0;
-        let legend_y = plot_y + 8.0;
-        let legend_entry_h = 22.0_f32;
-        let legend_height = named_series.len() as f32 * legend_entry_h + 12.0;
-        let legend_width = 120.0_f32;
-        // The layout reserves exactly this 120px legend column. Keep the label beside its swatch
-        // within that reservation rather than allowing a long series name to extend past the SVG
-        // viewport. `textLength` only engages once the ordinary label would overflow, so normal
-        // legend typography stays unchanged.
-        let legend_text_width = legend_width - 32.0;
-        let legend_font_size = clamp_font_size(config.font_size * 0.72, config.min_font_size);
-
-        let mut legend = Element::group().class("fm-xychart-legend");
-        legend = legend.child(
-            Element::rect()
-                .x(legend_x)
-                .y(legend_y)
-                .width(legend_width)
-                .height(legend_height)
-                .rx(config.rounded_corners.max(4.0))
-                .fill(&theme.colors.node_fill)
-                .stroke(&theme.colors.node_stroke)
-                .stroke_width(1.0)
-                .class("fm-xychart-legend-box"),
-        );
-        for (entry_idx, &(series_idx, name)) in named_series.iter().enumerate() {
-            let row_y = legend_y + 6.0 + entry_idx as f32 * legend_entry_h + legend_entry_h / 2.0;
-            let color = &palette[series_idx % palette.len()];
-            let legend_text = TextBuilder::new(name)
-                .x(legend_x + 24.0)
-                .y(row_y)
-                .baseline(crate::text::DominantBaseline::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(legend_font_size)
-                .fill(&theme.colors.text)
-                .class("fm-xychart-legend-entry")
-                .build();
-            let estimated_text_width = name.chars().count() as f32 * legend_font_size * 0.56;
-            let legend_text = if estimated_text_width > legend_text_width {
-                legend_text
-                    .attr_num("textLength", legend_text_width)
-                    .attr("lengthAdjust", "spacingAndGlyphs")
-            } else {
-                legend_text
-            };
-            legend = legend.child(
-                Element::rect()
-                    .x(legend_x + 8.0)
-                    .y(row_y - 5.0)
-                    .width(10.0)
-                    .height(10.0)
-                    .rx(2.0)
-                    .fill(color)
-                    .class("fm-xychart-legend-swatch"),
-            );
-            legend = legend.child(legend_text);
-        }
-        doc = doc.child(legend);
-    }
+    // ⚠️ NO LEGEND FOR NAMED SERIES (bd-b33ab). The pinned 11.15.0 incumbent renders no xychart
+    // legend; the oracle flagged ours as a we-draw-they-don't divergence. Series identity survives
+    // without it: every mark carries a <title> naming its series and value ("Sales Q1: 30"), which
+    // is also the hover tooltip and the accessible name. The layout's reserved legend column is
+    // gone with it, so the plot uses the full width the incumbent does.
 
     for (series_index, series) in xy_chart_meta.series.iter().enumerate() {
         let color = &palette[series_index % palette.len()];
@@ -8295,24 +8230,13 @@ fn render_xychart_svg(
     doc
 }
 
-fn xychart_plot_bounds(
-    layout: &DiagramLayout,
-    xy_chart_meta: &IrXyChartMeta,
-) -> fm_layout::LayoutRect {
+fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
     const LEFT_MARGIN: f32 = 88.0;
     const TOP_MARGIN: f32 = 84.0;
     const RIGHT_MARGIN: f32 = 36.0;
-    const LEGEND_RIGHT_MARGIN: f32 = 136.0;
     const BOTTOM_MARGIN: f32 = 76.0;
-    let right_margin = if xy_chart_meta
-        .series
-        .iter()
-        .any(|series| series.name.is_some())
-    {
-        LEGEND_RIGHT_MARGIN
-    } else {
-        RIGHT_MARGIN
-    };
+    // No legend column is reserved: the incumbent renders no legend (bd-b33ab).
+    let right_margin = RIGHT_MARGIN;
 
     fm_layout::LayoutRect {
         x: layout.bounds.x + LEFT_MARGIN,
@@ -12157,7 +12081,10 @@ fn render_node(
                 // two requirement render paths disagree on the same diagram.
                 (
                     "Risk: ",
-                    req_meta.risk.as_deref().map(fm_core::requirement_risk_display),
+                    req_meta
+                        .risk
+                        .as_deref()
+                        .map(fm_core::requirement_risk_display),
                     "fm-req-metadata",
                 ),
                 (
@@ -14517,7 +14444,6 @@ fn compute_edge_label<'a>(
         // and neither matched the incumbent, because a prefix is not what the incumbent produces.
         // The number is now written by `write_sequence_number_into`.
         let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
-
 
         // A C4Dynamic relationship is NUMBERED, 1-based, in declaration order.
         //
@@ -19095,57 +19021,6 @@ mod tests {
         assert!(svg.contains("Sales Revenue"));
         assert!(svg.contains(">Jan<"));
         assert!(svg.contains(">Revenue<"));
-    }
-
-    #[test]
-    fn named_xychart_legend_fits_inside_layout_viewport() {
-        let ir = create_xychart_ir();
-        let layout = layout_diagram(&ir);
-        let xy_chart_meta = ir.xy_chart_meta.as_ref().expect("xy chart metadata");
-        let plot_bounds = xychart_plot_bounds(&layout, xy_chart_meta);
-
-        const LEGEND_GAP: f32 = 16.0;
-        const LEGEND_WIDTH: f32 = 120.0;
-        let legend_right = plot_bounds.x + plot_bounds.width + LEGEND_GAP + LEGEND_WIDTH;
-        let viewport_right = layout.bounds.x + layout.bounds.width;
-        assert!(
-            legend_right <= viewport_right,
-            "legend right edge {legend_right} exceeds viewport {viewport_right}"
-        );
-    }
-
-    #[test]
-    fn named_xychart_legend_constrains_overlong_series_labels() {
-        let mut ir = create_xychart_ir();
-        let meta = ir.xy_chart_meta.as_mut().expect("xy chart metadata");
-        meta.series[0].name = Some("Revenue from enterprise subscriptions".to_string());
-
-        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
-
-        assert!(svg.contains("class=\"fm-xychart-legend-entry\""));
-        assert!(
-            svg.contains("textLength=\"88\"") && svg.contains("lengthAdjust=\"spacingAndGlyphs\""),
-            "overlong legend labels must remain inside the reserved 120px legend column"
-        );
-    }
-
-    #[test]
-    fn named_xychart_legend_leaves_short_series_labels_unconstrained() {
-        // Negative case for `named_xychart_legend_constrains_overlong_series_labels`: the
-        // constraint is conditional on the estimated label overflowing the reserved column, so a
-        // label that fits must keep its natural glyph advances. An implementation that always
-        // emitted `textLength` would satisfy the overlong test and fail this one.
-        let ir = create_xychart_ir();
-        let meta = ir.xy_chart_meta.as_ref().expect("xy chart metadata");
-        assert_eq!(meta.series[0].name.as_deref(), Some("Revenue"));
-
-        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
-
-        assert!(svg.contains("class=\"fm-xychart-legend-entry\""));
-        assert!(
-            !svg.contains("textLength=") && !svg.contains("lengthAdjust="),
-            "legend labels that fit the reserved column must not be squeezed"
-        );
     }
 
     #[test]
