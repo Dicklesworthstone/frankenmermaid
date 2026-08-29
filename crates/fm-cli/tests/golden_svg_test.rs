@@ -869,14 +869,18 @@ fn gitgraph_branches_occupy_distinct_lanes() {
     }
 }
 
-/// ER cardinality labels must match the crow's-foot symbols the fixture declares (bd-iicc).
+/// ER cardinality must match the crow's-foot symbols the fixture declares (bd-iicc).
 ///
 /// Passes today — the mapping is already right. It is worth pinning because cardinality is the
 /// entire semantic payload of an ER relationship: swapping `0..*` for `1..*` turns an optional
 /// association into a mandatory one, which is a data-model error that renders as a tidy,
 /// plausible-looking diagram and that a byte golden would bless without complaint.
+///
+/// ⚠️ bd-b1sy2 moved the CARRIER: SVG renders cardinality as crow's-foot MARKERS (the incumbent
+/// draws no cardinality text), so the expectation is the marker ids `parse_er_cardinality_forms`
+/// derives from the same fixture symbols — the semantic payload is still pinned symbol-by-symbol.
 #[test]
-fn er_cardinality_labels_match_declared_relationships() {
+fn er_cardinality_markers_match_declared_relationships() {
     let input_path = golden_dir().join("er_basic.mmd");
     let input = fs::read_to_string(&input_path)
         .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
@@ -886,7 +890,8 @@ fn er_cardinality_labels_match_declared_relationships() {
 
     // Derive the expectation from the FIXTURE's crow's-foot symbols rather than restating the
     // renderer's output, so this cannot be satisfied by re-blessing.
-    //   ||  exactly one      o{  zero or many      |{  one or many
+    //   ||  exactly one (er-onlyOne)      o{  zero or many (er-zeroOrMore)      |{  one or many
+    //   (er-oneOrMore)
     let mut expected: Vec<&str> = Vec::new();
     for line in input.lines() {
         let Some((left, _)) = line.split_once(" : ") else {
@@ -899,37 +904,63 @@ fn er_cardinality_labels_match_declared_relationships() {
             continue;
         };
         expected.push(match near {
-            "||" => "1",
-            "}o" | "o" => "0..*",
-            "}|" => "1..*",
+            "||" => "er-onlyOneStart",
+            "}o" => "er-zeroOrMoreStart",
+            "}|" => "er-oneOrMoreStart",
             other => panic!("unhandled near symbol {other}"),
         });
         expected.push(match far {
-            "||" => "1",
-            "o{" => "0..*",
-            "|{" => "1..*",
+            "||" => "er-onlyOneEnd",
+            "o{" => "er-zeroOrMoreEnd",
+            "|{" => "er-oneOrMoreEnd",
             other => panic!("unhandled far symbol {other}"),
         });
     }
     assert_eq!(
         expected,
-        ["1", "0..*", "1", "1..*"],
+        [
+            "er-onlyOneStart",
+            "er-zeroOrMoreEnd",
+            "er-onlyOneStart",
+            "er-oneOrMoreEnd"
+        ],
         "fixture parse produced unexpected cardinalities"
     );
 
-    let rendered_labels: Vec<String> = rendered
-        .split("fm-er-cardinality")
-        .skip(1)
-        .filter_map(|segment| {
-            let at = segment.find('>')? + 1;
-            let rest = &segment[at..];
-            Some(rest[..rest.find("</text>")?].to_string())
-        })
-        .collect();
+    // DOCUMENT ORDER: collect both attribute forms in one pass — a starts-then-ends split would
+    // reorder the refs and break the symbol pairing the assertion pins.
+    let rendered_refs: Vec<String> = {
+        let mut refs = Vec::new();
+        let mut rest = rendered.as_str();
+        while let Some(rel) = rest.find("marker-").and_then(|at| {
+            let tail = &rest[at..];
+            if tail.starts_with("marker-start=\"") || tail.starts_with("marker-end=\"") {
+                Some(at)
+            } else {
+                None
+            }
+        }) {
+            let after = rest[rel..]
+                .find('"')
+                .map(|at| rel + at + 1)
+                .expect("opening quote");
+            let end = after + rest[after..].find('"').expect("closing quote");
+            let raw = rest[after..end].to_string();
+            let id = raw
+                .trim_start_matches("url(#")
+                .trim_end_matches(')')
+                .to_string();
+            if id.starts_with("er-") {
+                refs.push(id);
+            }
+            rest = &rest[end..];
+        }
+        refs
+    };
 
     assert_eq!(
-        rendered_labels, expected,
-        "rendered cardinality labels must match the declared crow's-foot symbols, in order"
+        rendered_refs, expected,
+        "rendered crow's-foot markers must match the declared crow's-foot symbols, in order"
     );
 }
 
