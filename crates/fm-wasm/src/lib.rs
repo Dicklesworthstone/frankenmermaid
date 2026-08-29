@@ -14,8 +14,6 @@ use web_time::Instant;
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::MermaidGuardReport;
-#[cfg(any(not(target_arch = "wasm32"), test))]
-use fm_core::capability_matrix;
 // The CGA hit-test helpers below are reachable only from the wasm32 `Diagram` bindings and from
 // tests, so both they and this import are dead on a host non-test build.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -2149,7 +2147,9 @@ pub fn source_spans_js(input: &str) -> Result<JsValue, JsValue> {
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 pub fn capability_matrix_js() -> Result<JsValue, JsValue> {
-    to_js_value(&capability_matrix())
+    // The MERGED matrix: fm-core claims plus fm-layout's algorithm claims, identical to
+    // what the CLI prints and what evidence/capability_matrix.json pins.
+    to_js_value(&fm_layout::full_capability_matrix())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4538,7 +4538,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x4bf2_2727_9f3a_00f2;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x44b1_7e1c_b26e_5e4d;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),

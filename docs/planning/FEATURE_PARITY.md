@@ -5,13 +5,22 @@
 This file tracks actual parity status against the FrankenTUI Mermaid extraction
 reference, not marketing claims and not aspirational support.
 
-Status meanings:
+TWO AXES, NEVER COLLAPSED. A family has an independent answer for each:
 
-- `Complete`: implemented and verified in current Rust code
-- `Partial`: implemented for a meaningful subset, but not yet parity-complete
-- `Fallback`: detected or acknowledged, but routed through generic/fallback
-  behavior rather than a real implementation
-- `Missing`: no meaningful implementation yet
+- **Runtime** (`fm_core::DiagramType::support_level`): does the family parse,
+  lay out, and render here? `Full` / `Partial` / `Unsupported`. This is the axis
+  the README capability tables and the capability matrix publish.
+- **Parity** (`fm_core::DiagramType::parity_level`): how completely does it
+  reproduce the FrankenTUI reference's documented behavior?
+  `Complete` (reference behavior reproduced) / `Partial` (meaningful subset,
+  documented gaps remain) / `Fallback` (detected, routed through generic
+  behavior) / `Missing` (no meaningful implementation) /
+  `N/A` (new family with no reference counterpart).
+
+`Runtime: Full` and `Parity: Partial` is a normal, honest combination — a family
+can render end to end while still missing documented reference behavior. Both
+tables below are GENERATED from the pinned Rust sources and byte-checked by
+tests; hand-editing the generated blocks is a drift the build will reject.
 
 ## Evidence Sources
 
@@ -29,50 +38,60 @@ Current status in this file is grounded in:
 
 ### Parser Families
 
-| Diagram family | Detection | Dedicated parser | Dedicated layout | SVG render | Current status | Notes |
-|---|---|---|---|---|---|---|
-| Flowchart | Yes | Yes | Sugiyama | Yes | Partial | Most advanced path; recursive document AST, edge bundling, layout constraints |
-| Sequence | Yes | Yes | Sequence | Yes | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
-| Class | Yes | Yes | Sugiyama | Yes | Partial | Members, inheritance, stereotypes, generics, compartment rendering |
-| State | Yes | Yes | Sugiyama | Yes | Partial | Transitions, composites, fork/join, history states, choice |
-| ER | Yes | Yes | Sugiyama | Yes | Partial | Entity attributes with PK/FK/UK, cardinality labels on edges |
-| Requirement | Yes | Yes | Sugiyama | Yes | Partial | Requirement types, id/text/risk/verifyMethod metadata extraction |
-| Mindmap | Yes | Yes | Radial | Yes | Partial | Indentation-based hierarchy, node shapes |
-| Journey | Yes | Yes | Kanban | Yes | Partial | Steps, sections |
-| Timeline | Yes | Yes | Timeline | Yes | Partial | Periods with events |
-| Packet Beta | Yes | Yes | Packet (Grid) | Yes | Partial | Field parsing, grid-based layout |
-| Gantt | Yes | Yes | Gantt | Yes | Partial | Tasks, sections, durations, task types, date metadata |
-| Pie | Yes | Yes | Pie | Yes | Partial | Slice values, title, showData, wedge SVG rendering with accent colors |
-| Quadrant Chart | Yes | Yes | Quadrant | Yes | Partial | Axis labels, quadrant labels, data points with [0,1] coords, scatter SVG |
-| Git Graph | Yes | Yes | GitGraph | Yes | Partial | Commits, branches, merges, cherry-pick, lane-based layout |
-| Sankey | Yes | Yes | Sankey | Yes | Partial | Dedicated parser and flow-preserving layout; fixture-backed FrankenTUI conformance for link rows |
-| XY Chart | Yes | Yes | XyChart | Yes | Partial | Axis/series metadata, bar/line/area rendering; fixture-backed FrankenTUI conformance for axes + named series |
-| Block Beta | Yes | Yes | Grid | Yes | Partial | Column spanning, space blocks, group nesting; fixture-backed FrankenTUI conformance for nested structure |
-| Architecture Beta | Yes | Yes | Sugiyama | Yes | Partial | Groups, services, junctions, icon classes |
-| C4 family | Yes | Yes | Sugiyama | Yes | Partial | Boundary detection, C4 node metadata |
-| Kanban | Yes | Yes | Kanban | Yes | Partial | Columns and cards via clusters |
-| DOT bridge | Yes | Yes | Sugiyama | Yes | Partial | Graphviz DOT format to shared IR |
+<!-- BEGIN GENERATED: feature-parity-families -->
+| Diagram family | Detection | Dedicated parser | Dedicated layout | SVG render | Runtime | Parity | Notes |
+|---|---|---|---|---|---|---|---|
+| flowchart | Yes | Yes | `auto` | Yes | Full | Partial | Most advanced path; recursive document AST, edge bundling, layout constraints |
+| sequence | Yes | Yes | `sequence` | Yes | Partial | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
+| class | Yes | Yes | `auto` | Yes | Full | Partial | Members, inheritance, stereotypes, generics, compartment rendering |
+| state | Yes | Yes | `auto` | Yes | Full | Partial | Transitions, composites, fork/join, history states, choice |
+| er | Yes | Yes | `auto` | Yes | Full | Partial | Entity attributes with PK/FK/UK, crow's-foot cardinality markers (bd-b1sy2) |
+| requirementDiagram | Yes | Yes | `auto` | Yes | Full | Partial | Requirement types, id/text/risk/verifyMethod metadata extraction |
+| mindmap | Yes | Yes | `radial` | Yes | Full | Partial | Indentation-based hierarchy, node shapes |
+| journey | Yes | Yes | `kanban` | Yes | Full | Partial | Steps, sections |
+| timeline | Yes | Yes | `timeline` | Yes | Full | Partial | Periods with events |
+| packet-beta | Yes | Yes | `packet` | Yes | Full | Partial | Field parsing, grid-based layout |
+| gantt | Yes | Yes | `gantt` | Yes | Full | Partial | Tasks, sections, durations, task types, date metadata |
+| pie | Yes | Yes | `pie` | Yes | Full | Partial | Slice values, title, showData, wedge SVG rendering with accent colors |
+| quadrantChart | Yes | Yes | `quadrant` | Yes | Full | Partial | Axis labels, quadrant labels, data points with [0,1] coords, scatter SVG |
+| gitGraph | Yes | Yes | `gitgraph` | Yes | Full | Partial | Commits, branches, merges, cherry-pick, lane-based layout |
+| sankey | Yes | Yes | `sankey` | Yes | Full | Partial | Dedicated parser and flow-preserving layout; fixture-backed FrankenTUI conformance for link rows |
+| xyChart | Yes | Yes | `xychart` | Yes | Full | Partial | Axis/series metadata, bar/line/area rendering; fixture-backed FrankenTUI conformance for axes + named series |
+| block-beta | Yes | Yes | `grid` | Yes | Full | Partial | Column spanning, space blocks, group nesting; fixture-backed FrankenTUI conformance for nested structure |
+| architecture-beta | Yes | Yes | `architecture` | Yes | Full | Partial | Groups, services, junctions, icon classes; the dedicated architecture algorithm engages when an edge declares a side, otherwise the general selector runs (bd-zce4) |
+| C4 (all five variants) | Yes | Yes | `architecture` | Yes | Full | Partial | Boundary detection, C4 node metadata; one notation at five zoom levels; direction-aware algorithm engages on a declared relationship side |
+| kanban | Yes | Yes | `kanban` | Yes | Full | Partial | Columns and cards via clusters |
+| DOT bridge | Yes | Yes | `auto` | Yes | Full | Partial | Graphviz DOT format to shared IR |
+| treemap | Yes | Yes | `treemap` | Yes | Full | N/A | Squarified treemap; new family with no FrankenTUI reference counterpart (bd-dw450 certified terminal/canvas/WebGPU draw) |
+| radar-beta | Yes | Yes | `radar` | Yes | Full | N/A | Polar layout with cardinal-spline wedges; new family with no FrankenTUI reference counterpart (bd-sk4dv) |
+| info | Yes | Yes | `auto` | Yes | Full | N/A | Title banner; routes through the general graph selector |
+<!-- END GENERATED: feature-parity-families -->
 
 ### Layout Algorithms
 
-| Algorithm | Diagram types | Status | Notes |
-|---|---|---|---|
-| Sugiyama (hierarchical) | Flowchart, Class, State, ER, C4, Requirement, Architecture | Complete | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
-| Force-directed | General (fallback for dense/cyclic) | Complete | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
-| Tree | Tree-like graphs | Complete | Reingold-Tilford variant with direction support |
-| Radial | Mindmap | Complete | Leaf-weighted angle allocation |
-| Sequence | Sequence diagrams | Complete | Participant columns, message stacking, activation bars, notes, fragments |
-| Timeline | Timeline | Complete | Horizontal periods with vertical events |
-| Gantt | Gantt charts | Complete | Time-axis bar layout with sections |
-| Sankey | Sankey diagrams | Complete | Flow-preserving column layout |
-| Kanban | Journey, Kanban | Complete | Fixed-column card stacking |
-| Grid | Block-beta | Complete | CSS-grid-like positioning with column spans |
-| Pie | Pie charts | Complete | Wedge angle computation, perimeter label positioning |
-| Quadrant | Quadrant charts | Complete | 2D scatter on [0,1] axes |
-| GitGraph | Git graphs | Complete | Lane-based commit positioning |
-| Packet | Packet-beta | Complete | Grid-based field layout |
-| XyChart | XY charts | Complete | Cartesian coordinate mapping |
-| Auto | All types | Complete | Intelligent selection based on diagram type and graph topology |
+<!-- BEGIN GENERATED: feature-parity-layouts -->
+| Algorithm | Serves | Notes |
+|---|---|---|
+| `auto` | All types | Selection by diagram type and graph topology; sugiyama default in the general selector |
+| `sugiyama` | General graphs (flowchart, class, state, ER, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
+| `force` | General (fallback for dense/cyclic) | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
+| `tree` | Tree-like graphs | Reingold-Tilford variant with direction support |
+| `radial` | Mindmap | Leaf-weighted angle allocation |
+| `sequence` | Sequence diagrams | Participant columns, message stacking, activation bars, notes, fragments |
+| `timeline` | Timeline | Horizontal periods with vertical events |
+| `gantt` | Gantt charts | Time-axis bar layout with sections |
+| `xychart` | XY charts | Cartesian coordinate mapping |
+| `sankey` | Sankey diagrams | Flow-preserving column layout |
+| `kanban` | Journey, kanban | Fixed-column card stacking |
+| `grid` | Block-beta | CSS-grid-like positioning with column spans |
+| `pie` | Pie charts | Wedge angle computation, perimeter label positioning |
+| `quadrant` | Quadrant charts | 2D scatter on [0,1] axes |
+| `gitgraph` | Git graphs | Lane-based commit positioning |
+| `packet` | Packet-beta | Grid-based field layout |
+| `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
+| `treemap` | Treemap | Squarified tile allocation |
+| `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+<!-- END GENERATED: feature-parity-layouts -->
 
 ### Cross-Cutting Features
 
@@ -94,7 +113,7 @@ Current status in this file is grounded in:
 | Surface | Current status | Notes |
 |---|---|---|
 | Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers |
-| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 16 algorithms |
+| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
 | SVG renderer | Partial | 21 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
 | Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs |
 | Canvas/WASM | Partial | Canvas2D with mock context, viewport transforms |
@@ -139,7 +158,7 @@ Current status in this file is grounded in:
 - Lifecycle events (create/destroy)
 - Fragment alternatives with labeled sections
 - Fragment nesting (children tracking)
-- 16 dedicated layout algorithms (vs ~6 in FrankenTUI)
+- 18 dedicated layout algorithms plus Auto (vs ~6 in FrankenTUI)
 - SVG gradients, shadows, glow effects
 - Canvas2D rendering backend
 - WASM/JavaScript API

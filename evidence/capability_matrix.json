@@ -3,7 +3,7 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 35,
+    "implemented": 57,
     "partial": 2
   },
   "claims": [
@@ -680,6 +680,90 @@
       ]
     },
     {
+      "id": "diagram-type/treemap",
+      "category": "diagram_type",
+      "title": "Support treemap diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/radar-beta",
+      "category": "diagram_type",
+      "title": "Support radar-beta diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/info",
+      "category": "diagram_type",
+      "title": "Support info diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
       "id": "surface/wasm-render-deck",
       "category": "surface",
       "title": "WASM API renders deck manifests",
@@ -1010,6 +1094,538 @@
       ],
       "notes": [
         "Data model exists; cross-pipeline activation is still an open backlog item"
+      ]
+    },
+    {
+      "id": "layout/auto",
+      "category": "layout",
+      "title": "Layout algorithm: auto",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "All types"
+      ]
+    },
+    {
+      "id": "layout/sugiyama",
+      "category": "layout",
+      "title": "Layout algorithm: sugiyama",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "General graphs (flowchart, class, state, ER, requirement, DOT)"
+      ]
+    },
+    {
+      "id": "layout/force",
+      "category": "layout",
+      "title": "Layout algorithm: force",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "General (fallback for dense/cyclic)"
+      ]
+    },
+    {
+      "id": "layout/tree",
+      "category": "layout",
+      "title": "Layout algorithm: tree",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Tree-like graphs"
+      ]
+    },
+    {
+      "id": "layout/radial",
+      "category": "layout",
+      "title": "Layout algorithm: radial",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Mindmap"
+      ]
+    },
+    {
+      "id": "layout/sequence",
+      "category": "layout",
+      "title": "Layout algorithm: sequence",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Sequence diagrams"
+      ]
+    },
+    {
+      "id": "layout/timeline",
+      "category": "layout",
+      "title": "Layout algorithm: timeline",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Timeline"
+      ]
+    },
+    {
+      "id": "layout/gantt",
+      "category": "layout",
+      "title": "Layout algorithm: gantt",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Gantt charts"
+      ]
+    },
+    {
+      "id": "layout/xychart",
+      "category": "layout",
+      "title": "Layout algorithm: xychart",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "XY charts"
+      ]
+    },
+    {
+      "id": "layout/sankey",
+      "category": "layout",
+      "title": "Layout algorithm: sankey",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Sankey diagrams"
+      ]
+    },
+    {
+      "id": "layout/kanban",
+      "category": "layout",
+      "title": "Layout algorithm: kanban",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Journey, kanban"
+      ]
+    },
+    {
+      "id": "layout/grid",
+      "category": "layout",
+      "title": "Layout algorithm: grid",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Block-beta"
+      ]
+    },
+    {
+      "id": "layout/pie",
+      "category": "layout",
+      "title": "Layout algorithm: pie",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Pie charts"
+      ]
+    },
+    {
+      "id": "layout/quadrant",
+      "category": "layout",
+      "title": "Layout algorithm: quadrant",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Quadrant charts"
+      ]
+    },
+    {
+      "id": "layout/gitgraph",
+      "category": "layout",
+      "title": "Layout algorithm: gitgraph",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Git graphs"
+      ]
+    },
+    {
+      "id": "layout/packet",
+      "category": "layout",
+      "title": "Layout algorithm: packet",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Packet-beta"
+      ]
+    },
+    {
+      "id": "layout/architecture",
+      "category": "layout",
+      "title": "Layout algorithm: architecture",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Architecture-beta, C4 (conditional)"
+      ]
+    },
+    {
+      "id": "layout/treemap",
+      "category": "layout",
+      "title": "Layout algorithm: treemap",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Treemap"
+      ]
+    },
+    {
+      "id": "layout/radar",
+      "category": "layout",
+      "title": "Layout algorithm: radar",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Radar-beta"
       ]
     }
   ]

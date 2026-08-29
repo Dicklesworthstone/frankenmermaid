@@ -85,9 +85,10 @@ const fn family_fixture_case(family: DiagramType) -> Option<&'static str> {
         DiagramType::Requirement => Some("requirement_basic"),
         DiagramType::PacketBeta => Some("packet_basic"),
         DiagramType::Kanban => Some("kanban_basic"),
-        DiagramType::Treemap | DiagramType::Radar | DiagramType::Info | DiagramType::Unknown => {
-            None
-        }
+        DiagramType::Treemap => Some("treemap_basic"),
+        DiagramType::Radar => Some("radar_basic"),
+        DiagramType::Info => Some("info_basic"),
+        DiagramType::Unknown => None,
     }
 }
 

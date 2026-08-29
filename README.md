@@ -4,7 +4,7 @@
 
 # frankenmermaid
 
-**A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 15 layout algorithms, and SVG / terminal / Canvas2D / WASM rendering from a single intermediate representation.**
+**A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 18 layout algorithms plus Auto, and SVG / terminal / Canvas2D / WASM rendering from a single intermediate representation.**
 
 [![License: MIT (with AI Rider)](https://img.shields.io/badge/License-MIT%20(OpenAI%2FAnthropic%20Rider)-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024_edition-orange.svg)](rust-toolchain.toml)
@@ -49,15 +49,15 @@ all seven.
 
 **The Problem.** Mermaid syntax is wonderful for diagrams-as-code, but real-world inputs hit walls fast: cycles produce tangled hierarchical layouts, malformed syntax crashes the parser, large graphs grind through quadratic crossing-minimization, styling control is shallow, and there is no terminal output path at all. JavaScript-based renderers can't easily run in CI, embed in CLIs, or guarantee bit-identical output across runs.
 
-**The Solution.** `frankenmermaid` is a ground-up Rust implementation built around one shared intermediate representation that feeds 15 layout algorithms and four render backends (SVG, terminal, Canvas2D, and WASM). It recovers from bad input instead of crashing, picks cycle-aware layout strategies automatically, optionally consults a graph-intelligence engine (`FNX`) for centrality and topology hints, runs an incremental layout pipeline that skips stages whose inputs have not changed, and produces deterministic output suitable for CI snapshot testing.
+**The Solution.** `frankenmermaid` is a ground-up Rust implementation built around one shared intermediate representation that feeds 18 layout algorithms plus Auto and four render backends (SVG, terminal, Canvas2D, and WASM). It recovers from bad input instead of crashing, picks cycle-aware layout strategies automatically, optionally consults a graph-intelligence engine (`FNX`) for centrality and topology hints, runs an incremental layout pipeline that skips stages whose inputs have not changed, and produces deterministic output suitable for CI snapshot testing.
 
 ### Why use frankenmermaid?
 
 | Capability | What it does |
 |---|---|
-| **24 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, 5 C4 variants, requirement, kanban |
+| **27 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, treemap, radar-beta, info, 5 C4 variants, requirement, kanban |
 | **Intent-aware parsing** | Best-effort recovery with structured diagnostics. Fuzzy keyword matching catches typos like `flowchar` or `seqeunceDiagram`; dangling edges auto-create placeholder nodes; never panics on malformed input |
-| **15 layout algorithms** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet — auto-selected per diagram type |
+| **18 layout algorithms plus Auto** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet, architecture, treemap, radar — auto-selected per diagram type |
 | **4 cycle strategies** | Greedy, DFS back-edge, MFAS approximation, full cycle-aware with SCC detection and cluster collapse |
 | **Incremental layout** | Adapton-style self-adjusting computation, a cache-oblivious vEB layout index, and an epoch-based concurrent IR handle skip unchanged subgraphs on re-render |
 | **E-graph crossing minimization** | Egg-based equality saturation explores rank-order rewrites in parallel, with strict node-budget and timeout guards plus Sugiyama fallback |
@@ -69,6 +69,32 @@ all seven.
 | **FNX graph intelligence** | Optional `franken_networkx` integration adds centrality-aware semantic styling, cycle scoring, hub detection, and structural diagnostics. Phase 1 (undirected, advisory) is live; Phase 2 (directed: SCC, WCC, reachability) is in canary rollout |
 | **Zero unsafe code** | `#![forbid(unsafe_code)]` in every crate |
 | **DOT bridge** | Parses Graphviz DOT and converts to the shared IR for rendering through the same pipeline |
+
+### Layout algorithms
+
+<!-- BEGIN GENERATED: layout-algorithms -->
+| Algorithm | Serves | Notes |
+|---|---|---|
+| `auto` | All types | Selection by diagram type and graph topology; sugiyama default in the general selector |
+| `sugiyama` | General graphs (flowchart, class, state, ER, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
+| `force` | General (fallback for dense/cyclic) | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
+| `tree` | Tree-like graphs | Reingold-Tilford variant with direction support |
+| `radial` | Mindmap | Leaf-weighted angle allocation |
+| `sequence` | Sequence diagrams | Participant columns, message stacking, activation bars, notes, fragments |
+| `timeline` | Timeline | Horizontal periods with vertical events |
+| `gantt` | Gantt charts | Time-axis bar layout with sections |
+| `xychart` | XY charts | Cartesian coordinate mapping |
+| `sankey` | Sankey diagrams | Flow-preserving column layout |
+| `kanban` | Journey, kanban | Fixed-column card stacking |
+| `grid` | Block-beta | CSS-grid-like positioning with column spans |
+| `pie` | Pie charts | Wedge angle computation, perimeter label positioning |
+| `quadrant` | Quadrant charts | 2D scatter on [0,1] axes |
+| `gitgraph` | Git graphs | Lane-based commit positioning |
+| `packet` | Packet-beta | Grid-based field layout |
+| `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
+| `treemap` | Treemap | Squarified tile allocation |
+| `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+<!-- END GENERATED: layout-algorithms -->
 
 ## Quick example
 
@@ -181,9 +207,12 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | `requirementDiagram` | Implemented |
 | `packet-beta` | Implemented |
 | `kanban` | Implemented |
+| `treemap` | Implemented |
+| `radar-beta` | Implemented |
+| `info` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
-The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md). Every diagram family has dedicated detection, parser, layout dispatch, and SVG/terminal/canvas rendering. The "Partial" rows in the generated table above reflect the conformance-fixture status; in practice, every diagram type renders end-to-end through `fm-cli render`.
+The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md), generated from the same pinned Rust sources as the tables above. Runtime status and reference parity are separate axes there: a family can render end to end (`Runtime: Full`) while still owing documented reference behavior (`Parity: Partial`) — the two columns never collapse into one status.
 
 ## Installation
 
@@ -804,7 +833,7 @@ frankenmermaid/
                     ▼
       ┌──────────────────────────────┐
       │ fm-parser                    │
-      │  • type detection            │  24 diagram types
+      │  • type detection            │  27 diagram types
       │  • fuzzy matching            │  Levenshtein + heuristics
       │  • recovery + warnings       │  best-effort, never crashes
       │  • IR builder (interning)    │
@@ -1321,7 +1350,7 @@ Automatic fit-to-container scaling: `scale = min(container_width / diagram_width
 
 ```rust
 MermaidDiagramIr {
-    diagram_type: DiagramType,          // 24 types + Unknown
+    diagram_type: DiagramType,          // 27 types + Unknown
     direction: GraphDirection,          // TB, LR, RL, BT
     nodes: Vec<IrNode>,                 // id, label, shape, icon, classes, href, callback,
                                         //   tooltip, span_primary/span_all, implicit,
@@ -2682,7 +2711,7 @@ All themes honor `themeVariables` overrides for any individual color, so a `Dark
 4. Runs `wasm-opt -Oz --all-features --converge` over the resulting `.wasm` to drive size down further.
 5. Rewrites `pkg/package.json` with the canonical `@frankenmermaid/core` metadata (name, description, repository, homepage, bugs URL, keywords, files list, capability-matrix metadata).
 6. Copies the project `README.md` into `pkg/README.md` so the npm registry page mirrors the GitHub page.
-7. Enforces a hard **500 KB gzip ceiling** on the resulting `.wasm`; the build fails if the bundle exceeds it.
+  7. Enforces a hard gzip ceiling (`MAX_GZIP_BYTES` in `build-wasm.sh`) on the resulting `.wasm`; the build fails if the bundle exceeds it.
 
 The script takes no flags — its behavior is deterministic given a fixed `Cargo.lock`. The hardcoded `--release --target web` choices reflect the package's intended use case (in-browser ES module). If you need a different target preset (`bundler`, `nodejs`, `no-modules`) for a non-browser embedding, invoke `wasm-pack build` directly with your own arguments.
 
@@ -2694,7 +2723,7 @@ Actual measured bundle (from the current `pkg/`):
 | `frankenmermaid.js` (wasm-bindgen glue) | ~53 KB | ~8 KB |
 | `frankenmermaid.d.ts` (TypeScript types) | ~3.1 KB | ~1 KB |
 
-The 500 KB gzip ceiling is enforced by `MAX_GZIP_BYTES=$((500 * 1024))` in `build-wasm.sh`. The default build excludes the optional `fnx-integration` feature because the `franken_networkx` crates are heavyweight relative to the size budget. If you need FNX in the browser, build with `--features fnx-integration` directly (bypassing `build-wasm.sh`'s size ceiling) and accept the larger bundle.
+A gzip ceiling is enforced on the `.wasm` artifact by `MAX_GZIP_BYTES` in `build-wasm.sh` (a documented, measured ratchet — see the raise log in that script). The default build excludes the optional `fnx-integration` feature because the `franken_networkx` crates are heavyweight relative to the size budget. If you need FNX in the browser, build with `--features fnx-integration` directly (bypassing `build-wasm.sh`'s size ceiling) and accept the larger bundle.
 
 ---
 
@@ -3052,7 +3081,7 @@ Bundle composition is documented in detail under "Building the WASM bundle" abov
 | `frankenmermaid.js` (wasm-bindgen glue) | ~53 KB | ~8 KB |
 | `frankenmermaid.d.ts` (TypeScript types) | ~3.1 KB | ~1 KB |
 
-The build enforces a 500 KB gzip ceiling on the `.wasm` artifact (`MAX_GZIP_BYTES` in `build-wasm.sh`); the FNX feature roughly doubles the WASM size and is excluded from the default build for that reason.
+The build enforces a gzip ceiling on the `.wasm` artifact (`MAX_GZIP_BYTES` in `build-wasm.sh`); the FNX feature roughly doubles the WASM size and is excluded from the default build for that reason.
 
 ---
 

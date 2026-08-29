@@ -94,7 +94,7 @@ fnx-views = { workspace = true, optional = true }
 
 **Design notes:**
 - `fnx-integration` enables Phase 1: undirected structural intelligence
-- `fnx-experimental-directed` gates Phase 2: directed algorithms (future)
+- `fnx-experimental-directed` gates Phase 2: directed algorithms (experimental canary)
 - fnx deps are `cfg(not(wasm32))` because fnx uses std features unavailable in WASM
 
 ### fm-cli / fm-wasm (Surface Crates)
@@ -245,28 +245,27 @@ This requires:
 
 **Boundaries**:
 - fnx output is **advisory only** — layout makes final decisions
-- No directed graph analysis (DAG, topological sort) until Phase 2
+- Directed graph analysis (SCC, WCC, reachability, directed cycles) ships separately behind Phase 2
 - Fallback to existing heuristics if fnx analysis fails or times out
 
 **Feature flag**: `fnx-integration`
 
-### Phase 2: Directed Graph Intelligence (Future)
+### Phase 2: Directed Graph Intelligence (Experimental Canary)
 
-**Scope**: Adopt fnx directed graph algorithms when available:
+**Scope**: Directed graph algorithms, implemented natively in `fm-layout/src/fnx_directed.rs`
+(no dependency on upstream fnx directed APIs):
 - DAG detection and topological ordering
 - Critical path analysis
 - Directed centrality (in-degree, out-degree influence)
 - Layered layout optimization using directed structure
 
-**Boundaries**:
-- Requires fnx directed API completion (upstream work)
-- Must pass directed parity tests before enablement
-- Separate feature flag: `fnx-experimental-directed`
+- **Boundaries**: advisory only, canary rollout — enabled only by the
+  `fnx-experimental-directed` feature flag
+- Directed conformance tests must keep passing before any wider enablement
 
-**Go/no-go**: Phase 2 is blocked until:
-1. fnx exposes stable directed graph APIs
-2. Directed conformance tests pass
-3. Performance regression budget met (<10% latency increase)
+**Go/no-go** for widening beyond canary:
+1. Directed conformance tests stay green
+2. Performance regression budget met (<10% latency increase)
 
 ---
 

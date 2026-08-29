@@ -480,6 +480,25 @@ impl DiagramType {
             Self::Unknown => "unknown",
         }
     }
+    /// Parity standing versus the FrankenTUI extraction reference
+    /// (docs/planning/FEATURE_PARITY.md). This is a DIFFERENT AXIS from
+    /// [`Self::support_level`]: a family can be fully `Supported` at runtime while still
+    /// `Partial` on parity (a documented reference behavior is not yet reproduced). The
+    /// axes are distinct on purpose — collapsing them is what made the README say
+    /// "Implemented" while FEATURE_PARITY said "Partial" for the same family. Pinned
+    /// per family by
+    /// `tests::diagram_type_parity_levels_match_pinned_expectations`; flipping a level
+    /// must update that pin and the generated parity table in the same commit.
+    #[must_use]
+    pub const fn parity_level(self) -> MermaidParityLevel {
+        match self {
+            Self::Treemap | Self::Radar | Self::Info => MermaidParityLevel::NotApplicable,
+            Self::Unknown => MermaidParityLevel::Missing,
+            // Every reference-defined family currently adjudicates Partial (see the
+            // generated table in FEATURE_PARITY.md for the per-family evidence notes).
+            _ => MermaidParityLevel::Partial,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -791,6 +810,372 @@ fn documented_diagram_type_claims() -> Vec<CapabilityClaim> {
             )],
         })
         .collect()
+}
+
+/// Parity standing versus the FrankenTUI extraction reference. This is a DIFFERENT AXIS
+/// from [`MermaidSupportLevel`]: runtime status says whether a family parses, lays out,
+/// and renders here; parity says how completely it reproduces the reference's documented
+/// behavior. Collapsing the two axes is what made the README say "Implemented" while
+/// docs/planning/FEATURE_PARITY.md said "Partial" for the same family — both were true,
+/// on axes nobody had named. Never map one axis onto the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MermaidParityLevel {
+    /// Reproduces the reference's documented behavior for the family.
+    Complete,
+    /// A meaningful subset is implemented; documented gaps remain.
+    Partial,
+    /// Detected or acknowledged, routed through generic/fallback behavior.
+    Fallback,
+    /// No meaningful implementation yet.
+    Missing,
+    /// The FrankenTUI reference has no such family (our newer additions), so parity is
+    /// undefined rather than unproven.
+    NotApplicable,
+}
+
+impl MermaidParityLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "Complete",
+            Self::Partial => "Partial",
+            Self::Fallback => "Fallback",
+            Self::Missing => "Missing",
+            Self::NotApplicable => "N/A",
+        }
+    }
+}
+
+/// One family's public-capability row: the single machine-readable schema behind the
+/// generated parity table in docs/planning/FEATURE_PARITY.md. The layout spelling is an
+/// fm-layout `LayoutAlgorithm::as_str` (or `auto`); the workspace integration test
+/// cross-checks every spelling against the real enum so a rename cannot silently strand a
+/// row. `runtime` is stored rather than derived so bridge rows without a
+/// [`DiagramType`] can carry one; when `diagram_type` is `Some`, a test pins
+/// `runtime == diagram_type.support_level()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyParityRow {
+    /// Public family spelling as the README table prints it.
+    pub family: &'static str,
+    /// The family this row adjudicates, when it is a first-class Mermaid family.
+    pub diagram_type: Option<DiagramType>,
+    pub detection: bool,
+    pub dedicated_parser: bool,
+    pub layout: &'static str,
+    pub svg_render: bool,
+    pub runtime: MermaidSupportLevel,
+    pub parity: MermaidParityLevel,
+    pub notes: &'static str,
+}
+
+/// The adjudicated parity standing of every documented family, carried verbatim from the
+/// hand-maintained FEATURE_PARITY table it replaces. Flipping a level here is a parity
+/// claim and must land together with its evidence and the pinned expectation test.
+#[must_use]
+pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
+    const ROWS: &[FamilyParityRow] = &[
+        FamilyParityRow {
+            family: "flowchart",
+            diagram_type: Some(DiagramType::Flowchart),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Most advanced path; recursive document AST, edge bundling, layout constraints",
+        },
+        FamilyParityRow {
+            family: "sequence",
+            diagram_type: Some(DiagramType::Sequence),
+            detection: true,
+            dedicated_parser: true,
+            layout: "sequence",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Partial,
+            parity: MermaidParityLevel::Partial,
+            notes: "Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups",
+        },
+        FamilyParityRow {
+            family: "class",
+            diagram_type: Some(DiagramType::Class),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Members, inheritance, stereotypes, generics, compartment rendering",
+        },
+        FamilyParityRow {
+            family: "state",
+            diagram_type: Some(DiagramType::State),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Transitions, composites, fork/join, history states, choice",
+        },
+        FamilyParityRow {
+            family: "er",
+            diagram_type: Some(DiagramType::Er),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Entity attributes with PK/FK/UK, crow's-foot cardinality markers (bd-b1sy2)",
+        },
+        FamilyParityRow {
+            family: "requirementDiagram",
+            diagram_type: Some(DiagramType::Requirement),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Requirement types, id/text/risk/verifyMethod metadata extraction",
+        },
+        FamilyParityRow {
+            family: "mindmap",
+            diagram_type: Some(DiagramType::Mindmap),
+            detection: true,
+            dedicated_parser: true,
+            layout: "radial",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Indentation-based hierarchy, node shapes",
+        },
+        FamilyParityRow {
+            family: "journey",
+            diagram_type: Some(DiagramType::Journey),
+            detection: true,
+            dedicated_parser: true,
+            layout: "kanban",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Steps, sections",
+        },
+        FamilyParityRow {
+            family: "timeline",
+            diagram_type: Some(DiagramType::Timeline),
+            detection: true,
+            dedicated_parser: true,
+            layout: "timeline",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Periods with events",
+        },
+        FamilyParityRow {
+            family: "packet-beta",
+            diagram_type: Some(DiagramType::PacketBeta),
+            detection: true,
+            dedicated_parser: true,
+            layout: "packet",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Field parsing, grid-based layout",
+        },
+        FamilyParityRow {
+            family: "gantt",
+            diagram_type: Some(DiagramType::Gantt),
+            detection: true,
+            dedicated_parser: true,
+            layout: "gantt",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Tasks, sections, durations, task types, date metadata",
+        },
+        FamilyParityRow {
+            family: "pie",
+            diagram_type: Some(DiagramType::Pie),
+            detection: true,
+            dedicated_parser: true,
+            layout: "pie",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Slice values, title, showData, wedge SVG rendering with accent colors",
+        },
+        FamilyParityRow {
+            family: "quadrantChart",
+            diagram_type: Some(DiagramType::QuadrantChart),
+            detection: true,
+            dedicated_parser: true,
+            layout: "quadrant",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Axis labels, quadrant labels, data points with [0,1] coords, scatter SVG",
+        },
+        FamilyParityRow {
+            family: "gitGraph",
+            diagram_type: Some(DiagramType::GitGraph),
+            detection: true,
+            dedicated_parser: true,
+            layout: "gitgraph",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Commits, branches, merges, cherry-pick, lane-based layout",
+        },
+        FamilyParityRow {
+            family: "sankey",
+            diagram_type: Some(DiagramType::Sankey),
+            detection: true,
+            dedicated_parser: true,
+            layout: "sankey",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Dedicated parser and flow-preserving layout; fixture-backed FrankenTUI conformance for link rows",
+        },
+        FamilyParityRow {
+            family: "xyChart",
+            diagram_type: Some(DiagramType::XyChart),
+            detection: true,
+            dedicated_parser: true,
+            layout: "xychart",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Axis/series metadata, bar/line/area rendering; fixture-backed FrankenTUI conformance for axes + named series",
+        },
+        FamilyParityRow {
+            family: "block-beta",
+            diagram_type: Some(DiagramType::BlockBeta),
+            detection: true,
+            dedicated_parser: true,
+            layout: "grid",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Column spanning, space blocks, group nesting; fixture-backed FrankenTUI conformance for nested structure",
+        },
+        FamilyParityRow {
+            family: "architecture-beta",
+            diagram_type: Some(DiagramType::ArchitectureBeta),
+            detection: true,
+            dedicated_parser: true,
+            layout: "architecture",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Groups, services, junctions, icon classes; the dedicated architecture algorithm engages when an edge declares a side, otherwise the general selector runs (bd-zce4)",
+        },
+        FamilyParityRow {
+            family: "C4 (all five variants)",
+            diagram_type: Some(DiagramType::C4Context),
+            detection: true,
+            dedicated_parser: true,
+            layout: "architecture",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Boundary detection, C4 node metadata; one notation at five zoom levels; direction-aware algorithm engages on a declared relationship side",
+        },
+        FamilyParityRow {
+            family: "kanban",
+            diagram_type: Some(DiagramType::Kanban),
+            detection: true,
+            dedicated_parser: true,
+            layout: "kanban",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Columns and cards via clusters",
+        },
+        FamilyParityRow {
+            family: "DOT bridge",
+            diagram_type: None,
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::Partial,
+            notes: "Graphviz DOT format to shared IR",
+        },
+        FamilyParityRow {
+            family: "treemap",
+            diagram_type: Some(DiagramType::Treemap),
+            detection: true,
+            dedicated_parser: true,
+            layout: "treemap",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Squarified treemap; new family with no FrankenTUI reference counterpart (bd-dw450 certified terminal/canvas/WebGPU draw)",
+        },
+        FamilyParityRow {
+            family: "radar-beta",
+            diagram_type: Some(DiagramType::Radar),
+            detection: true,
+            dedicated_parser: true,
+            layout: "radar",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Polar layout with cardinal-spline wedges; new family with no FrankenTUI reference counterpart (bd-sk4dv)",
+        },
+        FamilyParityRow {
+            family: "info",
+            diagram_type: Some(DiagramType::Info),
+            detection: true,
+            dedicated_parser: true,
+            layout: "auto",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Title banner; routes through the general graph selector",
+        },
+    ];
+    ROWS
+}
+
+const fn family_runtime_label(level: MermaidSupportLevel) -> &'static str {
+    match level {
+        MermaidSupportLevel::Supported => "Full",
+        MermaidSupportLevel::Partial => "Partial",
+        MermaidSupportLevel::Unsupported => "Unsupported",
+    }
+}
+
+/// The generated parser-families table for docs/planning/FEATURE_PARITY.md. Runtime and
+/// parity are separate columns on separate axes; the header names both so the two
+/// numbers can never be read as one contradictory status again.
+#[must_use]
+pub fn feature_parity_parser_families_markdown() -> String {
+    let mut lines = vec![
+        String::from(
+            "| Diagram family | Detection | Dedicated parser | Dedicated layout | SVG render | Runtime | Parity | Notes |",
+        ),
+        String::from("|---|---|---|---|---|---|---|---|"),
+    ];
+    for row in family_parity_rows() {
+        let yes_no = |value: bool| if value { "Yes" } else { "No" };
+        lines.push(format!(
+            "| {} | {} | {} | `{}` | {} | {} | {} | {} |",
+            row.family,
+            yes_no(row.detection),
+            yes_no(row.dedicated_parser),
+            row.layout,
+            yes_no(row.svg_render),
+            family_runtime_label(row.runtime),
+            row.parity.as_str(),
+            row.notes,
+        ));
+    }
+    lines.join("\n")
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1178,6 +1563,9 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::Requirement,
         DiagramType::PacketBeta,
         DiagramType::Kanban,
+        DiagramType::Treemap,
+        DiagramType::Radar,
+        DiagramType::Info,
     ];
     DOCUMENTED
 }
@@ -9125,17 +9513,17 @@ mod tests {
         MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
         MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
         MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
-        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
-        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
+        MermaidParityLevel, MermaidPressureReport, MermaidPressureTier, MermaidQualityMode,
+        MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind,
+        MermaidSupportLevel, MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals,
+        NodeMap, NodeSet, NodeShape, NotePosition, Position, Span, StructuredDiagnostic,
+        apply_lens_edit, build_lens_bindings, capability_matrix,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
-        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
-        mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_layout_guard_observability,
-        mermaid_node_element_id, parse_mermaid_js_config_value, parse_style_string,
-        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
-        scale_budget, to_init_parse,
+        documented_diagram_types, family_parity_rows, feature_parity_parser_families_markdown,
+        is_allowed_style_property, is_safe_link_target, mermaid_cluster_element_id,
+        mermaid_edge_element_id, mermaid_layout_guard_observability, mermaid_node_element_id,
+        parse_mermaid_js_config_value, parse_style_string, parse_style_string_with_rejections,
+        resolve_span_text_range, sanitize_style_value, scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -13342,22 +13730,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_matrix_json_matches_checked_in_artifact() {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let artifact_path = manifest_dir.join("../../evidence/capability_matrix.json");
-
-        let actual = capability_matrix_json_pretty().expect("matrix JSON should serialize");
-        if std::env::var("BLESS").is_ok() {
-            std::fs::write(&artifact_path, &actual).unwrap();
-        }
-
-        let expected = std::fs::read_to_string(&artifact_path)
-            .expect("capability matrix artifact should exist");
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn readme_supported_diagram_types_block_matches_generated_markdown() {
         let actual = capability_readme_supported_diagram_types_markdown();
 
@@ -13421,6 +13793,110 @@ mod tests {
         assert_eq!(
             actual, expected,
             "README runtime capability metadata block drifted from capability source of truth"
+        );
+    }
+    #[test]
+    fn diagram_type_parity_levels_match_pinned_expectations() {
+        // Reference-defined families all adjudicate Partial today; the pin makes any
+        // parity change a conscious, evidence-carrying edit rather than doc drift.
+        for family in documented_diagram_types() {
+            let expected = match family {
+                DiagramType::Treemap | DiagramType::Radar | DiagramType::Info => {
+                    MermaidParityLevel::NotApplicable
+                }
+                _ => MermaidParityLevel::Partial,
+            };
+            assert_eq!(
+                family.parity_level(),
+                expected,
+                "family {} parity pin moved; update the pin and the generated parity table together",
+                family.as_str()
+            );
+        }
+        assert_eq!(
+            DiagramType::Unknown.parity_level(),
+            MermaidParityLevel::Missing
+        );
+    }
+
+    #[test]
+    fn family_parity_rows_agree_with_the_diagram_type_axes() {
+        let rows = family_parity_rows();
+        // One C4 row covers the whole C4 notation (five documented variants), so the row
+        // count is allowed to sit below the variant count.
+        assert!(
+            rows.len() >= documented_diagram_types().len() - 4,
+            "every documented family needs a parity row"
+        );
+        for row in rows {
+            if let Some(diagram_type) = row.diagram_type {
+                assert_eq!(
+                    row.runtime,
+                    diagram_type.support_level(),
+                    "row family {} runtime disagrees with support_level",
+                    row.family
+                );
+                assert_eq!(
+                    row.parity,
+                    diagram_type.parity_level(),
+                    "row family {} parity disagrees with parity_level",
+                    row.family
+                );
+            }
+        }
+        for family in documented_diagram_types() {
+            let covered = rows.iter().any(|row| row.diagram_type == Some(*family))
+                || (matches!(
+                    family,
+                    DiagramType::C4Container
+                        | DiagramType::C4Component
+                        | DiagramType::C4Dynamic
+                        | DiagramType::C4Deployment
+                ) && rows
+                    .iter()
+                    .any(|row| row.diagram_type == Some(DiagramType::C4Context)));
+            assert!(
+                covered,
+                "documented family {} has no parity row",
+                family.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn feature_parity_doc_block_matches_generated_markdown() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let doc_path = manifest_dir.join("../../docs/planning/FEATURE_PARITY.md");
+        let actual = feature_parity_parser_families_markdown();
+
+        if std::env::var("BLESS").is_ok() {
+            let mut doc =
+                std::fs::read_to_string(&doc_path).expect("FEATURE_PARITY.md should exist");
+            let start_marker = "<!-- BEGIN GENERATED: feature-parity-families -->";
+            let end_marker = "<!-- END GENERATED: feature-parity-families -->";
+            let start = doc.find(start_marker).expect("missing parity start marker");
+            let body_start = start + start_marker.len();
+            let end = doc[body_start..]
+                .find(end_marker)
+                .map(|offset| body_start + offset)
+                .expect("missing parity end marker");
+            doc.replace_range(body_start..end, &format!("\n{actual}\n"));
+            std::fs::write(&doc_path, doc).unwrap();
+        }
+
+        let doc = std::fs::read_to_string(&doc_path).expect("FEATURE_PARITY.md should exist");
+        let start_marker = "<!-- BEGIN GENERATED: feature-parity-families -->";
+        let end_marker = "<!-- END GENERATED: feature-parity-families -->";
+        let start = doc.find(start_marker).expect("missing parity start marker");
+        let body_start = start + start_marker.len();
+        let end = doc[body_start..]
+            .find(end_marker)
+            .map(|offset| body_start + offset)
+            .expect("missing parity end marker");
+        let expected = doc[body_start..end].trim();
+        assert_eq!(
+            actual, expected,
+            "FEATURE_PARITY.md parser-families block drifted from the capability source of truth"
         );
     }
 

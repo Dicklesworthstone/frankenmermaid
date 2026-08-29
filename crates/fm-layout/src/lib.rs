@@ -805,6 +805,195 @@ impl LayoutAlgorithm {
     }
 }
 
+/// One layout algorithm's public-capability row: the machine-readable schema behind the
+/// README layout table and the FEATURE_PARITY layout table. `serves` names the families
+/// the algorithm specializes for; `notes` carries the one-line mechanism summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutAlgorithmRow {
+    pub algorithm: LayoutAlgorithm,
+    pub serves: &'static str,
+    pub notes: &'static str,
+}
+
+/// All 18 concrete algorithms plus `Auto`, one row each. Pinned by
+/// `tests::layout_algorithm_rows_cover_every_variant` — the pin's variant list is a
+/// compiler-checked match surface, so adding a `LayoutAlgorithm` variant without a row
+/// fails the build, not the docs.
+#[must_use]
+pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
+    const ROWS: &[LayoutAlgorithmRow] = &[
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Auto,
+            serves: "All types",
+            notes: "Selection by diagram type and graph topology; sugiyama default in the general selector",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Sugiyama,
+            serves: "General graphs (flowchart, class, state, ER, requirement, DOT)",
+            notes: "Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Force,
+            serves: "General (fallback for dense/cyclic)",
+            notes: "Fruchterman-Reingold with Barnes-Hut, cluster cohesion",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Tree,
+            serves: "Tree-like graphs",
+            notes: "Reingold-Tilford variant with direction support",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Radial,
+            serves: "Mindmap",
+            notes: "Leaf-weighted angle allocation",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Sequence,
+            serves: "Sequence diagrams",
+            notes: "Participant columns, message stacking, activation bars, notes, fragments",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Timeline,
+            serves: "Timeline",
+            notes: "Horizontal periods with vertical events",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Gantt,
+            serves: "Gantt charts",
+            notes: "Time-axis bar layout with sections",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::XyChart,
+            serves: "XY charts",
+            notes: "Cartesian coordinate mapping",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Sankey,
+            serves: "Sankey diagrams",
+            notes: "Flow-preserving column layout",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Kanban,
+            serves: "Journey, kanban",
+            notes: "Fixed-column card stacking",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Grid,
+            serves: "Block-beta",
+            notes: "CSS-grid-like positioning with column spans",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Pie,
+            serves: "Pie charts",
+            notes: "Wedge angle computation, perimeter label positioning",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Quadrant,
+            serves: "Quadrant charts",
+            notes: "2D scatter on [0,1] axes",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::GitGraph,
+            serves: "Git graphs",
+            notes: "Lane-based commit positioning",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Packet,
+            serves: "Packet-beta",
+            notes: "Grid-based field layout",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Architecture,
+            serves: "Architecture-beta, C4 (conditional)",
+            notes: "Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Treemap,
+            serves: "Treemap",
+            notes: "Squarified tile allocation",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Radar,
+            serves: "Radar-beta",
+            notes: "Polar wedges with cardinal-spline rendering",
+        },
+    ];
+    ROWS
+}
+
+/// The layout axis of the public capability matrix: one claim per algorithm row. Merged
+/// into every published matrix view through [`full_capability_matrix`].
+#[must_use]
+pub fn layout_algorithm_capability_claims() -> Vec<fm_core::CapabilityClaim> {
+    layout_algorithm_rows()
+        .iter()
+        .map(|row| fm_core::CapabilityClaim {
+            id: format!("layout/{}", row.algorithm.as_str()),
+            category: String::from("layout"),
+            title: format!("Layout algorithm: {}", row.algorithm.as_str()),
+            status: fm_core::CapabilityStatus::Implemented,
+            advertised_in: vec![
+                String::from("README.md#layout-algorithms"),
+                String::from("docs/planning/FEATURE_PARITY.md#layout-algorithms"),
+            ],
+            code_paths: vec![String::from("crates/fm-layout/src/lib.rs::LayoutAlgorithm")],
+            evidence: vec![
+                fm_core::CapabilityEvidence {
+                    kind: String::from("code_path"),
+                    reference: String::from(
+                        "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+                    ),
+                    note: Some(String::from("Dispatch site for the specialized algorithms")),
+                },
+                fm_core::CapabilityEvidence {
+                    kind: String::from("test"),
+                    reference: String::from(
+                        "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+                    ),
+                    note: Some(String::from("Every enum variant carries exactly one row")),
+                },
+            ],
+            notes: vec![String::from(row.serves)],
+        })
+        .collect()
+}
+
+/// The fm-core capability matrix extended with fm-layout's algorithm claims — the merged
+/// view every public consumer (CLI `capabilities`, WASM `capabilityMatrix`, the evidence
+/// generator) must print, so the layout axis cannot silently fall out of the published
+/// matrix.
+#[must_use]
+pub fn full_capability_matrix() -> fm_core::CapabilityMatrix {
+    let mut matrix = fm_core::capability_matrix();
+    let claims = layout_algorithm_capability_claims();
+    for claim in &claims {
+        *matrix
+            .status_counts
+            .entry(claim.status.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+    matrix.claims.extend(claims);
+    matrix
+}
+
+/// The generated layout-algorithms table for README and FEATURE_PARITY.
+#[must_use]
+pub fn layout_algorithms_markdown() -> String {
+    let mut lines = vec![
+        String::from("| Algorithm | Serves | Notes |"),
+        String::from("|---|---|---|"),
+    ];
+    for row in layout_algorithm_rows() {
+        lines.push(format!(
+            "| `{}` | {} | {} |",
+            row.algorithm.as_str(),
+            row.serves,
+            row.notes
+        ));
+    }
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockBetaGridItem {
     Node(usize),
@@ -19281,6 +19470,199 @@ mod tests {
         clippy::similar_names,
         clippy::many_single_char_names
     )]
+
+    /// The committed capability-matrix artifact is the MERGED matrix (fm-core claims plus
+    /// this crate's algorithm claims) — the exact payload the CLI and the WASM
+    /// `capabilityMatrix()` print. Byte-pinned; BLESS=1 rewrites.
+    #[test]
+    fn full_capability_matrix_json_matches_checked_in_artifact() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let artifact_path = manifest_dir.join("../../evidence/capability_matrix.json");
+
+        let actual = serde_json::to_string_pretty(&super::full_capability_matrix())
+            .expect("merged capability matrix should serialize");
+        if std::env::var("BLESS").is_ok() {
+            std::fs::write(&artifact_path, &actual).unwrap();
+        }
+
+        let expected = std::fs::read_to_string(&artifact_path)
+            .expect("capability matrix artifact should exist");
+
+        assert_eq!(actual, expected);
+    }
+
+    /// The FEATURE_PARITY layout table is a projection of [`layout_algorithm_rows`];
+    /// byte-pinned against the doc (BLESS=1 rewrites).
+    #[test]
+    fn feature_parity_layout_block_matches_generated_markdown() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let doc_path = manifest_dir.join("../../docs/planning/FEATURE_PARITY.md");
+        let actual = super::layout_algorithms_markdown();
+        let start_marker = "<!-- BEGIN GENERATED: feature-parity-layouts -->";
+        let end_marker = "<!-- END GENERATED: feature-parity-layouts -->";
+
+        if std::env::var("BLESS").is_ok() {
+            let mut doc =
+                std::fs::read_to_string(&doc_path).expect("FEATURE_PARITY.md should exist");
+            match doc.find(start_marker) {
+                Some(start) => {
+                    let body_start = start + start_marker.len();
+                    let end = doc[body_start..]
+                        .find(end_marker)
+                        .map(|offset| body_start + offset)
+                        .expect("missing parity layouts end marker");
+                    doc.replace_range(body_start..end, &format!("\n{actual}\n"));
+                }
+                None => {
+                    doc.push('\n');
+                    doc.push_str(start_marker);
+                    doc.push('\n');
+                    doc.push_str(&actual);
+                    doc.push('\n');
+                    doc.push_str(end_marker);
+                    doc.push('\n');
+                }
+            }
+            std::fs::write(&doc_path, doc).unwrap();
+        }
+
+        let doc = std::fs::read_to_string(&doc_path).expect("FEATURE_PARITY.md should exist");
+        let start = doc
+            .find(start_marker)
+            .expect("FEATURE_PARITY.md is missing the layout generated block");
+        let body_start = start + start_marker.len();
+        let end = doc[body_start..]
+            .find(end_marker)
+            .map(|offset| body_start + offset)
+            .expect("missing parity layouts end marker");
+        assert_eq!(
+            actual,
+            doc[body_start..end].trim(),
+            "FEATURE_PARITY.md layout block drifted from the layout source of truth"
+        );
+    }
+
+    /// Every `LayoutAlgorithm` variant must carry exactly one public-capability row. The
+    /// variant list here is the pin: adding an enum variant without updating this test
+    /// (and the row table) fails the build rather than drifting the published contract.
+    #[test]
+    fn layout_algorithm_rows_cover_every_variant() {
+        const ALL: [LayoutAlgorithm; 19] = [
+            LayoutAlgorithm::Auto,
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Force,
+            LayoutAlgorithm::Tree,
+            LayoutAlgorithm::Radial,
+            LayoutAlgorithm::Timeline,
+            LayoutAlgorithm::Gantt,
+            LayoutAlgorithm::XyChart,
+            LayoutAlgorithm::Sankey,
+            LayoutAlgorithm::Kanban,
+            LayoutAlgorithm::Grid,
+            LayoutAlgorithm::Sequence,
+            LayoutAlgorithm::Pie,
+            LayoutAlgorithm::Quadrant,
+            LayoutAlgorithm::GitGraph,
+            LayoutAlgorithm::Packet,
+            LayoutAlgorithm::Architecture,
+            LayoutAlgorithm::Treemap,
+            LayoutAlgorithm::Radar,
+        ];
+        let rows = super::layout_algorithm_rows();
+        assert_eq!(rows.len(), ALL.len(), "row count must match variant count");
+        for algorithm in ALL {
+            assert!(
+                rows.iter().any(|row| row.algorithm == algorithm),
+                "layout algorithm {} has no capability row",
+                algorithm.as_str()
+            );
+        }
+    }
+
+    /// The fm-core parity rows spell layouts as `LayoutAlgorithm::as_str` (or `auto`); a
+    /// rename here must never strand a stale spelling in the generated parity table.
+    #[test]
+    fn family_parity_layout_spellings_are_real_algorithms() {
+        const SPELLINGS: [&str; 19] = [
+            "auto",
+            "sugiyama",
+            "force",
+            "tree",
+            "radial",
+            "timeline",
+            "gantt",
+            "xychart",
+            "sankey",
+            "kanban",
+            "grid",
+            "sequence",
+            "pie",
+            "quadrant",
+            "gitgraph",
+            "packet",
+            "architecture",
+            "treemap",
+            "radar",
+        ];
+        for row in fm_core::family_parity_rows() {
+            assert!(
+                SPELLINGS.contains(&row.layout),
+                "fm-core parity row family {} spells layout {:?}, which no LayoutAlgorithm emits",
+                row.family,
+                row.layout
+            );
+        }
+    }
+
+    /// The README layout block is a projection of [`layout_algorithm_rows`]; byte-pinned
+    /// so prose edits cannot drift the published table (BLESS=1 rewrites).
+    #[test]
+    fn readme_layout_algorithms_block_matches_generated_markdown() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme_path = manifest_dir.join("../../README.md");
+        let actual = super::layout_algorithms_markdown();
+        let start_marker = "<!-- BEGIN GENERATED: layout-algorithms -->";
+        let end_marker = "<!-- END GENERATED: layout-algorithms -->";
+
+        if std::env::var("BLESS").is_ok() {
+            let mut readme = std::fs::read_to_string(&readme_path).expect("README should exist");
+            match readme.find(start_marker) {
+                Some(start) => {
+                    let body_start = start + start_marker.len();
+                    let end = readme[body_start..]
+                        .find(end_marker)
+                        .map(|offset| body_start + offset)
+                        .expect("missing layout end marker");
+                    readme.replace_range(body_start..end, &format!("\n{actual}\n"));
+                }
+                None => {
+                    readme.push('\n');
+                    readme.push_str(start_marker);
+                    readme.push('\n');
+                    readme.push_str(&actual);
+                    readme.push('\n');
+                    readme.push_str(end_marker);
+                    readme.push('\n');
+                }
+            }
+            std::fs::write(&readme_path, readme).unwrap();
+        }
+
+        let readme = std::fs::read_to_string(&readme_path).expect("README should exist");
+        let start = readme
+            .find(start_marker)
+            .expect("README is missing the layout-algorithms generated block");
+        let body_start = start + start_marker.len();
+        let end = readme[body_start..]
+            .find(end_marker)
+            .map(|offset| body_start + offset)
+            .expect("missing layout end marker");
+        assert_eq!(
+            actual,
+            readme[body_start..end].trim(),
+            "README layout-algorithms block drifted from the layout source of truth"
+        );
+    }
 
     /// A class declaring ONLY a stereotype must still be sized for its compartment stack (bd-d48wi).
     ///

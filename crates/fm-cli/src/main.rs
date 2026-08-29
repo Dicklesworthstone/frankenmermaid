@@ -53,9 +53,8 @@ use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLinkMode,
     MermaidNativePressureSignals, MermaidParseMode, MermaidPressureReport, MermaidTier,
-    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty, mermaid_config_schema,
-    mermaid_config_schema_json_pretty, mermaid_layout_guard_observability,
-    validate_mermaid_config_value,
+    StructuredDiagnostic, mermaid_config_schema, mermaid_config_schema_json_pretty,
+    mermaid_layout_guard_observability, validate_mermaid_config_value,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
@@ -4522,10 +4521,13 @@ fn write_output_bytes(output: Option<&str>, content: &[u8]) -> Result<()> {
 }
 
 fn cmd_capabilities(pretty: bool, output: Option<&str>) -> Result<()> {
+    // The MERGED matrix: fm-core claims plus fm-layout's algorithm claims. Every public
+    // consumer prints this same view so the layout axis cannot fall out of the contract.
+    let matrix = fm_layout::full_capability_matrix();
     let json = if pretty {
-        capability_matrix_json_pretty()?
+        serde_json::to_string_pretty(&matrix)?
     } else {
-        serde_json::to_string(&capability_matrix())?
+        serde_json::to_string(&matrix)?
     };
     write_output(output, &json)
 }

@@ -185,11 +185,11 @@ FNX is automatically disabled in WebAssembly builds due to dependency constraint
 
 ### "Graph analysis skipped: undirected projection"
 
-**Cause**: FNX currently only supports undirected graph analysis. For directed diagrams like flowcharts, edge directions are temporarily ignored during analysis.
+**Cause**: Phase 1 (undirected) analysis projects the graph to an undirected form. For directed diagrams like flowcharts, edge directions are temporarily ignored during the undirected pass.
 
 **Impact**: Minimal. Most structural metrics (centrality, connectivity, cycles) are meaningful even without direction.
 
-**Workaround**: None needed. This is informational. Directed analysis support is planned for Phase 2.
+**Workaround**: None needed. This is informational. Directed analysis (SCC, WCC, reachability) ships behind the `fnx-experimental-directed` feature flag, currently in canary rollout.
 
 ### "FNX analysis timed out"
 
