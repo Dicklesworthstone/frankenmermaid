@@ -50,7 +50,7 @@ fn pad(len: usize) -> String {
 #[test]
 fn the_simd_and_byte_paths_escape_identically() {
     for fragment in ["a & b", "a < b", "x & y < z", "&amp;", "&notreal;", "a > b"] {
-        let short = format!("{fragment}");
+        let short = fragment.to_string();
         assert!(
             short.len() < 256,
             "the SHORT case must stay under the dispatch threshold to exercise the other path"

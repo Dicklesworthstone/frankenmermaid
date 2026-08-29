@@ -129,9 +129,8 @@ fn path_data_numbers(svg: &str) -> Vec<String> {
                     && !current.ends_with('e')
                     && !current.ends_with('E')
                 {
-                    if !current.is_empty() {
-                        out.push(std::mem::take(&mut current));
-                    }
+                    // `current` is provably non-empty here: the guard above requires it.
+                    out.push(std::mem::take(&mut current));
                 }
                 current.push(ch);
             } else if !current.is_empty() {
