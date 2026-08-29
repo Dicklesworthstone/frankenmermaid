@@ -108,11 +108,11 @@ struct StudioView: View {
                 .shadow(color: Lab.cyan.opacity(0.44), radius: 13)
                 .accessibilityLabel("Friendly FrankenMermaid graph monster")
             VStack(alignment: .leading, spacing: 1) {
-                Text("FRANKENMERMAID")
-                    .font(.system(size: Lab.size(20), weight: .black, design: .monospaced))
-                    .minimumScaleFactor(0.66)
-                    .lineLimit(1)
-                    .foregroundStyle(Lab.text)
+                FrankenWordmark(
+                    productInitial: "M",
+                    productRemainder: "ERMAID",
+                    fullName: "FrankenMermaid"
+                )
                 Text("GRAPH_HEART // private · offline · Rust")
                     .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
                     .foregroundStyle(Lab.secondary)
