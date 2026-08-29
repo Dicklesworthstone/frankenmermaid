@@ -1,0 +1,189 @@
+{
+  "cells": [
+    {
+      "family": "C4Component",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "C4Container",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "C4Context",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "C4Deployment",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "C4Dynamic",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "architecture-beta",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "block-beta",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "class",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "er",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "diverge",
+      "detail": "we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only"
+    },
+    {
+      "family": "flowchart",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "gantt",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "diverge",
+      "detail": "mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")"
+    },
+    {
+      "family": "gitGraph",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "diverge",
+      "detail": "known deliberate: commit ids (mermaid auto-hashes \"0-67d0e3d\"; we use commit_1..N); the reverse half (\"merge develop\") needs case triage"
+    },
+    {
+      "family": "journey",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "kanban",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "mindmap",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "packet-beta",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "pie",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "quadrantChart",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "requirementDiagram",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "sankey",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "diverge",
+      "detail": "we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")"
+    },
+    {
+      "family": "sequence",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "state",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "agree",
+      "detail": ""
+    },
+    {
+      "family": "timeline",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "undecidable",
+      "detail": ""
+    },
+    {
+      "family": "xyChart",
+      "surface": "svg",
+      "oracle": "chromium_text_diff",
+      "verdict": "diverge",
+      "detail": "we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")"
+    }
+  ],
+  "run": {
+    "instrument": "scripts/headtohead/chromium_text_diff.mjs --all-goldens",
+    "chromium": "Chrome/151.0.7922.34 (playwright chromium-1234, headless)",
+    "bundle": "mermaid@11.15.0 (npm dist, version-pinned)",
+    "date": "2026-08-28",
+    "totals": {
+      "agree": 28,
+      "diverge": 5,
+      "undecidable": 6,
+      "incumbent_dnf": 2
+    },
+    "excluded_fixtures": [
+      "fuzzy_keyword_recovery",
+      "malformed_recovery"
+    ],
+    "exclusion_reason": "resilience fixtures: the incumbent refusing deliberately-broken input is expected, not a parity signal"
+  }
+}

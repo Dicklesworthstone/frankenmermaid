@@ -1,20 +1,19 @@
 {
-  "source_rev": "b0204f2aa3d3859b5f3e28f8be133e6a35a474da",
+  "source_rev": "fbe9d3540cd0acfb319f4b5f5bd0ef462d85f49e",
   "cells": [
     {
       "family": "flowchart",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::flowchart_simple",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:flowchart_simple"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
       "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
-      "output_sha256": "11603fd0b7cd0645e33398dc1934963e65deb98898ff653445f263dec25715a4",
+      "output_sha256": "c6c318abff587550bcf7a584611e58602cec9cfe5092df4c4dfee9a729877b4b",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -105,17 +104,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::flowchart_simple",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:flowchart_simple"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
       "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
-      "output_sha256": "11603fd0b7cd0645e33398dc1934963e65deb98898ff653445f263dec25715a4",
+      "output_sha256": "c6c318abff587550bcf7a584611e58602cec9cfe5092df4c4dfee9a729877b4b",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -138,17 +137,16 @@
     {
       "family": "sequence",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::sequence_advanced",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:sequence_advanced"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
       "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
-      "output_sha256": "be882367a2de93a601ac32308155ccfcef9035630fe19d4dfa08837053569afe",
+      "output_sha256": "e670596a8c1b6a393221e5c20ee92b0c6266a6523f2143ba4ebcb95f41f6c5d5",
       "census": {
         "nodes": 3,
         "edges": 11,
@@ -239,17 +237,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::sequence_advanced",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:sequence_advanced"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
       "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
-      "output_sha256": "be882367a2de93a601ac32308155ccfcef9035630fe19d4dfa08837053569afe",
+      "output_sha256": "e670596a8c1b6a393221e5c20ee92b0c6266a6523f2143ba4ebcb95f41f6c5d5",
       "census": {
         "nodes": 3,
         "edges": 11,
@@ -272,17 +270,16 @@
     {
       "family": "class",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::class_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:class_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
       "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
-      "output_sha256": "a572f9f7d41db65901fd077db7372e032717f27b2f74a823e7773409188b7bb7",
+      "output_sha256": "700e53d53bc89ad93fde73125ea55aa6b61406fe478ce4e9777757c001d918b9",
       "census": {
         "nodes": 2,
         "edges": 1,
@@ -373,17 +370,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::class_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:class_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
       "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
-      "output_sha256": "a572f9f7d41db65901fd077db7372e032717f27b2f74a823e7773409188b7bb7",
+      "output_sha256": "700e53d53bc89ad93fde73125ea55aa6b61406fe478ce4e9777757c001d918b9",
       "census": {
         "nodes": 2,
         "edges": 1,
@@ -406,17 +403,16 @@
     {
       "family": "state",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::state_composite",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:state_composite"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
       "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
-      "output_sha256": "b24172f9dd9ac746c84476a6ff9786032f56eb6f38a5e35b7e594da07fceaf32",
+      "output_sha256": "9260800b4b3888c4fb4640c6331051597313dece6b739d66bd8c4c213c0d0970",
       "census": {
         "nodes": 15,
         "edges": 16,
@@ -507,17 +503,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::state_composite",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:state_composite"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
       "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
-      "output_sha256": "b24172f9dd9ac746c84476a6ff9786032f56eb6f38a5e35b7e594da07fceaf32",
+      "output_sha256": "9260800b4b3888c4fb4640c6331051597313dece6b739d66bd8c4c213c0d0970",
       "census": {
         "nodes": 15,
         "edges": 16,
@@ -542,7 +538,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
       "evidence_ids": [
         "golden_svg_test::er_basic",
@@ -550,7 +546,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
-      "output_sha256": "a76069a931d05672df39749621e82b76b24648eb55a0f3a41193bda41edf2082",
+      "output_sha256": "c82b1fd4ecf6ff9e238ebd9c98a306d54cd70a8a319513467b6efddcc8a498f2",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -641,7 +637,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: [\"1\",\"1\",\"0..*\",\"1..*\"] cardinality text; mermaid renders cardinality as crow's-foot markers only): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -651,7 +647,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
-      "output_sha256": "a76069a931d05672df39749621e82b76b24648eb55a0f3a41193bda41edf2082",
+      "output_sha256": "c82b1fd4ecf6ff9e238ebd9c98a306d54cd70a8a319513467b6efddcc8a498f2",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -674,13 +670,12 @@
     {
       "family": "C4Context",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::c4_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:c4_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
       "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
@@ -775,13 +770,13 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::c4_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:c4_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
       "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
@@ -810,7 +805,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::c4_container",
@@ -909,7 +904,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -944,7 +939,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::c4_component",
@@ -952,7 +947,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
       "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
-      "output_sha256": "df8e1eededaa14f3522b457a6998f1191accf220f3c2498586cc30f08d49b970",
+      "output_sha256": "f60a8f1be58ec26db97bb0635c4fa5221e8a4328ff695c3d3119f6a5fead80da",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -1043,7 +1038,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1053,7 +1048,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
       "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
-      "output_sha256": "df8e1eededaa14f3522b457a6998f1191accf220f3c2498586cc30f08d49b970",
+      "output_sha256": "f60a8f1be58ec26db97bb0635c4fa5221e8a4328ff695c3d3119f6a5fead80da",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -1078,7 +1073,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::c4_dynamic",
@@ -1086,7 +1081,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
       "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
-      "output_sha256": "255a70931c6894a3c6aebad6d8b395c2655f5f4a4e48d94c312d3ed67459fe58",
+      "output_sha256": "5f12519372d66c2fbbc3a2f02006229e770f282df955f289654d8612b9ea57e0",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -1177,7 +1172,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1187,7 +1182,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
       "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
-      "output_sha256": "255a70931c6894a3c6aebad6d8b395c2655f5f4a4e48d94c312d3ed67459fe58",
+      "output_sha256": "5f12519372d66c2fbbc3a2f02006229e770f282df955f289654d8612b9ea57e0",
       "census": {
         "nodes": 4,
         "edges": 4,
@@ -1212,7 +1207,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::c4_deployment",
@@ -1220,7 +1215,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
       "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
-      "output_sha256": "9a3ae39af032490e1d7edef036ea23ad1021f8976d560bc2b6abc5309ac9a462",
+      "output_sha256": "d506a84f3e52b8851112509a1f1603cbdca531428bcc2508d04a76c1e8163c79",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -1311,7 +1306,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1321,7 +1316,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
       "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
-      "output_sha256": "9a3ae39af032490e1d7edef036ea23ad1021f8976d560bc2b6abc5309ac9a462",
+      "output_sha256": "d506a84f3e52b8851112509a1f1603cbdca531428bcc2508d04a76c1e8163c79",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -1346,7 +1341,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::architecture_basic",
@@ -1354,7 +1349,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
       "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
-      "output_sha256": "595a6bd5717456e2728ef2afce3e9a7551c17bd6d7f607a31e084bacfce3075a",
+      "output_sha256": "cd29a2b8c4a31572741e616709aa805297c7bab2a2351578383272442e77c3e7",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -1445,7 +1440,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1455,7 +1450,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
       "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
-      "output_sha256": "595a6bd5717456e2728ef2afce3e9a7551c17bd6d7f607a31e084bacfce3075a",
+      "output_sha256": "cd29a2b8c4a31572741e616709aa805297c7bab2a2351578383272442e77c3e7",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -1478,13 +1473,12 @@
     {
       "family": "block-beta",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::block_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:block_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
       "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
@@ -1579,13 +1573,13 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::block_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:block_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
       "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
@@ -1614,7 +1608,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports DIVERGE for this cell (mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
       "evidence_ids": [
         "golden_svg_test::gantt_basic",
@@ -1622,7 +1616,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
-      "output_sha256": "2578abb116ca390b2bf7b2b5e6a6ef1f0fe3efd00e764d3a18f2fe6bcf70c190",
+      "output_sha256": "c08a0721d9f0250c009591001f7f2c304983eed5a98c0bfe96d37429c5fb124e",
       "census": {
         "nodes": 2,
         "edges": 1,
@@ -1713,7 +1707,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports DIVERGE for this cell (mermaid draws, we do not: dated axis ticks (\"2026-01-01\"..\"2026-01-07\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1723,7 +1717,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
-      "output_sha256": "2578abb116ca390b2bf7b2b5e6a6ef1f0fe3efd00e764d3a18f2fe6bcf70c190",
+      "output_sha256": "c08a0721d9f0250c009591001f7f2c304983eed5a98c0bfe96d37429c5fb124e",
       "census": {
         "nodes": 2,
         "edges": 1,
@@ -1748,7 +1742,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
       "evidence_ids": [
         "golden_svg_test::timeline_basic",
@@ -1756,7 +1750,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
       "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
-      "output_sha256": "782099608c66decac81bcd27092806de9250686bd1d8cbdf1bd97e19df069ca9",
+      "output_sha256": "4c45442ac44a77db6cf6ea1197e6ff0df1e65fff5ef50f52bd16b019b09d747a",
       "census": {
         "nodes": 7,
         "edges": 6,
@@ -1847,7 +1841,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -1857,7 +1851,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
       "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
-      "output_sha256": "782099608c66decac81bcd27092806de9250686bd1d8cbdf1bd97e19df069ca9",
+      "output_sha256": "4c45442ac44a77db6cf6ea1197e6ff0df1e65fff5ef50f52bd16b019b09d747a",
       "census": {
         "nodes": 7,
         "edges": 6,
@@ -1880,17 +1874,16 @@
     {
       "family": "journey",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::journey_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:journey_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
       "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
-      "output_sha256": "0f6858a96ded6574a8ed1745c7e3f25a754f2a6c8363055996b256a7272adc64",
+      "output_sha256": "a8f2b7d898241e59905e0837c8724504bd159f52eeeaffe886f31c6faf7d016d",
       "census": {
         "nodes": 7,
         "edges": 6,
@@ -1981,17 +1974,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::journey_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:journey_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
       "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
-      "output_sha256": "0f6858a96ded6574a8ed1745c7e3f25a754f2a6c8363055996b256a7272adc64",
+      "output_sha256": "a8f2b7d898241e59905e0837c8724504bd159f52eeeaffe886f31c6faf7d016d",
       "census": {
         "nodes": 7,
         "edges": 6,
@@ -2016,7 +2009,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports DIVERGE for this cell (known deliberate: commit ids (mermaid auto-hashes \"0-67d0e3d\"; we use commit_1..N); the reverse half (\"merge develop\") needs case triage): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
       "evidence_ids": [
         "golden_svg_test::gitgraph_basic",
@@ -2024,7 +2017,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
       "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
-      "output_sha256": "b95657236d89b7733726e5a1f986faa7d3757e4e26d3b5aba531590a0d5127db",
+      "output_sha256": "b3bfc35a8ebc266ccdf164ecc3a13aec9ab020a7228105ed4ae0a75269eea68a",
       "census": {
         "nodes": 6,
         "edges": 6,
@@ -2115,7 +2108,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports DIVERGE for this cell (known deliberate: commit ids (mermaid auto-hashes \"0-67d0e3d\"; we use commit_1..N); the reverse half (\"merge develop\") needs case triage): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -2125,7 +2118,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
       "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
-      "output_sha256": "b95657236d89b7733726e5a1f986faa7d3757e4e26d3b5aba531590a0d5127db",
+      "output_sha256": "b3bfc35a8ebc266ccdf164ecc3a13aec9ab020a7228105ed4ae0a75269eea68a",
       "census": {
         "nodes": 6,
         "edges": 6,
@@ -2150,7 +2143,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
       "evidence_ids": [
         "golden_svg_test::sankey_basic",
@@ -2158,11 +2151,11 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
-      "output_sha256": "a80ea7d8cf356c3ded843db7041e80c11821cab935b472e58a01c69318603ca9",
+      "output_sha256": "7af04145e0e68f5ae61b9e04d2c166ca6325b220b98b38ab9bf8d45f689d49e1",
       "census": {
         "nodes": 7,
         "edges": 8,
-        "text_runs": 15
+        "text_runs": 7
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
@@ -2249,7 +2242,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: per-link value numbers (\"100\",\"50\",\"75\",\"25\",\"120\",\"55\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -2259,11 +2252,11 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
-      "output_sha256": "a80ea7d8cf356c3ded843db7041e80c11821cab935b472e58a01c69318603ca9",
+      "output_sha256": "7af04145e0e68f5ae61b9e04d2c166ca6325b220b98b38ab9bf8d45f689d49e1",
       "census": {
         "nodes": 7,
         "edges": 8,
-        "text_runs": 15
+        "text_runs": 7
       },
       "determinism_repeat_identical": true,
       "diagnostics": {
@@ -2282,17 +2275,16 @@
     {
       "family": "mindmap",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::mindmap_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:mindmap_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
       "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
-      "output_sha256": "f3656125fdfe3785b0c9bc0aeb014d455f3a52197f9c7caeed66feaab6441b78",
+      "output_sha256": "046265d72bcaed337b90dda83aecb4fb84d1d27615c218e674a956baa1da06cc",
       "census": {
         "nodes": 6,
         "edges": 5,
@@ -2383,17 +2375,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::mindmap_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:mindmap_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
       "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
-      "output_sha256": "f3656125fdfe3785b0c9bc0aeb014d455f3a52197f9c7caeed66feaab6441b78",
+      "output_sha256": "046265d72bcaed337b90dda83aecb4fb84d1d27615c218e674a956baa1da06cc",
       "census": {
         "nodes": 6,
         "edges": 5,
@@ -2416,17 +2408,16 @@
     {
       "family": "pie",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::pie_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:pie_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
       "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
-      "output_sha256": "b90163ab3c11329db5da44eb057945142ad54ac546bd75eaa29a037becab6502",
+      "output_sha256": "cd372b083a1055eb7f6e3e7009da444cff77eef065fad0446837406980dc7840",
       "census": {
         "nodes": 3,
         "edges": 0,
@@ -2517,17 +2508,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::pie_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:pie_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
       "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
-      "output_sha256": "b90163ab3c11329db5da44eb057945142ad54ac546bd75eaa29a037becab6502",
+      "output_sha256": "cd372b083a1055eb7f6e3e7009da444cff77eef065fad0446837406980dc7840",
       "census": {
         "nodes": 3,
         "edges": 0,
@@ -2550,17 +2541,16 @@
     {
       "family": "quadrantChart",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::quadrant_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:quadrant_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
       "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
-      "output_sha256": "0ead538d3defe7942835d44b5139d85399d249172906ada14b77c283423f621f",
+      "output_sha256": "bda6fe7b71938b86f59df9f47d4b9f8f7f26316a75d100f4fbde415ab9fcf7ad",
       "census": {
         "nodes": 3,
         "edges": 0,
@@ -2651,17 +2641,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::quadrant_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:quadrant_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
       "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
-      "output_sha256": "0ead538d3defe7942835d44b5139d85399d249172906ada14b77c283423f621f",
+      "output_sha256": "bda6fe7b71938b86f59df9f47d4b9f8f7f26316a75d100f4fbde415ab9fcf7ad",
       "census": {
         "nodes": 3,
         "edges": 0,
@@ -2686,7 +2676,7 @@
       "surface": "svg",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
       "evidence_ids": [
         "golden_svg_test::xychart_comprehensive",
@@ -2694,7 +2684,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
-      "output_sha256": "ff21ab2fc827ccea04bab14ddfcb47f006aacbb6e87607b7f82afb4eb947660a",
+      "output_sha256": "8142f959c82474540ccf95d1fadbe9eefdd49c29b347f10e71df0f98f70de5c2",
       "census": {
         "nodes": 12,
         "edges": 3,
@@ -2785,7 +2775,7 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
+        "oracle chromium_text_diff reports DIVERGE for this cell (we draw, mermaid does not: series-name legend entries (\"Sales\",\"Expenses\",\"Target\")): semantic promotion is refused until the divergence is fixed or recorded as deliberate",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
@@ -2795,7 +2785,7 @@
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
-      "output_sha256": "ff21ab2fc827ccea04bab14ddfcb47f006aacbb6e87607b7f82afb4eb947660a",
+      "output_sha256": "8142f959c82474540ccf95d1fadbe9eefdd49c29b347f10e71df0f98f70de5c2",
       "census": {
         "nodes": 12,
         "edges": 3,
@@ -2818,17 +2808,16 @@
     {
       "family": "requirementDiagram",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::requirement_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:requirement_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
       "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
-      "output_sha256": "da3781c0f259fd9b027ea00d05673bce2ff4050f7e8be26781b1994a9ef1cee0",
+      "output_sha256": "20d0ceb3e33c3e4a890d1e4c980aa561cb7e930d9b39e0807ffa7d0764edd6de",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -2919,17 +2908,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::requirement_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:requirement_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
       "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
-      "output_sha256": "da3781c0f259fd9b027ea00d05673bce2ff4050f7e8be26781b1994a9ef1cee0",
+      "output_sha256": "20d0ceb3e33c3e4a890d1e4c980aa561cb7e930d9b39e0807ffa7d0764edd6de",
       "census": {
         "nodes": 3,
         "edges": 2,
@@ -2952,13 +2941,12 @@
     {
       "family": "packet-beta",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::packet_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:packet_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
       "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
@@ -3053,13 +3041,13 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::packet_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:packet_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
       "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
@@ -3086,17 +3074,16 @@
     {
       "family": "kanban",
       "surface": "svg",
-      "tier": "structural",
-      "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote"
-      ],
+      "tier": "production",
+      "reasons": [],
       "evidence_ids": [
         "golden_svg_test::kanban_basic",
-        "renderer_agreement"
+        "renderer_agreement",
+        "chromium_text_diff:kanban_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
       "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
-      "output_sha256": "08eceb1ac8ca3c73f14b8298841cc65ac04670ff039c6493dfada7f6588feb1b",
+      "output_sha256": "27746112b1807f5d85042ce2feac7714a79f452616b75d2e72111a1ffa4cd055",
       "census": {
         "nodes": 7,
         "edges": 0,
@@ -3187,17 +3174,17 @@
       "surface": "wasm",
       "tier": "structural",
       "reasons": [
-        "no ingested cross-engine verdict for this cell: run scripts/headtohead/chromium_text_diff.mjs --all-goldens against this revision and pass the report via --oracle-results to promote",
         "capped at structural: the authoritative WASM gate is the fm-wasm test suite and the packaged smoke in build-wasm.sh, which this in-process measurement cannot run; the release gauntlet promotes this cell"
       ],
       "evidence_ids": [
         "golden_svg_test::kanban_basic",
         "renderer_agreement",
-        "fm-wasm tests + packaged smoke (build-wasm.sh)"
+        "fm-wasm tests + packaged smoke (build-wasm.sh)",
+        "chromium_text_diff:kanban_basic"
       ],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
       "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
-      "output_sha256": "08eceb1ac8ca3c73f14b8298841cc65ac04670ff039c6493dfada7f6588feb1b",
+      "output_sha256": "27746112b1807f5d85042ce2feac7714a79f452616b75d2e72111a1ffa4cd055",
       "census": {
         "nodes": 7,
         "edges": 0,
