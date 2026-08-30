@@ -1494,6 +1494,22 @@ fn apply_output_post_passes(
 /// The default-preset theme's edge color. The arrowhead-marker `<defs>` for this color are memoized
 /// (see [`marker_defs_body`]). Pinned to the preset by `default_edge_color_matches_preset`.
 const DEFAULT_EDGE_COLOR: &str = "#64748b";
+/// Mermaid 11.15.0's `theme: default` primary text color, taken from the bundle pinned in
+/// `scripts/headtohead/pins.json`.
+const MERMAID_DEFAULT_PRIMARY_TEXT_COLOR: &str = "#333";
+
+/// Keep the two labelled surfaces whose incumbent colors are part of the SVG contract aligned with
+/// Mermaid's default theme without retuning FrankenMermaid's broader default palette.
+fn mermaid_default_primary_text_color<'a>(
+    config: &SvgRenderConfig,
+    colors: &'a ThemeColors,
+) -> &'a str {
+    if config.theme == ThemePreset::Default {
+        MERMAID_DEFAULT_PRIMARY_TEXT_COLOR
+    } else {
+        colors.text.as_str()
+    }
+}
 
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
@@ -7811,7 +7827,7 @@ fn render_xychart_svg(
                 // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
                 // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
                 // was not, on the SHIPPED default theme.
-                .fill(&theme.colors.text)
+                .fill(mermaid_default_primary_text_color(config, &theme.colors))
                 .class("fm-xychart-y-tick")
                 .build(),
         );
@@ -9133,7 +9149,16 @@ fn write_c4_node_fragment_into(
     // contrast catches it. Its own siblings in the same box, `fm-c4-name` and `fm-c4-description`,
     // already use `colors.text`; the visual hierarchy is carried by size (0.78x) and weight (600),
     // not by making the label unreadable.
-    let _ = write_escaped_attr(out, &colors.text);
+    let c4_type_label_color = mermaid_default_primary_text_color(config, colors);
+    let _ = write_escaped_attr(out, c4_type_label_color);
+    // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
+    // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned
+    // `#333`, while non-default themes continue to inherit their themed text color.
+    if config.theme == ThemePreset::Default {
+        out.push_str("\" style=\"fill:");
+        let _ = write_escaped_attr(out, c4_type_label_color);
+        out.push('\"');
+    }
     out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
@@ -12879,8 +12904,8 @@ fn render_c4_node_content(
     let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
     let mut cursor_y = y + (small_font * 1.25);
 
-    group = group.child(apply_label_style(apply_label_class(
-        TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
+    let c4_type_label_color = mermaid_default_primary_text_color(config, colors);
+    let mut c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
             .x(x + w / 2.0)
             .y(cursor_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
@@ -12890,10 +12915,13 @@ fn render_c4_node_content(
             // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
             // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
             // given diagram happens to take.
-            .fill(&colors.text)
+            .fill(c4_type_label_color)
             .class("fm-c4-type-label")
-            .build(),
-    )));
+            .build();
+    if config.theme == ThemePreset::Default {
+        c4_type_label = c4_type_label.attr("style", "fill:#333");
+    }
+    group = group.child(apply_label_style(apply_label_class(c4_type_label)));
 
     if node
         .classes

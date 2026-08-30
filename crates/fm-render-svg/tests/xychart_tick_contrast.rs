@@ -1,10 +1,7 @@
 //! xychart axis tick labels must be legible against their own theme background (bd-c14jf).
 //!
-//! The y-axis ticks were painted with `colors.edge` — the LINE colour — while their siblings
-//! `fm-xychart-x-tick` and `fm-xychart-title` used `colors.text`. A category error that is nearly
-//! invisible in review, because both theme slots hold a dark-ish value, and one with no CSS rule
-//! behind it to correct the attribute (unlike `.fm-cluster-label`, where a rule wins over the
-//! presentation attribute and hides exactly this kind of mistake).
+//! Mermaid 11.15.0's pinned default bundle derives y-axis labels from `primaryTextColor`, whose
+//! exact default is `#333`; the old edge color is not a substitute.
 //!
 //! MEASURED against the theme's own background, before the fix:
 //!
@@ -92,17 +89,37 @@ fn axis_tick_labels_meet_wcag_aa_contrast_in_both_themes() {
                  4.5:1 for normal text"
             );
         }
+
+        // Planted negative: the old edge color must remain below AA in the default theme. This
+        // demonstrates that the computed-ratio assertion has a concrete rejecting case.
+        if theme == ThemePreset::Default {
+            let planted_bad = "#94a3b8";
+            let planted_ratio = contrast(planted_bad, bg);
+            assert!(
+                planted_ratio < 4.5,
+                "CONTROL FAILED: planted bad color {planted_bad} on {bg} unexpectedly passed at \
+                 {planted_ratio:.2}:1"
+            );
+        }
     }
 }
 
-/// THE ASYMMETRY that identified the defect: the two axes must agree.
-///
-/// The y ticks used the LINE colour and the x ticks the TEXT colour. Neither has a CSS rule, so the
-/// attributes are authoritative and the two axes really did render differently. Pinning them to each
-/// other means a future change has to move both or fail here.
+/// Mermaid's pinned 11.15.0 default y-axis label color is an exact SVG contract.
 #[test]
-fn both_axes_paint_their_tick_labels_the_same_colour() {
-    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+fn default_y_ticks_match_mermaid_primary_text_color() {
+    assert_eq!(
+        fill_of(&render(ThemePreset::Default), "fm-xychart-y-tick"),
+        Some("#333"),
+        "xychart y ticks must use Mermaid 11.15.0 default primaryTextColor"
+    );
+}
+
+/// Non-default themes retain the local theme's shared axis-text color.
+///
+/// The default y-axis contract is Mermaid-specific (`#333`) and is pinned separately above.
+#[test]
+fn non_default_axes_paint_their_tick_labels_the_same_colour() {
+    for theme in [ThemePreset::Dark] {
         let svg = render(theme);
         assert_eq!(
             fill_of(&svg, "fm-xychart-y-tick"),

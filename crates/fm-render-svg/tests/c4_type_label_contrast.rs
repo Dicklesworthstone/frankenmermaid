@@ -1,7 +1,8 @@
 //! The C4 stereotype label must be legible against its own theme background (bd-4rlrx).
 //!
-//! It was painted with `colors.cluster_stroke` — the cluster BORDER colour, a slot designed to sit
-//! QUIETLY against the background, which is the opposite of what text needs. Measured:
+//! Mermaid 11.15.0's pinned default bundle derives this surface from `primaryTextColor`, whose
+//! exact default value is `#333`. It must stay legible and must not drift to the cluster BORDER
+//! colour, a slot designed to sit quietly against the background.
 //!
 //!   default  #cbd5e1 on #fafbfc  =  1.43:1   effectively invisible
 //!   dark     #475569 on #0f172a  =  2.36:1
@@ -78,7 +79,7 @@ fn render(theme: ThemePreset, streaming: bool) -> String {
     )
 }
 
-/// THE DEFECT, in both themes and BOTH render paths.
+/// THE CONTRACT, in both themes and BOTH render paths.
 #[test]
 fn the_c4_stereotype_label_meets_wcag_aa_on_both_paths() {
     for streaming in [true, false] {
@@ -94,18 +95,42 @@ fn the_c4_stereotype_label_meets_wcag_aa_on_both_paths() {
                 "streaming={streaming} {theme:?}: the stereotype is {fill} on {bg} = {ratio:.2}:1, \
                  below the WCAG AA floor of 4.5:1"
             );
+
+            // Planted negative: the original cluster-border class of color is below AA against
+            // this document background. This proves the measured threshold can reject the defect,
+            // rather than merely accepting the current color.
+            let planted_bad = "#cbd5e1";
+            let planted_ratio = contrast(planted_bad, bg);
+            assert!(
+                planted_ratio < 4.5,
+                "CONTROL FAILED: planted bad color {planted_bad} on {bg} unexpectedly passed at \
+                 {planted_ratio:.2}:1"
+            );
         }
     }
 }
 
-/// THE ASYMMETRY that identified it: the stereotype must be painted like its siblings.
-///
-/// `fm-c4-name` sits in the same box and was already correct. Pinning them to each other means a
-/// future change has to move both or fail here.
+/// Mermaid's pinned 11.15.0 default color is an exact contract in addition to the contrast floor.
 #[test]
-fn the_stereotype_is_painted_like_the_name_beside_it() {
+fn default_theme_stereotype_matches_mermaid_primary_text_color() {
     for streaming in [true, false] {
-        for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        let svg = render(ThemePreset::Default, streaming);
+        assert_eq!(
+            fill_of(&svg, "fm-c4-type-label"),
+            Some("#333"),
+            "streaming={streaming}: C4 stereotype must use Mermaid 11.15.0 default #333"
+        );
+    }
+}
+
+/// Non-default themes continue to derive the stereotype from the local theme text slot.
+///
+/// Mermaid's default C4 contract is deliberately more specific (`#333`), so it has its own exact
+/// assertion above rather than accidentally inheriting FrankenMermaid's broader default palette.
+#[test]
+fn non_default_stereotype_is_painted_like_the_name_beside_it() {
+    for streaming in [true, false] {
+        for theme in [ThemePreset::Dark] {
             let svg = render(theme, streaming);
             assert_eq!(
                 fill_of(&svg, "fm-c4-type-label"),
