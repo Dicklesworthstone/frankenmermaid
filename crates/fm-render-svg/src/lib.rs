@@ -9185,6 +9185,7 @@ fn write_c4_node_fragment_into(
     let _ = write_number_into(out, h);
     out.push_str("\" rx=\"");
     let _ = write_number_into(out, rx);
+    out.push('\"');
     if let Some((fill, stroke)) = c4_person_colors {
         // Theme CSS assigns generic node paint with greater specificity than SVG presentation
         // attributes, so make the pinned C4 paint an inline declaration in this streaming path.

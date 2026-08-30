@@ -125,7 +125,7 @@ function erDiagram(n) {
 // Mermaid 11.15.0 accepts a circle-only cardinality marker at each end. This small fixture is
 // intentionally not a performance workload: it is the cross-engine rendering witness for bd-5ir5r.
 function erBareOptionality() {
-  return 'erDiagram\n  CUSTOMER o--o ORDER : places';
+  return 'erDiagram\n  CUSTOMER o--o ORDER';
 }
 
 // Small but complete Gantt fixture used to pin Mermaid 11.15's axis contract: it always emits the

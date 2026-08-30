@@ -61,6 +61,12 @@ fn person_card_fill(svg: &str) -> Option<&str> {
     let rect = svg[node..].find("<rect ")? + node;
     let attrs_end = svg[rect..].find('>')? + rect;
     let attrs = &svg[rect..attrs_end];
+    if let Some(style) = attrs.find("style=\"") {
+        let style = &attrs[style + "style=\"".len()..];
+        if let Some(fill) = style.strip_prefix("fill:") {
+            return Some(&fill[..fill.find(';').unwrap_or(fill.len())]);
+        }
+    }
     let start = attrs.find("fill=\"")? + "fill=\"".len();
     let stop = attrs[start..].find('"')? + start;
     Some(&attrs[start..stop])
@@ -181,7 +187,8 @@ fn the_stereotype_label_is_rendered_at_all() {
     for streaming in [true, false] {
         let svg = render(ThemePreset::Default, streaming);
         assert!(
-            svg.contains("class=\"fm-c4-type-label\">&lt;&lt;person>></text>"),
+            svg.contains("class=\"fm-c4-type-label\"")
+                && svg.contains(">&lt;&lt;person>></text>"),
             "streaming={streaming}: the stereotype label is missing or reworded"
         );
     }

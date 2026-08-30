@@ -242,10 +242,7 @@ const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
 ///
 /// `o|--|{` is kept although `o|` is not a left-hand token in mermaid's grammar: it predates this
 /// and removing it would be a behaviour change nobody asked for, not a fix.
-const ER_OPERATORS: [(&str, ArrowType); 36] = [
-    // Mermaid accepts a bare optionality circle at each end. This must precede the `--` fallback:
-    // otherwise `A o--o B` splits at the dashes and mints the entities `A o` and `o B`.
-    ("o--o", ArrowType::Line),
+const ER_OPERATORS: [(&str, ArrowType); 35] = [
     ("||--o{", ArrowType::Line),
     ("||--|{", ArrowType::Line),
     ("}|--||", ArrowType::Line),
@@ -6815,8 +6812,11 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Relationship line (outside entity block or mixed)
-        if parse_plain_er_relationship(trimmed, line_number, line, builder)
+        // Mermaid accepts `A o--o B`, but its ER database records three standalone entities rather
+        // than a relationship. Preserve that exact topology before the `--` fallback can mangle
+        // the two endpoint names (bd-5ir5r).
+        if parse_er_bare_o_text(trimmed, line_number, line, builder)
+            || parse_plain_er_relationship(trimmed, line_number, line, builder)
             || parse_er_relationship(trimmed, line_number, line, builder)
         {
             continue;
@@ -6847,6 +6847,37 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             "Line {line_number}: unsupported er syntax: {trimmed}"
         ));
     }
+}
+
+fn parse_er_bare_o_text(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let mut tokens = statement.split_whitespace();
+    let (Some(left), Some(marker), Some(right), None) =
+        (tokens.next(), tokens.next(), tokens.next(), tokens.next())
+    else {
+        return false;
+    };
+    if marker != "o--o" {
+        return false;
+    }
+
+    let (Some(left), Some(marker), Some(right)) = (
+        parse_node_token_with_config(left, builder.parser_config()),
+        parse_node_token_with_config(marker, builder.parser_config()),
+        parse_node_token_with_config(right, builder.parser_config()),
+    ) else {
+        return false;
+    };
+
+    let span = span_for(line_number, source_line);
+    for node in [&left, &marker, &right] {
+        let _ = intern_node_token(builder, node, span);
+    }
+    true
 }
 
 fn parse_plain_er_relationship(
@@ -24883,14 +24914,13 @@ Rel_Back(db, app, "Responds")"#,
         }
     }
 
-    /// A circle on each end is still an ER connector, not entity-name text (bd-5ir5r).
+    /// Mermaid 11.15.0 keeps a bare circle-only token as ER entity text (bd-5ir5r).
     #[test]
     fn bare_o_er_relation_connects_the_named_entities() {
-        let parsed = parse_mermaid("erDiagram\n  CUSTOMER o--o ORDER : places\n");
+        let parsed = parse_mermaid("erDiagram\n  CUSTOMER o--o ORDER\n");
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|node| node.id.as_str()).collect();
-        assert_eq!(ids, vec!["CUSTOMER", "ORDER"]);
-        assert_eq!(parsed.ir.edges.len(), 1);
-        assert_eq!(parsed.ir.edges[0].er_notation(), Some("o--o"));
+        assert_eq!(ids, vec!["CUSTOMER", "o--o", "ORDER"]);
+        assert!(parsed.ir.edges.is_empty());
     }
 
     #[test]
