@@ -243,6 +243,7 @@ struct StudioView: View {
                                 } label: {
                                     Label(kind.title, systemImage: kind.symbol)
                                 }
+                                .disabled(kind != .source && !renderer.hasCurrentRenderedArtifact)
                             }
                         } label: {
                             Label("Share", systemImage: "square.and.arrow.up")

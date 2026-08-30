@@ -49,6 +49,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     @Published private(set) var diagramType = "detecting"
     @Published private(set) var nodeCount = 0
     @Published private(set) var edgeCount = 0
+    @Published private(set) var hasCurrentRenderedArtifact = false
 
     let webView: WKWebView
     private var requestID = 0
@@ -94,11 +95,16 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         self.shadows = shadows
         self.roundedCorners = min(24, max(0, roundedCorners))
         self.nodeGradients = nodeGradients
+        hasCurrentRenderedArtifact = false
         if renderImmediately { renderNow() }
     }
 
     func scheduleRender() {
         scheduledRender?.cancel()
+        // An export made during the debounce window would otherwise silently
+        // contain the previous source. Mark the rendered artifact stale as soon
+        // as editing begins, rather than only when WebKit starts rendering.
+        hasCurrentRenderedArtifact = false
         let expectedSource = source
         scheduledRender = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
@@ -110,8 +116,9 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     func renderNow() {
         guard phase != .loading, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         requestID += 1
+        let req = requestID
         let command: [String: Any] = [
-            "requestID": requestID,
+            "requestID": req,
             "source": source,
             "options": [
                 "theme": theme,
@@ -125,17 +132,28 @@ final class MermaidRendererModel: NSObject, ObservableObject {
                 "enableLinks": false
             ]
         ]
+        hasCurrentRenderedArtifact = false
         phase = .rendering
         Task { [weak self, weak webView] in
+            guard let self else { return }
+            guard let webView else {
+                if self.requestID == req {
+                    self.phase = .failed("The private diagram renderer is no longer available.")
+                }
+                return
+            }
             do {
-                _ = try await webView?.callAsyncJavaScript(
+                _ = try await webView.callAsyncJavaScript(
                     "return await window.frankenRender(command)",
                     arguments: ["command": command],
                     in: nil,
                     contentWorld: .page
                 )
             } catch {
-                self?.phase = .failed(error.localizedDescription)
+                // A slower, superseded WebKit request must not replace the
+                // state of a newer successful render.
+                guard self.requestID == req else { return }
+                self.phase = .failed(error.localizedDescription)
             }
         }
     }
@@ -145,6 +163,12 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         if kind == .source {
             contents = source
         } else {
+            guard hasCurrentRenderedArtifact, phase == .ready else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Wait for the current diagram to finish rendering before exporting it."
+                ])
+            }
             let command: [String: Any] = [
                 "kind": kind.rawValue,
                 "title": "FrankenMermaid \(diagramType) diagram"
@@ -201,6 +225,7 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             diagramType = payload["diagramType"] as? String ?? "diagram"
             nodeCount = payload["nodeCount"] as? Int ?? 0
             edgeCount = payload["edgeCount"] as? Int ?? 0
+            hasCurrentRenderedArtifact = true
             phase = .ready
 #if DEBUG
             if debugExportProbePending {
@@ -217,6 +242,8 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             }
 #endif
         case "failure":
+            guard (payload["requestID"] as? Int) == requestID else { return }
+            hasCurrentRenderedArtifact = false
             phase = .failed(payload["message"] as? String ?? "Renderer failed")
         default:
             break
