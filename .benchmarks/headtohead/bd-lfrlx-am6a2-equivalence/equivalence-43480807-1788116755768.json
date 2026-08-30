@@ -1,0 +1,1029 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-08-30T19:05:53.141Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "434808070b1a229d0fc2b3ca71a654dedc0bf044",
+    "git_dirty": true,
+    "kernel": "7.0.0-30-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 21.85,
+    "node": "v24.14.0",
+    "cpu_power_policy": {
+      "kind": "linux_cpufreq",
+      "platform": "linux",
+      "complete": true,
+      "drivers": [
+        "amd-pstate-epp"
+      ],
+      "governors": [
+        "powersave"
+      ],
+      "energy_performance_preferences": [
+        "balance_performance"
+      ],
+      "boost": {
+        "source": "/sys/devices/system/cpu/cpufreq/boost",
+        "enabled": true,
+        "raw": "1"
+      },
+      "policies": [
+        {
+          "policy": "policy0",
+          "affected_cpus": "0",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy1",
+          "affected_cpus": "1",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy2",
+          "affected_cpus": "2",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy3",
+          "affected_cpus": "3",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy4",
+          "affected_cpus": "4",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy5",
+          "affected_cpus": "5",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy6",
+          "affected_cpus": "6",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy7",
+          "affected_cpus": "7",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy8",
+          "affected_cpus": "8",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy9",
+          "affected_cpus": "9",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy10",
+          "affected_cpus": "10",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy11",
+          "affected_cpus": "11",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy12",
+          "affected_cpus": "12",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy13",
+          "affected_cpus": "13",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy14",
+          "affected_cpus": "14",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy15",
+          "affected_cpus": "15",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy16",
+          "affected_cpus": "16",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy17",
+          "affected_cpus": "17",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy18",
+          "affected_cpus": "18",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy19",
+          "affected_cpus": "19",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy20",
+          "affected_cpus": "20",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy21",
+          "affected_cpus": "21",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy22",
+          "affected_cpus": "22",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy23",
+          "affected_cpus": "23",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy24",
+          "affected_cpus": "24",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy25",
+          "affected_cpus": "25",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy26",
+          "affected_cpus": "26",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy27",
+          "affected_cpus": "27",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy28",
+          "affected_cpus": "28",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy29",
+          "affected_cpus": "29",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy30",
+          "affected_cpus": "30",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy31",
+          "affected_cpus": "31",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy32",
+          "affected_cpus": "32",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy33",
+          "affected_cpus": "33",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy34",
+          "affected_cpus": "34",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy35",
+          "affected_cpus": "35",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy36",
+          "affected_cpus": "36",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy37",
+          "affected_cpus": "37",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy38",
+          "affected_cpus": "38",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy39",
+          "affected_cpus": "39",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy40",
+          "affected_cpus": "40",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy41",
+          "affected_cpus": "41",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy42",
+          "affected_cpus": "42",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy43",
+          "affected_cpus": "43",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy44",
+          "affected_cpus": "44",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy45",
+          "affected_cpus": "45",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy46",
+          "affected_cpus": "46",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy47",
+          "affected_cpus": "47",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy48",
+          "affected_cpus": "48",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy49",
+          "affected_cpus": "49",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy50",
+          "affected_cpus": "50",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy51",
+          "affected_cpus": "51",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy52",
+          "affected_cpus": "52",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy53",
+          "affected_cpus": "53",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy54",
+          "affected_cpus": "54",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy55",
+          "affected_cpus": "55",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy56",
+          "affected_cpus": "56",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy57",
+          "affected_cpus": "57",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy58",
+          "affected_cpus": "58",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy59",
+          "affected_cpus": "59",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy60",
+          "affected_cpus": "60",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy61",
+          "affected_cpus": "61",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy62",
+          "affected_cpus": "62",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy63",
+          "affected_cpus": "63",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "balance_performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        }
+      ]
+    },
+    "isa": {
+      "architecture": "x64",
+      "machine": "x86_64",
+      "source": "/proc/cpuinfo",
+      "complete": true,
+      "flags": [
+        "3dnowprefetch",
+        "abm",
+        "adx",
+        "aes",
+        "amd_ppin",
+        "aperfmperf",
+        "apic",
+        "arat",
+        "avx",
+        "avx2",
+        "bmi1",
+        "bmi2",
+        "bpext",
+        "brs",
+        "cat_l3",
+        "cdp_l3",
+        "clflush",
+        "clflushopt",
+        "clwb",
+        "clzero",
+        "cmov",
+        "cmp_legacy",
+        "constant_tsc",
+        "cpb",
+        "cpuid",
+        "cqm",
+        "cqm_llc",
+        "cqm_mbm_local",
+        "cqm_mbm_total",
+        "cqm_occup_llc",
+        "cr8_legacy",
+        "cx16",
+        "cx8",
+        "de",
+        "debug_swap",
+        "decodeassists",
+        "erms",
+        "extapic",
+        "extd_apicid",
+        "f16c",
+        "flushbyasid",
+        "fma",
+        "fpu",
+        "fsgsbase",
+        "fsrm",
+        "fxsr",
+        "fxsr_opt",
+        "ht",
+        "hw_pstate",
+        "ibpb",
+        "ibrs",
+        "ibs",
+        "invpcid",
+        "irperf",
+        "lahf_lm",
+        "lbrv",
+        "lm",
+        "mba",
+        "mca",
+        "mce",
+        "misalignsse",
+        "mmx",
+        "mmxext",
+        "monitor",
+        "movbe",
+        "msr",
+        "mtrr",
+        "mwaitx",
+        "nonstop_tsc",
+        "nopl",
+        "npt",
+        "nrip_save",
+        "nx",
+        "ospke",
+        "osvw",
+        "overflow_recov",
+        "pae",
+        "pat",
+        "pausefilter",
+        "pcid",
+        "pclmulqdq",
+        "pdpe1gb",
+        "perfctr_core",
+        "perfctr_llc",
+        "perfctr_nb",
+        "pfthreshold",
+        "pge",
+        "pku",
+        "pni",
+        "popcnt",
+        "pse",
+        "pse36",
+        "rapl",
+        "rdpid",
+        "rdpru",
+        "rdrand",
+        "rdseed",
+        "rdt_a",
+        "rdtscp",
+        "rep_good",
+        "sep",
+        "sha_ni",
+        "skinit",
+        "smap",
+        "smca",
+        "smep",
+        "ssbd",
+        "sse",
+        "sse2",
+        "sse4_1",
+        "sse4_2",
+        "sse4a",
+        "ssse3",
+        "stibp",
+        "succor",
+        "svm",
+        "svm_lock",
+        "syscall",
+        "tce",
+        "topoext",
+        "tsc",
+        "tsc_scale",
+        "umip",
+        "user_shstk",
+        "v_spec_ctrl",
+        "v_vmsave_vmload",
+        "vaes",
+        "vgif",
+        "vmcb_clean",
+        "vme",
+        "vmmcall",
+        "vpclmulqdq",
+        "wbnoinvd",
+        "wdt",
+        "x2apic",
+        "xgetbv1",
+        "xsave",
+        "xsavec",
+        "xsaveerptr",
+        "xsaveopt",
+        "xsaves",
+        "xtopology"
+      ],
+      "capabilities": {
+        "avx2": true,
+        "fma": true,
+        "bmi2": true,
+        "vaes": true,
+        "any_avx512": false,
+        "neon_or_asimd": false
+      }
+    },
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "rendered-path edge topology compared cross-engine AND against input-derived ground truth for flowchart/state, plus class relationship kind and marker-owning endpoint compared cross-engine AND against input-derived ground truth. Referenced marker bodies must encode the right diamond geometry/fill, while inheritance additionally requires a hollow triangle facing away from the path. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Claimed for: flowchart, state, class, er.",
+    "incumbent_dnf": "when mermaid-js does not render, no cross-engine equivalence or ratio is claimed. The measured FrankenMermaid SVG revisions must instead pass a separate source-grounded native-output validation before the DNF outcome is recorded.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: mutation controls (including dropped or rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, unknown markers, invalid diamond bodies, inward or filled inheritance triangles, and cardinality/label drift), including source-grounded native DNF validation controls, and 4 negative controls (including benign path ordering and extra content)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "913ace010571f21ee0fdf21ed0c0448315ddcc8775fbcaa8eef43b2976746678",
+    "fm_elf_bytes": 8662032,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/151.0.7922.108",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "sequence_20",
+      "status": "compared",
+      "revisions": 1,
+      "input_sha256": "31c0dd6bc24b571c01c80d6c24d9e6e179f035cd82d226c71d952e8e52498db0",
+      "fm_input_sha256": "31c0dd6bc24b571c01c80d6c24d9e6e179f035cd82d226c71d952e8e52498db0",
+      "js_input_sha256": "31c0dd6bc24b571c01c80d6c24d9e6e179f035cd82d226c71d952e8e52498db0",
+      "inputs_identical": true,
+      "execution": {
+        "frankenmermaid": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "scalar"
+        },
+        "mermaid_js": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "single_page_main_thread"
+        }
+      },
+      "linkage": {
+        "fm_revisions_dumped": 1,
+        "js_revisions_dumped": 1,
+        "revisions_expected": 1,
+        "fm_dump_sha256": "60c08d0bda7f734af18f2297975d007ac54268da61d02b6c741efb795344e9fc",
+        "fm_reported_sha256": "60c08d0bda7f734af18f2297975d007ac54268da61d02b6c741efb795344e9fc",
+        "js_dump_sha256": "cfc3a3994c2b6c1a07058d332ed53c08a7822978660db0b277dfe710027f3ade",
+        "js_reported_sha256": "cfc3a3994c2b6c1a07058d332ed53c08a7822978660db0b277dfe710027f3ade",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families), rendered-path edge topology cross-engine and against input-derived ground truth, and class relationship marker kind plus owning end, including referenced-definition checks for diamond geometry/fill and hollow inheritance-triangle direction. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 1,
+        "equivalent": 1,
+        "divergent": 0,
+        "unverified": 0,
+        "verdict": "pass",
+        "tier2_diagrams": 0,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          }
+        },
+        "by_family": {
+          "sequence": {
+            "diagrams": 1,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 0
+          }
+        },
+        "divergent_samples": [],
+        "unverified_samples": []
+      }
+    },
+    {
+      "id": "class_50",
+      "status": "compared",
+      "revisions": 1,
+      "input_sha256": "d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831",
+      "fm_input_sha256": "d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831",
+      "js_input_sha256": "d1d7ef8c8e7c8d1dab2da8fbd56565dc97148e8fb1651d23fe43140e8c4ef831",
+      "inputs_identical": true,
+      "execution": {
+        "frankenmermaid": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "scalar"
+        },
+        "mermaid_js": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "single_page_main_thread"
+        }
+      },
+      "linkage": {
+        "fm_revisions_dumped": 1,
+        "js_revisions_dumped": 1,
+        "revisions_expected": 1,
+        "fm_dump_sha256": "6b2b7590226d0919ab6a8c1d5a9267f342e18678e33be0927240da742fa4fe8f",
+        "fm_reported_sha256": "6b2b7590226d0919ab6a8c1d5a9267f342e18678e33be0927240da742fa4fe8f",
+        "js_dump_sha256": "1e90cfe56156e11ce8a16f80af6d7081cfc30924e6bff87ca6a22a32be15b067",
+        "js_reported_sha256": "1e90cfe56156e11ce8a16f80af6d7081cfc30924e6bff87ca6a22a32be15b067",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families), rendered-path edge topology cross-engine and against input-derived ground truth, and class relationship marker kind plus owning end, including referenced-definition checks for diamond geometry/fill and hollow inheritance-triangle direction. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 1,
+        "equivalent": 1,
+        "divergent": 0,
+        "unverified": 0,
+        "verdict": "pass",
+        "tier2_diagrams": 1,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "class_relationship_semantics_cross_engine": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "class": {
+            "diagrams": 1,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 1
+          }
+        },
+        "divergent_samples": [],
+        "unverified_samples": []
+      }
+    }
+  ],
+  "verdict": "pass"
+}
