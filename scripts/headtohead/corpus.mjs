@@ -108,6 +108,34 @@ function clickTooltip() {
   ].join('\n');
 }
 
+function classLinkStyleDirective() {
+  return [
+    'classDiagram',
+    '  class A',
+    '  class B',
+    '  A --> B',
+    '  linkStyle 0 stroke:#ff0000',
+  ].join('\n');
+}
+
+function stateClassDirective() {
+  return [
+    'stateDiagram-v2',
+    '  [*] --> A',
+    '  A --> B',
+    '  classDef bad fill:#ff0000',
+    '  class A bad',
+  ].join('\n');
+}
+
+function erClassDirective() {
+  return [
+    'erDiagram',
+    '  CUSTOMER ||--o{ ORDER : places',
+    '  class CUSTOMER bad',
+  ].join('\n');
+}
+
 function stateDiagram(n) {
   const lines = ['stateDiagram-v2'];
   lines.push('  [*] --> S0');
@@ -570,6 +598,9 @@ const GENERATORS = {
   class_edge_id: () => [classEdgeId()],
   subgraph_style_directive: () => [subgraphStyleDirective()],
   click_tooltip: () => [clickTooltip()],
+  class_linkstyle_directive: () => [classLinkStyleDirective()],
+  state_class_directive: () => [stateClassDirective()],
+  er_class_directive: () => [erClassDirective()],
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
   er_bare_o: () => [erBareOptionality()],
@@ -608,6 +639,9 @@ export const CORPUS = [
   { id: 'class_edge_id',        gen: 'class_edge_id', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'subgraph_style_directive', gen: 'subgraph_style_directive', params: {},      reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'click_tooltip',        gen: 'click_tooltip', params: {},                     reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  { id: 'class_linkstyle_directive', gen: 'class_linkstyle_directive', params: {},    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  { id: 'state_class_directive', gen: 'state_class_directive', params: {},            reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  { id: 'er_class_directive',   gen: 'er_class_directive', params: {},                reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_bare_o',            gen: 'er_bare_o', params: {},                        reps_js: 1,  warmup_js: 0, reps_rs: 1,   warmup_rs: 0 },

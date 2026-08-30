@@ -22,6 +22,16 @@ const CHART: &str = "xychart-beta\n  title \"X\"\n  x-axis [a, b]\n  bar [1, 2]\
 /// WCAG 2.x relative luminance.
 fn luminance(hex: &str) -> f64 {
     let hex = hex.trim_start_matches('#');
+    let expanded;
+    let hex = if hex.len() == 3 {
+        expanded = hex
+            .chars()
+            .flat_map(|channel| [channel, channel])
+            .collect::<String>();
+        expanded.as_str()
+    } else {
+        hex
+    };
     let channel = |index: usize| {
         let value = u8::from_str_radix(&hex[index..index + 2], 16).unwrap_or(0) as f64 / 255.0;
         if value <= 0.03928 {
