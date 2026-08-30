@@ -9185,12 +9185,6 @@ fn write_c4_node_fragment_into(
     let _ = write_number_into(out, h);
     out.push_str("\" rx=\"");
     let _ = write_number_into(out, rx);
-    out.push_str("\" fill=\"");
-    let _ = write_escaped_attr(
-        out,
-        c4_person_colors.map_or("url(#fm-node-gradient)", |(fill, _)| fill),
-    );
-    out.push('\"');
     if let Some((fill, stroke)) = c4_person_colors {
         // Theme CSS assigns generic node paint with greater specificity than SVG presentation
         // attributes, so make the pinned C4 paint an inline declaration in this streaming path.
@@ -9200,7 +9194,9 @@ fn write_c4_node_fragment_into(
         let _ = write_escaped_attr(out, stroke);
         out.push('\"');
     }
-    out.push_str("/>");
+    // The slow Element path's shared gradient post-pass appends this attribute after an inline
+    // C4 style. Keep that exact order so the streaming and Element renderers stay byte-identical.
+    out.push_str(" fill=\"url(#fm-node-gradient)\"/>");
 
     // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
     let label_text = node
@@ -9226,12 +9222,13 @@ fn write_c4_node_fragment_into(
     // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
     // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned white,
     // while non-default themes continue to inherit their themed text color.
+    out.push_str("\" class=\"fm-c4-type-label\"");
     if config.theme == ThemePreset::Default {
-        out.push_str("\" style=\"fill:");
+        out.push_str(" style=\"fill:");
         let _ = write_escaped_attr(out, c4_type_label_color);
         out.push('\"');
     }
-    out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
+    out.push_str(">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
 

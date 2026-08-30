@@ -242,7 +242,10 @@ const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
 ///
 /// `o|--|{` is kept although `o|` is not a left-hand token in mermaid's grammar: it predates this
 /// and removing it would be a behaviour change nobody asked for, not a fix.
-const ER_OPERATORS: [(&str, ArrowType); 35] = [
+const ER_OPERATORS: [(&str, ArrowType); 36] = [
+    // Mermaid accepts a bare optionality circle at each end. This must precede the `--` fallback:
+    // otherwise `A o--o B` splits at the dashes and mints the entities `A o` and `o B`.
+    ("o--o", ArrowType::Line),
     ("||--o{", ArrowType::Line),
     ("||--|{", ArrowType::Line),
     ("}|--||", ArrowType::Line),
@@ -302,6 +305,22 @@ struct OpScan {
     /// letting it loose on the other tables would mis-lex them (`A --o B` is a flowchart circle
     /// link but a class-diagram aggregation, and `A -->> B` is a sequence dotted arrow).
     mermaid_flow_links: bool,
+    /// Let an operator BEGIN with `(`. TRUE FOR THE CLASS TABLE ONLY (bd-lkm9i).
+    ///
+    /// ⚠️ WITHOUT THIS FLAG THE `()--` TABLE ENTRY IS INERT, and inert in a way that looks like a
+    /// working fix: [`find_operator_core`] treats `(` as a DEPTH byte — it bumps `paren_depth` and
+    /// `continue`s — so it never even attempts a match at that position. `A ()-- B` therefore fell
+    /// through to the bare `--` two bytes later and still produced `ArrowType::Line` with the
+    /// lollipop entries sitting unused in the table. Adding the spellings without this flag is
+    /// exactly the "the table entry alone is not the fix" trap bd-zdpwd recorded for the leading
+    /// `o`/`x` forms.
+    ///
+    /// It is scoped to the class table for the same reason `mermaid_flow_links` is scoped to the
+    /// flowchart one: `(` opens a NODE SHAPE elsewhere. `A(label) --> B` is a rounded flowchart
+    /// node, and letting a `(` position start an operator scan there would put the split inside the
+    /// node's own label. Class diagrams have no parenthesised shape syntax, so `()` is unambiguous
+    /// there and ambiguous everywhere else.
+    paren_leading_operators: bool,
 }
 
 /// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
@@ -326,6 +345,7 @@ const fn op_scan(operators: &[(&str, ArrowType)]) -> OpScan {
     OpScan {
         first_byte: op_first_byte_gate(operators),
         mermaid_flow_links: false,
+        paren_leading_operators: false,
     }
 }
 
@@ -335,7 +355,10 @@ const FLOW_OP_GATE: OpScan = OpScan {
     mermaid_flow_links: true,
     ..op_scan(&FLOW_OPERATORS)
 };
-const CLASS_OP_GATE: OpScan = op_scan(&CLASS_OPERATORS);
+const CLASS_OP_GATE: OpScan = OpScan {
+    paren_leading_operators: true,
+    ..op_scan(&CLASS_OPERATORS)
+};
 const PACKET_OP_GATE: OpScan = op_scan(&PACKET_OPERATORS);
 
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
@@ -12532,6 +12555,30 @@ fn find_operator_core<'a>(
                 in_quote = None;
             }
             continue;
+        }
+
+        // CLASS ONLY: `()` OPENS AN OPERATOR, NOT A DEPTH LEVEL (bd-lkm9i).
+        //
+        // This must run BEFORE the `match` below, because that match's `b'('` arm bumps
+        // `paren_depth` and `continue`s — a `(` position is never offered to the operator loop at
+        // the bottom, which is why the `()--` table entries do nothing on their own.
+        //
+        // Only a literal paren-leading operator can match here, so the ordinary uses of `(` are
+        // untouched: `A : +run() void` reaches this point with a tail of `"() void"`, which is not
+        // `()--` or `()..`, so it falls through to the depth tracking exactly as before.
+        if scan.paren_leading_operators
+            && byte == b'('
+            && square_depth == 0
+            && paren_depth == 0
+            && brace_depth == 0
+        {
+            let tail = &statement[idx..];
+            if let Some((operator, arrow)) = operators
+                .iter()
+                .find(|(operator, _)| operator.as_bytes().first() == Some(&b'(') && tail.starts_with(operator))
+            {
+                return Some((idx, *operator, *arrow));
+            }
         }
 
         match byte {
@@ -24834,6 +24881,16 @@ Rel_Back(db, app, "Responds")"#,
             assert_eq!(ids, vec!["CUSTOMER", "ORDER"]);
             assert_eq!(parsed.ir.edges[0].arrow, expected);
         }
+    }
+
+    /// A circle on each end is still an ER connector, not entity-name text (bd-5ir5r).
+    #[test]
+    fn bare_o_er_relation_connects_the_named_entities() {
+        let parsed = parse_mermaid("erDiagram\n  CUSTOMER o--o ORDER : places\n");
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, vec!["CUSTOMER", "ORDER"]);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].er_notation(), Some("o--o"));
     }
 
     #[test]
