@@ -122,6 +122,12 @@ function erDiagram(n) {
   return lines.join('\n');
 }
 
+// Mermaid 11.15.0 accepts a circle-only cardinality marker at each end. This small fixture is
+// intentionally not a performance workload: it is the cross-engine rendering witness for bd-5ir5r.
+function erBareOptionality() {
+  return 'erDiagram\n  CUSTOMER o--o ORDER : places';
+}
+
 // Small but complete Gantt fixture used to pin Mermaid 11.15's axis contract: it always emits the
 // ordinary bottom grid and `topAxis` appends a second grid above the task rows.
 function ganttTopAxis() {
@@ -566,6 +572,7 @@ const GENERATORS = {
   click_tooltip: () => [clickTooltip()],
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
+  er_bare_o: () => [erBareOptionality()],
   gantt_top_axis: () => [ganttTopAxis()],
   edit_trace: (p) => editTrace(p.n, p.revisions),
   docs_site: (p) => docsSite(p.count, p.seed),
@@ -603,6 +610,7 @@ export const CORPUS = [
   { id: 'click_tooltip',        gen: 'click_tooltip', params: {},                     reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
+  { id: 'er_bare_o',            gen: 'er_bare_o', params: {},                        reps_js: 1,  warmup_js: 0, reps_rs: 1,   warmup_rs: 0 },
   { id: 'gantt_top_axis',       gen: 'gantt_top_axis', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   // A live-preview editing session: 21 successive full documents. One "iteration" renders all 21,
   // which is what an editor does as the user types -- mermaid has no incremental path.
