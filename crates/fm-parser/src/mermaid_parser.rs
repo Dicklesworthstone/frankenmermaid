@@ -8609,6 +8609,197 @@ fn parse_packet_bit_range(range: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// One ER cardinality SHAPE, in the two spellings a canonical notation string uses for it.
+///
+/// The incumbent's ER lexer maps FOURTEEN spellings onto FOUR shapes — `one or more`, `one or many`,
+/// `1+`, `many(1)`, `}|` and `|{` are all the same token, `ONE_OR_MORE`. The spelling is only how it
+/// was written; the shape is the datum. So the word forms are CANONICALISED into the symbolic
+/// notation this engine already carries, and everything downstream — `parse_er_cardinality_forms`,
+/// `er_marker_form`, `er_marker_label`, the crow's-foot markers in all three renderers — needs no
+/// change at all (bd-wyyb3).
+///
+/// `None` in [`ER_CARDINALITY_SPELLINGS`] is `MD_PARENT` (`u`), which the incumbent lexes as a
+/// cardinality but which names no crow's-foot shape. It is recognised so it stops being absorbed
+/// into the neighbouring entity id, and draws nothing.
+#[derive(Clone, Copy)]
+struct ErCardinalitySpelling {
+    /// Written at the SOURCE end of the notation (`}o--`).
+    left: &'static str,
+    /// Written at the TARGET end (`--o{`). Not the same string: the crow's foot mirrors.
+    right: &'static str,
+}
+
+const ER_ZERO_OR_ONE: ErCardinalitySpelling = ErCardinalitySpelling {
+    left: "|o",
+    right: "o|",
+};
+const ER_ZERO_OR_MORE: ErCardinalitySpelling = ErCardinalitySpelling {
+    left: "}o",
+    right: "o{",
+};
+const ER_ONE_OR_MORE: ErCardinalitySpelling = ErCardinalitySpelling {
+    left: "}|",
+    right: "|{",
+};
+const ER_ONLY_ONE: ErCardinalitySpelling = ErCardinalitySpelling {
+    left: "||",
+    right: "||",
+};
+
+/// Every cardinality spelling the pinned incumbent's ER lexer accepts, LONGEST FIRST.
+///
+/// ⚠️ THE ORDER IS LOAD-BEARING, and three pairs are traps that a table written from what the syntax
+/// looks like gets wrong:
+///   - `many` is ZERO_OR_MORE but `many(1)` is ONE_OR_MORE, so the parenthesised forms must precede
+///     the bare word or `many(1)` silently becomes zero-or-more — the opposite cardinality.
+///   - `one` is ONLY_ONE but `one or more` / `one or many` / `one or zero` are not, so the phrases
+///     must precede the bare word or `one` swallows their first token and the rest is left dangling.
+///   - `only one` must precede `one` for the same reason in the other direction.
+///
+/// Derived by aligning the bundle's own `rules[]` regexes with their `case N: return` tokens, not by
+/// reading adjacent text: a first pass that eyeballed the minified source came out with `..` and
+/// `--` INVERTED against IDENTIFYING/NON_IDENTIFYING.
+/// The SYMBOLIC spellings are here too, and they are not redundant with [`ER_OPERATORS`]. That table
+/// only matches a cardinality when it is FUSED into one literal with the relation type (`||--o{`).
+/// A symbolic cardinality standing beside a relation type the table cannot spell — `A ||.-o{ B`, or
+/// the `||` left over when `A u--|| B` matches only the bare `--` — reaches this strip instead, and
+/// without an entry it stays glued to the entity.
+const ER_CARDINALITY_SPELLINGS: [(&str, Option<ErCardinalitySpelling>); 22] = [
+    ("zero or more", Some(ER_ZERO_OR_MORE)),
+    ("zero or many", Some(ER_ZERO_OR_MORE)),
+    ("one or more", Some(ER_ONE_OR_MORE)),
+    ("one or many", Some(ER_ONE_OR_MORE)),
+    ("one or zero", Some(ER_ZERO_OR_ONE)),
+    ("zero or one", Some(ER_ZERO_OR_ONE)),
+    ("only one", Some(ER_ONLY_ONE)),
+    ("many(0)", Some(ER_ZERO_OR_MORE)),
+    ("many(1)", Some(ER_ONE_OR_MORE)),
+    ("many", Some(ER_ZERO_OR_MORE)),
+    ("one", Some(ER_ONLY_ONE)),
+    ("1+", Some(ER_ONE_OR_MORE)),
+    ("0+", Some(ER_ZERO_OR_MORE)),
+    ("1", Some(ER_ONLY_ONE)),
+    // Symbolic spellings. Each end has its OWN spelling for the same shape — `|o` is the source
+    // form of zero-or-one and `o|` the target form — so both appear, mapping to one shape.
+    ("||", Some(ER_ONLY_ONE)),
+    ("|o", Some(ER_ZERO_OR_ONE)),
+    ("o|", Some(ER_ZERO_OR_ONE)),
+    ("}o", Some(ER_ZERO_OR_MORE)),
+    ("o{", Some(ER_ZERO_OR_MORE)),
+    ("}|", Some(ER_ONE_OR_MORE)),
+    ("|{", Some(ER_ONE_OR_MORE)),
+    // MD_PARENT: lexed as a cardinality, names no crow's-foot shape.
+    ("u", None),
+];
+
+/// The incumbent's SIX relationship types, longest first, as `(spelling, is_word_form, arrow)`.
+///
+/// `--`/`to` are IDENTIFYING (solid) and `..`/`optionally to`/`.-`/`-.` are NON_IDENTIFYING
+/// (dashed). Our existing `--`/`..` mapping already agrees with that; the other four had no spelling
+/// at all, and `.-`/`-.` dropped the whole line including its second entity.
+const ER_RELATION_TYPES: [(&str, bool, ArrowType); 6] = [
+    ("optionally to", true, ArrowType::DottedLine),
+    ("to", true, ArrowType::Line),
+    ("--", false, ArrowType::Line),
+    ("..", false, ArrowType::DottedLine),
+    (".-", false, ArrowType::DottedLine),
+    ("-.", false, ArrowType::DottedLine),
+];
+
+/// Strip a cardinality spelling off the end of the SOURCE side, returning `(entity, spelling)`.
+///
+/// ⚠️ NEVER STRIPS THE WHOLE TOKEN. An entity legitimately named `ONE` or `MANY` is a real diagram —
+/// `ONE ||--|| TWO` — and consuming it would delete the entity to name its own cardinality, which is
+/// the very defect class this work exists to fix. The match must leave a non-empty entity behind and
+/// must end at a word boundary, so `PHONE` never yields `PH` by shedding a trailing `one`.
+fn strip_trailing_er_cardinality(side: &str) -> (&str, Option<ErCardinalitySpelling>) {
+    for (spelling, shape) in ER_CARDINALITY_SPELLINGS {
+        let Some(head) = side
+            .len()
+            .checked_sub(spelling.len())
+            .filter(|at| side[*at..].eq_ignore_ascii_case(spelling))
+            .map(|at| &side[..at])
+        else {
+            continue;
+        };
+        let trimmed = head.trim_end();
+        if !trimmed.is_empty() && head.len() != trimmed.len() {
+            return (trimmed, shape);
+        }
+    }
+    (side, None)
+}
+
+/// Strip a cardinality spelling off the front of the TARGET side, returning `(spelling, entity)`.
+fn strip_leading_er_cardinality(side: &str) -> (Option<ErCardinalitySpelling>, &str) {
+    for (spelling, shape) in ER_CARDINALITY_SPELLINGS {
+        if side.len() < spelling.len() || !side[..spelling.len()].eq_ignore_ascii_case(spelling) {
+            continue;
+        }
+        let tail = &side[spelling.len()..];
+        let trimmed = tail.trim_start();
+        if !trimmed.is_empty() && tail.len() != trimmed.len() {
+            return (shape, trimmed);
+        }
+    }
+    (None, side)
+}
+
+/// Split an ER relation the incumbent accepts but [`ER_OPERATORS`] cannot spell, into
+/// `(source, canonical notation, arrow, target)` (bd-wyyb3).
+///
+/// `ER_OPERATORS` fuses cardinality and relation type into one literal, which works only for the
+/// eight symbolic cardinality spellings: 14 spellings x 14 x 6 relation types is ~1176 entries, and
+/// the word forms contain SPACES so they are not tokens that scan can reach at all. This mirrors the
+/// incumbent's grammar instead — find the relation type, then lex a cardinality inward from each
+/// side — and hands back the canonical symbolic notation so nothing downstream has to learn a second
+/// spelling.
+fn split_er_word_relation(relation: &str) -> Option<(&str, String, ArrowType, &str)> {
+    for (spelling, is_word_form, arrow) in ER_RELATION_TYPES {
+        let mut search = 0;
+        while let Some(rel) = relation[search..].find(spelling) {
+            let at = search + rel;
+            let end = at + spelling.len();
+            search = at + 1;
+            // A WORD-FORM relation type is a word: `to` inside `TOTAL` is not a relation, and
+            // without this guard an entity containing those two letters splits itself in half.
+            if is_word_form {
+                let before_ok = relation[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+                let after_ok = relation[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace);
+                if !before_ok || !after_ok {
+                    continue;
+                }
+            }
+            let (left_entity, left_card) = strip_trailing_er_cardinality(relation[..at].trim_end());
+            let (right_card, right_entity) =
+                strip_leading_er_cardinality(relation[end..].trim_start());
+            if left_entity.trim().is_empty() || right_entity.trim().is_empty() {
+                continue;
+            }
+            // A purely symbolic relation is left to `ER_OPERATORS`, which already handles it and is
+            // the path every existing corpus row takes. Reaching here with no cardinality on either
+            // side would only re-derive what that scan produces.
+            if !is_word_form && left_card.is_none() && right_card.is_none() {
+                continue;
+            }
+            let connector = if arrow == ArrowType::Line { "--" } else { ".." };
+            let notation = format!(
+                "{}{connector}{}",
+                left_card.map_or("", |c| c.left),
+                right_card.map_or("", |c| c.right)
+            );
+            return Some((left_entity.trim(), notation, arrow, right_entity.trim()));
+        }
+    }
+    None
+}
+
 fn parse_er_relationship(
     statement: &str,
     line_number: usize,
@@ -8621,13 +8812,42 @@ fn parse_er_relationship(
         (statement.trim(), None)
     };
 
-    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
-    else {
-        return false;
-    };
+    // THE SYMBOLIC TABLE STILL GOES FIRST, deliberately. Every ER row in ci_docs_2000/5000 (165 and
+    // 442, all equivalent) uses a symbolic spelling and takes this path; leaving it untouched is what
+    // makes the word-form support additive rather than a rewrite of a gated path.
+    //
+    // ⚠️ ONE CORRECTION APPLIES TO IT TOO: a bare MD_PARENT `u` sits OUTSIDE the fused operator, so
+    // `A u--|| B` matched the bare `--` here and left `A u` as the source text, minting the phantom
+    // `A_u` — the same leading-marker-absorbed-into-the-id defect as the flowchart `o--o` (bd-zdpwd)
+    // and the class `o--` (bd-92b6), in a third diagram type. Stripping a cardinality off the inner
+    // edge of each side fixes that without touching the fused spellings, which carry their
+    // cardinality inside the operator and so have nothing to strip.
+    let (left_raw, right_raw, notation, arrow) =
+        if let Some((operator_idx, operator, arrow)) =
+            find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
+        {
+            let (left, left_card) = strip_trailing_er_cardinality(relation[..operator_idx].trim());
+            let (right_card, right) =
+                strip_leading_er_cardinality(relation[operator_idx + operator.len()..].trim());
+            // Only a spelling OUTSIDE the operator can refine the notation; when both sides are bare
+            // the fused operator already is the notation, byte for byte as before.
+            let notation = if left_card.is_some() || right_card.is_some() {
+                let connector = if operator.contains("..") { ".." } else { "--" };
+                format!(
+                    "{}{connector}{}",
+                    left_card.map_or("", |c| c.left),
+                    right_card.map_or("", |c| c.right)
+                )
+            } else {
+                operator.to_string()
+            };
+            (left.trim(), right.trim(), notation, arrow)
+        } else if let Some((left, notation, arrow, right)) = split_er_word_relation(relation) {
+            (left, right, notation, arrow)
+        } else {
+            return false;
+        };
 
-    let left_raw = relation[..operator_idx].trim();
-    let right_raw = relation[operator_idx + operator.len()..].trim();
     if left_raw.is_empty() || right_raw.is_empty() {
         return false;
     }
@@ -8656,7 +8876,7 @@ fn parse_er_relationship(
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
             builder.push_edge(from_node, to_node, arrow, label.as_deref(), span);
-            builder.set_last_edge_er_notation(operator);
+            builder.set_last_edge_er_notation(&notation);
             true
         }
         _ => false,
