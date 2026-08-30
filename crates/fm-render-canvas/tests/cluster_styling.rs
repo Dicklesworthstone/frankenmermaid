@@ -157,40 +157,58 @@ fn a_composite_state_without_a_separator_draws_no_divider() {
     );
 }
 
-/// ER cardinality reaches the canvas (bd-2h3pp).
+/// ER cardinality reaches the canvas (bd-2h3pp), now as MARKERS rather than text (bd-b1sy2).
 ///
-/// `}o--o|` declares "0..*" and "0..1". fm-render-svg drew both and this surface drew neither, so an
-/// ER relationship arrived as a bare line with its cardinality missing — the bd-039t family, where
-/// one renderer omits content another draws.
+/// `}o--o|` declares "0..*" and "0..1". This surface once drew neither, so an ER relationship
+/// arrived as a bare line with its cardinality missing — the bd-039t family, where one renderer
+/// omits content another draws. That is still what this pair guards.
 ///
-/// Asserted through `FillText(` rather than a coordinate: the op NAME is the stable part of this
-/// Debug stream, and the two canvas tests I wrote against a guessed op earlier today both failed
-/// because they named one the renderer never emits. Position is deliberately not asserted — the
-/// labels are inset along the edge, and pinning where would fail on any future routing change
-/// without saying anything about whether the cardinality is drawn.
+/// ⚠️ THE CARRIER CHANGED UNDER THIS TEST AND THE TEST DID NOT MOVE WITH IT. bd-b1sy2 (16fc38c6)
+/// decided cardinality is carried surface-appropriately — SVG and canvas draw the crow's-foot
+/// markers the incumbent draws, and only the TERMINAL keeps the text, because a character grid has
+/// no marker carrier. That commit edited this renderer to stop drawing the text and added
+/// `cardinality_is_carried_surface_appropriately`, which asserts the canvas must NOT draw `0..*` as
+/// text. It did not update this file, so main carried two tests demanding OPPOSITE things and this
+/// one was RED.
+///
+/// ⚠️ AND ITS CONTROL BELOW WENT VACUOUS IN THE SAME MOMENT, which is the more dangerous half: once
+/// no ER relation draws cardinality text, "a bare relation draws no cardinality text" passes for a
+/// reason that has nothing to do with what it was written to catch. Asymmetric-sibling breakage —
+/// one of a matched pair updated, the other missed.
+///
+/// So both are recast DIFFERENTIALLY against the carrier that actually ships. Asserting "the
+/// declared relation draws marker calls" alone would be satisfied by a renderer that drew the same
+/// marker for every relation; comparing it to the bare relation is what makes it a statement about
+/// the cardinality rather than about markers in general. The op stream is compared, not any
+/// particular op name — the markers draw as raw paths and carry no greppable name, which is exactly
+/// why `cardinality_is_carried_surface_appropriately` has to reach for a source grep instead.
 #[test]
 fn er_cardinality_reaches_the_canvas() {
-    let ops = canvas_ops("erDiagram\n  CUSTOMER }o--o| ORDER : places\n");
+    let declared = canvas_ops("erDiagram\n  CUSTOMER }o--o| ORDER : places\n");
+    let bare = canvas_ops("erDiagram\n  CUSTOMER -- ORDER : places\n");
 
     assert!(
-        ops.contains("FillText(\"CUSTOMER\""),
-        "the entities were not drawn, so the assertions below prove nothing: {ops}"
+        declared.contains("FillText(\"CUSTOMER\""),
+        "the entities were not drawn, so the assertions below prove nothing: {declared}"
+    );
+    assert_ne!(
+        declared, bare,
+        "`}}o--o|` and `--` drew the SAME canvas, so the declared cardinality reached it through no \
+         carrier at all"
     );
     assert!(
-        ops.contains("FillText(\"0..*\""),
-        "the source cardinality never reached the canvas: {ops}"
-    );
-    assert!(
-        ops.contains("FillText(\"0..1\""),
-        "the target cardinality never reached the canvas: {ops}"
+        !declared.contains("FillText(\"0..*\"") && !declared.contains("FillText(\"0..1\""),
+        "the canvas drew cardinality as TEXT, which bd-b1sy2 removed in favour of the markers the \
+         incumbent draws: {declared}"
     );
 }
 
-/// CONTROL: a bare `--` relation declares no cardinality and must draw none.
+/// CONTROL: a bare `--` relation declares no cardinality and must draw none — in EITHER carrier.
 ///
-/// The shared mapping returns `""` for a connector with no markers and the placement closure skips
-/// empty text. Without this, an implementation that emitted a default marker — or that drew the
-/// notation string itself — would pass the case above.
+/// Kept as a separate test because it is the one that says an implementation which emits a default
+/// marker (or draws the notation string itself) is wrong. The text half is retained rather than
+/// dropped: it is vacuous today, but it is the assertion that fails if cardinality text ever returns
+/// to this surface, and the differential above is what carries the non-vacuous weight.
 #[test]
 fn a_bare_er_relation_draws_no_cardinality_on_the_canvas() {
     let ops = canvas_ops("erDiagram\n  CUSTOMER -- ORDER : places\n");
