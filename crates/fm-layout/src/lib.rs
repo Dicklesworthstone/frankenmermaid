@@ -2858,6 +2858,15 @@ pub enum MarkerKind {
     /// Hollow triangle for the START slot, which needs the reversed-orientation marker def so the
     /// point faces out of the path rather than into it.
     TriangleOpenStart,
+    /// Hollow circle — UML lollipop / provided interface, target slot (`A --() B`), bd-lkm9i.
+    ///
+    /// Distinct from `Circle`, which is the flowchart `--o` terminator: that one is FILLED and
+    /// centred on the endpoint, while a lollipop is an unfilled socket offset past it. The two
+    /// slots need separate variants for the offset, not the orientation — a circle is symmetric
+    /// under rotation, so unlike `TriangleOpenStart` this pair differs only in `refX`.
+    Lollipop,
+    /// Hollow circle for the START slot (`A ()-- B`), bd-lkm9i.
+    LollipopStart,
     Open,
     /// ER crow's-foot cardinality (bd-dun16). Each shape needs BOTH a start and an end variant: the
     /// glyph is not symmetric and SVG's `orient="auto"` rotates a marker without mirroring it, so
@@ -2964,6 +2973,26 @@ impl MarkerKind {
                 | Self::ErZeroOrMoreStart
                 | Self::ErZeroOrMoreEnd
         )
+    }
+
+    /// UML lollipop, either slot (bd-lkm9i).
+    #[must_use]
+    pub const fn is_lollipop(self) -> bool {
+        matches!(self, Self::Lollipop | Self::LollipopStart)
+    }
+
+    /// Shapes the WebGPU marker shader has no glyph for, which the scene collector must therefore
+    /// SKIP rather than map.
+    ///
+    /// This predicate exists because the fallback is the dangerous direction: `GpuMarkerKind`'s
+    /// `_ => Arrow` turns an unglyphed marker into an arrowhead, and an arrowhead standing in for a
+    /// crow's foot or a lollipop states a relationship the author never wrote — false, not merely
+    /// incomplete. Drawing nothing is the honest degradation. Naming the concept once (rather than
+    /// spelling `!is_er_cardinality()` at each call site, which is how the lollipop would have been
+    /// forgotten) means the next marker added without a glyph is a one-line change here.
+    #[must_use]
+    pub const fn lacks_gpu_glyph(self) -> bool {
+        self.is_er_cardinality() || self.is_lollipop()
     }
 
     /// The start-slot and end-slot markers for an ER cardinality shape.
@@ -3438,6 +3467,13 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     }
                     fm_core::ArrowType::InheritanceReverse => {
                         marker_end = MarkerKind::TriangleOpen;
+                    }
+                    // Lollipop marks the end that PROVIDES the interface (bd-lkm9i).
+                    fm_core::ArrowType::Lollipop => {
+                        marker_start = MarkerKind::LollipopStart;
+                    }
+                    fm_core::ArrowType::LollipopReverse => {
+                        marker_end = MarkerKind::Lollipop;
                     }
                 }
             }

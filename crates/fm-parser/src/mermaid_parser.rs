@@ -97,7 +97,7 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
 // prefix, so they must precede the bare `--` or it matches first and swallows the trailing marker
 // byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
 // leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
-const CLASS_OPERATORS: [(&str, ArrowType); 14] = [
+const CLASS_OPERATORS: [(&str, ArrowType); 18] = [
     ("<|--", ArrowType::Inheritance),
     ("--|>", ArrowType::InheritanceReverse),
     // UML REALIZATION — `Impl ..|> Interface` / `Interface <|.. Impl`. No operator in this table
@@ -136,6 +136,26 @@ const CLASS_OPERATORS: [(&str, ArrowType); 14] = [
     ("--o", ArrowType::AggregationReverse),
     ("--*", ArrowType::CompositionReverse),
     ("-->", ArrowType::Arrow),
+    // UML LOLLIPOP / provided interface (bd-lkm9i). mermaid's class grammar has FIVE relation types
+    // — `{AGGREGATION, EXTENSION, COMPOSITION, DEPENDENCY, LOLLIPOP}` — and this table knew four.
+    // With no `()` spelling here, `A ()-- B` fell through to the bare `--` below and produced
+    // `ArrowType::Line` with NO markers: rendered byte-identically to the plain `A -- B` beside it,
+    // and with no warning. The third instance of this table's own recurring defect, after `<--`
+    // (bd-lfucm) and `o--`/`*--` (bd-92b6) — a declared relationship form silently demoted to a
+    // line because the longer spelling was missing.
+    //
+    // ⚠️ NO PHANTOM NODE was minted here, unlike those two, because identifier normalization
+    // absorbs the `()`. That is why the ci_docs_2000 class gate reads 190/190 with this bug live:
+    // the corpus contains no lollipop, and the defect is invisible to a node-ID diff anyway. It was
+    // found by diffing the incumbent's LEXER, not by the corpus.
+    //
+    // ⚠️ THESE FOUR MUST PRECEDE THE BARE `--` AND `..` BELOW, per the longest-prefix-first rule
+    // `operator_tables_are_longest_prefix_first` enforces: `()--` contains `--`, so a `--` matched
+    // first would split the statement two bytes late and leave `()` glued to the source token.
+    ("()--", ArrowType::Lollipop),
+    ("--()", ArrowType::LollipopReverse),
+    ("()..", ArrowType::Lollipop),
+    ("..()", ArrowType::LollipopReverse),
     // The plain DOTTED LINK `A .. B`, which was also unmatched and also drew nothing. `DottedLine`
     // is exact for this one — dashed, no head — so unlike the two above it loses nothing.
     //
@@ -2264,7 +2284,7 @@ fn parse_flowchart_document_items<'a>(
         // interned `accTitle: My Title` as a NODE displayed as that text and announced to screen
         // readers as `aria-label="accTitle: My Title"` on a role="graphics-symbol". The directive
         // meant to improve accessibility was degrading it. The class path has guarded this all
-        // along via `is_class_non_node_statement`; the flowchart path was the outlier, exactly as
+        // along via the class arm of `is_non_node_statement_for`; the flowchart path was the outlier, exactly as
         // it was for subgraph titles in bd-ka77.
         if in_acc_descr_block {
             if trimmed == "}" || trimmed.ends_with('}') {
@@ -2655,9 +2675,9 @@ fn parse_flowchart_statement_asts(
 
 /// True when a statement is a non-node DIRECTIVE rather than a node declaration (bd-ij0f).
 ///
-/// Three partial guards existed — `is_class_non_node_statement` (class), `is_non_graph_statement`
-/// (style/classDef/linkStyle) and `flowchart_accessibility_directive` (bd-0di8) — and no path
-/// covered everything, so each unguarded combination interned the directive text as a phantom node:
+/// This is the common directive vocabulary. Diagram-specific classifiers add only the forms that
+/// have non-node meaning in their own grammar. Without either guard, the directive text was interned
+/// as a phantom node:
 /// `title My State` became a node `title_My_State`, `click A "…"` became `click_A`, and so on. The
 /// phantom also carried the raw syntax as its accessible name, so assistive technology announced it.
 ///
@@ -2788,7 +2808,7 @@ fn is_accessibility_directive_statement(statement: &str) -> bool {
 /// form — the keyword followed by `:` or whitespace — rather than on the identifier, so a node
 /// legitimately named `accTitle` (`accTitle[Box]`) is still a node.
 ///
-/// Mirrors the `accessibility(..)` arm of `is_class_non_node_statement`, which has guarded the class
+/// Mirrors the `accessibility(..)` arm of the class-specific non-node classifier, which has guarded the class
 /// path against this since it was written.
 fn flowchart_accessibility_directive(statement: &str) -> Option<&str> {
     for keyword in ["accTitle", "accDescr"] {
@@ -5199,7 +5219,7 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             continue;
         }
 
-        if is_class_non_node_statement(statement) {
+        if is_non_node_statement_for(NonNodeStatementDiagram::Class, statement) {
             handled_non_node_statement = true;
             continue;
         }
@@ -5298,7 +5318,16 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // A single-number value is used deliberately: `stroke-dasharray:5` means equal 5-unit
             // dash and gap, and avoids handing a comma-separated value to a style parser that also
             // treats commas as declaration separators.
-            let is_realization = matches!(class_operator, Some("..|>" | "<|.."));
+            //
+            // The LOLLIPOP pair `()..` / `..()` (bd-lkm9i) joins the realization here for the same
+            // reason and through the same mechanism. mermaid's class relation is a PRODUCT of a
+            // relation type and a line type — `[relation][line][relation]` over
+            // `lineType {LINE, DOTTED_LINE}` — so every relation has a dotted spelling, and the
+            // socket is carried by `ArrowType::Lollipop` while the dash is carried here. Mapping
+            // `()..` to its own ArrowType instead would double the lollipop arms in fm-core,
+            // fm-layout and all three renderers to express one bit that already has a home.
+            let is_dashed_relation =
+                matches!(class_operator, Some("..|>" | "<|.." | "().." | "..()"));
             for ast in asts {
                 let ast = if reversed_dependency {
                     swap_edge_endpoints(ast)
@@ -5311,7 +5340,7 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
                     None => ast,
                 };
                 statements.push(ClassStatement::Ast(ast));
-                if is_realization {
+                if is_dashed_relation {
                     statements.push(ClassStatement::EdgeInlineStyle("stroke-dasharray:5"));
                 }
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
@@ -5386,12 +5415,43 @@ fn is_class_link_style_directive(statement: &str) -> bool {
                 .all(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())))
 }
 
+/// Diagram grammars that need their own non-node classification.
+///
+/// `class` declares a node in a class diagram, but assigns a style in state and ER diagrams. Keeping
+/// that distinction at one call site prevents a directive fix for one grammar from swallowing a
+/// legitimate declaration in another.
+#[derive(Clone, Copy)]
+enum NonNodeStatementDiagram {
+    Class,
+    State,
+    Er,
+}
+
+/// True when `statement` has non-node meaning for the selected diagram grammar.
+///
+/// State and ER share the class-style assignment rule, while class diagrams use their more precise
+/// `linkStyle` target parser so a relation leaving a class named `linkStyle` remains a relation.
+fn is_non_node_statement_for(diagram: NonNodeStatementDiagram, statement: &str) -> bool {
+    match diagram {
+        NonNodeStatementDiagram::State => {
+            is_non_node_directive_statement(statement)
+                || is_state_hide_empty_description(statement)
+                || is_class_style_assignment_statement(statement)
+        }
+        NonNodeStatementDiagram::Er => {
+            is_non_node_directive_statement(statement)
+                || is_class_style_assignment_statement(statement)
+        }
+        NonNodeStatementDiagram::Class => is_class_non_node_directive(statement),
+    }
+}
+
 /// Statements that carry class-diagram metadata or interactivity rather than declaring a class.
 ///
 /// Their data is either extracted globally (`accTitle`, `accDescr`, `style`, `classDef`) or not
 /// represented by the current IR yet (link/callback/note). Treating any of them as a node is worse
 /// than the graceful unsupported-construct behavior: it changes the diagram's visible topology.
-fn is_class_non_node_statement(statement: &str) -> bool {
+fn is_class_non_node_directive(statement: &str) -> bool {
     let statement = trim_fast(statement);
     let begins_with_whitespace =
         |value: &str| value.chars().next().is_some_and(char::is_whitespace);
@@ -5588,42 +5648,15 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<StateStatement>> {
-    // Directives are extracted from the original input elsewhere; here they must simply not become
-    // states. Returning an empty statement list rather than `None` also suppresses the
-    // "unsupported state syntax" warning, which would otherwise fire on valid mermaid (bd-ij0f).
-    if is_non_node_directive_statement(line) {
-        return Some(Vec::new());
-    }
-
     if line.starts_with("direction ") {
         return parse_graph_direction(line)
             .map(|direction| vec![StateStatement::Direction(direction)]);
     }
 
-    // ⚠️ `hide empty description` DREW A STATE BOX. It is a real state-diagram directive, it was in
-    // no filter here, so it fell through to the node parser and `normalize_identifier` turned it
-    // into a state keyed `hide_empty_description` — a phantom box captioned with the author's own
-    // directive, sitting in the diagram. Same family as bd-xfmm's subgraph phantom, and worse than
-    // a silent drop because the reader sees text nobody wrote (bd-871ka).
-    //
-    // Recognised and IGNORED, and that is the CORRECT behaviour rather than a compromise: this
-    // renderer has no state-description compartment at all — there is no state meta and nothing in
-    // fm-render-svg draws one — so there is no empty description for the directive to hide. It is a
-    // genuine no-op for us. Deliberately NOT warned for the same reason: a warning on valid input
-    // that changes nothing would be the false-diagnostic trap bd-lvj3's stale message was.
-    //
-    // Case-insensitive and spacing-tolerant, matching its `hide footbox` sibling in the sequence
-    // parser; the probe confirms mermaid accepts `HIDE EMPTY DESCRIPTION` too.
-    //
-    // Kept LOCAL to the state parser instead of joining `is_non_node_directive_statement`: that
-    // predicate is shared with the flowchart and other paths, and swallowing a `hide …` line there
-    // would be the exact regression bd-ij0f caused when a widened filter ate eight click tests.
-    if is_state_hide_empty_description(line) {
-        return Some(Vec::new());
-    }
-
-    // `class A bad` styles state A; it must not ALSO become a state (bd-0audg).
-    if is_class_style_assignment_statement(line) {
+    // Directives are extracted from the original input elsewhere; here they must simply not become
+    // states. Returning an empty statement list rather than `None` also suppresses the
+    // "unsupported state syntax" warning, which would otherwise fire on valid mermaid (bd-ij0f).
+    if is_non_node_statement_for(NonNodeStatementDiagram::State, line) {
         return Some(Vec::new());
     }
 
@@ -6721,21 +6754,8 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // bd-ij0f: `accTitle: T` and `style A fill:#bbf` were interned as entities.
-        if is_non_node_directive_statement(trimmed) {
-            continue;
-        }
-
-        // …and `class CUSTOMER bad` was too (bd-25lru). Not covered above, correctly: that predicate
-        // is shared with the CLASS diagram, where `class A` DECLARES. ER needs the same opt-in rule
-        // state diagrams needed, which is why this is one named predicate and not two inline checks.
-        //
-        // The phantom here was INVISIBLE to a drawn-text check — the entity had no label to draw —
-        // while being very much present: `data-nodes` went 2 to 3, it got its own `data-id` group,
-        // it took LAYOUT SPACE (the viewBox grew from 326x437 to 395x623, shifting the real
-        // entities), and the accessibility description announced "Key nodes: CUSTOMER, ORDER,
-        // class CUSTOMER bad." A screen reader read the author's directive out as an entity.
-        if is_class_style_assignment_statement(trimmed) {
+        // `class CUSTOMER bad` applies the extracted style but must not become an entity (bd-25lru).
+        if is_non_node_statement_for(NonNodeStatementDiagram::Er, trimmed) {
             continue;
         }
 

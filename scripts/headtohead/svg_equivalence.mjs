@@ -367,6 +367,16 @@ function nodeIdFromGroup(engine, tag) {
   return canonicalNodeId(engine, ATTR(tag, 'id'));
 }
 
+/**
+ * Mermaid wraps an href/click-tooltip node in an `<a>` and moves its transform to that wrapper.
+ * The node group still owns the author id, so recover the immediately enclosing wrapper's anchor
+ * instead of dropping an otherwise rendered clickable node from structural comparison.
+ */
+function clickableNodeWrapperAnchor(svg, nodeAt) {
+  const wrapper = /<a\b[^>]*>\s*$/.exec(svg.slice(0, nodeAt));
+  return wrapper ? translateOf(wrapper[0]) : null;
+}
+
 /** Every `<g ...>` open tag with its byte offset, so a group's subtree can be sliced out. */
 function openGroups(svg) {
   const out = [];
@@ -415,7 +425,7 @@ function mermaidStructure(svg) {
   for (const g of openGroups(svg)) {
     const cls = ATTR(g.tag, 'class') ?? '';
     if (!/\bnode\b/.test(cls) || /\bnodeLabel\b/.test(cls)) continue;
-    const at = translateOf(g.tag);
+    const at = translateOf(g.tag) ?? clickableNodeWrapperAnchor(svg, g.at);
     const id = nodeIdFromGroup('mermaid-js', g.tag);
     if (!id || !at) continue;
     // A repeated id is not a node model we can anchor against; drop to Tier 1 by leaving it out.
@@ -2167,6 +2177,12 @@ export function selfTest() {
         '<g id="diagram-flowchart-A-7-19" class="node" data-id="A-7">',
       ),
     ]);
+  record('clickable_mermaid_node_uses_its_anchor_wrapper_transform', (() => {
+    const svg = '<svg><a xlink:href="https://example.com/" transform="translate(50, 20)">'
+      + '<g class="node default clickable" id="diagram-flowchart-A-0"></g></a></svg>';
+    const s = signature(svg, 'mermaid-js');
+    return s.node_ids.join(',') === 'a' && s.node_count === 1;
+  })(), 'Mermaid click/href nodes place their transform on the enclosing anchor');
   record('ground_truth_reads_chained_edges', (() => {
     const t = groundTruth('flowchart LR\n  A-->B-->C\n');
     return t !== null && t.edges.join(',') === 'a>b,b>c';

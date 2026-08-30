@@ -88,6 +88,26 @@ function classEdgeId() {
   ].join('\n');
 }
 
+// Minimal capability fixtures. Each exercises syntax whose output used to be silently dropped,
+// so they stay in the cross-engine corpus rather than relying only on a renderer-local assertion.
+function subgraphStyleDirective() {
+  return [
+    'flowchart TD',
+    '  subgraph one[One]',
+    '    A[Node A] --> B[Node B]',
+    '  end',
+    '  style one fill:#ff0000,stroke:#00ff00,stroke-width:3px',
+  ].join('\n');
+}
+
+function clickTooltip() {
+  return [
+    'flowchart TD',
+    '  A[Node A] --> B[Node B]',
+    '  click A "https://example.com" "Go to example"',
+  ].join('\n');
+}
+
 function stateDiagram(n) {
   const lines = ['stateDiagram-v2'];
   lines.push('  [*] --> S0');
@@ -542,6 +562,8 @@ const GENERATORS = {
   sequence: (p) => [sequence(p.n)],
   class: (p) => [classDiagram(p.n)],
   class_edge_id: () => [classEdgeId()],
+  subgraph_style_directive: () => [subgraphStyleDirective()],
+  click_tooltip: () => [clickTooltip()],
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
   gantt_top_axis: () => [ganttTopAxis()],
@@ -577,6 +599,8 @@ export const CORPUS = [
   { id: 'sequence_20',          gen: 'sequence',  params: { n: 20 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'class_50',             gen: 'class',     params: { n: 50 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'class_edge_id',        gen: 'class_edge_id', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  { id: 'subgraph_style_directive', gen: 'subgraph_style_directive', params: {},      reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  { id: 'click_tooltip',        gen: 'click_tooltip', params: {},                     reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'gantt_top_axis',       gen: 'gantt_top_axis', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },

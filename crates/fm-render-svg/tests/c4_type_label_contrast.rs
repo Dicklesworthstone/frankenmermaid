@@ -1,11 +1,9 @@
 //! The C4 stereotype label must be legible against its own theme background (bd-4rlrx).
 //!
-//! Mermaid 11.15.0's pinned default bundle derives this surface from `primaryTextColor`, whose
-//! exact default value is `#333`. It must stay legible and must not drift to the cluster BORDER
-//! colour, a slot designed to sit quietly against the background.
+//! Mermaid 11.15.0's pinned default bundle paints the C4 Person surface with a navy card and a
+//! white stereotype. It must stay legible and must not drift to a generic document-text color.
 //!
-//!   default  #cbd5e1 on #fafbfc  =  1.43:1   effectively invisible
-//!   dark     #475569 on #0f172a  =  2.36:1
+//!   default  #475569 on #08427B  =  1.73:1   effectively invisible
 //!
 //! Both fail WCAG AA (4.5:1) and the 3:1 large-text floor.
 //!
@@ -58,7 +56,17 @@ fn fill_of<'a>(svg: &'a str, class: &str) -> Option<&'a str> {
     None
 }
 
-fn background(svg: &str) -> Option<&str> {
+fn person_card_fill(svg: &str) -> Option<&str> {
+    let node = svg.find("data-id=\"a\"")?;
+    let rect = svg[node..].find("<rect ")? + node;
+    let attrs_end = svg[rect..].find('>')? + rect;
+    let attrs = &svg[rect..attrs_end];
+    let start = attrs.find("fill=\"")? + "fill=\"".len();
+    let stop = attrs[start..].find('"')? + start;
+    Some(&attrs[start..stop])
+}
+
+fn document_background(svg: &str) -> Option<&str> {
     let start = svg.find("--fm-bg:")? + "--fm-bg:".len();
     let rest = svg[start..].trim_start();
     let offset = svg.len() - rest.len();
@@ -85,7 +93,11 @@ fn the_c4_stereotype_label_meets_wcag_aa_on_both_paths() {
     for streaming in [true, false] {
         for theme in [ThemePreset::Default, ThemePreset::Dark] {
             let svg = render(theme, streaming);
-            let bg = background(&svg).expect("the document declares a background");
+            let bg = if theme == ThemePreset::Default {
+                person_card_fill(&svg).expect("the default C4 Person card is rendered")
+            } else {
+                document_background(&svg).expect("the document declares a background")
+            };
             let fill = fill_of(&svg, "fm-c4-type-label").unwrap_or_else(|| {
                 panic!("CONTROL FAILED: no stereotype label rendered (streaming={streaming})")
             });
@@ -96,10 +108,10 @@ fn the_c4_stereotype_label_meets_wcag_aa_on_both_paths() {
                  below the WCAG AA floor of 4.5:1"
             );
 
-            // Planted negative: the original cluster-border class of color is below AA against
-            // this document background. This proves the measured threshold can reject the defect,
-            // rather than merely accepting the current color.
-            let planted_bad = "#cbd5e1";
+            // Planted negative: the old dark muted-text class is below AA against the actual C4
+            // Person card. This proves the measured threshold can reject the defect rather than
+            // merely accepting the current color.
+            let planted_bad = "#475569";
             let planted_ratio = contrast(planted_bad, bg);
             assert!(
                 planted_ratio < 4.5,
@@ -110,15 +122,20 @@ fn the_c4_stereotype_label_meets_wcag_aa_on_both_paths() {
     }
 }
 
-/// Mermaid's pinned 11.15.0 default color is an exact contract in addition to the contrast floor.
+/// Mermaid's pinned 11.15.0 default colors are exact contracts in addition to the contrast floor.
 #[test]
 fn default_theme_stereotype_matches_mermaid_primary_text_color() {
     for streaming in [true, false] {
         let svg = render(ThemePreset::Default, streaming);
         assert_eq!(
             fill_of(&svg, "fm-c4-type-label"),
-            Some("#333"),
-            "streaming={streaming}: C4 stereotype must use Mermaid 11.15.0 default #333"
+            Some("#FFFFFF"),
+            "streaming={streaming}: C4 stereotype must use Mermaid 11.15.0 default #FFFFFF"
+        );
+        assert_eq!(
+            person_card_fill(&svg),
+            Some("#08427B"),
+            "streaming={streaming}: C4 Person card must use Mermaid 11.15.0 default #08427B"
         );
     }
 }

@@ -382,6 +382,11 @@ pub(crate) fn describe_edge_labels(
         ArrowType::AggregationReverse => "is aggregated by",
         ArrowType::Composition => "is composed of",
         ArrowType::CompositionReverse => "composes",
+        // Must match the `<title>` phrases the SVG fragment writer emits for the same two variants,
+        // for the same reason the six above must: the catch-all is silent, so a missing arm here
+        // makes <desc> say "connects to" while <title> says "provides" (bd-lkm9i).
+        ArrowType::Lollipop => "provides",
+        ArrowType::LollipopReverse => "is provided by",
         _ => "connects to",
     };
 

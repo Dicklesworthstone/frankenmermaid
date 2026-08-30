@@ -2181,7 +2181,7 @@ impl Canvas2dRenderer {
                 match arrow {
                     ArrowType::Line => {}
                     ArrowType::Circle => {
-                        draw_circle_marker(ctx, ex, ey, 4.0, &self.config.node_fill, stroke);
+                        draw_circle_marker(ctx, ex, ey, 4.0, Some(&self.config.node_fill), stroke);
                         self.draw_calls += 1;
                     }
                     ArrowType::Cross => {
@@ -3143,7 +3143,15 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_er_cardinality_marker(ctx, marker, x, y, angle, node_fill, stroke_color)
         }
         MarkerKind::Circle => {
-            draw_circle_marker(ctx, x, y, 4.0, node_fill, stroke_color);
+            draw_circle_marker(ctx, x, y, 4.0, Some(node_fill), stroke_color);
+            1
+        }
+        // The lollipop socket is HOLLOW and slightly larger than the filled `--o` terminator above,
+        // matching the r=6 circle mermaid declares against that marker's r=5 (bd-lkm9i). Both slots
+        // draw the same glyph: a circle is symmetric under rotation, so unlike the triangle pair
+        // below neither needs an angle flip.
+        MarkerKind::Lollipop | MarkerKind::LollipopStart => {
+            draw_circle_marker(ctx, x, y, 6.0, None, stroke_color);
             1
         }
         MarkerKind::Cross => {
@@ -4032,6 +4040,8 @@ const fn legacy_uml_markers(arrow: ArrowType) -> Option<(MarkerKind, MarkerKind)
         ArrowType::CompositionReverse => Some((MarkerKind::None, MarkerKind::Diamond)),
         ArrowType::Inheritance => Some((MarkerKind::TriangleOpenStart, MarkerKind::None)),
         ArrowType::InheritanceReverse => Some((MarkerKind::None, MarkerKind::TriangleOpen)),
+        ArrowType::Lollipop => Some((MarkerKind::LollipopStart, MarkerKind::None)),
+        ArrowType::LollipopReverse => Some((MarkerKind::None, MarkerKind::Lollipop)),
         _ => None,
     }
 }

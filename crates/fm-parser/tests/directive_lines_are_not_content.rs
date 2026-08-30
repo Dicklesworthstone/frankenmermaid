@@ -204,3 +204,50 @@ fn block_beta_still_takes_it_as_content() {
         "block-beta stopped taking a line the reference also takes: {texts:?}"
     );
 }
+
+/// Mermaid 11.15.0 parses the state and ER fixtures below without minting a node for `class …`.
+///
+/// The class-diagram fixture is deliberately different: its 11.15.0 class database contains a
+/// legacy `linkStyle0stroke` class. We reject that phantom on purpose, so this test documents a
+/// known, intentional divergence rather than laundering it into a false equivalence claim.
+#[test]
+fn state_class_style_directive_matches_mermaid_11_15_0_node_set() {
+    let state = fm_parser::parse("stateDiagram-v2\n  A --> B\n  class A bad\n");
+    let state_ids: Vec<_> = state.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        state_ids,
+        vec!["A", "B"],
+        "state fixture diverged from mermaid 11.15.0"
+    );
+    assert!(
+        state.ir.nodes[0].classes.iter().any(|class| class == "bad"),
+        "the state style was discarded while suppressing its directive"
+    );
+}
+
+#[test]
+fn er_class_style_directive_matches_mermaid_11_15_0_node_set() {
+    let er = fm_parser::parse(
+        "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  class CUSTOMER bad\n",
+    );
+    let er_ids: Vec<_> = er.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        er_ids,
+        vec!["CUSTOMER", "ORDER"],
+        "ER fixture diverged from mermaid 11.15.0"
+    );
+    assert!(
+        er.ir.nodes[0].classes.iter().any(|class| class == "bad"),
+        "the ER style was discarded while suppressing its directive"
+    );
+}
+
+#[test]
+fn class_link_style_intentionally_rejects_mermaid_11_15_0_legacy_phantom() {
+    let class = fm_parser::parse(
+        "classDiagram\n  class A\n  class B\n  A --> B\n  linkStyle 0 stroke:#f00\n",
+    );
+    let class_ids: Vec<_> = class.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(class_ids, vec!["A", "B"], "linkStyle became a class node");
+    assert_eq!(class.ir.edges.len(), 1, "the styled relation was lost");
+}

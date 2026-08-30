@@ -889,19 +889,28 @@ pub fn draw_er_cardinality_marker<C: Canvas2dContext>(
 }
 
 /// Draw a circle marker at the end of an edge.
+/// `fill: None` draws the circle as an OUTLINE — the UML lollipop / provided-interface socket
+/// (bd-lkm9i), as against the filled flowchart `--o` terminator.
+///
+/// The `Option` mirrors [`draw_diamond_marker`], which carries it for the identical reason: hollow
+/// versus filled is not styling in UML, it is which relationship the diagram states (aggregation vs
+/// composition there, provided interface vs terminator here). Both shapes therefore share one
+/// geometry and differ only in the fill.
 pub fn draw_circle_marker<C: Canvas2dContext>(
     ctx: &mut C,
     x: f64,
     y: f64,
     radius: f64,
-    fill: &str,
+    fill: Option<&str>,
     stroke: &str,
 ) {
-    ctx.set_fill_style(fill);
     ctx.set_stroke_style(stroke);
     ctx.begin_path();
     ctx.arc(x, y, radius, 0.0, 2.0 * PI);
-    ctx.fill();
+    if let Some(fill) = fill {
+        ctx.set_fill_style(fill);
+        ctx.fill();
+    }
     ctx.stroke();
 }
 

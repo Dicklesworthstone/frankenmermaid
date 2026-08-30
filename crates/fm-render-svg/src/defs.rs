@@ -350,6 +350,53 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Hollow circle, the UML lollipop (provided-interface socket) marker — `A ()-- B` (bd-lkm9i).
+    ///
+    /// ⚠️ NOT [`Self::circle_marker`], and the difference is the whole point of the marker. That one
+    /// is the flowchart `--o` terminator: FILLED, r=3, anchored at its centre. UML draws a provided
+    /// interface as an unfilled socket, which is what distinguishes it from a filled terminator the
+    /// way `diamond_open_marker` is distinguished from `diamond_marker` and `triangle_open_marker`
+    /// from a solid arrowhead. Reusing the filled circle would draw a ball where the socket goes and
+    /// re-create the "two declared forms, one picture" defect this marker exists to fix.
+    ///
+    /// `ref_x` selects the end: mermaid anchors its `-lollipopStart` at 13 and its `-lollipopEnd`
+    /// at 1 of a 14-unit box, so the socket sits OUTSIDE the line's endpoint on whichever end it
+    /// belongs to. That is why the lollipop needs two `<marker>` declarations while the
+    /// orientation-independent `o--o` circle needs only one.
+    ///
+    /// The geometry is a circle of r=6 centred at (7,7), drawn as the same two-arc path
+    /// [`Self::circle_marker`] uses — a single SVG arc whose start and end points coincide is
+    /// degenerate and renders nothing.
+    ///
+    /// DELIBERATE DIVERGENCE FROM THE INCUMBENT, stated rather than left to be discovered: mermaid
+    /// declares this marker with `markerWidth 190` / `markerHeight 240` and `markerUnits
+    /// userSpaceOnUse`. Those are slack padding, not shape. Every marker in this file is
+    /// `markerUnits="strokeWidth"` with a box that bounds its own geometry, and adopting mermaid's
+    /// numbers here alone would make this one marker scale differently from its neighbours under
+    /// stroke width. The drawn circle is the same; the box is ours.
+    #[must_use]
+    pub fn lollipop_marker(id: &str, stroke: &str, ref_x: f32) -> Self {
+        let path = PathBuilder::new()
+            .move_to(13.0, 7.0)
+            .arc_to(6.0, 6.0, 0.0, false, true, 1.0, 7.0)
+            .arc_to(6.0, 6.0, 0.0, false, true, 13.0, 7.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 14.0,
+            marker_height: 14.0,
+            ref_x,
+            ref_y: 7.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: "none".to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.0),
+        }
+    }
+
     /// Set the orientation of the marker.
     #[must_use]
     pub fn with_orient(mut self, orient: MarkerOrient) -> Self {

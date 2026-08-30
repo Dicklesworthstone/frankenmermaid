@@ -2215,6 +2215,19 @@ pub enum ArrowType {
     /// UML inheritance written child-first (`--|>`), putting the parent — and the triangle — at the
     /// target end.
     InheritanceReverse,
+    /// UML lollipop / provided interface (`A ()-- B`): a hollow socket on the SOURCE end (bd-lkm9i).
+    ///
+    /// mermaid's class grammar carries five relation types, not four — `{AGGREGATION, EXTENSION,
+    /// COMPOSITION, DEPENDENCY, LOLLIPOP}` — and lollipop is the one this table had no spelling for,
+    /// so `()--` fell through to the bare `--` and drew an anonymous line. Same "two declared forms,
+    /// one picture" defect as `<--` (bd-lfucm) and `o--` (bd-92b6), in the same table.
+    ///
+    /// ⚠️ NOT [`Self::Circle`]. The flowchart `--o` circle is OPAQUE and smaller (r=5, refX -1);
+    /// mermaid draws a lollipop as an explicitly `fill="transparent"` r=6 circle at refX 13/1.
+    /// Collapsing them would put a filled ball where UML requires a hollow socket.
+    Lollipop,
+    /// UML lollipop written target-first (`A --() B`), putting the socket at the target end.
+    LollipopReverse,
 }
 
 impl ArrowType {
@@ -2266,6 +2279,8 @@ impl ArrowType {
             Self::CompositionReverse => "--*",
             Self::Inheritance => "<|--",
             Self::InheritanceReverse => "--|>",
+            Self::Lollipop => "()--",
+            Self::LollipopReverse => "--()",
         }
     }
 }
@@ -11780,6 +11795,8 @@ mod tests {
             (ArrowType::CompositionReverse, "--*"),
             (ArrowType::Inheritance, "<|--"),
             (ArrowType::InheritanceReverse, "--|>"),
+            (ArrowType::Lollipop, "()--"),
+            (ArrowType::LollipopReverse, "--()"),
         ];
 
         for (arrow, expected) in expectations {

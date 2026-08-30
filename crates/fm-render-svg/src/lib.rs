@@ -927,7 +927,7 @@ fn ir_inline_styles_reference_accent(ir: &MermaidDiagramIr) -> bool {
 /// construction: any referenced or future marker is kept; a CSS/markup drift can only leave a dead
 /// def in place, never strip a live one. Single O(n) rebuild (no per-marker rescans), so it adds
 /// no large-render cost — and large flowcharts already emit a minimal marker set (nothing to strip).
-fn strip_unused_markers(svg: &mut String) -> Option<u16> {
+fn strip_unused_markers(svg: &mut String) -> Option<u32> {
     // Multi-byte needles searched in tight loops (once per `url(#…)` ref / `<marker>` def): build each
     // SIMD `Finder` ONCE and reuse it, instead of `str::find` rebuilding a `TwoWaySearcher` per call.
     let marker_finder = memchr::memmem::Finder::new(b"<marker ");
@@ -952,7 +952,7 @@ fn strip_unused_markers(svg: &mut String) -> Option<u16> {
     let endmarker_finder = memchr::memmem::Finder::new(b"</marker>");
     let id_finder = memchr::memmem::Finder::new(b"id=\"");
     let mut dead_spans: Vec<(usize, usize)> = Vec::new();
-    let mut live_mask = 0u16;
+    let mut live_mask = 0u32;
     let mut cacheable = true;
     let mut at = 0;
     while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
@@ -1001,26 +1001,40 @@ fn strip_unused_markers(svg: &mut String) -> Option<u16> {
     cacheable.then_some(live_mask)
 }
 
-const MARKER_END: u16 = 1 << 0;
-const MARKER_FILLED: u16 = 1 << 1;
-const MARKER_OPEN: u16 = 1 << 2;
-const MARKER_HALF_TOP: u16 = 1 << 3;
-const MARKER_HALF_BOTTOM: u16 = 1 << 4;
-const MARKER_STICK_TOP: u16 = 1 << 5;
-const MARKER_STICK_BOTTOM: u16 = 1 << 6;
-const MARKER_START: u16 = 1 << 7;
-const MARKER_START_FILLED: u16 = 1 << 8;
-const MARKER_CIRCLE: u16 = 1 << 9;
-const MARKER_CROSS: u16 = 1 << 10;
-const MARKER_DIAMOND: u16 = 1 << 11;
-const MARKER_DIAMOND_OPEN: u16 = 1 << 12;
-const MARKER_TRIANGLE_OPEN: u16 = 1 << 13;
-const MARKER_START_TRIANGLE_OPEN: u16 = 1 << 14;
-const BASIC_MARKER_MASK: u16 = MARKER_END | MARKER_OPEN;
-const ALL_MARKER_MASK: u16 = (1 << 15) - 1;
+// ⚠️ THE BIT INDEX IS THE ARRAY POSITION. `marker_id_bit` derives a bit from a name's index in its
+// `IDS` table, so these constants and that table are ONE mapping written twice: appending here
+// without appending there (or in a different order) silently hands a marker its neighbour's bit.
+// `marker_id_bit_matches_the_marker_constants` fails if the two ever disagree.
+//
+// WIDENED u16 -> u32 FOR THE LOLLIPOP PAIR (bd-lkm9i). Bits 0..=14 were spoken for and
+// `ALL_MARKER_MASK` was `(1 << 15) - 1`, leaving exactly ONE free bit for a relation that needs TWO
+// (a lollipop is a socket at the source OR at the target, and mermaid gives each end its own def
+// with its own refX — 13 for the start, 1 for the end — so they cannot share one bit). u32 takes the
+// pair and leaves 15 spare, which is why this is the widening and not a fifteenth-bit squeeze.
+const MARKER_END: u32 = 1 << 0;
+const MARKER_FILLED: u32 = 1 << 1;
+const MARKER_OPEN: u32 = 1 << 2;
+const MARKER_HALF_TOP: u32 = 1 << 3;
+const MARKER_HALF_BOTTOM: u32 = 1 << 4;
+const MARKER_STICK_TOP: u32 = 1 << 5;
+const MARKER_STICK_BOTTOM: u32 = 1 << 6;
+const MARKER_START: u32 = 1 << 7;
+const MARKER_START_FILLED: u32 = 1 << 8;
+const MARKER_CIRCLE: u32 = 1 << 9;
+const MARKER_CROSS: u32 = 1 << 10;
+const MARKER_DIAMOND: u32 = 1 << 11;
+const MARKER_DIAMOND_OPEN: u32 = 1 << 12;
+const MARKER_TRIANGLE_OPEN: u32 = 1 << 13;
+const MARKER_START_TRIANGLE_OPEN: u32 = 1 << 14;
+/// UML lollipop at the TARGET end (`A --() B`) — mermaid's `-lollipopEnd`, refX 1 (bd-lkm9i).
+const MARKER_LOLLIPOP: u32 = 1 << 15;
+/// UML lollipop at the SOURCE end (`A ()-- B`) — mermaid's `-lollipopStart`, refX 13 (bd-lkm9i).
+const MARKER_START_LOLLIPOP: u32 = 1 << 16;
+const BASIC_MARKER_MASK: u32 = MARKER_END | MARKER_OPEN;
+const ALL_MARKER_MASK: u32 = (1 << 17) - 1;
 
-fn marker_id_bit(id: &str) -> Option<u16> {
-    const IDS: [&str; 15] = [
+fn marker_id_bit(id: &str) -> Option<u32> {
+    const IDS: [&str; 17] = [
         "arrow-end",
         "arrow-filled",
         "arrow-open",
@@ -1036,10 +1050,13 @@ fn marker_id_bit(id: &str) -> Option<u16> {
         "arrow-diamond-open",
         "arrow-triangle-open",
         "start-arrow-triangle-open",
+        // Positions 15 and 16 — MUST stay aligned with MARKER_LOLLIPOP / MARKER_START_LOLLIPOP.
+        "arrow-lollipop",
+        "start-arrow-lollipop",
     ];
     IDS.iter()
         .position(|candidate| *candidate == id)
-        .map(|index| 1u16 << index)
+        .map(|index| 1u32 << index)
 }
 
 /// Companion to [`strip_unused_markers`]: prune `marker#arrow-*` selectors from the theme CSS once
@@ -1095,7 +1112,7 @@ fn strip_dead_marker_css(svg: &mut String) {
 /// stylesheet never names. Only the six ids the theme actually styles need an entry; an unknown id
 /// is treated as NOT prunable by the caller, so a stylesheet edit that introduces a new selector
 /// degrades to "keep it", never to a wrongly-dropped live rule.
-const fn theme_marker_bit(id: &str) -> Option<u16> {
+const fn theme_marker_bit(id: &str) -> Option<u32> {
     Some(match id.as_bytes() {
         b"arrow-end" => MARKER_END,
         b"arrow-filled" => MARKER_FILLED,
@@ -1119,7 +1136,7 @@ const fn theme_marker_bit(id: &str) -> Option<u16> {
 /// markers cannot share a stylesheet.
 ///
 /// An id the theme does not name keeps its selector (see [`theme_marker_bit`]).
-fn strip_dead_marker_css_for_mask(css: &mut String, live_mask: u16) {
+fn strip_dead_marker_css_for_mask(css: &mut String, live_mask: u32) {
     if memchr::memmem::find(css.as_bytes(), b"marker#arrow-").is_none() {
         return;
     }
@@ -1323,7 +1340,7 @@ struct CssPostPassCacheEntry {
     state_used: bool,
     accent_mask: u16,
     body_var_mask: u16,
-    live_marker_mask: u16,
+    live_marker_mask: u32,
     processed_css: Box<str>,
 }
 
@@ -1369,7 +1386,7 @@ fn cached_processed_css(
     state_used: bool,
     accent_mask: u16,
     body_var_mask: u16,
-    live_marker_mask: u16,
+    live_marker_mask: u32,
 ) -> Option<String> {
     CSS_POST_PASS_CACHE.with(|cache| {
         cache
@@ -1392,7 +1409,7 @@ fn cache_processed_css(
     state_used: bool,
     accent_mask: u16,
     body_var_mask: u16,
-    live_marker_mask: u16,
+    live_marker_mask: u32,
     processed_css: String,
 ) {
     CSS_POST_PASS_CACHE.with(|cache| {
@@ -1424,7 +1441,7 @@ fn clear_css_post_pass_cache() {
 fn apply_output_post_passes(
     svg: &mut String,
     use_cache: bool,
-    known_live_marker_mask: Option<u16>,
+    known_live_marker_mask: Option<u32>,
 ) {
     if !use_cache {
         strip_unused_state_css(svg);
@@ -1497,6 +1514,11 @@ const DEFAULT_EDGE_COLOR: &str = "#64748b";
 /// Mermaid 11.15.0's `theme: default` primary text color, taken from the bundle pinned in
 /// `scripts/headtohead/pins.json`.
 const MERMAID_DEFAULT_PRIMARY_TEXT_COLOR: &str = "#333";
+/// Mermaid 11.15.0's default C4 Person stereotype fill, taken directly from the pinned bundle's
+/// C4 renderer (`fontColor ?? "#FFFFFF"`).
+const MERMAID_DEFAULT_C4_STEREOTYPE_COLOR: &str = "#FFFFFF";
+const MERMAID_DEFAULT_C4_PERSON_FILL: &str = "#08427B";
+const MERMAID_DEFAULT_C4_PERSON_STROKE: &str = "#073B6F";
 
 /// Keep the two labelled surfaces whose incumbent colors are part of the SVG contract aligned with
 /// Mermaid's default theme without retuning FrankenMermaid's broader default palette.
@@ -1511,14 +1533,36 @@ fn mermaid_default_primary_text_color<'a>(
     }
 }
 
+/// C4 assigns its stereotype a renderer-local `fontColor`, rather than the global primary text
+/// color. For the default Person surface that is white on C4's navy card; preserving the pair is
+/// necessary because the ordinary document background is not the background the label is drawn on.
+fn mermaid_default_c4_person_colors(
+    config: &SvgRenderConfig,
+    c4_meta: &fm_core::IrC4NodeMeta,
+) -> Option<(&'static str, &'static str)> {
+    (config.theme == ThemePreset::Default && c4_meta.element_type.eq_ignore_ascii_case("person"))
+        .then_some((MERMAID_DEFAULT_C4_PERSON_FILL, MERMAID_DEFAULT_C4_PERSON_STROKE))
+}
+
+fn mermaid_default_c4_stereotype_color<'a>(
+    config: &SvgRenderConfig,
+    colors: &'a ThemeColors,
+) -> &'a str {
+    if config.theme == ThemePreset::Default {
+        MERMAID_DEFAULT_C4_STEREOTYPE_COLOR
+    } else {
+        colors.text.as_str()
+    }
+}
+
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
 /// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
 /// calls the same `Element::write_to_string`.
-fn build_marker_defs_body(edge_color: &str, marker_mask: u16) -> String {
+fn build_marker_defs_body(edge_color: &str, marker_mask: u32) -> String {
     use crate::defs::MarkerOrient;
     let mut s = String::new();
-    let push = |s: &mut String, bit: u16, m: ArrowheadMarker| {
+    let push = |s: &mut String, bit: u32, m: ArrowheadMarker| {
         if marker_mask & bit != 0 {
             m.to_element().write_to_string(s);
         }
@@ -1612,6 +1656,20 @@ fn build_marker_defs_body(edge_color: &str, marker_mask: u16) -> String {
         ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge_color)
             .with_orient(MarkerOrient::AutoStartReverse),
     );
+    // UML lollipop (bd-lkm9i). A circle IS symmetric under 180 degrees, so unlike the triangle pair
+    // above neither end needs `AutoStartReverse` — what differs between the two is only where the
+    // socket sits relative to the endpoint, which is the `ref_x` argument (13 outside the source,
+    // 1 outside the target), not the orientation.
+    push(
+        &mut s,
+        MARKER_LOLLIPOP,
+        ArrowheadMarker::lollipop_marker("arrow-lollipop", edge_color, 1.0),
+    );
+    push(
+        &mut s,
+        MARKER_START_LOLLIPOP,
+        ArrowheadMarker::lollipop_marker("start-arrow-lollipop", edge_color, 13.0),
+    );
     s
 }
 
@@ -1634,7 +1692,7 @@ fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> Cow<'static, str> {
     )
 }
 
-fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u16) -> Cow<'static, str> {
+fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u32) -> Cow<'static, str> {
     if edge_color == DEFAULT_EDGE_COLOR {
         static EMPTY: OnceLock<String> = OnceLock::new();
         static END_ONLY: OnceLock<String> = OnceLock::new();
@@ -2090,6 +2148,8 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
         MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
         MarkerKind::TriangleOpenStart => "url(#start-arrow-triangle-open)",
+        MarkerKind::Lollipop => "url(#arrow-lollipop)",
+        MarkerKind::LollipopStart => "url(#start-arrow-lollipop)",
         MarkerKind::Open => "url(#arrow-open)",
         MarkerKind::ErOnlyOneStart => "url(#er-onlyOneStart)",
         MarkerKind::ErOnlyOneEnd => "url(#er-onlyOneEnd)",
@@ -3552,7 +3612,7 @@ fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
     )
 }
 
-fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
+fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
     use fm_core::ArrowType;
     match arrow {
         ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => 0,
@@ -3592,13 +3652,18 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
         ArrowType::Composition | ArrowType::CompositionReverse => MARKER_DIAMOND,
         ArrowType::Inheritance => MARKER_START_TRIANGLE_OPEN,
         ArrowType::InheritanceReverse => MARKER_TRIANGLE_OPEN,
+        // The lollipop pair DOES need two declarations, unlike `o--o` above. A circle is
+        // orientation-independent, but mermaid's lollipop is not centred on the endpoint: the start
+        // def sits at refX 13 and the end def at refX 1, so one `<marker>` cannot serve both ends.
+        ArrowType::Lollipop => MARKER_START_LOLLIPOP,
+        ArrowType::LollipopReverse => MARKER_LOLLIPOP,
     }
 }
 
 /// Flowchart layout edges are the complete marker source, so derive the exact live set before SVG
 /// serialization. Other diagram families retain the drift-proof output scan because their renderers
 /// may synthesize markers outside `ir.edges`.
-fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u16> {
+fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u32> {
     (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
         layout.edges.iter().fold(0, |mask, edge_path| {
             let edge_mask = if edge_path.reversed {
@@ -4002,7 +4067,7 @@ fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
     config: &SvgRenderConfig,
-    known_live_marker_mask: Option<u16>,
+    known_live_marker_mask: Option<u32>,
     direct_minified_css: bool,
     cache_direct_minified_css: bool,
     mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
@@ -4091,9 +4156,11 @@ fn render_layout_to_svg(
         || marker_defs_body(edge_color, emit_fancy_markers),
         |mask| marker_defs_body_for_mask(edge_color, mask),
     );
-    // ER crow's-foot cardinality markers (bd-dun16) are appended rather than folded into the mask:
-    // the mask is a `u16` with 15 of 16 bits already spoken for, and these defs are emitted only for
-    // the shapes the diagram references, so there is nothing for the mask's strip pass to prune.
+    // ER crow's-foot cardinality markers (bd-dun16) are appended rather than folded into the mask.
+    // The original reason was that the mask was a full `u16`; it is a `u32` since bd-lkm9i, so the
+    // reason is now the second one alone, which was always the load-bearing half: these defs are
+    // emitted only for the shapes the diagram references, so there is nothing for the mask's strip
+    // pass to prune. Folding them in would buy no stripping and cost four more bits.
     let er_markers = er_marker_defs_body(ir, edge_color);
     defs = defs.raw_markers(if er_markers.is_empty() {
         arrow_markers
@@ -9105,9 +9172,9 @@ fn write_c4_node_fragment_into(
     out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
     let _ = write_escaped_attr(out, raw_label);
     out.push_str("\" tabindex=\"0\">");
-    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — under `node_gradients` the Rounded rect's
-    // fill is overridden to the gradient (same attr order the class fragment uses), NOT `node_fill`. (The
-    // `c4_basic` golden's solid `#ffffff` is the gradients-OFF path, which this fast path is gated out of.)
+    // Mermaid's default C4 Person is a navy card, so the white stereotype is never painted against
+    // the document's white canvas. Other themes retain the ordinary rounded-node gradient.
+    let c4_person_colors = mermaid_default_c4_person_colors(config, c4_meta);
     out.push_str("<rect x=\"");
     let _ = write_number_into(out, x);
     out.push_str("\" y=\"");
@@ -9118,7 +9185,22 @@ fn write_c4_node_fragment_into(
     let _ = write_number_into(out, h);
     out.push_str("\" rx=\"");
     let _ = write_number_into(out, rx);
-    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(
+        out,
+        c4_person_colors.map_or("url(#fm-node-gradient)", |(fill, _)| fill),
+    );
+    out.push('\"');
+    if let Some((fill, stroke)) = c4_person_colors {
+        // Theme CSS assigns generic node paint with greater specificity than SVG presentation
+        // attributes, so make the pinned C4 paint an inline declaration in this streaming path.
+        out.push_str(" style=\"fill:");
+        let _ = write_escaped_attr(out, fill);
+        out.push_str(";stroke:");
+        let _ = write_escaped_attr(out, stroke);
+        out.push('\"');
+    }
+    out.push_str("/>");
 
     // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
     let label_text = node
@@ -9139,21 +9221,11 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, small_font);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    // `colors.text`, NOT `colors.cluster_stroke` (bd-4rlrx). This painted the stereotype with the
-    // cluster BORDER colour — a slot designed to sit QUIETLY against the background, which is the
-    // opposite of what text needs. Measured against each theme's own background:
-    //   default  #cbd5e1 on #fafbfc  =  1.43:1   effectively invisible
-    //   dark     #475569 on #0f172a  =  2.36:1
-    // Both fail WCAG AA (4.5:1) and the 3:1 large-text floor. It was themed — the colour does move
-    // between themes — which is why a "does it follow the theme?" check passes and only a measured
-    // contrast catches it. Its own siblings in the same box, `fm-c4-name` and `fm-c4-description`,
-    // already use `colors.text`; the visual hierarchy is carried by size (0.78x) and weight (600),
-    // not by making the label unreadable.
-    let c4_type_label_color = mermaid_default_primary_text_color(config, colors);
+    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
     let _ = write_escaped_attr(out, c4_type_label_color);
     // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
-    // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned
-    // `#333`, while non-default themes continue to inherit their themed text color.
+    // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned white,
+    // while non-default themes continue to inherit their themed text color.
     if config.theme == ThemePreset::Default {
         out.push_str("\" style=\"fill:");
         let _ = write_escaped_attr(out, c4_type_label_color);
@@ -10928,15 +11000,24 @@ fn render_node(
             .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(config.rounded_corners * 0.55),
 
-        NodeShape::Rounded => Element::rect()
-            .x(x)
-            .y(y)
-            .width(w)
-            .height(h)
-            .fill(&colors.node_fill)
-            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
-            .rx(config.rounded_corners),
+        NodeShape::Rounded => {
+            let c4_person_colors = ir_node
+                .and_then(|node| node.c4_meta.as_deref())
+                .and_then(|meta| mermaid_default_c4_person_colors(config, meta));
+            let mut rect = Element::rect()
+                .x(x)
+                .y(y)
+                .width(w)
+                .height(h)
+                .fill(c4_person_colors.map_or(colors.node_fill.as_str(), |(fill, _)| fill))
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+                .rx(config.rounded_corners);
+            if let Some((fill, stroke)) = c4_person_colors {
+                rect = rect.attr("style", &format!("fill:{fill};stroke:{stroke}"));
+            }
+            rect
+        }
 
         NodeShape::Stadium => Element::rect()
             .x(x)
@@ -12904,7 +12985,7 @@ fn render_c4_node_content(
     let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
     let mut cursor_y = y + (small_font * 1.25);
 
-    let c4_type_label_color = mermaid_default_primary_text_color(config, colors);
+    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
     let mut c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -12919,7 +13000,7 @@ fn render_c4_node_content(
             .class("fm-c4-type-label")
             .build();
     if config.theme == ThemePreset::Default {
-        c4_type_label = c4_type_label.attr("style", "fill:#333");
+        c4_type_label = c4_type_label.attr("style", "fill:#FFFFFF");
     }
     group = group.child(apply_label_style(apply_label_class(c4_type_label)));
 
@@ -14855,6 +14936,17 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             ArrowType::InheritanceReverse => {
                 (None, None, Some("url(#arrow-triangle-open)"), &colors.edge)
             }
+            // UML lollipop: the socket marks the end that PROVIDES the interface — the source for
+            // `()--`, the target for `--()`. Same start/end split as the diamonds above.
+            ArrowType::Lollipop => (
+                None,
+                Some("url(#start-arrow-lollipop)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::LollipopReverse => {
+                (None, None, Some("url(#arrow-lollipop)"), &colors.edge)
+            }
         }
     };
 
@@ -15853,6 +15945,27 @@ fn render_edge_body_into(
             "url(#arrow-triangle-open)",
             "",
             " inherits ",
+        ),
+        // The DASH is not set here. A lollipop's line type is orthogonal to its socket — mermaid's
+        // class relation is `[relation][line][relation]` — so `()..` carries the same
+        // `ArrowType::Lollipop` and gets its dash from the `stroke-dasharray:5` inline style the
+        // parser attaches, exactly as UML realization does. Hard-coding a dashed class here would
+        // dash `()--` too.
+        ArrowType::Lollipop => (
+            1.8,
+            "fm-edge-solid",
+            "url(#start-arrow-lollipop)",
+            "",
+            "",
+            " provides ",
+        ),
+        ArrowType::LollipopReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-lollipop)",
+            "",
+            " is provided by ",
         ),
     };
     // A sankey flow's WIDTH is its value — the arrow-derived width above carries no quantity, so
@@ -19660,7 +19773,18 @@ marker#arrow-future path { fill: red; }\n\
                                 edge,
                             )
                             .with_orient(MarkerOrient::AutoStartReverse),
-                        );
+                        )
+                        // The lollipop pair joins the fancy set because `ALL_MARKER_MASK` covers
+                        // every bit; this hand-maintained sequence must stay in the SAME ORDER as
+                        // `build_marker_defs_body`'s `push` calls or the two bodies stop being
+                        // byte-identical. Updating one side only is exactly how this test was
+                        // broken once before (bd-92b6's notes).
+                        .marker(ArrowheadMarker::lollipop_marker("arrow-lollipop", edge, 1.0))
+                        .marker(ArrowheadMarker::lollipop_marker(
+                            "start-arrow-lollipop",
+                            edge,
+                            13.0,
+                        ));
                 }
                 let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));
                 assert_eq!(
@@ -19800,7 +19924,7 @@ marker#arrow-open path {
         // Negative case: a mask claiming every marker is live must change nothing, so a bug that
         // pruned unconditionally (or inverted the test) fails here.
         let mut all_live = String::from(pretty);
-        strip_dead_marker_css_for_mask(&mut all_live, u16::MAX);
+        strip_dead_marker_css_for_mask(&mut all_live, u32::MAX);
         assert_eq!(all_live, pretty, "live markers must not be pruned");
     }
 

@@ -132,7 +132,8 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
         | ArrowType::StickArrowBottomReverseDotted
         | ArrowType::Aggregation
         | ArrowType::Composition
-        | ArrowType::Inheritance => (true, false),
+        | ArrowType::Inheritance
+        | ArrowType::Lollipop => (true, false),
         ArrowType::Arrow
         | ArrowType::OpenArrow
         | ArrowType::HalfArrowTop
@@ -154,7 +155,8 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
         | ArrowType::DottedCircle
         | ArrowType::AggregationReverse
         | ArrowType::CompositionReverse
-        | ArrowType::InheritanceReverse => (false, true),
+        | ArrowType::InheritanceReverse
+        | ArrowType::LollipopReverse => (false, true),
     }
 }
 

@@ -408,7 +408,12 @@ impl From<MarkerKind> for GpuMarkerKind {
             | MarkerKind::ErOneOrMoreStart
             | MarkerKind::ErOneOrMoreEnd
             | MarkerKind::ErZeroOrMoreStart
-            | MarkerKind::ErZeroOrMoreEnd => Self::Arrow,
+            | MarkerKind::ErZeroOrMoreEnd
+            // Same contract for the lollipop pair (bd-lkm9i): `collect_scene_markers` drops them
+            // via `lacks_gpu_glyph`, and this arm exists so that giving the shader a socket glyph
+            // is a deliberate edit here rather than a silent fall-through to `Arrow`.
+            | MarkerKind::Lollipop
+            | MarkerKind::LollipopStart => Self::Arrow,
         }
     }
 }
@@ -2820,11 +2825,13 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                     .as_ref()
                     .and_then(|stroke| parse_paint_rgba(&stroke.color))
                     .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
-                // ER crow's-foot shapes are skipped, not mapped: the shader's marker set has no glyph
-                // for them, and `GpuMarkerKind`'s fallback is `Arrow` — an arrowhead in a crow's
-                // foot's place states a cardinality the source never declared (bd-dun16).
+                // ER crow's-foot shapes and UML lollipops are skipped, not mapped: the shader's
+                // marker set has no glyph for either, and `GpuMarkerKind`'s fallback is `Arrow` — an
+                // arrowhead in a crow's foot's place states a cardinality the source never declared
+                // (bd-dun16), and in a lollipop's place turns a provided interface into an
+                // association (bd-lkm9i). Both are false statements, not missing ones.
                 if path.marker_start != MarkerKind::None
-                    && !path.marker_start.is_er_cardinality()
+                    && !path.marker_start.lacks_gpu_glyph()
                     && let Some((position, angle)) = path_marker_start(&path.commands)
                 {
                     markers.push(scene_marker_instance(
@@ -2835,7 +2842,7 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                     ));
                 }
                 if path.marker_end != MarkerKind::None
-                    && !path.marker_end.is_er_cardinality()
+                    && !path.marker_end.lacks_gpu_glyph()
                     && let Some((position, angle)) = path_marker_end(&path.commands)
                 {
                     let angle = if path.marker_end == MarkerKind::TriangleOpenStart {
