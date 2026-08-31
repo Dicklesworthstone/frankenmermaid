@@ -755,6 +755,63 @@ impl FixedLayerCrossings {
         self.fenwick.fill(0);
         inversions
     }
+
+    /// Return the exact crossing-count delta for a short left rotation of `ordering`.
+    ///
+    /// A left rotation splits the affected range into `A B` and produces `B A`.  Only pairs with
+    /// one endpoint in each half change relative order, so their contribution can be recomputed
+    /// from the fixed-layer groups without recounting every candidate ordering.  Candidate
+    /// generation limits rotations to length three or four, keeping this deliberately small and
+    /// allocation-free.
+    fn rotation_delta(
+        &self,
+        ordering: &[usize],
+        start: usize,
+        len: usize,
+        amount: usize,
+    ) -> Option<isize> {
+        if !(3..=4).contains(&len)
+            || amount == 0
+            || amount >= len
+            || start.checked_add(len)? > ordering.len()
+        {
+            return None;
+        }
+
+        let block = &ordering[start..start + len];
+        let mut earlier = [0_usize; 4];
+        let mut before = [[0_usize; 4]; 4];
+
+        for window in self.offsets.windows(2) {
+            let [start, end] = *window else {
+                continue;
+            };
+            let mut here = [0_usize; 4];
+            for &node_id in &self.grouped[start..end] {
+                if let Some(index) = block.iter().position(|&candidate| candidate == node_id) {
+                    here[index] += 1;
+                }
+            }
+
+            for left in 0..len {
+                for right in 0..len {
+                    before[left][right] =
+                        before[left][right].checked_add(here[left].checked_mul(earlier[right])?)?;
+                }
+                earlier[left] = earlier[left].checked_add(here[left])?;
+            }
+        }
+
+        let mut delta = 0_isize;
+        for left in 0..amount {
+            for right in amount..len {
+                let reversed = isize::try_from(before[right][left]).ok()?;
+                let original = isize::try_from(before[left][right]).ok()?;
+                delta = delta.checked_add(reversed.checked_sub(original)?)?;
+            }
+        }
+        Some(delta)
+    }
 }
 
 /// Scores candidate orderings of one layer against its fixed neighbours.
@@ -835,6 +892,35 @@ impl<'a> LayerScorer<'a> {
             (None, None) => {}
         }
         total
+    }
+
+    /// Exact score delta for a generated short rotation, when both present neighbour counters
+    /// have their fixed-layer CSR representation.  A sparse-domain fallback keeps using the
+    /// reference scorer rather than approximating the result.
+    fn rotation_delta(&self, current: &LayerOrdering, mv: LayerMove) -> Option<isize> {
+        let LayerMove::Rotate { start, len, amount } = mv else {
+            return None;
+        };
+
+        let mut total = 0_isize;
+        for (fast, neighbour) in [
+            (self.upper_fast.as_ref(), self.upper),
+            (self.lower_fast.as_ref(), self.lower),
+        ] {
+            match (fast, neighbour) {
+                (Some(counter), _) => {
+                    total = total.checked_add(counter.rotation_delta(
+                        &current.order,
+                        start,
+                        len,
+                        amount,
+                    )?)?;
+                }
+                (None, None) => {}
+                (None, Some(_)) => return None,
+            }
+        }
+        Some(total)
     }
 }
 
@@ -1292,7 +1378,10 @@ pub fn optimize_layer_ordering(
         scratch.order.extend_from_slice(&best.order);
         for &mv in &moves {
             apply_layer_move(&mut scratch.order, mv);
-            let candidate_crossings = scorer.score(&scratch);
+            let candidate_crossings = scorer
+                .rotation_delta(&best, mv)
+                .and_then(|delta| best_crossings.checked_add_signed(delta))
+                .unwrap_or_else(|| scorer.score(&scratch));
             if candidate_crossings < best_crossings {
                 // ⚠️ CLONE ONLY ON A STRICT IMPROVEMENT. The comparison itself reads the scratch
                 // slice, so a candidate that loses the tie-break costs no allocation at all — which
@@ -1625,6 +1714,54 @@ mod tests {
             saw_repeated,
             "the occupancy-counts path never ran: this test no longer covers it"
         );
+    }
+
+    #[test]
+    fn short_rotation_delta_matches_a_full_recount() {
+        let mut state = 0x4f1d_1e5d_u64;
+        let mut next = |bound: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % bound.max(1)
+        };
+
+        for case in 0..200 {
+            let width = 4 + next(9);
+            let upper = LayerOrdering::new((0..width).map(|index| index * 3).collect());
+            let middle = LayerOrdering::new((0..width).map(|index| 1 + index * 3).collect());
+            let lower = LayerOrdering::new((0..width).map(|index| 2 + index * 3).collect());
+            let mut upper_edges = Vec::new();
+            let mut lower_edges = Vec::new();
+            for _ in 0..(width * 3) {
+                upper_edges.push((next(width) * 3, 1 + next(width) * 3));
+                lower_edges.push((1 + next(width) * 3, 2 + next(width) * 3));
+            }
+            let upper_edges = LayerEdges { edges: upper_edges };
+            let lower_edges = LayerEdges { edges: lower_edges };
+            let up = Some((&upper, &upper_edges));
+            let down = Some((&lower, &lower_edges));
+            let mut scorer = LayerScorer::new(&middle, up, down);
+            let base = scorer.score(&middle);
+            let mut moves = Vec::new();
+            collect_candidate_moves(&middle, up, down, &mut moves);
+
+            for mv @ LayerMove::Rotate { .. } in moves {
+                let delta = scorer
+                    .rotation_delta(&middle, mv)
+                    .expect("dense short rotations must have an exact delta");
+                let expected = base
+                    .checked_add_signed(delta)
+                    .expect("crossing delta must not underflow");
+                let mut candidate = middle.clone();
+                apply_layer_move(&mut candidate.order, mv);
+                assert_eq!(
+                    expected,
+                    scorer.score(&candidate),
+                    "case {case} rotation {mv:?}"
+                );
+            }
+        }
     }
 
     /// The candidate list EXACTLY as `candidate_orderings` built it before the sort and dedup were
