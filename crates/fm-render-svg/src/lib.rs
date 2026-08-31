@@ -1541,7 +1541,10 @@ fn mermaid_default_c4_person_colors(
     c4_meta: &fm_core::IrC4NodeMeta,
 ) -> Option<(&'static str, &'static str)> {
     (config.theme == ThemePreset::Default && c4_meta.element_type.eq_ignore_ascii_case("person"))
-        .then_some((MERMAID_DEFAULT_C4_PERSON_FILL, MERMAID_DEFAULT_C4_PERSON_STROKE))
+        .then_some((
+            MERMAID_DEFAULT_C4_PERSON_FILL,
+            MERMAID_DEFAULT_C4_PERSON_STROKE,
+        ))
 }
 
 fn mermaid_default_c4_stereotype_color<'a>(
@@ -12985,18 +12988,18 @@ fn render_c4_node_content(
 
     let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
     let mut c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
-            .x(x + w / 2.0)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(small_font)
-            .font_weight("600")
-            .anchor(TextAnchor::Middle)
-            // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
-            // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
-            // given diagram happens to take.
-            .fill(c4_type_label_color)
-            .class("fm-c4-type-label")
-            .build();
+        .x(x + w / 2.0)
+        .y(cursor_y)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+        .font_size(small_font)
+        .font_weight("600")
+        .anchor(TextAnchor::Middle)
+        // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
+        // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
+        // given diagram happens to take.
+        .fill(c4_type_label_color)
+        .class("fm-c4-type-label")
+        .build();
     if config.theme == ThemePreset::Default {
         c4_type_label = c4_type_label.attr("style", "fill:#FFFFFF");
     }
@@ -14936,15 +14939,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             }
             // UML lollipop: the socket marks the end that PROVIDES the interface — the source for
             // `()--`, the target for `--()`. Same start/end split as the diamonds above.
-            ArrowType::Lollipop => (
-                None,
-                Some("url(#start-arrow-lollipop)"),
-                None,
-                &colors.edge,
-            ),
-            ArrowType::LollipopReverse => {
-                (None, None, Some("url(#arrow-lollipop)"), &colors.edge)
-            }
+            ArrowType::Lollipop => (None, Some("url(#start-arrow-lollipop)"), None, &colors.edge),
+            ArrowType::LollipopReverse => (None, None, Some("url(#arrow-lollipop)"), &colors.edge),
         }
     };
 
@@ -19777,7 +19773,11 @@ marker#arrow-future path { fill: red; }\n\
                         // `build_marker_defs_body`'s `push` calls or the two bodies stop being
                         // byte-identical. Updating one side only is exactly how this test was
                         // broken once before (bd-92b6's notes).
-                        .marker(ArrowheadMarker::lollipop_marker("arrow-lollipop", edge, 1.0))
+                        .marker(ArrowheadMarker::lollipop_marker(
+                            "arrow-lollipop",
+                            edge,
+                            1.0,
+                        ))
                         .marker(ArrowheadMarker::lollipop_marker(
                             "start-arrow-lollipop",
                             edge,

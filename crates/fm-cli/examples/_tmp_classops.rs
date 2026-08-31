@@ -10,7 +10,10 @@ fn main() {
             .match_indices("marker-")
             .map(|(i, _)| &svg[i..(i + 28).min(svg.len())])
             .collect();
-        println!("{op:6} ids={ids:?} arrow={arrow:?} warns={}", parsed.ir.diagnostics.len());
+        println!(
+            "{op:6} ids={ids:?} arrow={arrow:?} warns={}",
+            parsed.ir.diagnostics.len()
+        );
         println!("        markers={markers:?}");
     }
 }

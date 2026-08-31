@@ -227,9 +227,8 @@ fn state_class_style_directive_matches_mermaid_11_15_0_node_set() {
 
 #[test]
 fn er_class_style_directive_matches_mermaid_11_15_0_node_set() {
-    let er = fm_parser::parse(
-        "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  class CUSTOMER bad\n",
-    );
+    let er =
+        fm_parser::parse("erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  class CUSTOMER bad\n");
     let er_ids: Vec<_> = er.ir.nodes.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(
         er_ids,

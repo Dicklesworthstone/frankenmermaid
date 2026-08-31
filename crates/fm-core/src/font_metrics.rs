@@ -440,14 +440,22 @@ impl FontMetrics {
                     (ASCII_WIDTH_MULT[c as usize], false)
                 } else {
                     let class = CharWidthClass::classify(c);
-                    (class.multiplier(), matches!(class, CharWidthClass::FullWidth))
+                    (
+                        class.multiplier(),
+                        matches!(class, CharWidthClass::FullWidth),
+                    )
                 };
                 // ⚠️ A JOINER FUSES AN EMOJI, NOT ANY CHARACTER. `👨 ZWJ 👩` is one family glyph, but
                 // `a ZWJ b` still draws two Latin letters — the joiner only requests a joined form,
                 // which Latin fonts do not provide. Suppressing every character after a joiner
                 // measured `a\u{200D}b` as one character wide, which is why only a FULL-WIDTH
                 // follower is treated as fused.
-                total += avg * if after_joiner && is_full_width { 0.0 } else { multiplier };
+                total += avg
+                    * if after_joiner && is_full_width {
+                        0.0
+                    } else {
+                        multiplier
+                    };
                 after_joiner = c == ZERO_WIDTH_JOINER;
             }
             return total;

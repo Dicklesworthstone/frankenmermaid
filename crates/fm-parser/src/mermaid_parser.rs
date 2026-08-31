@@ -8822,31 +8822,30 @@ fn parse_er_relationship(
     // and the class `o--` (bd-92b6), in a third diagram type. Stripping a cardinality off the inner
     // edge of each side fixes that without touching the fused spellings, which carry their
     // cardinality inside the operator and so have nothing to strip.
-    let (left_raw, right_raw, notation, arrow) =
-        if let Some((operator_idx, operator, arrow)) =
-            find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
-        {
-            let (left, left_card) = strip_trailing_er_cardinality(relation[..operator_idx].trim());
-            let (right_card, right) =
-                strip_leading_er_cardinality(relation[operator_idx + operator.len()..].trim());
-            // Only a spelling OUTSIDE the operator can refine the notation; when both sides are bare
-            // the fused operator already is the notation, byte for byte as before.
-            let notation = if left_card.is_some() || right_card.is_some() {
-                let connector = if operator.contains("..") { ".." } else { "--" };
-                format!(
-                    "{}{connector}{}",
-                    left_card.map_or("", |c| c.left),
-                    right_card.map_or("", |c| c.right)
-                )
-            } else {
-                operator.to_string()
-            };
-            (left.trim(), right.trim(), notation, arrow)
-        } else if let Some((left, notation, arrow, right)) = split_er_word_relation(relation) {
-            (left, right, notation, arrow)
+    let (left_raw, right_raw, notation, arrow) = if let Some((operator_idx, operator, arrow)) =
+        find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
+    {
+        let (left, left_card) = strip_trailing_er_cardinality(relation[..operator_idx].trim());
+        let (right_card, right) =
+            strip_leading_er_cardinality(relation[operator_idx + operator.len()..].trim());
+        // Only a spelling OUTSIDE the operator can refine the notation; when both sides are bare
+        // the fused operator already is the notation, byte for byte as before.
+        let notation = if left_card.is_some() || right_card.is_some() {
+            let connector = if operator.contains("..") { ".." } else { "--" };
+            format!(
+                "{}{connector}{}",
+                left_card.map_or("", |c| c.left),
+                right_card.map_or("", |c| c.right)
+            )
         } else {
-            return false;
+            operator.to_string()
         };
+        (left.trim(), right.trim(), notation, arrow)
+    } else if let Some((left, notation, arrow, right)) = split_er_word_relation(relation) {
+        (left, right, notation, arrow)
+    } else {
+        return false;
+    };
 
     if left_raw.is_empty() || right_raw.is_empty() {
         return false;
@@ -12824,10 +12823,9 @@ fn find_operator_core<'a>(
             && brace_depth == 0
         {
             let tail = &statement[idx..];
-            if let Some((operator, arrow)) = operators
-                .iter()
-                .find(|(operator, _)| operator.as_bytes().first() == Some(&b'(') && tail.starts_with(operator))
-            {
+            if let Some((operator, arrow)) = operators.iter().find(|(operator, _)| {
+                operator.as_bytes().first() == Some(&b'(') && tail.starts_with(operator)
+            }) {
                 return Some((idx, *operator, *arrow));
             }
         }
@@ -25138,7 +25136,12 @@ Rel_Back(db, app, "Responds")"#,
     #[test]
     fn bare_o_er_relation_connects_the_named_entities() {
         let parsed = parse_mermaid("erDiagram\n  CUSTOMER o--o ORDER\n");
-        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["CUSTOMER", "o--o", "ORDER"]);
         assert!(parsed.ir.edges.is_empty());
     }

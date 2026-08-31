@@ -40,12 +40,30 @@ fn labelled(tag: &str) -> String {
 fn converting_positions(tag: &str) -> Vec<(&'static str, String)> {
     let l = labelled(tag);
     vec![
-        ("flowchart node label", format!("flowchart LR\n  A[\"{l}\"]\n")),
-        ("flowchart edge label", format!("flowchart LR\n  A -->|\"{l}\"| B\n")),
-        ("subgraph title", format!("flowchart LR\n  subgraph \"{l}\"\n    A\n  end\n")),
-        ("sequence message", format!("sequenceDiagram\n  A->>B: {l}\n")),
-        ("sequence note", format!("sequenceDiagram\n  participant A\n  Note over A: {l}\n")),
-        ("state description", format!("stateDiagram-v2\n  s1 : {l}\n")),
+        (
+            "flowchart node label",
+            format!("flowchart LR\n  A[\"{l}\"]\n"),
+        ),
+        (
+            "flowchart edge label",
+            format!("flowchart LR\n  A -->|\"{l}\"| B\n"),
+        ),
+        (
+            "subgraph title",
+            format!("flowchart LR\n  subgraph \"{l}\"\n    A\n  end\n"),
+        ),
+        (
+            "sequence message",
+            format!("sequenceDiagram\n  A->>B: {l}\n"),
+        ),
+        (
+            "sequence note",
+            format!("sequenceDiagram\n  participant A\n  Note over A: {l}\n"),
+        ),
+        (
+            "state description",
+            format!("stateDiagram-v2\n  s1 : {l}\n"),
+        ),
         ("mindmap node", format!("mindmap\n  root((R))\n    {l}\n")),
         ("kanban item", format!("kanban\n  col1[Col]\n    t1[{l}]\n")),
         ("block label", format!("block-beta\n  A[\"{l}\"]\n")),
@@ -117,7 +135,10 @@ fn the_sweep_can_see_an_unconverted_tag() {
     // Nothing resembling the marker at all.
     assert_eq!(verdict("flowchart LR\n  A[\"plain\"]\n", "<br/>"), "ABSENT");
     // And the positive arm is genuinely reachable.
-    assert_eq!(verdict("flowchart LR\n  A[\"Q<br/>Z\"]\n", "<br/>"), "CONVERTED");
+    assert_eq!(
+        verdict("flowchart LR\n  A[\"Q<br/>Z\"]\n", "<br/>"),
+        "CONVERTED"
+    );
 }
 
 /// Markup that is not a line break is left alone.
@@ -127,7 +148,10 @@ fn the_sweep_can_see_an_unconverted_tag() {
 /// `<b>` literally in a node label, so this is parity as well as good sense.
 #[test]
 fn other_markup_in_a_label_is_not_rewritten() {
-    let dump = format!("{:?}", fm_parser::parse("flowchart LR\n  A[\"a<b>c</b>d\"]\n").ir);
+    let dump = format!(
+        "{:?}",
+        fm_parser::parse("flowchart LR\n  A[\"a<b>c</b>d\"]\n").ir
+    );
     assert!(
         dump.contains("a<b>c</b>d"),
         "markup that is not a line-break tag was rewritten: {dump:.200}"

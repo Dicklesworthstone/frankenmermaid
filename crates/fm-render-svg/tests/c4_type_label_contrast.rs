@@ -187,8 +187,7 @@ fn the_stereotype_label_is_rendered_at_all() {
     for streaming in [true, false] {
         let svg = render(ThemePreset::Default, streaming);
         assert!(
-            svg.contains("class=\"fm-c4-type-label\"")
-                && svg.contains(">&lt;&lt;person>></text>"),
+            svg.contains("class=\"fm-c4-type-label\"") && svg.contains(">&lt;&lt;person>></text>"),
             "streaming={streaming}: the stereotype label is missing or reworded"
         );
     }

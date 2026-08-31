@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { pathToFileURL } = require('node:url');
 const vm = require('node:vm');
 
 function loadWorker(diagram) {
@@ -56,6 +57,18 @@ async function initializeOffscreenWorker(worker) {
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+test('playground resolves the worker module URL to the shipped root package', () => {
+  const playgroundPath = path.join(__dirname, 'playground.html');
+  const source = fs.readFileSync(playgroundPath, 'utf8');
+  const expectedPackage = path.join(__dirname, '..', 'pkg', 'frankenmermaid.js');
+
+  assert.match(source, /new URL\("\.\.\/pkg\/frankenmermaid\.js", import\.meta\.url\)/);
+  assert.equal(fs.existsSync(expectedPackage), true, 'the playground must target a shipped package');
+
+  const resolved = new URL('../pkg/frankenmermaid.js', pathToFileURL(playgroundPath));
+  assert.equal(path.normalize(resolved.pathname), expectedPackage);
+});
 
 test('offscreen worker skips a queued render superseded before synchronous canvas drawing', async () => {
   const inputs = [];

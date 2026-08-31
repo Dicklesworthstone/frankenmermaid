@@ -59,7 +59,11 @@ fn render_labelled(label: &str) -> String {
 /// characters specifically rather than about row uniformity in general.
 #[test]
 fn ascii_rows_have_a_uniform_display_width() {
-    for label in ["Hello World", "short", "a much longer label than the others"] {
+    for label in [
+        "Hello World",
+        "short",
+        "a much longer label than the others",
+    ] {
         let out = render_labelled(label);
         let widths: std::collections::BTreeSet<usize> = out.lines().map(display_width).collect();
         assert_eq!(
@@ -80,8 +84,16 @@ fn ascii_rows_have_a_uniform_display_width() {
 #[test]
 fn the_width_helper_is_not_a_codepoint_count() {
     assert_eq!(display_width("abc"), 3);
-    assert_eq!(display_width("日本語"), 6, "wide characters must count as two columns");
-    assert_eq!("日本語".chars().count(), 3, "the codepoint count is the WRONG answer, pinned here");
+    assert_eq!(
+        display_width("日本語"),
+        6,
+        "wide characters must count as two columns"
+    );
+    assert_eq!(
+        "日本語".chars().count(),
+        3,
+        "the codepoint count is the WRONG answer, pinned here"
+    );
     assert_ne!(
         display_width("日本語"),
         "日本語".chars().count(),

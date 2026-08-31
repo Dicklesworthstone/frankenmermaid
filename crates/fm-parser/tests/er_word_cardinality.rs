@@ -81,9 +81,18 @@ fn every_word_spelling_resolves_to_its_shape() {
 /// each is a different reordering mistake.
 #[test]
 fn the_longer_spellings_win_over_the_shorter_ones_they_contain() {
-    assert_eq!(relation("A many(1) to many(0) B : r").1.as_deref(), Some("}|--o{"));
-    assert_eq!(relation("A many to many B : r").1.as_deref(), Some("}o--o{"));
-    assert_eq!(relation("A one or more to one B : r").1.as_deref(), Some("}|--||"));
+    assert_eq!(
+        relation("A many(1) to many(0) B : r").1.as_deref(),
+        Some("}|--o{")
+    );
+    assert_eq!(
+        relation("A many to many B : r").1.as_deref(),
+        Some("}o--o{")
+    );
+    assert_eq!(
+        relation("A one or more to one B : r").1.as_deref(),
+        Some("}|--||")
+    );
     assert_eq!(relation("A one to one B : r").1.as_deref(), Some("||--||"));
 }
 

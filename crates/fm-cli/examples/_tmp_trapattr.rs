@@ -4,7 +4,10 @@ fn main() {
         ("flowchart", "flowchart LR\n  title FMTITLE\n  A --> B"),
         ("class", "classDiagram\n  title FMTITLE\n  class A"),
         ("gitgraph", "gitGraph\n  title FMTITLE\n  commit"),
-        ("requirement", "requirementDiagram\n  title FMTITLE\n  requirement r {\n    id: 1\n    text: t\n    risk: high\n    verifymethod: test\n  }"),
+        (
+            "requirement",
+            "requirementDiagram\n  title FMTITLE\n  requirement r {\n    id: 1\n    text: t\n    risk: high\n    verifymethod: test\n  }",
+        ),
     ] {
         let parsed = fm_parser::parse(&format!("{body}\n"));
         let svg = fm_render_svg::render_svg(&parsed.ir);

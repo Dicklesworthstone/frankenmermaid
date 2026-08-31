@@ -38,27 +38,62 @@ use std::collections::BTreeMap;
 fn cases() -> Vec<(&'static str, String)> {
     let arrow = "-->";
     vec![
-        ("flowchart node label", "flowchart LR\n  A[\"H#35;1\"]\n".to_string()),
-        ("flowchart edge label", format!("flowchart LR\n  A {arrow}|\"E#35;1\"| B\n")),
-        ("subgraph title", "flowchart LR\n  subgraph \"S#35;1\"\n    A\n  end\n".to_string()),
-        ("front-matter title", "---\ntitle: T#35;1\n---\nflowchart LR\n  A\n".to_string()),
+        (
+            "flowchart node label",
+            "flowchart LR\n  A[\"H#35;1\"]\n".to_string(),
+        ),
+        (
+            "flowchart edge label",
+            format!("flowchart LR\n  A {arrow}|\"E#35;1\"| B\n"),
+        ),
+        (
+            "subgraph title",
+            "flowchart LR\n  subgraph \"S#35;1\"\n    A\n  end\n".to_string(),
+        ),
+        (
+            "front-matter title",
+            "---\ntitle: T#35;1\n---\nflowchart LR\n  A\n".to_string(),
+        ),
         ("class name", "classDiagram\n  class C#35;1\n".to_string()),
-        ("class member", "classDiagram\n  class C {\n    +m#35;1()\n  }\n".to_string()),
-        ("sequence participant", "sequenceDiagram\n  participant P#35;1\n".to_string()),
-        ("sequence message", "sequenceDiagram\n  A->>B: M#35;1\n".to_string()),
-        ("sequence note", "sequenceDiagram\n  participant A\n  Note over A: N#35;1\n".to_string()),
-        ("state description", "stateDiagram-v2\n  s1 : D#35;1\n".to_string()),
+        (
+            "class member",
+            "classDiagram\n  class C {\n    +m#35;1()\n  }\n".to_string(),
+        ),
+        (
+            "sequence participant",
+            "sequenceDiagram\n  participant P#35;1\n".to_string(),
+        ),
+        (
+            "sequence message",
+            "sequenceDiagram\n  A->>B: M#35;1\n".to_string(),
+        ),
+        (
+            "sequence note",
+            "sequenceDiagram\n  participant A\n  Note over A: N#35;1\n".to_string(),
+        ),
+        (
+            "state description",
+            "stateDiagram-v2\n  s1 : D#35;1\n".to_string(),
+        ),
         ("pie slice label", "pie\n  \"P#35;1\" : 10\n".to_string()),
         (
             "gantt task",
-            "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  G#35;1 :a1, 2024-01-01, 1d\n".to_string(),
+            "gantt\n  dateFormat YYYY-MM-DD\n  section S\n  G#35;1 :a1, 2024-01-01, 1d\n"
+                .to_string(),
         ),
         (
             "gantt section",
-            "gantt\n  dateFormat YYYY-MM-DD\n  section S#35;1\n  A :a1, 2024-01-01, 1d\n".to_string(),
+            "gantt\n  dateFormat YYYY-MM-DD\n  section S#35;1\n  A :a1, 2024-01-01, 1d\n"
+                .to_string(),
         ),
-        ("journey task", "journey\n  title J\n  section S\n    T#35;1: 5: Me\n".to_string()),
-        ("er entity", "erDiagram\n  E#35;1 ||--o{ B : has\n".to_string()),
+        (
+            "journey task",
+            "journey\n  title J\n  section S\n    T#35;1: 5: Me\n".to_string(),
+        ),
+        (
+            "er entity",
+            "erDiagram\n  E#35;1 ||--o{ B : has\n".to_string(),
+        ),
         (
             "requirement text",
             "requirementDiagram\n  requirement R {\n  id: 1\n  text: X#35;1\n  risk: low\n  \
@@ -67,10 +102,18 @@ fn cases() -> Vec<(&'static str, String)> {
         ),
         (
             "quadrant point",
-            format!("quadrantChart\n  x-axis L {arrow} H\n  y-axis L {arrow} H\n  P#35;1: [0.3, 0.4]\n"),
+            format!(
+                "quadrantChart\n  x-axis L {arrow} H\n  y-axis L {arrow} H\n  P#35;1: [0.3, 0.4]\n"
+            ),
         ),
-        ("timeline event", "timeline\n  title T\n  2024 : E#35;1\n".to_string()),
-        ("mindmap node", "mindmap\n  root((R))\n    C#35;1\n".to_string()),
+        (
+            "timeline event",
+            "timeline\n  title T\n  2024 : E#35;1\n".to_string(),
+        ),
+        (
+            "mindmap node",
+            "mindmap\n  root((R))\n    C#35;1\n".to_string(),
+        ),
         ("sankey node", "sankey-beta\n\nA#35;1,B,5\n".to_string()),
         ("treemap leaf", "treemap-beta\n\"L#35;1\": 5\n".to_string()),
         (
@@ -78,7 +121,10 @@ fn cases() -> Vec<(&'static str, String)> {
             "xychart-beta\n  title \"X#35;1\"\n  x-axis [a]\n  y-axis \"r\" 0 --> 10\n  bar [5]\n"
                 .to_string(),
         ),
-        ("kanban item", "kanban\n  col1[Col]\n    t1[K#35;1]\n".to_string()),
+        (
+            "kanban item",
+            "kanban\n  col1[Col]\n    t1[K#35;1]\n".to_string(),
+        ),
         ("block label", "block-beta\n  A[\"B#35;1\"]\n".to_string()),
     ]
 }
@@ -180,7 +226,10 @@ fn named_and_numeric_codes_decode_and_a_bare_hash_survives() {
     }
 
     // A `#` that does not open an entity is ordinary text and must survive untouched.
-    let dump = format!("{:?}", fm_parser::parse("flowchart LR\n  A[\"C# and F#\"]\n").ir);
+    let dump = format!(
+        "{:?}",
+        fm_parser::parse("flowchart LR\n  A[\"C# and F#\"]\n").ir
+    );
     assert!(
         dump.contains("C# and F#"),
         "a bare `#` was eaten by the entity decoder: {dump:.200}"
