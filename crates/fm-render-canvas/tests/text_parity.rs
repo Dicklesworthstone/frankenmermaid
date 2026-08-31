@@ -708,20 +708,35 @@ fn a_class_with_only_a_stereotype_shows_it_on_both_the_canvas_and_the_svg() {
     render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
     let texts = drawn_text(&format!("{:?}", context.operations()));
 
-    let stereotype = format!("{}interface{}", "<<", ">>");
-    // The SVG arm escapes ASYMMETRICALLY — `<` becomes `&lt;` but `>` stays bare, which is valid in
-    // XML text content — so the emitted form is `&lt;&lt;interface>>`. Guessing `&gt;&gt;` here
-    // fails, and guessing the unescaped form fails too; this is measured from the actual output.
-    // It is also exactly how a naive scan gets this backwards: splitting the document on '>' reads
-    // that trailing `>>` as a tag close and reports the text as ABSENT, which reads as a defect.
-    let escaped = format!("{}interface{}", "&lt;&lt;", ">>");
+    // ⚠️ THE DRAWN SPELLING IS GUILLEMETS, NOT THE SOURCE'S ANGLE BRACKETS. `<<interface>>` is how
+    // the stereotype is WRITTEN; `«interface»` is what mermaid DRAWS, and db00c405 (bd-1buv) moved
+    // both our backends onto the drawn form. This test was not carried with that change and asserted
+    // the old `&lt;&lt;interface>>` on the SVG arm, so it has been RED on main since 2026-08-28 —
+    // masked, because `cargo test` stops at the first failing target and cluster_styling's stale ER
+    // cardinality assertion was failing ahead of it. Repairing that one surfaced this one.
+    //
+    // The escaping note the old comment carried is still worth keeping, because it is what makes a
+    // naive check here get the wrong answer: the guillemets are non-ASCII and pass through unescaped,
+    // so neither `&lt;` nor `&gt;` appears at all now. Splitting the document on '>' to find text
+    // would still misread a bare `>` as a tag close — the trap recorded on bd-9wdra.
+    let stereotype = format!("{}interface{}", '\u{ab}', '\u{bb}');
     assert!(
-        svg.contains(&escaped),
+        svg.contains(&stereotype),
         "the SVG never emitted the stereotype for a memberless class"
     );
     assert!(
         texts.iter().any(|text| text == &stereotype),
         "the canvas never drew the stereotype for a memberless class; drawn text was {texts:?}"
+    );
+    // ⚠️ AND THE SOURCE SPELLING MUST NOT SURVIVE INTO THE OUTPUT. Asserting only that the drawn
+    // form is present would still pass if a backend emitted BOTH — or regressed to echoing the raw
+    // `<<interface>>` alongside it — which is a different wrong picture, not a missing one.
+    let written = format!("{}interface{}", "<<", ">>");
+    assert!(
+        !svg.contains(&written) && !texts.iter().any(|text| text == &written),
+        "a backend drew the WRITTEN stereotype spelling instead of the drawn one; \
+         svg_has={} canvas_texts={texts:?}",
+        svg.contains(&written)
     );
 
     // The class NAME must survive alongside it — drawing the stereotype in place of the name would
