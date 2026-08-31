@@ -58,6 +58,22 @@ function arg(name, fallback = null) {
 const has = (name) => process.argv.includes(`--${name}`);
 const log = (...a) => console.error('[equiv]', ...a);
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
+// Do not concatenate a whole edit trace merely to hash it. The 1,001-revision trace's SVGs exceed
+// V8's maximum string length even though each revision is individually available for validation.
+function sha256Chunks(chunks) {
+  const hash = createHash('sha256');
+  for (const chunk of chunks) hash.update(chunk, 'utf8');
+  return hash.digest('hex');
+}
+
+if (has('self-test')) {
+  const chunks = ['flowchart LR\n', 'A-->B\n', 'emoji: \u{1F984}\n'];
+  if (sha256Chunks(chunks) !== sha256(chunks.join(''))) {
+    throw new Error('streamed SVG linkage hash differs from concatenated input');
+  }
+  console.log('equivalence hash self-test: PASS');
+  process.exit(0);
+}
 
 function sh(cmd, args) {
   const res = spawnSync(cmd, args, { encoding: 'utf8' });
@@ -369,7 +385,7 @@ for (const item of items) {
     const linkage = {
       fm_revisions_dumped: fmSvgs.length,
       revisions_expected: texts.length,
-      fm_dump_sha256: sha256(fmSvgs.join('')),
+      fm_dump_sha256: sha256Chunks(fmSvgs),
       fm_reported_sha256: fmRecord.output_sha256,
     };
     linkage.counts_match = linkage.fm_revisions_dumped === linkage.revisions_expected;

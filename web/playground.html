@@ -43,10 +43,7 @@
   const logEl = document.getElementById("log");
   const statusEl = document.getElementById("status");
 
-  // This page lives in `web/`, while the shipped wasm-bindgen package is rooted at `pkg/`.
-  // Keep the URL browser-relative: workers receive an absolute URL, so they must not guess a
-  // second package location relative to their own script.
-  const MODULE_URL = new URL("../pkg/frankenmermaid.js", import.meta.url).href;
+  const MODULE_URL = new URL("./pkg/fm_wasm.js", import.meta.url).href;
 
   function log(text, cls) {
     const line = document.createElement("div");
