@@ -145,14 +145,16 @@ fn self_elf_sha256() -> (String, u64) {
     }
 }
 
-/// Return the source revision embedded by the strict-remote benchmark build.
+/// Return the source revision compiled into the strict-remote benchmark build.
 ///
 /// The driver rejects an untagged or malformed revision before it measures either
 /// engine. This closes the stale-ELF gap that an ELF hash alone cannot detect:
 /// the hash proves which executable ran, while this value binds that executable
-/// to the exact source revision the campaign requested.
+/// to the exact source revision present when Cargo built it. The build script obtains
+/// this from the repository itself rather than trusting an environment variable that
+/// an RCH worker may not receive.
 fn build_git_revision() -> Option<&'static str> {
-    option_env!("FM_H2H_BUILD_GIT_REV").filter(|revision| is_git_revision(revision))
+    option_env!("FM_H2H_COMPILED_GIT_REV").filter(|revision| is_git_revision(revision))
 }
 
 /// A 40-character lowercase HEX object name, which is what git actually produces.
@@ -2246,6 +2248,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Arc;
 
     use fm_parser::parse;
@@ -2261,11 +2264,26 @@ mod tests {
 
     #[test]
     fn benchmark_binary_revision_rejects_malformed_build_stamps() {
-        assert_eq!(build_git_revision(), option_env!("FM_H2H_BUILD_GIT_REV"));
+        assert_eq!(
+            build_git_revision(),
+            option_env!("FM_H2H_COMPILED_GIT_REV").filter(|revision| is_git_revision(revision))
+        );
+        assert!(build_git_revision().is_some());
         assert!(is_git_revision(&"a".repeat(40)));
         assert!(!is_git_revision("a"));
         assert!(!is_git_revision(&"A".repeat(40)));
         assert!(!is_git_revision(&"z".repeat(40)));
+    }
+
+    #[test]
+    fn benchmark_binary_revision_matches_the_source_compiled_by_cargo() {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("the head-to-head benchmark is compiled from a Git checkout");
+        assert!(output.status.success());
+        let revision = String::from_utf8(output.stdout).expect("Git revisions are UTF-8");
+        assert_eq!(build_git_revision(), Some(revision.trim()));
     }
     /// Right-skewed sizes, the shape every realistic documentation corpus has.
     fn skewed_inputs(count: usize) -> Vec<String> {
