@@ -40,7 +40,7 @@ use std::sync::Arc;
 use web_time::Instant;
 
 use fm_core::{
-    ArchitectureSide, C4RelationshipDirection, DiagramType, FxHashMap, FxHashSet, GanttDate,
+    ArchitectureSide, DiagramType, FxHashMap, FxHashSet, GanttDate,
     GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrGanttMeta,
     IrNode, IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig,
     MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
@@ -3864,13 +3864,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
-        LayoutAlgorithm::Architecture => {
-            if c4_declares_forced_relationship_direction(ir) {
-                layout_diagram_c4_directional_traced(ir)
-            } else {
-                layout_diagram_architecture_traced(ir)
-            }
-        }
+        LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
         LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
         LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
     };
@@ -4601,15 +4595,6 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::ArchitectureBeta if selected == LayoutAlgorithm::Architecture => {
             return "auto_diagram_type_architecture";
         }
-        DiagramType::C4Context
-        | DiagramType::C4Container
-        | DiagramType::C4Component
-        | DiagramType::C4Dynamic
-        | DiagramType::C4Deployment
-            if selected == LayoutAlgorithm::Architecture =>
-        {
-            return "auto_c4_forced_relationship_direction";
-        }
         DiagramType::Sequence => return "auto_diagram_type_sequence",
         _ => {}
     }
@@ -4653,15 +4638,6 @@ fn preferred_layout_algorithm_with_config(
         // this here rather than inside the algorithm keeps the dispatch trace honest — the
         // recorded `selected` is the algorithm that actually ran.
         DiagramType::ArchitectureBeta if architecture_declares_a_side(ir) => {
-            LayoutAlgorithm::Architecture
-        }
-        DiagramType::C4Context
-        | DiagramType::C4Container
-        | DiagramType::C4Component
-        | DiagramType::C4Dynamic
-        | DiagramType::C4Deployment
-            if c4_declares_forced_relationship_direction(ir) =>
-        {
             LayoutAlgorithm::Architecture
         }
         _ => return select_general_graph_algorithm_with_config(ir, config),
@@ -4887,15 +4863,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Quadrant => matches!(diagram_type, DiagramType::QuadrantChart),
         LayoutAlgorithm::GitGraph => matches!(diagram_type, DiagramType::GitGraph),
         LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
-        LayoutAlgorithm::Architecture => matches!(
-            diagram_type,
-            DiagramType::ArchitectureBeta
-                | DiagramType::C4Context
-                | DiagramType::C4Container
-                | DiagramType::C4Component
-                | DiagramType::C4Dynamic
-                | DiagramType::C4Deployment
-        ),
+        LayoutAlgorithm::Architecture => matches!(diagram_type, DiagramType::ArchitectureBeta),
         LayoutAlgorithm::Treemap => matches!(diagram_type, DiagramType::Treemap),
         LayoutAlgorithm::Radar => matches!(diagram_type, DiagramType::Radar),
     }
@@ -9876,11 +9844,6 @@ fn architecture_declares_a_side(ir: &MermaidDiagramIr) -> bool {
         .any(|edge| edge.source_side().is_some() || edge.target_side().is_some())
 }
 
-/// Does any C4 edge request a directional relationship placement?
-fn c4_declares_forced_relationship_direction(ir: &MermaidDiagramIr) -> bool {
-    ir.edges.iter().any(|edge| edge.c4_direction().is_some())
-}
-
 /// One grid step for a declared side. Screen coordinates put +y DOWN, so `T` is negative.
 const fn architecture_side_step(side: ArchitectureSide) -> (i32, i32) {
     match side {
@@ -9901,21 +9864,6 @@ fn architecture_edge_step(edge: &fm_core::IrEdge) -> Option<(i32, i32)> {
     edge.source_side()
         .or_else(|| edge.target_side().map(ArchitectureSide::opposite))
         .map(architecture_side_step)
-}
-
-/// One grid step for a C4 directional relationship. Screen coordinates put +y DOWN, so `Up` is
-/// negative. Unlike architecture sides this is always stated from the source toward the target.
-const fn c4_relationship_step(direction: C4RelationshipDirection) -> (i32, i32) {
-    match direction {
-        C4RelationshipDirection::Up => (0, -1),
-        C4RelationshipDirection::Down => (0, 1),
-        C4RelationshipDirection::Left => (-1, 0),
-        C4RelationshipDirection::Right => (1, 0),
-    }
-}
-
-fn c4_relationship_edge_step(edge: &fm_core::IrEdge) -> Option<(i32, i32)> {
-    edge.c4_direction().map(c4_relationship_step)
 }
 
 /// Claim a grid cell for `node`, fanning out if the wanted cell is already taken.
@@ -10310,14 +10258,6 @@ fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// The cell-placement engine is shared with architecture-beta because both grammars state the
 /// same discrete relation: where the target must sit relative to the source. The C4 relationship
 /// direction is stored separately in the IR so a plain `Rel` cannot accidentally acquire one.
-fn layout_diagram_c4_directional_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_directed_grid_traced(
-        ir,
-        c4_relationship_edge_step,
-        "c4_relationship_direction_placement",
-    )
-}
-
 /// Lay out nodes on a deterministic grid whose selected edges specify one source-to-target step.
 fn layout_diagram_directed_grid_traced(
     ir: &MermaidDiagramIr,
