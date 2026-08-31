@@ -5,16 +5,21 @@ final class HTMLShareUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        let diagram = app.buttons.matching(
-            NSPredicate(format: "label ==[c] %@", "diagram")
-        ).firstMatch
+        // Follow the same explicit render path a compact-width user takes. Tapping the
+        // segmented control alone can race SwiftUI's initial renderer publication and
+        // leave the Code lane selected; View Diagram owns both operations atomically.
+        let diagram = app.buttons["View Diagram"]
         XCTAssertTrue(diagram.waitForExistence(timeout: 8))
+        XCTAssertTrue(diagram.isHittable)
         diagram.tap()
 
-        let share = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", "share")
-        ).firstMatch
+        let share = app.buttons["Share"]
         XCTAssertTrue(share.waitForExistence(timeout: 12))
+        let shareIsReady = expectation(
+            for: NSPredicate(format: "isEnabled == YES AND isHittable == YES"),
+            evaluatedWith: share
+        )
+        wait(for: [shareIsReady], timeout: 12)
         share.tap()
 
         let animatedPage = app.buttons.matching(
