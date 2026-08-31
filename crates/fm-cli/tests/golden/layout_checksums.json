@@ -231,6 +231,16 @@
       "node_count": 6,
       "nodes_checksum": "c2fa745194a0b39a"
     },
+    "info_basic": {
+      "edge_count": 0,
+      "edges_checksum": "cbf29ce484222325",
+      "layout_algorithm": "auto",
+      "layout_checksum": "af617ed0c68a8096",
+      "layout_height": 0.0,
+      "layout_width": 0.0,
+      "node_count": 0,
+      "nodes_checksum": "cbf29ce484222325"
+    },
     "journey_basic": {
       "edge_count": 6,
       "edges_checksum": "cbe1f0861d4a426a",
@@ -300,6 +310,16 @@
       "layout_width": 471.825012,
       "node_count": 3,
       "nodes_checksum": "1e6ae3b629d918e6"
+    },
+    "radar_basic": {
+      "edge_count": 0,
+      "edges_checksum": "cbf29ce484222325",
+      "layout_algorithm": "auto",
+      "layout_checksum": "4bba9b0d14deeef8",
+      "layout_height": 700.0,
+      "layout_width": 700.0,
+      "node_count": 0,
+      "nodes_checksum": "cbf29ce484222325"
     },
     "requirement_basic": {
       "edge_count": 2,
@@ -390,6 +410,16 @@
       "layout_width": 674.324951,
       "node_count": 7,
       "nodes_checksum": "e5b096c2b47f1619"
+    },
+    "treemap_basic": {
+      "edge_count": 0,
+      "edges_checksum": "cbf29ce484222325",
+      "layout_algorithm": "auto",
+      "layout_checksum": "a0de99c498dbb6fd",
+      "layout_height": 400.0,
+      "layout_width": 1000.0,
+      "node_count": 0,
+      "nodes_checksum": "cbf29ce484222325"
     },
     "xychart_basic": {
       "edge_count": 0,
