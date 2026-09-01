@@ -261,7 +261,15 @@ const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
  * renderer's actual attachment surface while other node shapes retain the conservative
  * centre-distance fallback.
  */
-function anchorDistance(point, anchor) {
+/**
+ * Exported for diagnosis, not for use by the checker's callers. When a row is reported
+ * `ambiguous(unresolved=N)` the count says how many endpoints refused, never WHICH ones or how
+ * close they were, and bd-h6csf sat on exactly that question. With this and `ADAPTERS` reachable, a
+ * probe can rank every anchor by distance and print the margin (`bestD / secondD` against the 0.75
+ * refusal threshold), which is the difference between "it resolves now" and "it resolves now by a
+ * factor of 11,000".
+ */
+export function anchorDistance(point, anchor) {
   if (Array.isArray(anchor)) return distance(point, anchor);
   const { center, bounds } = anchor;
   if (!bounds) return distance(point, center);
@@ -540,7 +548,7 @@ function shapeAnchor(subtree) {
   return null;
 }
 
-const ADAPTERS = { 'mermaid-js': mermaidStructure, frankenmermaid: frankenStructure };
+export const ADAPTERS = { 'mermaid-js': mermaidStructure, frankenmermaid: frankenStructure };
 
 /** Collapse each engine's own pseudo-node name so a shared topology can be stated. */
 const pseudo = (id) => (isSyntheticNode(id) ? '#pseudo' : id);
