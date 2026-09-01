@@ -190,10 +190,11 @@ fn the_line_type_matches_the_incumbent() {
 /// test that instead listed `("o..", Aggregation)` would pass by construction against the very
 /// table it is meant to check.
 ///
-/// ⚠️ SPELLINGS MARKED AT BOTH ENDS ARE EXCLUDED, AND THAT EXCLUSION IS THE RECORDED LOSS. There is
-/// no `ArrowType` naming a PAIR of ends, so `o--*` cannot be expressed at all — see
-/// `class_relation_arrow`. This test holds the line on what is expressible; the pair is a separate
-/// bead, and the exclusion is written here so it stays visible rather than becoming folklore.
+/// ⚠️ SPELLINGS MARKED AT BOTH ENDS ARE INCLUDED NOW (bd-f9t0r). They used to be skipped, because
+/// `ArrowType` names an edge rather than a pair of ends and `o--*` could not be expressed at all.
+/// The second marker is now carried beside the primary as `IrEdgeExtras::co_arrow` — the
+/// `ArrowType` that already draws that marker on that end — so a both-ends spelling has a
+/// source-end marker to check like any other, and the exclusion is gone rather than reworded.
 #[test]
 fn a_single_ended_relation_keeps_its_marker_and_its_end() {
     let reference = |type1: Option<u8>, type2: Option<u8>| -> Option<String> {
@@ -221,11 +222,15 @@ fn a_single_ended_relation_keeps_its_marker_and_its_end() {
 
     let mut bad = Vec::new();
     for row in rows() {
-        // Both ends marked: not expressible, excluded by design (see the doc comment).
-        if row.type1.is_some() && row.type2.is_some() {
-            continue;
-        }
-        let Some(canonical) = reference(row.type1, row.type2) else {
+        // The SOURCE-end marker is the primary `ArrowType` whether or not the target end is marked
+        // too, so a both-ends row is compared against the canonical spelling carrying the same
+        // start marker and no end marker.
+        let canonical_type2 = if row.type1.is_some() {
+            None
+        } else {
+            row.type2
+        };
+        let Some(canonical) = reference(row.type1, canonical_type2) else {
             continue;
         };
         if canonical == row.op {
@@ -362,5 +367,46 @@ fn a_trailing_o_in_a_class_name_is_not_an_aggregation_marker() {
     assert!(
         ids.contains(&"Foo") && ids.contains(&"Bar"),
         "`Foo-- Bar` split inside the identifier: {ids:?}"
+    );
+}
+
+/// ⚠️ AND THE FAR MARKER MUST ACTUALLY ARRIVE (bd-f9t0r). Every test above reads the PRIMARY
+/// `ArrowType`, which carries the source-end marker — so all of them passed while a both-ends
+/// relation silently drew one marker and dropped the other. That is the defect this file's earlier
+/// exclusion was recording, and only `co_arrow` can see it.
+///
+/// Driven by the fixture's own `type2` column, so the expectation is the incumbent's answer rather
+/// than a list written here: every spelling mermaid reports with BOTH ends marked must carry a
+/// co-arrow, and every spelling it reports with at most one must not.
+#[test]
+fn a_relation_marked_at_both_ends_carries_its_far_marker() {
+    let mut missing = Vec::new();
+    let mut spurious = Vec::new();
+    for row in rows() {
+        let source = format!("classDiagram\n  Alpha {} Beta\n", row.op);
+        let ir = fm_parser::parse(&source).ir;
+        let e = ir
+            .edges
+            .first()
+            .unwrap_or_else(|| panic!("`{}` produced NO EDGE at all", row.op));
+        let both_ends = row.type1.is_some() && row.type2.is_some();
+        // The start-side DEPENDENCY spellings are the documented exception: they map onto the
+        // forward `Arrow`/`DottedArrow` and rely on the endpoints being SWAPPED, so there is no
+        // reverse variant to pair against them — see `class_relation_co_arrow`.
+        let swaps = row.type1 == Some(3);
+        match (both_ends && !swaps, e.co_arrow()) {
+            (true, None) => missing.push(format!("  {:<8} type1={:?} type2={:?}", row.op, row.type1, row.type2)),
+            (false, Some(co)) => spurious.push(format!("  {:<8} unexpected co_arrow {co:?}", row.op)),
+            _ => {}
+        }
+    }
+    assert!(
+        missing.is_empty() && spurious.is_empty(),
+        "{} both-ends spelling(s) lost their far marker:\n{}\n{} spelling(s) gained one they \
+         should not have:\n{}",
+        missing.len(),
+        missing.join("\n"),
+        spurious.len(),
+        spurious.join("\n")
     );
 }

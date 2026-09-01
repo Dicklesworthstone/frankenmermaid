@@ -2131,7 +2131,16 @@ impl Canvas2dRenderer {
             let uml_markers = if edge_path.reversed {
                 None
             } else {
-                legacy_uml_markers(arrow)
+                // A RELATION MARKED AT BOTH ENDS is two `ArrowType`s, not one (bd-f9t0r): the
+                // primary carries the source-end marker and `co_arrow` the target-end one, each
+                // named by the `ArrowType` that already draws it there. So the SAME derivation runs
+                // twice and the results merge — no second marker table to drift out of sync with
+                // this one.
+                let primary = legacy_uml_markers(arrow);
+                let co = ir_edge
+                    .and_then(fm_core::IrEdge::co_arrow)
+                    .and_then(legacy_uml_markers);
+                merge_uml_markers(primary, co)
             };
             if let Some((marker_start, marker_end)) = uml_markers {
                 let start = &points[0];
@@ -4029,6 +4038,27 @@ pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, 
         ArrowType::ThickArrow => (2.5, &[]),
         ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),
         _ => (default_width, &[]),
+    }
+}
+
+/// Combine a primary marker pair with a co-arrow's, each contributing only the end it marks.
+///
+/// ⚠️ THE CO-ARROW FILLS AN EMPTY SLOT, IT NEVER OVERWRITES ONE. A co-arrow is the `*Reverse`
+/// (target-end) counterpart of a forward primary, so its start slot is always `None` and the
+/// primary's end slot always is too; taking the co-arrow's value unconditionally would work today
+/// and collapse both markers onto one end the moment that stopped holding. Preferring the
+/// already-set slot states the invariant instead of relying on it.
+const fn merge_uml_markers(
+    primary: Option<(MarkerKind, MarkerKind)>,
+    co: Option<(MarkerKind, MarkerKind)>,
+) -> Option<(MarkerKind, MarkerKind)> {
+    match (primary, co) {
+        (Some((ps, pe)), Some((cs, ce))) => Some((
+            if matches!(ps, MarkerKind::None) { cs } else { ps },
+            if matches!(pe, MarkerKind::None) { ce } else { pe },
+        )),
+        (Some(pair), None) | (None, Some(pair)) => Some(pair),
+        (None, None) => None,
     }
 }
 

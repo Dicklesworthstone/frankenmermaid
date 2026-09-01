@@ -2999,6 +2999,28 @@ pub struct IrEdgeExtras {
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Box<str>>,
+    /// A SECOND marker, for an edge whose two ends are marked differently (bd-f9t0r).
+    ///
+    /// ⚠️ AN `ArrowType`, NOT A NEW MARKER VOCABULARY, AND THAT IS THE WHOLE POINT. mermaid's class
+    /// relation is a product — `[relationType] lineType [relationType]` — so `Alpha o--* Beta` wants an
+    /// aggregation diamond at the SOURCE and a composition diamond at the TARGET. `ArrowType` names
+    /// an edge, not a pair of ends, and the product has 25 marked-at-both-ends spellings; naming
+    /// them as variants would mean 25 new arms in this enum's `as_str`, in fm-layout, in a11y and in
+    /// all three renderers, every one of which is a separate forked mapping.
+    ///
+    /// So the second marker is carried as the `ArrowType` that ALREADY draws it on the right end:
+    /// `o--*` is `arrow = Aggregation` (diamond-open at the start) plus
+    /// `co_arrow = CompositionReverse` (diamond at the end). Every consumer already derives a
+    /// `(marker_start, marker_end)` PAIR from an `ArrowType` and leaves one slot empty — so each
+    /// applies that same derivation a second time and merges the slot the co-arrow fills. No
+    /// consumer learns a new marker, and a `None` co-arrow is byte-identical to before.
+    ///
+    /// ⚠️ IT CONTRIBUTES ONLY ITS OWN SLOT. A co-arrow is always a `*Reverse` variant (target end)
+    /// paired with a forward `arrow` (source end); a merge that overwrote the primary's slot instead
+    /// of filling the empty one would collapse both markers onto a single end — which is exactly the
+    /// picture this field exists to stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub co_arrow: Option<ArrowType>,
     /// The speed an `edgeId@{ animate: … }` statement asked this edge to march at (bd-euyt4).
     ///
     /// `None` on every edge that did not opt in, which is nearly all of them — the reason this
@@ -3204,6 +3226,15 @@ impl IrEdge {
         self.extras.as_ref().and_then(|e| e.c4_direction)
     }
     /// Mutable access to the diagram-specific extras, allocating the box on first use.
+    /// The second marker on an edge marked at both ends, if any (bd-f9t0r).
+    ///
+    /// `None` on every edge with at most one marked end, which is nearly all of them — see
+    /// [`IrEdgeExtras::co_arrow`] for why it is an `ArrowType` rather than a marker kind.
+    #[must_use]
+    pub fn co_arrow(&self) -> Option<ArrowType> {
+        self.extras.as_ref().and_then(|e| e.co_arrow)
+    }
+
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
         self.extras
             .get_or_insert_with(|| Box::new(IrEdgeExtras::default()))

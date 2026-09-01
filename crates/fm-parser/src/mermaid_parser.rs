@@ -484,6 +484,9 @@ enum ClassStatement {
     /// An inline style for the most recently created edge — currently only the dashed line that
     /// makes a UML REALIZATION distinguishable from an inheritance (bd-u9hcc).
     EdgeInlineStyle(&'static str),
+    /// The SECOND marker for a relation marked at both ends (bd-f9t0r), carried as the `ArrowType`
+    /// that already draws that marker on that end — see `fm_core::IrEdgeExtras::co_arrow`.
+    EdgeCoArrow(fm_core::ArrowType),
     /// `note for <class> "<text>"` — target name and note text (bd-1fw3).
     Note(String, String),
     End,
@@ -5381,6 +5384,19 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
                 if is_dashed_relation {
                     statements.push(ClassStatement::EdgeInlineStyle("stroke-dasharray:5"));
                 }
+                // BOTH ENDS MARKED: the primary `ArrowType` carries the source-end marker and this
+                // carries the target-end one (bd-f9t0r). `class_relation_co_arrow` returns `None`
+                // for every relation with at most one marked end, which is all of the eighteen
+                // spellings the old table could name — so this is inert on everything that already
+                // worked.
+                //
+                // ⚠️ AFTER THE SWAP, DELIBERATELY. `reversed_dependency` exchanges the endpoints for
+                // the start-side dependency spellings, and a co-arrow names an END rather than a
+                // class, so it must be computed against the token and attached to the edge as it
+                // finally points — not swapped along with the cardinalities.
+                if let Some(co_arrow) = class_operator.and_then(class_relation_co_arrow) {
+                    statements.push(ClassStatement::EdgeCoArrow(co_arrow));
+                }
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
                 // only when at least one cardinality was extracted, so no is_some() re-check.
                 if let Some((_, source_card, target_card)) = &stripped {
@@ -5569,6 +5585,9 @@ fn lower_class_statement(
         }
         ClassStatement::EdgeInlineStyle(style) => {
             builder.set_last_edge_inline_style(style);
+        }
+        ClassStatement::EdgeCoArrow(co_arrow) => {
+            builder.set_last_edge_co_arrow(co_arrow);
         }
         ClassStatement::Note(target, text) => {
             // Deliberately does NOT intern the target, unlike the state-diagram note path. A note
@@ -12996,6 +13015,39 @@ fn class_relation_is_dashed(token: &str) -> bool {
             class_relation_arrow(start, end, dotted),
             ArrowType::DottedArrow | ArrowType::DottedLine
         )
+}
+
+/// The SECOND marker for a relation marked at BOTH ends, as the `ArrowType` that draws it there.
+///
+/// `None` unless both ends carry a marker, so every single-ended spelling is unaffected. When both
+/// do, `class_relation_arrow` keeps the SOURCE-end marker as the primary `ArrowType` and this
+/// returns the TARGET-end one as its `*Reverse` counterpart — `o--*` gives
+/// `(Aggregation, CompositionReverse)`, which the renderers merge into one diamond-open at the start
+/// and one diamond at the end.
+///
+/// ⚠️ THE DEPENDENCY PAIR IS THE ONE THAT CANNOT BE EXPRESSED THIS WAY. A start-side dependency
+/// makes `class_relation_arrow` return the FORWARD `Arrow`/`DottedArrow` and relies on the lowering
+/// site SWAPPING the endpoints to put the head at the source; there is no reverse variant to pair
+/// against it, and emitting one would draw both heads on the same end after the swap. So a
+/// dependency start keeps its swap and takes no co-arrow, and `class_relation_is_reversed` is
+/// already restricted to `(Dependency, None)` for the same reason.
+fn class_relation_co_arrow(token: &str) -> Option<ArrowType> {
+    let (start, end, dotted) = class_relation_parts(token)?;
+    let (Some(_), Some(end)) = (start, end) else {
+        return None;
+    };
+    if matches!(start, Some(ClassMarker::Dependency)) {
+        return None;
+    }
+    Some(match end {
+        ClassMarker::Aggregation => ArrowType::AggregationReverse,
+        ClassMarker::Composition => ArrowType::CompositionReverse,
+        ClassMarker::Extension => ArrowType::InheritanceReverse,
+        ClassMarker::Lollipop => ArrowType::LollipopReverse,
+        // A target-side dependency is an arrowhead at the end, which is what the forward
+        // `Arrow`/`DottedArrow` already draws — no swap involved, so it pairs cleanly.
+        ClassMarker::Dependency => dotted_or(dotted, ArrowType::DottedArrow, ArrowType::Arrow),
+    })
 }
 
 /// Does this relation put its head on the SOURCE end, so the endpoints must swap?

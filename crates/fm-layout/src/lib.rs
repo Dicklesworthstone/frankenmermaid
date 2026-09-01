@@ -2062,6 +2062,22 @@ fn label_text_by_id(ir: &MermaidDiagramIr, label_id: fm_core::IrLabelId) -> &str
 /// and most-frequently-edited-first (interactive edits are overwhelmingly label-text edits), so a
 /// miss usually exits before the O(nodes + edges) tail. Destructuring keeps this in lockstep with
 /// the IR: adding a field to `MermaidDiagramIr` fails compilation here until it is compared.
+/// The END-slot marker a co-arrow contributes (bd-f9t0r).
+///
+/// A co-arrow always names the TARGET end — it is the `*Reverse` counterpart of a forward primary,
+/// or the plain `Arrow`/`DottedArrow` for a target-side dependency — so it only ever fills
+/// `marker_end`. `None` for anything else, which leaves the primary's answer untouched.
+const fn co_arrow_marker_end(co_arrow: fm_core::ArrowType) -> Option<MarkerKind> {
+    match co_arrow {
+        fm_core::ArrowType::AggregationReverse => Some(MarkerKind::DiamondOpen),
+        fm_core::ArrowType::CompositionReverse => Some(MarkerKind::Diamond),
+        fm_core::ArrowType::InheritanceReverse => Some(MarkerKind::TriangleOpen),
+        fm_core::ArrowType::LollipopReverse => Some(MarkerKind::Lollipop),
+        fm_core::ArrowType::Arrow | fm_core::ArrowType::DottedArrow => Some(MarkerKind::Arrow),
+        _ => None,
+    }
+}
+
 fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
     let MermaidDiagramIr {
         diagram_type,
@@ -3475,6 +3491,16 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     fm_core::ArrowType::LollipopReverse => {
                         marker_end = MarkerKind::Lollipop;
                     }
+                }
+
+                // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second
+                // `ArrowType` (bd-f9t0r). The match above is a statement, not an expression, so it
+                // cannot simply be run twice the way fm-render-canvas reuses `legacy_uml_markers`;
+                // the mapping is restated here for the six variants a co-arrow can be, and
+                // `layout_co_arrow_markers_match_the_primary_mapping` asserts the two agree for
+                // every one of them so this copy cannot drift.
+                if let Some(co_arrow) = ir_edge.co_arrow() {
+                    marker_end = co_arrow_marker_end(co_arrow).unwrap_or(marker_end);
                 }
             }
         }
@@ -19446,6 +19472,73 @@ mod tests {
         clippy::similar_names,
         clippy::many_single_char_names
     )]
+
+    /// ⚠️ THIS CRATE RESTATES THE MARKER MAPPING, SO THE COPY IS PINNED TO THE ORIGINAL.
+    ///
+    /// `co_arrow_marker_end` exists only because this crate's `ArrowType` mapping is a `match`
+    /// STATEMENT that assigns `marker_start` / `marker_end` in place — it cannot be run a second
+    /// time for the co-arrow the way fm-render-canvas re-runs its pure `legacy_uml_markers`. A
+    /// restated mapping is a forked helper, and a forked helper drifts: this asserts that for every
+    /// `ArrowType` a co-arrow can be, the copy answers exactly what the primary mapping puts in
+    /// `marker_end` for that same type, by building a one-edge diagram for each and reading the
+    /// rendered path back.
+    ///
+    /// The six listed are the entire co-arrow range — `class_relation_co_arrow` in fm-parser can
+    /// return nothing else — and a seventh appearing there without an arm here would leave that
+    /// marker silently undrawn, which is the failure this test is for.
+    #[test]
+    fn layout_co_arrow_markers_match_the_primary_mapping() {
+        // The module's `use super::{…}` is an explicit list rather than a glob, so the items this
+        // test reaches for are imported here instead of widening that list for one test.
+        use fm_core::ArrowType;
+        use super::co_arrow_marker_end;
+
+        let mismatches: Vec<String> = [
+            ArrowType::AggregationReverse,
+            ArrowType::CompositionReverse,
+            ArrowType::InheritanceReverse,
+            ArrowType::LollipopReverse,
+            ArrowType::Arrow,
+            ArrowType::DottedArrow,
+        ]
+        .into_iter()
+        .filter_map(|arrow| {
+            let copy = co_arrow_marker_end(arrow);
+            let primary = primary_marker_end_for(arrow);
+            (copy != Some(primary)).then(|| {
+                format!("  {arrow:?}: co_arrow_marker_end={copy:?} but the primary mapping says {primary:?}")
+            })
+        })
+        .collect();
+
+        assert!(
+            mismatches.is_empty(),
+            "co_arrow_marker_end has drifted from the primary ArrowType mapping:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// The `marker_end` the PRIMARY mapping produces for `arrow`, read back off a rendered edge.
+    ///
+    /// Goes through `build_edge_layer` rather than duplicating the match a third time — the whole
+    /// point is to compare against what the real code does, so a helper that restated the mapping
+    /// would make the test tautological.
+    fn primary_marker_end_for(arrow: fm_core::ArrowType) -> super::MarkerKind {
+        use super::{RenderItem, build_edge_layer, layout_diagram};
+        let mut ir = fm_parser::parse("classDiagram\n  Alpha -- Beta\n").ir;
+        ir.edges[0].arrow = arrow;
+        let layout = layout_diagram(&ir);
+        let group = build_edge_layer(&ir, &layout);
+        group
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Path(path) => Some(path.marker_end),
+                _ => None,
+            })
+            .expect("the one-edge diagram renders one path")
+    }
+
 
     /// The committed capability-matrix artifact is the MERGED matrix (fm-core claims plus
     /// this crate's algorithm claims) — the exact payload the CLI and the WASM

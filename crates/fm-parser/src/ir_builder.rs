@@ -2599,6 +2599,21 @@ impl IrBuilder {
     /// MERGES rather than replaces, because an edge can already carry a style from another channel
     /// and silently discarding it would be the same class of drop this bead is about. Later keys
     /// win, which is what a CSS declaration block already means.
+    /// Attach a SECOND marker to the edge just pushed (bd-f9t0r).
+    ///
+    /// Mirrors [`Self::set_last_edge_inline_style`] exactly, including the reusable-prefix dirty
+    /// mark: an edge whose co-arrow changed is not interchangeable with the cached one, and
+    /// skipping that mark is how an incremental reparse serves a stale edge.
+    pub(crate) fn set_last_edge_co_arrow(&mut self, co_arrow: fm_core::ArrowType) {
+        let Some(edge_index) = self.ir.edges.len().checked_sub(1) else {
+            return;
+        };
+        self.mark_reusable_prefix_edge_dirty(edge_index);
+        if let Some(edge) = self.ir.edges.get_mut(edge_index) {
+            edge.extras_mut().co_arrow = Some(co_arrow);
+        }
+    }
+
     pub(crate) fn set_last_edge_inline_style(&mut self, style: &str) {
         let parsed = fm_core::parse_style_string(style);
         if parsed.properties.is_empty() {

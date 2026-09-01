@@ -948,7 +948,19 @@ impl TermRenderer {
             self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, edge_path.reversed, arrow);
         }
 
-        let (marker_at_start, marker_at_end) = edge_marker_ends(arrow);
+        // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second `ArrowType`
+        // (bd-f9t0r), so the SAME `edge_marker_ends` mapping decides that end too and the two
+        // answers are OR-ed. Reusing the mapping rather than restating it is what keeps the
+        // terminal's idea of "which end is marked" from drifting away from SVG's and canvas's.
+        let co_arrow = ir
+            .edges
+            .get(edge_path.edge_index)
+            .and_then(fm_core::IrEdge::co_arrow);
+        let (marker_at_start, marker_at_end) = {
+            let (start, end) = edge_marker_ends(arrow);
+            let (co_start, co_end) = co_arrow.map_or((false, false), edge_marker_ends);
+            (start || co_start, end || co_end)
+        };
 
         // The operator determines the semantic endpoint. In particular, UML ownership and
         // inheritance operators place their marker at the source for `o--`, `*--`, and `<|--`,
