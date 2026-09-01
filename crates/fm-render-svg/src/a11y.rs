@@ -167,6 +167,7 @@ fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
                 Some(from),
                 Some(to),
                 edge.arrow,
+                edge.co_arrow(),
                 edge.label
                     .and_then(|label_id| ir.labels.get(label_id.0))
                     .map(|label| label.text.as_str()),
@@ -316,11 +317,15 @@ pub fn journey_step_description_suffix(node: &IrNode) -> String {
 }
 
 /// Generate a text alternative for an edge.
+///
+/// `co_arrow` carries the far-end marker of a relation marked at BOTH ends; pass
+/// `edge.co_arrow()`. Passing `None` for an edge that has one draws a marker nobody is told about.
 #[must_use]
 pub fn describe_edge(
     from_node: Option<&IrNode>,
     to_node: Option<&IrNode>,
     arrow_type: fm_core::ArrowType,
+    co_arrow: Option<fm_core::ArrowType>,
     label: Option<&str>,
     ir: &MermaidDiagramIr,
 ) -> String {
@@ -342,7 +347,7 @@ pub fn describe_edge(
         .or_else(|| to_node.map(|n| n.id.as_str()))
         .unwrap_or("unknown");
 
-    describe_edge_labels(Some(from_label), Some(to_label), arrow_type, label)
+    describe_edge_labels(Some(from_label), Some(to_label), arrow_type, co_arrow, label)
 }
 
 pub(crate) fn accessible_node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> &'a str {
@@ -352,15 +357,15 @@ pub(crate) fn accessible_node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagram
         .unwrap_or(&node.id)
 }
 
-pub(crate) fn describe_edge_labels(
-    from_label: Option<&str>,
-    to_label: Option<&str>,
-    arrow_type: ArrowType,
-    label: Option<&str>,
-) -> String {
-    let from_label = from_label.unwrap_or("unknown");
-    let to_label = to_label.unwrap_or("unknown");
-    let arrow_desc = match arrow_type {
+/// The verb phrase one `ArrowType` contributes, owner-first.
+///
+/// Extracted so the FAR end of a relation marked at both ends is described with the same words the
+/// near end would have used had that marker been on it (bd-f9t0r). A second table would be a second
+/// thing to drift: this crate has already shipped a `<desc>` saying "connects to" while the
+/// `<title>` said "is inherited by", because a catch-all silently swallowed the UML phrases
+/// (bd-92b6, bd-lkm9i).
+fn arrow_phrase(arrow_type: ArrowType) -> &'static str {
+    match arrow_type {
         ArrowType::Arrow => "points to",
         ArrowType::ThickArrow => "strongly points to",
         ArrowType::DottedArrow => "optionally points to",
@@ -388,12 +393,46 @@ pub(crate) fn describe_edge_labels(
         ArrowType::Lollipop => "provides",
         ArrowType::LollipopReverse => "is provided by",
         _ => "connects to",
-    };
+    }
+}
 
-    if let Some(label_text) = label {
-        format!("{from_label} {arrow_desc} {to_label} with label: {label_text}")
-    } else {
-        format!("{from_label} {arrow_desc} {to_label}")
+/// Describe one edge, naming BOTH ends when the relation is marked at both (bd-f9t0r).
+///
+/// `co_arrow` is the second marker an `o--*`-style class relation carries -- the `ArrowType` that
+/// already draws that marker on that end. The two phrases share a subject and an object, so they
+/// join with "and" and no new vocabulary is needed: `Alpha o--* Beta` reads "Alpha aggregates and
+/// composes Beta". Without this the far diamond is drawn and never spoken, so the picture and the
+/// accessible text state different relationships.
+///
+/// When `co_arrow` is `None` the output is byte-identical to what this produced before, which is
+/// what lets the golden SVGs and the fragment writers' byte-identity tests stay untouched.
+pub(crate) fn describe_edge_labels(
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+    arrow_type: ArrowType,
+    co_arrow: Option<ArrowType>,
+    label: Option<&str>,
+) -> String {
+    let from_label = from_label.unwrap_or("unknown");
+    let to_label = to_label.unwrap_or("unknown");
+    let arrow_desc = arrow_phrase(arrow_type);
+    // Deduplicated on the PHRASE rather than the variant: two different `ArrowType`s could map to
+    // the same words through the `_ => "connects to"` catch-all, and "connects to and connects to"
+    // is worse than saying it once. No spelling in the fixture reaches that today; this is here so
+    // that if one ever does, it degrades to the single-ended phrase instead of stuttering.
+    let co_desc = co_arrow
+        .map(arrow_phrase)
+        .filter(|co_desc| *co_desc != arrow_desc);
+
+    match (co_desc, label) {
+        (None, None) => format!("{from_label} {arrow_desc} {to_label}"),
+        (None, Some(label_text)) => {
+            format!("{from_label} {arrow_desc} {to_label} with label: {label_text}")
+        }
+        (Some(co_desc), None) => format!("{from_label} {arrow_desc} and {co_desc} {to_label}"),
+        (Some(co_desc), Some(label_text)) => {
+            format!("{from_label} {arrow_desc} and {co_desc} {to_label} with label: {label_text}")
+        }
     }
 }
 
@@ -576,6 +615,7 @@ mod tests {
             Some(&ir.nodes[0]),
             Some(&ir.nodes[1]),
             fm_core::ArrowType::Arrow,
+            None,
             Some("Submit"),
             &ir,
         );
@@ -593,10 +633,76 @@ mod tests {
             Some(&ir.nodes[1]),
             fm_core::ArrowType::Line,
             None,
+            None,
             &ir,
         );
         assert!(desc.contains("connects to"));
         assert!(!desc.contains("with label"));
+    }
+
+    /// Every co-arrow must be SPOKEN, using the same word the near end would have used (bd-f9t0r).
+    ///
+    /// Reads the real phrase table via `arrow_phrase` rather than restating it: a test that spells
+    /// out its own expected strings passes when the table drifts, which is how a `<desc>` saying
+    /// "connects to" survived beside a `<title>` saying "is inherited by" (bd-92b6, bd-lkm9i).
+    /// The six here are the entire co-arrow range produced by `class_relation_co_arrow`.
+    #[test]
+    fn a_far_end_marker_is_named_with_the_word_its_own_end_would_use() {
+        use fm_core::ArrowType;
+        let range = [
+            (ArrowType::Aggregation, ArrowType::AggregationReverse),
+            (ArrowType::Aggregation, ArrowType::CompositionReverse),
+            (ArrowType::Composition, ArrowType::LollipopReverse),
+            (ArrowType::Inheritance, ArrowType::InheritanceReverse),
+            (ArrowType::Lollipop, ArrowType::InheritanceReverse),
+            (ArrowType::Composition, ArrowType::Arrow),
+            (ArrowType::Aggregation, ArrowType::DottedArrow),
+        ];
+        let mut silent = Vec::new();
+        for (primary, co) in range {
+            let desc =
+                describe_edge_labels(Some("Alpha"), Some("Beta"), primary, Some(co), None);
+            let near = arrow_phrase(primary);
+            let far = arrow_phrase(co);
+            if desc != format!("Alpha {near} and {far} Beta") {
+                silent.push(format!("  {primary:?} + {co:?} -> {desc:?}"));
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "{} pair(s) did not name both ends:\n{}",
+            silent.len(),
+            silent.join("\n")
+        );
+    }
+
+    /// A `None` co-arrow must leave the description BYTE-IDENTICAL to what it was before.
+    ///
+    /// This is what lets the golden SVGs and the fragment writers' byte-identity tests stay
+    /// untouched by this change; if it ever fails, every unrelated golden is about to move.
+    #[test]
+    fn an_edge_without_a_far_marker_reads_exactly_as_before() {
+        use fm_core::ArrowType;
+        assert_eq!(
+            describe_edge_labels(Some("A"), Some("B"), ArrowType::Arrow, None, None),
+            "A points to B"
+        );
+        assert_eq!(
+            describe_edge_labels(Some("A"), Some("B"), ArrowType::Line, None, Some("go")),
+            "A connects to B with label: go"
+        );
+        // A co-arrow whose phrase equals the primary's degrades to the single-ended sentence
+        // rather than stuttering "connects to and connects to".
+        assert_eq!(
+            describe_edge_labels(
+                Some("A"),
+                Some("B"),
+                ArrowType::Arrow,
+                Some(ArrowType::Arrow),
+                None
+            ),
+            "A points to B"
+        );
     }
 
     #[test]
@@ -608,6 +714,7 @@ mod tests {
             Some(from_node),
             Some(to_node),
             fm_core::ArrowType::Arrow,
+            None,
             Some("Submit"),
             &ir,
         );
@@ -615,6 +722,7 @@ mod tests {
             Some(accessible_node_label(from_node, &ir)),
             Some(accessible_node_label(to_node, &ir)),
             fm_core::ArrowType::Arrow,
+            None,
             Some("Submit"),
         );
 

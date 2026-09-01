@@ -2414,7 +2414,12 @@ fn apply_source_metadata(
                     elem = elem.attr("role", "graphics-symbol").attr(
                         "aria-label",
                         &crate::a11y::describe_edge(
-                            from_node, to_node, edge.arrow, label, diagram_ir,
+                            from_node,
+                            to_node,
+                            edge.arrow,
+                            edge.co_arrow(),
+                            label,
+                            diagram_ir,
                         ),
                     );
                 }
@@ -15336,8 +15341,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         {
             let (from_label, to_label) =
                 edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-            let edge_desc =
-                crate::a11y::describe_edge_labels(from_label, to_label, arrow, Some(label_text));
+            let edge_desc = crate::a11y::describe_edge_labels(
+                from_label,
+                to_label,
+                arrow,
+                edge.co_arrow(),
+                Some(label_text),
+            );
             group = group.child(Element::title(&edge_desc));
         }
 
@@ -15350,7 +15360,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     {
         let (from_label, to_label) =
             edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
-        let edge_desc = crate::a11y::describe_edge_labels(from_label, to_label, arrow, None);
+        let edge_desc =
+            crate::a11y::describe_edge_labels(from_label, to_label, arrow, edge.co_arrow(), None);
         // Wrap in group to add title
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
@@ -17146,7 +17157,10 @@ mod tests {
                      to_label: Option<&str>| {
             let d = crate::path::build_smooth_path_by(points.len(), |i| points[i]);
             let desc =
-                crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None);
+                // `ArrowType::Arrow` never carries a co-arrow: the fast fragment this pins is
+                // gated on `co_arrow().is_none()`, so `None` here is the shape under test, not a
+                // convenience default.
+                crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None, None);
             let path_child = Element::raw_svg(build_common_edge_fragment(
                 &d,
                 sw,
