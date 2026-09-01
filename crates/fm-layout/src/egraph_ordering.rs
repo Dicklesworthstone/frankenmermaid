@@ -793,11 +793,21 @@ impl FixedLayerCrossings {
                 }
             }
 
+            // ⚠️ THE GROUP'S OWN COUNTS MUST NOT BE VISIBLE TO ITSELF. `earlier[right]` means
+            // "endpoints in a STRICTLY EARLIER fixed group", and folding `here[left]` into it
+            // inside this loop made it visible to every later `left` in the SAME group: at
+            // `left == 1`, `earlier[0]` already carried this group's `here[0]`, so
+            // `before[1][0]` counted pairs whose two fixed endpoints sit at the same position.
+            // Two edges landing on the same fixed node do not cross, so those pairs are not
+            // crossings, and the delta came out too large — 348 against a full recount's 345 on
+            // the very first generated rotation.
             for left in 0..len {
                 for right in 0..len {
                     before[left][right] =
                         before[left][right].checked_add(here[left].checked_mul(earlier[right])?)?;
                 }
+            }
+            for left in 0..len {
                 earlier[left] = earlier[left].checked_add(here[left])?;
             }
         }
@@ -1726,6 +1736,11 @@ mod tests {
             usize::try_from(state >> 33).unwrap_or(0) % bound.max(1)
         };
 
+        // ⚠️ THE FILTER MAKES THIS TEST VACUOUS-ABLE. Skipping every non-rotation with `continue`
+        // means a `collect_candidate_moves` that stopped emitting `Rotate` at all would run the
+        // loop body ZERO times and still pass — the assertion below is what makes the pass mean
+        // something, and it is the reason the counter exists rather than a bare filter.
+        let mut rotations_checked = 0_usize;
         for case in 0..200 {
             let width = 4 + next(9);
             let upper = LayerOrdering::new((0..width).map(|index| index * 3).collect());
@@ -1746,7 +1761,16 @@ mod tests {
             let mut moves = Vec::new();
             collect_candidate_moves(&middle, up, down, &mut moves);
 
-            for mv @ LayerMove::Rotate { .. } in moves {
+            // ⚠️ A `for` BINDING MUST BE IRREFUTABLE. This was written as
+            // `for mv @ LayerMove::Rotate { .. } in moves`, which does not compile (E0005: `Swap`
+            // and `Relocate` not covered) — and nothing caught it, because it lives in a
+            // `#[cfg(test)]` module that a crate-scoped `cargo test -p fm-layout` never builds and
+            // only `clippy --workspace --all-targets` reaches. It sat red on main.
+            for mv in moves {
+                let LayerMove::Rotate { .. } = mv else {
+                    continue;
+                };
+                rotations_checked += 1;
                 let delta = scorer
                     .rotation_delta(&middle, mv)
                     .expect("dense short rotations must have an exact delta");
@@ -1762,6 +1786,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            rotations_checked > 0,
+            "no rotation candidate was generated, so this test asserted nothing"
+        );
     }
 
     /// The candidate list EXACTLY as `candidate_orderings` built it before the sort and dedup were
