@@ -1,0 +1,13 @@
+# RCH project configuration for frankenmermaid.
+#
+# WHY THIS FILE EXISTS: `crates/fm-cli/build.rs` stamps the benchmark ELF with the source revision
+# it was compiled from, and the head-to-head driver refuses to publish a timed row unless that stamp
+# equals the build base and HEAD. On an rch worker the build script cannot derive that revision --
+# the worker's checkout carries its OWN `.git`, left at whatever revision it last held, so
+# `git rev-parse HEAD` there answers for the worker and not for the source that was transferred
+# (bd-vdrx9: a build of source `aaa334d9` stamped `43480807`, a real commit 35 behind, well-formed
+# enough to survive every shape check). The only value that can be correct is the one the CALLER
+# knows, so it has to travel with the command -- and rch forwards an environment variable to the
+# worker only if it is named here.
+[environment]
+allowlist = ["FM_H2H_BUILD_GIT_REV"]

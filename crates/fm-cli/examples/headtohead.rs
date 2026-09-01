@@ -150,11 +150,30 @@ fn self_elf_sha256() -> (String, u64) {
 /// The driver rejects an untagged or malformed revision before it measures either
 /// engine. This closes the stale-ELF gap that an ELF hash alone cannot detect:
 /// the hash proves which executable ran, while this value binds that executable
-/// to the exact source revision present when Cargo built it. The build script obtains
-/// this from the repository itself rather than trusting an environment variable that
-/// an RCH worker may not receive.
+/// to the exact source revision present when Cargo built it.
+///
+/// ⚠️ IT IS `None` FAR MORE OFTEN THAN IT USED TO BE, AND THAT IS THE FIX (bd-vdrx9). This
+/// previously read "the build script obtains this from the repository itself rather than trusting
+/// an environment variable that an RCH worker may not receive". That was exactly backwards. A
+/// remote worker builds the transferred source inside a directory holding its OWN `.git`, so
+/// "the repository itself" is the WORKER's repository: a build of `aaa334d9` stamped `43480807`,
+/// a real commit 35 behind, well-formed enough to pass every downstream shape check. The caller is
+/// the only party that knows the revision it transferred, so `FM_H2H_BUILD_GIT_REV` is now the
+/// authority and the build script derives a revision only from a checkout whose tracked source is
+/// clean. When neither holds this is `None`, which the driver catches -- unlike a wrong answer,
+/// which it believed.
 fn build_git_revision() -> Option<&'static str> {
     option_env!("FM_H2H_COMPILED_GIT_REV").filter(|revision| is_git_revision(revision))
+}
+
+/// How the build script arrived at [`build_git_revision`]: `env`, `git`, or `unavailable`.
+///
+/// A stamp is only as good as the thing that produced it, and the two producers have different
+/// trust: `env` is the caller's assertion about source it transferred, `git` is a proof derived
+/// from a checkout whose tracked source matched `HEAD`. Publishing which one ran turns a reader's
+/// "the ELF says it is at revision X" into a claim that can be argued with.
+fn build_git_revision_source() -> &'static str {
+    option_env!("FM_H2H_COMPILED_GIT_REV_SOURCE").unwrap_or("unavailable")
 }
 
 /// A 40-character lowercase HEX object name, which is what git actually produces.
@@ -1904,6 +1923,7 @@ fn main() {
             "elf_sha256": elf_sha256,
             "elf_bytes": elf_bytes,
             "build_git_revision": build_git_revision(),
+            "build_git_revision_source": build_git_revision_source(),
             "worker_threads": executor.threads,
             "thread_count_requested": executor.threads,
             "thread_probe_required": executor.thread_probe_enabled,
@@ -2256,10 +2276,10 @@ mod tests {
 
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
-        build_git_revision, calibrated_batch, contiguous_shards, full_pipeline_parsed,
-        is_git_revision, lock_unpoisoned, measure_parse, median, new_batch_revision_key,
-        parse_cpu_list, parse_results_reference, ratio_stats, render_item, rescaled_batch,
-        run_parse_batch, stats,
+        build_git_revision, build_git_revision_source, calibrated_batch, contiguous_shards,
+        full_pipeline_parsed, is_git_revision, lock_unpoisoned, measure_parse, median,
+        new_batch_revision_key, parse_cpu_list, parse_results_reference, ratio_stats, render_item,
+        rescaled_batch, run_parse_batch, stats,
     };
 
     #[test]
@@ -2268,19 +2288,57 @@ mod tests {
             build_git_revision(),
             option_env!("FM_H2H_COMPILED_GIT_REV").filter(|revision| is_git_revision(revision))
         );
-        assert!(build_git_revision().is_some());
         assert!(is_git_revision(&"a".repeat(40)));
         assert!(!is_git_revision("a"));
         assert!(!is_git_revision(&"A".repeat(40)));
         assert!(!is_git_revision(&"z".repeat(40)));
     }
 
+    /// The stamp and the reason it exists must agree, in every build environment.
+    ///
+    /// ⚠️ WHAT THIS REPLACED, AND WHY IT HAD TO GO (bd-vdrx9). The previous test compared the stamp
+    /// against `git rev-parse HEAD` *in whatever checkout the test happened to run in*. Run on an
+    /// RCH worker -- which is where the benchmark is built and tested -- both sides read the SAME
+    /// foreign `.git`, so the test agreed with the bug it should have caught and passed while the
+    /// ELF carried a revision 35 commits from its own source. A test that reads its answer from the
+    /// same wrong oracle as the code cannot fail. The invariant below needs no oracle: it is a
+    /// closed relation between the two values the build script emits together.
     #[test]
-    fn benchmark_binary_revision_matches_the_source_compiled_by_cargo() {
+    fn benchmark_binary_revision_agrees_with_how_the_build_script_obtained_it() {
+        let source = build_git_revision_source();
+        assert!(
+            matches!(source, "env" | "git" | "unavailable"),
+            "unknown stamp provenance {source:?}"
+        );
+        match source {
+            "unavailable" => assert_eq!(
+                build_git_revision(),
+                None,
+                "an unavailable provenance must not carry a revision"
+            ),
+            _ => assert!(
+                build_git_revision().is_some(),
+                "provenance {source:?} promises a 40-hex revision"
+            ),
+        }
+    }
+
+    /// A checkout-derived stamp is only sound when the checkout's tracked source matches `HEAD`.
+    ///
+    /// This is the local half of the same invariant, and it is skipped rather than asserted when
+    /// the environment cannot answer -- on a worker there is no meaningful `HEAD` to compare with,
+    /// and the previous test's failure was to pretend otherwise. Cargo will not re-run the build
+    /// script for a working-tree edit that leaves the ref untouched, so a `git` stamp is compared
+    /// only against `HEAD`, never against a freshly re-derived cleanliness verdict.
+    #[test]
+    fn a_checkout_derived_stamp_names_that_checkouts_head() {
+        if build_git_revision_source() != "git" {
+            return;
+        }
         let output = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .output()
-            .expect("the head-to-head benchmark is compiled from a Git checkout");
+            .expect("a git-derived stamp implies a reachable Git checkout");
         assert!(output.status.success());
         let revision = String::from_utf8(output.stdout).expect("Git revisions are UTF-8");
         assert_eq!(build_git_revision(), Some(revision.trim()));

@@ -55,10 +55,20 @@ RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
 #    executable from the worker's .rch-target-<worker>-pool-* directory; a bounded local build is
 #    also permitted by POLICY_local_perf_binaries.md only after its 150G free-space precheck.
 df -h /data
-RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+#    ⚠️ USE THE WRAPPER unless you have a reason not to: it passes FM_H2H_BUILD_GIT_REV (which is
+#    the ONLY way the ELF can learn the revision it was built from -- see "The revision stamp"
+#    below) and then reads the stamp back out of the ELF to prove the variable survived the trip.
+scripts/headtohead/build_h2h.sh -o crates/fm-cli/examples/headtohead.rs
+
+#    The equivalent by hand. FM_H2H_BUILD_GIT_REV must be set, and `.rch/config.toml` must still
+#    name it in rch's `[environment] allowlist` or rch drops it silently.
+RCH_REQUIRE_REMOTE=1 FM_H2H_BUILD_GIT_REV="${FM_H2H_BUILD_BASE}" \
+  env -u CARGO_TARGET_DIR rch exec \
   --base "${FM_H2H_BUILD_BASE}" --clean-overlay \
   --overlay-path crates/fm-cli/examples/headtohead.rs -- \
   cargo build --profile release -p frankenmermaid-cli --example headtohead
+python3 scripts/headtohead/assert_build_stamp.py \
+  target/release/examples/headtohead "${FM_H2H_BUILD_BASE}"
 
 # 3. run both engines over byte-identical inputs
 node scripts/headtohead/run.mjs \
@@ -161,6 +171,30 @@ Two traps, both specific to a benchmark repo:
 - **Do not auto-derive the overlay list from `git diff --name-only`.** In a shared checkout that list
   contains the *other* agent's modifications too, which re-imports exactly the churn you are
   excluding. Enumerate the paths you changed, by name, and keep the list minimal.
+
+### The revision stamp: `FM_H2H_BUILD_GIT_REV` is the only source of truth (bd-vdrx9)
+
+The ELF self-reports `build_git_revision`, and `run.mjs` refuses to publish a timed row unless it
+equals both `--fm-build-base` and checked-out `HEAD`. **The build script cannot derive that value on
+a worker.** RCH transfers the SOURCE; the worker builds it inside a directory that carries its own
+`.git`, left at whatever revision it last held. `git rev-parse HEAD` there answers for the worker.
+Measured 2026-09-01: a build of source `aaa334d9` stamped `43480807` — a real commit, 35 behind,
+lowercase 40-hex, and therefore accepted by every shape check downstream. A missing stamp is caught;
+a plausible wrong one is believed.
+
+So `crates/fm-cli/build.rs` now uses a checkout-derived revision only when that checkout's tracked
+source (`Cargo.toml`, `Cargo.lock`, `crates/`, `.cargo/`, `rust-toolchain.toml`) matches `HEAD`, and
+otherwise stamps nothing. Two consequences to know before they surprise you:
+
+- **Pass `FM_H2H_BUILD_GIT_REV` on every remote build**, and keep `FM_H2H_BUILD_GIT_REV` in
+  `.rch/config.toml`'s `[environment] allowlist` — RCH forwards nothing else, and a dropped variable
+  looks exactly like a successful build.
+- **A local build over uncommitted source now stamps nothing.** That is deliberate: no commit
+  describes that binary, so no commit is the honest answer. Commit first.
+
+The ELF also reports `build_git_revision_source` (`env` / `git` / `unavailable`) and `run.mjs`
+carries it onto each row as `fm_build_git_rev_source`, so a reader can tell an asserted revision
+from a derived one instead of having to trust both equally.
 
 **Local builds are frozen while `/data` free space is below 150G.** Check `df` before any Cargo
 command. During the freeze, validation uses only

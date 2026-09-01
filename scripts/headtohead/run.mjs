@@ -4219,6 +4219,14 @@ const tagPhase = (records, phase) =>
     // JSON.stringify DROPS from the row -- a stamp that silently does nothing while reading as
     // though it works. Checked against validBuildRevision at line 840.
     fm_build_git_rev: record.fm_build_git_rev ?? provenanceBinary?.build_git_revision,
+    // HOW the ELF knows its own revision, carried beside the revision itself (bd-vdrx9). `env` is
+    // the builder's assertion about source it transferred to a worker; `git` is derived from a
+    // checkout whose tracked source matched HEAD. The distinction is not decorative: a build script
+    // running on a worker once derived a well-formed revision from the WORKER's `.git` and stamped
+    // a commit 35 behind the source it had just compiled. An ELF too old to carry this field leaves
+    // it `undefined`, which JSON.stringify drops -- absent means unknown, never `git`.
+    fm_build_git_rev_source:
+      record.fm_build_git_rev_source ?? provenanceBinary?.build_git_revision_source,
   }));
 const events = has('skip-mermaid')
   ? tagPhase(fmBefore.records, 'frankenmermaid-before')

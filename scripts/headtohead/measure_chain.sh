@@ -242,6 +242,19 @@ done
 REV=$(git rev-parse HEAD)
 echo "[chain] pinning revision ${REV}"
 
+# The chain BAKES ${REV} into the binary as FM_H2H_BUILD_GIT_REV, and every row it banks is read as
+# "measured at ${REV}". That claim is only true if ${REV} actually describes the source about to be
+# compiled. Passing the variable makes the stamp unfalsifiable by the build itself -- it is an
+# assertion, not a derivation -- so the assertion gets checked here, once, where it can be (bd-vdrx9).
+CHAIN_DIRTY=$(git --no-optional-locks status --porcelain --untracked-files=no -- \
+  Cargo.toml Cargo.lock crates .cargo rust-toolchain.toml)
+if [ -n "$CHAIN_DIRTY" ]; then
+  echo "[chain] REFUSING: tracked source differs from ${REV}, so no commit describes what would be" >&2
+  echo "[chain] built, and every row would name a revision it was not measured at:" >&2
+  echo "$CHAIN_DIRTY" >&2
+  exit 3
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "[chain] DRY RUN -- prechecks passed; would now build, prove equivalence and measure at ${REV}"
   exit 0
