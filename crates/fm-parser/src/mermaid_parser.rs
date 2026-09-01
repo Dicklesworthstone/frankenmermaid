@@ -318,6 +318,14 @@ struct OpScan {
     /// node's own label. Class diagrams have no parenthesised shape syntax, so `()` is unambiguous
     /// there and ambiguous everywhere else.
     paren_leading_operators: bool,
+    /// Recognise mermaid's class RELATION grammar at each candidate position, in preference to a
+    /// literal hit in the table. TRUE FOR THE CLASS TABLE ONLY — see
+    /// [`match_mermaid_class_relation`] for why a table of spellings cannot express it.
+    ///
+    /// Scoped for the same reason `mermaid_flow_links` is: the halves mean different things
+    /// elsewhere. `A --o B` is a class aggregation but a flowchart CIRCLE link, and `A o--o B` is a
+    /// flowchart link whose own grammar (`match_mermaid_flow_link`) already reads the pair.
+    mermaid_class_relations: bool,
 }
 
 /// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
@@ -343,6 +351,7 @@ const fn op_scan(operators: &[(&str, ArrowType)]) -> OpScan {
         first_byte: op_first_byte_gate(operators),
         mermaid_flow_links: false,
         paren_leading_operators: false,
+        mermaid_class_relations: false,
     }
 }
 
@@ -354,6 +363,7 @@ const FLOW_OP_GATE: OpScan = OpScan {
 };
 const CLASS_OP_GATE: OpScan = OpScan {
     paren_leading_operators: true,
+    mermaid_class_relations: true,
     ..op_scan(&CLASS_OPERATORS)
 };
 const PACKET_OP_GATE: OpScan = op_scan(&PACKET_OPERATORS);
@@ -5321,7 +5331,12 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // `<..` and `<--` are the left-pointing spellings of `..>` and `-->`: same head, swapped
             // endpoints. Adding `<--` here without the table entry above (or the reverse) leaves an
             // association pointing the wrong way, which is worse than the missing head it replaces.
-            let reversed_dependency = matches!(class_operator, Some("<.." | "<--"));
+            //
+            // ⚠️ DERIVED FROM THE TOKEN'S PARTS, NOT FROM A LIST OF SPELLINGS. This used to read
+            // `matches!(class_operator, Some("<.." | "<--"))`, which is a list the relation matcher
+            // now outruns: it returns 72 different tokens, and `<-->` or `<--o` would silently stop
+            // swapping while still being a start-side dependency.
+            let reversed_dependency = class_operator.is_some_and(class_relation_is_reversed);
             // UML REALIZATION is a DASHED line with a hollow triangle. bd-u9hcc gave `..|>`/`<|..`
             // the correct head and direction by mapping them onto Inheritance/InheritanceReverse,
             // and recorded the remaining loss honestly: without the dash a realization renders
@@ -5346,8 +5361,11 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // socket is carried by `ArrowType::Lollipop` while the dash is carried here. Mapping
             // `()..` to its own ArrowType instead would double the lollipop arms in fm-core,
             // fm-layout and all three renderers to express one bit that already has a home.
-            let is_dashed_relation =
-                matches!(class_operator, Some("..|>" | "<|.." | "().." | "..()"));
+            //
+            // ⚠️ ALSO DERIVED, for the same reason. The literal list dashed exactly four spellings;
+            // every `..`-bodied relation needs it except the two whose ArrowType is already dotted
+            // by name. `class_relation_is_dashed` states that rule once — see it for the exclusion.
+            let is_dashed_relation = class_operator.is_some_and(class_relation_is_dashed);
             for ast in asts {
                 let ast = if reversed_dependency {
                     swap_edge_endpoints(ast)
@@ -12768,6 +12786,230 @@ fn extend_operator_run(statement: &str, index: usize, matched: &str) -> Option<(
     (len != matched.len()).then_some((len, arrow))
 }
 
+/// One end's marker in mermaid's class relation grammar.
+///
+/// This is `relationType` from the grammar, named rather than numbered. mermaid's own db reports it
+/// as an integer (`0 AGGREGATION, 1 EXTENSION, 2 COMPOSITION, 3 DEPENDENCY, 4 LOLLIPOP`), and
+/// `crates/fm-parser/tests/fixtures/mermaid_class_relations.tsv` records those numbers verbatim for
+/// all 72 spellings so the mapping below can be checked against the incumbent rather than believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassMarker {
+    Aggregation,
+    Extension,
+    Composition,
+    Dependency,
+    Lollipop,
+}
+
+/// The marker halves as they are SPELLED at each end. Extension and dependency are not the same
+/// bytes on both sides — `<|` opens a triangle and `|>` closes one, `<` opens an arrow and `>`
+/// closes one — which is why these are two tables and not one.
+///
+/// ⚠️ ORDERED LONGEST FIRST WITHIN A SHARED LEAD BYTE. `<|` must precede `<`, or every `<|--` is
+/// read as a dependency with a stray `|` and splits one byte early.
+const CLASS_RELATION_STARTS: [(&str, ClassMarker); 5] = [
+    ("<|", ClassMarker::Extension),
+    ("()", ClassMarker::Lollipop),
+    ("o", ClassMarker::Aggregation),
+    ("*", ClassMarker::Composition),
+    ("<", ClassMarker::Dependency),
+];
+
+const CLASS_RELATION_ENDS: [(&str, ClassMarker); 5] = [
+    ("|>", ClassMarker::Extension),
+    ("()", ClassMarker::Lollipop),
+    ("o", ClassMarker::Aggregation),
+    ("*", ClassMarker::Composition),
+    (">", ClassMarker::Dependency),
+];
+
+/// mermaid's class RELATION, lexed the way its grammar defines it rather than listed as spellings.
+///
+/// ```text
+///   relation : relationType lineType relationType | relationType lineType
+///            | lineType relationType             | lineType
+///   lineType ::= `--` solid | `..` dotted
+/// ```
+///
+/// WHY THIS IS NOT A TABLE, and why adding "the missing entries" has never finished the job.
+/// `CLASS_OPERATORS` lists SPELLINGS, so it can only name the combinations somebody wrote down, and
+/// it has now been patched four separate times for one that nobody did: `<--` (bd-lfucm), `o--` and
+/// `*--` (bd-92b6), `..|>` and `<|..` (bd-u9hcc), `()--` (bd-lkm9i). The grammar is a PRODUCT of
+/// two ends and a line type — 6 x 2 x 6 = 72 spellings, and the pinned incumbent accepts ALL 72
+/// (see the fixture). A table of 18 could never have been the fix; each patch just moved the hole.
+///
+/// ⚠️ THE HOLE IS A NODE-SET DEFECT, NOT A MISSING MARKER. Falling through to a shorter entry does
+/// not merely lose the marker, it leaves the marker's bytes glued to an ENDPOINT. Measured on the
+/// table alone, `Alpha o--o Beta` matched `o--` and built `Alpha -> o_Beta`; `Alpha o.. Beta`
+/// reached the trailing `..` and built `Alpha_o -> Beta`; `Alpha o..o Beta` managed both at once.
+/// The incumbent holds exactly `[Alpha,Beta]` for all 72.
+///
+/// Returns the length of the WHOLE token, which is what fixes the split:
+/// `parse_edge_statement_asts` takes the right-hand side from `operator_idx + operator.len()`, so a
+/// token that stops short is exactly how a marker byte becomes part of the next node's id.
+fn match_mermaid_class_relation(statement: &str, idx: usize) -> Option<(usize, ArrowType)> {
+    let bytes = statement.as_bytes();
+    let mut cursor = idx;
+
+    let mut start = None;
+    for (spelling, marker) in CLASS_RELATION_STARTS {
+        if bytes[cursor..].starts_with(spelling.as_bytes()) {
+            // ⚠️ A LEADING `o` IS AN OPERATOR ONLY AT A TOKEN BOUNDARY (bd-zdpwd's rule, and the
+            // reason this guard is here and not only in the table loop below). mermaid's relation
+            // begins after whitespace, so without this the second `o` of `Foo` starts a perfect
+            // `o--` match and `Foo-- Bar` splits the source into `Fo`.
+            //
+            // Scoped to `o` because that is the only marker byte that is also an identifier byte,
+            // and because widening it would CHANGE existing behaviour: the table loop guards
+            // `o`/`x` only, so `*` has always matched unguarded and still must.
+            if spelling == "o" && cursor > 0 && !bytes[cursor - 1].is_ascii_whitespace() {
+                break;
+            }
+            start = Some(marker);
+            cursor += spelling.len();
+            break;
+        }
+    }
+
+    let dotted = if bytes[cursor..].starts_with(b"--") {
+        false
+    } else if bytes[cursor..].starts_with(b"..") {
+        true
+    } else {
+        // No line body, so this is not a relation at all. Returning None hands the position back to
+        // the literal table, which is what keeps every non-relation class statement unaffected.
+        return None;
+    };
+    cursor += 2;
+
+    let mut end = None;
+    for (spelling, marker) in CLASS_RELATION_ENDS {
+        if bytes[cursor..].starts_with(spelling.as_bytes()) {
+            end = Some(marker);
+            cursor += spelling.len();
+            break;
+        }
+    }
+
+    Some((cursor - idx, class_relation_arrow(start, end, dotted)))
+}
+
+/// Split a matched class relation token back into its three parts.
+///
+/// The lowering site needs the parts, not the spelling: it decides the dash and the endpoint swap,
+/// and both used to be `matches!` over a handful of literals (`"..|>" | "<|.." | "().." | "..()"`).
+/// A literal list cannot survive a matcher that returns 72 different tokens — it would silently
+/// stop dashing `o..` and stop swapping `<-->` — so both decisions are re-derived from here.
+fn class_relation_parts(token: &str) -> Option<(Option<ClassMarker>, Option<ClassMarker>, bool)> {
+    let bytes = token.as_bytes();
+    let mut cursor = 0;
+    let mut start = None;
+    for (spelling, marker) in CLASS_RELATION_STARTS {
+        if bytes[cursor..].starts_with(spelling.as_bytes()) {
+            start = Some(marker);
+            cursor += spelling.len();
+            break;
+        }
+    }
+    let dotted = if bytes[cursor..].starts_with(b"--") {
+        false
+    } else if bytes[cursor..].starts_with(b"..") {
+        true
+    } else {
+        return None;
+    };
+    cursor += 2;
+    let mut end = None;
+    for (spelling, marker) in CLASS_RELATION_ENDS {
+        if bytes[cursor..].starts_with(spelling.as_bytes()) {
+            end = Some(marker);
+            cursor += spelling.len();
+            break;
+        }
+    }
+    // Only a token this matcher itself produced is a relation; anything with a tail is not.
+    (cursor == bytes.len()).then_some((start, end, dotted))
+}
+
+/// The `ArrowType` for a `(start, end, line)` triple.
+///
+/// ⚠️ THIS IS A STRICT SUPERSET OF THE TABLE IT REPLACES, and
+/// `the_spellings_the_table_already_knew_are_unchanged` in
+/// `crates/fm-parser/tests/class_relation_marker_pairs.rs` asserts exactly that: all 18
+/// `CLASS_OPERATORS` spellings must come back with the `ArrowType` the table already gave them,
+/// written out verbatim there. The point of this change is the 54 spellings the table could not
+/// name, not a new answer for the 18 it could.
+///
+/// ⚠️ A RELATION MARKED AT BOTH ENDS IS DRAWN WITH ONE MARKER, AND THAT IS A KNOWN, RECORDED LOSS.
+/// `ArrowType` names an edge, not a pair of ends, so `o--*` (aggregation at the source, composition
+/// at the target) has no variant. Expressing the pair means a marker-PAIR representation reaching
+/// fm-core, fm-layout, a11y and all three renderers — every ArrowType->marker mapping is forked
+/// across those crates — which is its own bead, not a rider on this one. What this function
+/// guarantees meanwhile is the half that is a correctness defect rather than a fidelity gap: the
+/// endpoints are the classes the author named, and the source-end marker is the one they wrote.
+fn class_relation_arrow(
+    start: Option<ClassMarker>,
+    end: Option<ClassMarker>,
+    dotted: bool,
+) -> ArrowType {
+    // The source end wins when both are marked; see the note above.
+    match (start, end) {
+        (Some(marker), _) => match marker {
+            ClassMarker::Aggregation => ArrowType::Aggregation,
+            ClassMarker::Composition => ArrowType::Composition,
+            ClassMarker::Extension => ArrowType::Inheritance,
+            ClassMarker::Lollipop => ArrowType::Lollipop,
+            // `<--` / `<..` are the mirrors of `-->` / `..>`: the SAME head, drawn at the other
+            // end. They keep the forward ArrowType and the lowering site swaps the endpoints, which
+            // is what `reversed_dependency` has always done — a `DottedArrowReverse` variant would
+            // mean exhaustive matches in fm-core, fm-layout and all three renderers to say
+            // something the swap already says.
+            ClassMarker::Dependency => dotted_or(dotted, ArrowType::DottedArrow, ArrowType::Arrow),
+        },
+        (None, Some(marker)) => match marker {
+            ClassMarker::Aggregation => ArrowType::AggregationReverse,
+            ClassMarker::Composition => ArrowType::CompositionReverse,
+            ClassMarker::Extension => ArrowType::InheritanceReverse,
+            ClassMarker::Lollipop => ArrowType::LollipopReverse,
+            ClassMarker::Dependency => dotted_or(dotted, ArrowType::DottedArrow, ArrowType::Arrow),
+        },
+        (None, None) => dotted_or(dotted, ArrowType::DottedLine, ArrowType::Line),
+    }
+}
+
+const fn dotted_or(dotted: bool, when_dotted: ArrowType, when_solid: ArrowType) -> ArrowType {
+    if dotted { when_dotted } else { when_solid }
+}
+
+/// Does this relation need a `stroke-dasharray` of its own?
+///
+/// ⚠️ ONLY WHEN THE ARROW TYPE DOES NOT ALREADY CARRY THE DASH. `DottedArrow` and `DottedLine` are
+/// dotted by name, so `..>` and `..` must NOT also get an inline style — adding one would change
+/// bytes on two spellings that are already correct. Everything else with a `..` body does need it,
+/// which is how a dotted aggregation (`o..`) gets the dash that `<|..` already had.
+fn class_relation_is_dashed(token: &str) -> bool {
+    let Some((start, end, dotted)) = class_relation_parts(token) else {
+        return false;
+    };
+    dotted
+        && !matches!(
+            class_relation_arrow(start, end, dotted),
+            ArrowType::DottedArrow | ArrowType::DottedLine
+        )
+}
+
+/// Does this relation put its head on the SOURCE end, so the endpoints must swap?
+///
+/// True for the dependency spelled at the start with nothing at the end — `<--` and `<..`. Both
+/// map onto the forward `Arrow`/`DottedArrow`, so without the swap the head lands on the target and
+/// the diagram states the opposite relationship.
+fn class_relation_is_reversed(token: &str) -> bool {
+    matches!(
+        class_relation_parts(token),
+        Some((Some(ClassMarker::Dependency), None, _))
+    )
+}
+
 fn find_operator_core<'a>(
     statement: &'a str,
     start_index: usize,
@@ -12822,6 +13064,14 @@ fn find_operator_core<'a>(
             && paren_depth == 0
             && brace_depth == 0
         {
+            // The grammar first, the table as the fallback — the same precedence the main loop
+            // below uses. Without it a `()` position could only ever match the four literal
+            // lollipop spellings, so `A ()--o B` would still split two bytes late.
+            if scan.mermaid_class_relations
+                && let Some((len, arrow)) = match_mermaid_class_relation(statement, idx)
+            {
+                return Some((idx, &statement[idx..idx + len], arrow));
+            }
             let tail = &statement[idx..];
             if let Some((operator, arrow)) = operators.iter().find(|(operator, _)| {
                 operator.as_bytes().first() == Some(&b'(') && tail.starts_with(operator)
@@ -12878,6 +13128,15 @@ fn find_operator_core<'a>(
         // `match_mermaid_flow_link`.
         if scan.mermaid_flow_links
             && let Some((len, arrow)) = match_mermaid_flow_link(statement.as_bytes(), idx)
+        {
+            return Some((idx, &statement[idx..idx + len], arrow));
+        }
+
+        // CLASS ONLY: likewise the relation grammar over the relation table (see
+        // `match_mermaid_class_relation`). A hit wins over any literal because it consumes the
+        // WHOLE token, and a token that stops short is what leaves a marker byte on an endpoint.
+        if scan.mermaid_class_relations
+            && let Some((len, arrow)) = match_mermaid_class_relation(statement, idx)
         {
             return Some((idx, &statement[idx..idx + len], arrow));
         }
