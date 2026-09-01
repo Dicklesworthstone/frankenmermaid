@@ -1,5 +1,59 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECTED, but it PRICES the gap: matching mermaid's flowchart layout costs +12.7% full-pipeline instructions (bd-di7mt, 2026-09-01)
+
+- **Lever.** The auto-selector's tree-like loss term is family-blind: `Tree => (70, 920, 700)` for
+  every diagram type. Measured against the incumbent, that is wrong for one family — mermaid draws a
+  flowchart LAYERED even when its graph is a tree. Candidate: make the tree-like entry conditional,
+  `Tree if diagram_type == Flowchart => (300, 920, 700)`. 200 is the flip threshold and it is
+  arithmetic from the table, not a fitted constant: at the observed 930/10/60 posterior the term must
+  exceed `(236 - 51.2) / 0.93` = 198.7 for `Sugiyama` to win. 300 is that plus margin.
+- **A/A null control (same invocation):** three-arm interleaved sweep of the head-to-head example on
+  `ci_docs_2000`, arm order alternated per round, null = a byte-identical copy of the baseline ELF.
+  Over 5 rounds the null ratio holds at median 1.000137, range 0.999844-1.000348, against an A/B of
+  median 1.127175, range 1.127004-1.127508 — the effect is roughly 370x the null's full spread, and
+  the two ranges do not come close to touching. Instructions, not wall: the arms differ in retired
+  work, and this host was at load 5.06.
+- **THE MEASURED PRICE — the point of this row.** Candidate retires **+12.7% instructions** on
+  `ci_docs_2000` (64,055,478,925 -> 72,204,752,078 median). It is not paid for extra output: the
+  candidate emits FEWER bytes (40,896,106 -> 40,497,143). It is layout work — `Sugiyama` is measured
+  3.8x-12.7x more expensive than `Tree` per affected diagram (within-process best-of-9, A/A null
+  0.991-1.020). 478 of this item's 2,000 revisions change.
+- **The fidelity it buys is real, and controlled for the obvious confound.** Across 31 flowchart
+  revisions in three independent samples, `Sugiyama` was closer to Chromium 151 + mermaid@11.15.0 on
+  28 and tied on 3; `Tree` was closer on NONE. Critically that includes 10 revisions of 12-36 nodes
+  that the budget guardrail never touches — without them "flowchart" and "big flowchart" fit the data
+  equally well, and only the first justifies a family term. Mean both-axis error on that control:
+  49.2% -> 41.6%.
+- **Corpus-wide blast radius, all 10,095 revisions:** 2,670 selections change, **every one of them a
+  flowchart, every one `Tree` -> `Sugiyama`**; no other family moves and the 44 goldens are unchanged
+  in selection, estimate, reason and bounds. But only **1,423** of those 2,670 draw anything
+  different (>=1%); **1,201 render an IDENTICAL picture** and simply pay the more expensive algorithm
+  — `ci_shared_subgraph_384` 384/384, `ci_equiv_512` 303/512, `typing_trace_60` 60/60. On
+  `ci_docs_2000` specifically the split is favourable (391 of 482 material), so the +12.7% measured
+  above is mostly bought fidelity rather than pure waste; corpus-wide it is 53/47.
+- **Verdict: REJECT on the metric that decides.** A 12.7% full-pipeline regression is larger than most
+  wins in this ledger, and it is not mine to trade for partial fidelity unilaterally. Same shape as
+  the 2026-07-04 sequence-guardrail entry, which also had a real correctness argument and was also
+  rejected on the full pipeline.
+- **What this row is FOR.** The number is the deliverable: closing the flowchart layout-fidelity gap
+  against mermaid costs about an eighth of the pipeline at today's `Sugiyama` cost. That converts
+  bd-di7mt from "a defect to fix" into a priced decision, and it names the precondition that would
+  change the answer — make `Sugiyama` materially cheaper, or find a layout that is closer to the
+  reference without being 3.8x-12.7x the cost of `Tree`. Retry only against one of those.
+- **Do-not-retry as-is.** Do not re-land a family term on the tree-like loss without a new pipeline
+  measurement; the +12.7% is not a tuning artifact of the constant chosen (300 is 50% above the 198.7
+  flip threshold, and any value that flips the selection buys the same `Sugiyama` cost).
+- **Revert:** `crates/fm-layout/src/lib.rs` is byte-identical to HEAD; the working-tree diff over
+  `crates/` is empty. Nothing shipped.
+- **Provenance.** Baseline ELF built `--no-overlay` at `e7e62786` and stamped with it; candidate built
+  from the same base with a single-file overlay and left DELIBERATELY UNSTAMPED, so it self-reports no
+  revision rather than claiming one that does not describe its source. Both arms' ELF SHA-256 are
+  self-reported by the process and checked against the file on disk, base != cand, null == base. Per
+  revision output bytes come from the engine's own dump, whose concatenation hashes to the
+  `output_sha256` it reports for the timed rounds. Incumbent geometry is viewBox from Chromium 151 +
+  mermaid@11.15.0 over CDP. `same_host=thinkstation1`, load1 5.06. No cross-engine ratio is claimed.
+
 ### REJECTED TWICE, one rule in two scopes: making the layout guardrail defer to the auto-selector's ranking — and the family split that closes the whole approach (bd-h6gxf, 2026-09-01)
 
 - **A/A null control (same invocation):** the layout timings below are a THREE-arm interleaved
