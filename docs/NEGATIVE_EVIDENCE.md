@@ -1,5 +1,96 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECTED TWICE, one rule in two scopes: making the layout guardrail defer to the auto-selector's ranking — and the family split that closes the whole approach (bd-h6gxf, 2026-09-01)
+
+- **A/A null control (same invocation):** the layout timings below are a THREE-arm interleaved
+  sweep, arm order rotated per round; arm 2 requests the SAME algorithm as arm 0, so its ratio
+  against arm 0 is the floor this measurement can resolve. Over 9 rounds, best-of, on 14 inputs the
+  null ratio spans 0.986-1.044 (median 1.017), against effects of 2.570x-71.627x — the smallest
+  effect is 60x the null's largest deviation, so no reported direction rests on the floor. Null and
+  effect are drawn from the same rounds in the same process, on a clean-HEAD ELF
+  (`base=c16f5dd32db1ef43c232e14c281ad73fe39d3dc5`, rch clean-overlay receipt), with the guardrail
+  disabled and the executed algorithm ASSERTED per sample.
+- **Counted mechanism:** the verdict itself rests on COUNTS and on deterministic geometry, not on the
+  timings above; it claims no cross-engine ratio. Counted, base ELF
+  vs candidate ELF over the identical corpus: 10,095 corpus revisions dumped per-revision from each
+  arm and diffed on the selected-algorithm field, giving 1,505 moved under the broad rule (659
+  `Sugiyama`->`Tree`, 846 the other way) and 658 moved under the narrow rule (all one direction);
+  44 golden fixtures diffed on selection, estimate, reason and bounds, giving 0 moved under the
+  narrow rule and 0 algorithm changes under the broad one; 653 flowchart vs 5 erDiagram movers
+  classified by each revision's own first source line; and `posterior_tree_like_permille` read off
+  every mover, giving min = max = median = 930 on BOTH sides, which is the finding. The layout
+  timings quoted (2.5x-61x, 30 inputs) are within-process best-of-7 A/Bs of two code paths with the
+  guardrail disabled and the executed algorithm asserted per sample — a self-comparison used only to
+  establish the direction of the cost, never as a ratio against any other engine. Incumbent widths
+  and heights are viewBox values, a deterministic property of a rendered document, not a measurement.
+- **Lever.** `evaluate_layout_guardrails` re-decides the algorithm on a cost model with NO quality
+  term, and on ER schemas it reverses a choice the auto-selector made with cost already priced in
+  (`expected_loss_permille` = a quality term plus `estimate_layout_cost(..).time_ms / 20`). Candidate:
+  refuse a guardrail fallback whose recorded expected loss is HIGHER than the algorithm it replaces.
+  Gated to the trio the loss model actually covers (`Sugiyama`/`Tree`/`Force`) and to a dispatch that
+  actually ran that model, so specialized dispatches (`Radial` for mindmaps, whose 500-permille
+  placeholder is not a measurement) and explicit requests keep the old cost-only behaviour.
+- **Why it looked right, and it was not one bad number.** The auto-selector scores `Tree` at 138
+  against `Sugiyama`'s 246 on `schema_catalog_25` rev0 WITH the compute penalty already included, and
+  the guardrail then overrides it on an estimate measured wrong by 2288x-23500x. On the first evidence
+  available the change passed everything: **44/44 goldens byte-identical**, six ER revisions released
+  back to `Tree`, and `Tree` closer to the pinned incumbent on **6 of 6** (mean width error
+  34.2% -> 29.0%, Chromium 151 + mermaid@11.15.0 viewBox).
+- **BROAD SCOPE — REVERTED.** Widening the blast-radius check from the 44 goldens to all **10,095**
+  head-to-head corpus revisions moved **1,505** of them, in BOTH directions (659 `Sugiyama`->`Tree`,
+  846 `Tree`->`Sugiyama`). The direction the goldens cannot show is a loss on both axes:
+
+  | item | cost of the swap | width err `Tree` | width err `Sugiyama` |
+  |---|---|---:|---:|
+  | `wide_8x16` | Sugiyama 9.2x slower | 127.1% | 130.8% |
+  | `wide_12x24` | Sugiyama 37.7x slower | 46.4% | 124.8% |
+  | `wide_16x32` | Sugiyama 54.3x slower | 41.5% | 199.0% |
+
+  The rule inherits the selector's own error: the loss model prefers `Sugiyama` for `layered_general`
+  shapes where the reference does not.
+- **NARROW SCOPE — ALSO REVERTED.** Restricted to the branch that accepts an AFFORDABLE candidate
+  (which today takes the first entry of a hardcoded preference list without comparing anything), and
+  leaving the damage-control branch alone, the change is clean and one-directional: **44/44 goldens
+  identical**, **658 of 10,095** revisions move, **all** `Sugiyama`->`Tree`, every one of them onto an
+  algorithm measured 2.5x-61x cheaper to lay out. It still fails on fidelity, and the split is exact:
+
+  | family | revisions moved | incumbent both-axis error | verdict |
+  |---|---:|---|---|
+  | `erDiagram` (`schema_catalog_25`) | 5 | 37.1% -> 33.7%, better on **5/5** | Tree is right |
+  | `flowchart` (`ci_docs_*`, `docs_site_*`) | 653 | 35.7% -> 50.4%, worse on **11/11** sampled | Tree is wrong |
+
+- **THE FINDING THAT CLOSES THE APPROACH — and it is not "the constant is stale".** The winning and
+  losing populations are INDISTINGUISHABLE to the selection model: `posterior_tree_like_permille` is
+  **930 for all 653 flowchart movers and 930 for all 5 ER movers** (min = max = median on both sides).
+  Identical topology signal, opposite correct answers — mermaid draws a tree-shaped `erDiagram`
+  tree-like and a tree-shaped `flowchart` layered. The discriminator the incumbent uses is the diagram
+  FAMILY, and the auto-selector has no family term for these two, only topology. That is why every
+  global fix fails, this one included: any rule expressible in the model's current signals moves both
+  populations together, and they need to move apart.
+- **Do-not-retry.** Do NOT re-attempt a guardrail-scoped or selector-ranking-scoped fix for bd-h6gxf,
+  in either scope, and do NOT tune the `Tree` arm of `estimate_layout_cost` as a scalar (rejected
+  three times before this — see the bead). The cost model IS dishonest: `Tree` is charged 4 ms/node
+  against a measured 0.00017-0.0018 ms/node. But on this corpus its wrong number produces the closer
+  picture on 653 of the 658 cases it decides, so correcting it in isolation trades a real fidelity
+  regression for an honest number. The next candidate has to add the missing FAMILY term to selection,
+  with per-family incumbent geometry behind it, not correct a constant.
+- **Revert:** `crates/fm-layout/src/lib.rs` and
+  `crates/fm-layout/tests/incremental_matches_full_recompute.rs` are byte-identical to HEAD; the
+  working-tree diff over `crates/` is empty. Nothing shipped.
+- **Two pre-existing reds confirmed by control, not caused here.** `fm-layout --lib`
+  `c4_directional_relationships_drive_geometry_without_redirecting_plain_relationships` fails at
+  unmodified HEAD (532 passed / 1 failed, `--no-overlay` control): d948c7b7 deleted the C4 direction
+  handling the test asserts and did not update it. `golden_svg_test` has 7 stale snapshots (3 C4
+  geometric, 2 C4 theme-fill, 2 xychart tick-fill), which is bd-ng2a7's recorded drift. With the
+  candidate applied the same single lib test failed and 535 passed — the +3 being this lever's own
+  tests, so the attribution is clean in both directions.
+- **Provenance.** Selection maps and geometry are deterministic local computation with no timing in
+  them. Layout timings are within-process best-of-7 A/Bs with the guardrail DISABLED and the executed
+  algorithm asserted per sample, so an arm is the arm it is named — a guarded request is silently
+  overridden, which contaminated an earlier pass on this bead. Incumbent geometry is the viewBox read
+  from Chromium 151 + mermaid@11.15.0 over CDP. `same_host=thinkstation1`. No cross-engine ratio is
+  claimed and no competitive claim is made or implied.
+
 ### FRONTIER STATUS: no qualifying lever left in the current profiles — every candidate this session raised, and why it is closed (2026-08-27)
 
 - **Written because the next agent will otherwise re-derive all of it.** The corpus sweep is closed
