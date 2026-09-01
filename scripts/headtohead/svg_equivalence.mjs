@@ -285,7 +285,7 @@ export function anchorDistance(point, anchor) {
  * other the assignment is not evidence, and we return `null` so the caller degrades that diagram
  * to Tier 1 rather than reporting a topology that a rounding difference could have flipped.
  */
-export function nearestAnchor(point, anchors, ratio = 0.75) {
+export function resolveAnchor(point, anchors, ratio = 0.75) {
   let best = null;
   let bestD = Infinity;
   let secondD = Infinity;
@@ -294,9 +294,28 @@ export function nearestAnchor(point, anchors, ratio = 0.75) {
     if (d < bestD) { secondD = bestD; bestD = d; best = id; }
     else if (d < secondD) { secondD = d; }
   }
-  if (best === null) return null;
-  if (Number.isFinite(secondD) && (secondD === 0 || bestD > secondD * ratio)) return null;
-  return best;
+  if (best === null) return { id: null, reason: 'no_anchors' };
+  // ⚠️ THESE TWO REFUSALS MEAN OPPOSITE THINGS AND USED TO BE THE SAME `null` (bd-h6csf).
+  // `near_tie` is the oracle declining to guess: two anchors are close enough that a rounding
+  // difference could flip the assignment, so geometry is not evidence. `coincident_anchors` is a
+  // finding ABOUT THE RENDERED SVG: the point is at distance zero from two DIFFERENT nodes, which
+  // only happens when that engine drew two node boxes overlapping. ci_docs_5000 row 2579 spent a
+  // whole bead as "topology undecidable" when what it actually said was that our own layout had
+  // put N24 and N38 on the same y-band with the same min_x. Reporting them identically turns a
+  // renderer defect into a shrug about the harness.
+  if (secondD === 0) return { id: null, reason: 'coincident_anchors' };
+  if (Number.isFinite(secondD) && bestD > secondD * ratio) return { id: null, reason: 'near_tie' };
+  return { id: best, reason: 'resolved' };
+}
+
+/**
+ * Resolve a point to the nearest node anchor, or `null` when that is not evidence.
+ *
+ * Delegates to [`resolveAnchor`] so there is exactly one copy of the rule; callers that need to
+ * know WHY a point refused call that directly.
+ */
+export function nearestAnchor(point, anchors, ratio = 0.75) {
+  return resolveAnchor(point, anchors, ratio).id;
 }
 
 // ---------------------------------------------------------------- node identity
@@ -906,13 +925,23 @@ export function signature(svg, engine) {
   const derived = [];
   let unresolved = 0;
   let unparsed = 0;
+  // How many of the unresolved edges refused because this engine drew two node boxes on top of one
+  // another, rather than because two anchors merely sat close together. Counted separately because
+  // it is a defect in the SVG under test, not a limit of the reconstruction.
+  let coincident = 0;
   for (const edge of edges) {
     const ends = pathEndpoints(edge.d);
     if (!ends) { unparsed += 1; continue; }
-    const from = nearestAnchor(ends.start, anchors);
-    const to = nearestAnchor(ends.end, anchors);
-    if (from === null || to === null) { unresolved += 1; continue; }
-    derived.push(`${pseudo(from)}>${pseudo(to)}`);
+    const from = resolveAnchor(ends.start, anchors);
+    const to = resolveAnchor(ends.end, anchors);
+    if (from.id === null || to.id === null) {
+      unresolved += 1;
+      if (from.reason === 'coincident_anchors' || to.reason === 'coincident_anchors') {
+        coincident += 1;
+      }
+      continue;
+    }
+    derived.push(`${pseudo(from.id)}>${pseudo(to.id)}`);
   }
 
   const ids = [...nodes.keys()];
@@ -950,7 +979,8 @@ export function signature(svg, engine) {
         ? 'no_edge_elements'
         : anchors.length === 0
           ? 'no_node_anchors'
-          : `ambiguous(unresolved=${unresolved},unparsed=${unparsed})`,
+          : `ambiguous(unresolved=${unresolved},unparsed=${unparsed},`
+            + `coincident_anchors=${coincident})`,
   };
 }
 
@@ -2106,6 +2136,33 @@ export function selfTest() {
   record('ambiguous_anchor_refuses',
     nearestAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]) === null,
     nearestAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]));
+
+  // bd-h6csf: the two refusals must stay TOLD APART. A midpoint between two anchors is the oracle
+  // declining to guess; a point inside two overlapping node boxes is a defect in the SVG being
+  // checked. Both answer `null`, and reporting them as one number is what let ci_docs_5000 row 2579
+  // read as "topology undecidable" when it meant "this engine drew N24 and N38 on top of each
+  // other". The reasons are asserted here, not the counts, because a count cannot say which.
+  record('near_tie_and_coincident_anchors_are_distinguished', (() => {
+    const nearTie = resolveAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]);
+    const overlapping = [
+      ['a', { center: [0, 0], bounds: { min_x: -10, min_y: -10, max_x: 10, max_y: 10 } }],
+      ['b', { center: [5, 0], bounds: { min_x: -10, min_y: -10, max_x: 15, max_y: 10 } }],
+    ];
+    const coincident = resolveAnchor([0, 0], overlapping);
+    const resolved = resolveAnchor([0, 0], [['a', [0, 0]], ['b', [500, 0]]]);
+    return nearTie.reason === 'near_tie' && nearTie.id === null
+      && coincident.reason === 'coincident_anchors' && coincident.id === null
+      && resolved.reason === 'resolved' && resolved.id === 'a'
+      // The public wrapper must keep answering exactly what it answered before.
+      && nearestAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]) === null
+      && nearestAnchor([0, 0], overlapping) === null;
+  })(), {
+    near_tie: resolveAnchor([10, 0], [['a', [0, 0]], ['b', [20, 0]]]),
+    coincident: resolveAnchor([0, 0], [
+      ['a', { center: [0, 0], bounds: { min_x: -10, min_y: -10, max_x: 10, max_y: 10 } }],
+      ['b', { center: [5, 0], bounds: { min_x: -10, min_y: -10, max_x: 15, max_y: 10 } }],
+    ]),
+  });
   record('wide_rectangle_boundary_beats_neighbour_center',
     nearestAnchor(
       [200, 0],
