@@ -153,7 +153,24 @@ fn default_theme_stereotype_matches_mermaid_primary_text_color() {
 #[test]
 fn non_default_stereotype_is_painted_like_the_name_beside_it() {
     for streaming in [true, false] {
-        for theme in [ThemePreset::Dark] {
+        // ⚠️ THEMES, PLURAL — see the doc comment. This iterated `[ThemePreset::Dark]` alone, one
+        // theme standing in for the other nine, which is also why it tripped
+        // `clippy::single_element_loop` under CI's `-D warnings` (bd-3klh2). It is the exact twin of
+        // the narrowing in `xychart_tick_contrast.rs`: both landed together in cf6e4cd9, and fixing
+        // one without grepping for the other would have left the gate red on the sibling.
+        // `Default` is excluded because its C4 contract is the Mermaid-specific `#333` pinned above.
+        for theme in [
+            ThemePreset::Mermaid,
+            ThemePreset::Dark,
+            ThemePreset::Forest,
+            ThemePreset::Neutral,
+            ThemePreset::Corporate,
+            ThemePreset::Neon,
+            ThemePreset::Pastel,
+            ThemePreset::HighContrast,
+            ThemePreset::Monochrome,
+            ThemePreset::Blueprint,
+        ] {
             let svg = render(theme, streaming);
             assert_eq!(
                 fill_of(&svg, "fm-c4-type-label"),

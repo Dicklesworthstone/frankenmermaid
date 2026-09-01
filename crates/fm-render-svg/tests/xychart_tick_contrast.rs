@@ -127,9 +127,28 @@ fn default_y_ticks_match_mermaid_primary_text_color() {
 /// Non-default themes retain the local theme's shared axis-text color.
 ///
 /// The default y-axis contract is Mermaid-specific (`#333`) and is pinned separately above.
+///
+/// ⚠️ THE NAME SAYS THEMES, PLURAL, AND NOW SO DOES THE LOOP. This iterated `[ThemePreset::Dark]`
+/// alone — one theme, standing in for the other nine. That is also why it tripped
+/// `clippy::single_element_loop` under CI's `-D warnings` and blocked the whole workspace gate
+/// (bd-3klh2): a single-element loop is the SHAPE of coverage that was narrowed and never widened
+/// back. Collapsing the loop to silence the lint would have frozen the narrowing in place, so the
+/// list is filled in instead — every non-`Default` preset, since `Default`'s y tick is a separate
+/// Mermaid-specific contract pinned by `default_y_ticks_match_mermaid_primary_text_color` above.
 #[test]
 fn non_default_axes_paint_their_tick_labels_the_same_colour() {
-    for theme in [ThemePreset::Dark] {
+    for theme in [
+        ThemePreset::Mermaid,
+        ThemePreset::Dark,
+        ThemePreset::Forest,
+        ThemePreset::Neutral,
+        ThemePreset::Corporate,
+        ThemePreset::Neon,
+        ThemePreset::Pastel,
+        ThemePreset::HighContrast,
+        ThemePreset::Monochrome,
+        ThemePreset::Blueprint,
+    ] {
         let svg = render(theme);
         assert_eq!(
             fill_of(&svg, "fm-xychart-y-tick"),

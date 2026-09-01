@@ -74,7 +74,11 @@ fn diverges(n: usize, edges: bool) -> Option<(f32, f32)> {
     ))
 }
 fn main() {
-    for edges in [true] {
+    // ⚠️ BOTH ARMS, BECAUSE THE `else` BELOW IS THE PROOF THIS WAS NARROWED. The loop read
+    // `[true]` while the body still branches `if edges { "dense" } else { "chain" }` — a dead arm
+    // and a probe that silently stopped reporting half of what it names. It also tripped
+    // `clippy::single_element_loop` under CI's `-D warnings` (bd-3klh2).
+    for edges in [true, false] {
         for n in [48usize, 60, 66, 70, 71, 72] {
             if let Some((dw, dh)) = diverges(n, edges) {
                 let tag = if edges { "dense" } else { "chain" };
