@@ -906,6 +906,51 @@ function classRelationshipSemantics(engine, edges, nodes, definitions) {
   };
 }
 
+/**
+ * Pairs of node boxes in ONE rendered document that overlap by positive area.
+ *
+ * ⚠️ POSITIVE AREA, NOT CONTACT, AND THE DIFFERENCE IS THE WHOLE RULE (bd-29la1). Boxes that share
+ * an edge intersect at zero area, which is what abutting lanes in a dense layer legitimately do; a
+ * naive `intersects` test calls those a defect. The threshold is picked from measurement rather
+ * than taste: swept over every corpus item the equivalence driver can run (~8,800 diagrams,
+ * ~80,000 nodes) frankenmermaid produces ZERO positive-area overlaps and ZERO zero-area contacts,
+ * so excluding contact costs no coverage at all while keeping the rule safe for a layout that
+ * starts packing lanes tightly.
+ *
+ * WHY THIS IS CHECKED SEPARATELY FROM TOPOLOGY. An overlap is only visible to the topology check
+ * when an edge endpoint happens to land inside the overlapping region, where it makes two anchors
+ * equidistant and the row degrades to `coincident_anchors`. ci_docs_5000 row 2579 at 7e9e5ba6 was
+ * exactly that accident: n24 was drawn ENTIRELY inside n38's box (119.03 x 66.5, the whole of n24)
+ * and the only reason anyone noticed was two endpoints falling in the wrong place. A pair that
+ * overlaps without swallowing an endpoint passes every other invariant while the picture shows one
+ * box on top of another.
+ *
+ * Nodes whose anchor carries no rectangular bounds cannot be measured and are counted, not assumed
+ * innocent -- `unmeasurable` is reported so a clean verdict states its own coverage.
+ */
+export function overlappingNodeBoxes(anchors) {
+  const boxes = [];
+  let unmeasurable = 0;
+  for (const [id, anchor] of anchors) {
+    if (Array.isArray(anchor) || !anchor.bounds) { unmeasurable += 1; continue; }
+    boxes.push([id, anchor.bounds]);
+  }
+  const pairs = [];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const [aId, a] = boxes[i];
+      const [bId, b] = boxes[j];
+      const width = Math.min(a.max_x, b.max_x) - Math.max(a.min_x, b.min_x);
+      const height = Math.min(a.max_y, b.max_y) - Math.max(a.min_y, b.min_y);
+      if (width > 0 && height > 0) {
+        pairs.push({ a: aId, b: bId, area: Number((width * height).toFixed(2)) });
+      }
+    }
+  }
+  pairs.sort((x, y) => y.area - x.area);
+  return { pairs, measured: boxes.length, unmeasurable };
+}
+
 // ---------------------------------------------------------------- signatures
 
 /**
@@ -944,6 +989,8 @@ export function signature(svg, engine) {
     derived.push(`${pseudo(from.id)}>${pseudo(to.id)}`);
   }
 
+  const overlaps = overlappingNodeBoxes(anchors);
+
   const ids = [...nodes.keys()];
   const resolvable = edges.length > 0 && anchors.length > 0 && unresolved === 0 && unparsed === 0;
   const declared = engine === 'mermaid-js'
@@ -972,6 +1019,12 @@ export function signature(svg, engine) {
     declared_topology_status: declared.status,
     class_relationships: classRelationships.relationships,
     class_relationships_status: classRelationships.status,
+    // Pairs of this document's own node boxes that overlap by POSITIVE AREA, i.e. one node drawn
+    // over another. Self-consistency of one rendered SVG, never compared across engines.
+    overlapping_node_pairs: overlaps.pairs.length,
+    overlapping_node_sample: overlaps.pairs[0] ?? null,
+    overlapping_node_boxes_measured: overlaps.measured,
+    overlapping_node_boxes_unmeasurable: overlaps.unmeasurable,
     topology: resolvable ? derived.slice().sort() : null,
     topology_status: resolvable
       ? 'geometric'
@@ -1313,6 +1366,26 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
       detail: against ?? { reason: truth === null ? 'input_not_decodable' : topologyStatus },
     });
   }
+
+  // A SELF-CONSISTENCY invariant, deliberately not a cross-engine one: mermaid's layout is free to
+  // place boxes wherever it likes, and requiring our geometry to match theirs would be a far
+  // stronger claim than this harness makes anywhere else. What is checked is that a rendered
+  // diagram does not draw one of its own nodes on top of another. Applied to frankenmermaid only --
+  // the incumbent's layout is not this project's to fail.
+  checks.push({
+    invariant: 'node_boxes_do_not_overlap__frankenmermaid',
+    tier: 1,
+    decided: fm.overlapping_node_boxes_measured > 1,
+    pass: fm.overlapping_node_boxes_measured > 1 ? fm.overlapping_node_pairs === 0 : null,
+    detail: {
+      overlapping_pairs: fm.overlapping_node_pairs,
+      worst: fm.overlapping_node_sample,
+      measured: fm.overlapping_node_boxes_measured,
+      // Stated on every verdict, passing ones included: a node whose anchor has no rectangular
+      // bounds is outside this invariant's reach, and a clean answer has to say how much it saw.
+      unmeasurable: fm.overlapping_node_boxes_unmeasurable,
+    },
+  });
 
   if (family === 'class') {
     const bothRelationships = fm.class_relationships !== null && js.class_relationships !== null;
@@ -2113,6 +2186,50 @@ export function selfTest() {
   record('class_cardinality_and_label_preserve_relationship_semantics',
     classN2.verdict === 'equivalent',
     { verdict: classN2.verdict, failed: failedInvariants(classN2) });
+
+  // bd-29la1 MUTATION CONTROL. A rendered diagram must not draw one of its own nodes on top of
+  // another. Two rect nodes are placed so their boxes intersect by positive area, and the verdict
+  // has to flip; the same pair moved apart, and a pair merely TOUCHING at a shared edge, must both
+  // stay equivalent -- abutting lanes are not a defect and a rule that cannot tell them apart would
+  // fail every dense layout.
+  const rectNode = (id, x, y, w = 100, h = 40) =>
+    `<g id="fm-node-${id}-0" class="fm-node fm-node-shape-rect">`
+    + `<rect x="${x}" y="${y}" width="${w}" height="${h}"/><text x="0" y="0">${id.toUpperCase()}</text></g>`;
+  const twoNodeFm = (bx) => `<svg><style>.fm-node{fill:#fff}</style>`
+    + rectNode('a', 0, 0) + rectNode('b', bx, 0)
+    + `<g id="fm-edge-0" class="fm-edge" data-fm-edge-id="0"><path d="M100,20L${bx},20"/></g></svg>`;
+  const overlapCounts = (bx) => {
+    const sig = signature(twoNodeFm(bx), 'frankenmermaid');
+    return {
+      pairs: sig.overlapping_node_pairs,
+      measured: sig.overlapping_node_boxes_measured,
+      unmeasurable: sig.overlapping_node_boxes_unmeasurable,
+    };
+  };
+  record('overlapping_node_boxes_are_detected', (() => {
+    const apart = overlapCounts(200);
+    const touching = overlapCounts(100);
+    const overlapping = overlapCounts(50);
+    return apart.pairs === 0 && touching.pairs === 0 && overlapping.pairs === 1
+      // Coverage has to be reported, not assumed: both rect nodes are measurable here.
+      && apart.measured === 2 && apart.unmeasurable === 0
+      && signature(twoNodeFm(50), 'frankenmermaid').overlapping_node_sample.area === 2000;
+  })(), { apart: overlapCounts(200), touching: overlapCounts(100), overlapping: overlapCounts(50) });
+
+  // Nodes the harness cannot bound must not be silently counted as clean.
+  record('unboundable_nodes_are_reported_not_assumed_clean', (() => {
+    const sig = signature(
+      `<svg><g id="fm-node-a-0" class="fm-node fm-node-shape-circle"><circle cx="10" cy="10" r="5"/></g>`
+      + `<g id="fm-node-b-1" class="fm-node fm-node-shape-circle"><circle cx="12" cy="10" r="5"/></g></svg>`,
+      'frankenmermaid',
+    );
+    return sig.overlapping_node_boxes_measured === 0 && sig.overlapping_node_boxes_unmeasurable === 2
+      && sig.overlapping_node_pairs === 0;
+  })(), signature(
+    `<svg><g id="fm-node-a-0" class="fm-node fm-node-shape-circle"><circle cx="10" cy="10" r="5"/></g>`
+    + `<g id="fm-node-b-1" class="fm-node fm-node-shape-circle"><circle cx="12" cy="10" r="5"/></g></svg>`,
+    'frankenmermaid',
+  ));
 
   // Unit-level invariants the above depend on.
   record('entities_decode', decodeEntities('a&lt;b&amp;c&#65;&#x42;') === 'a<b&cAB', decodeEntities('a&lt;b&amp;c&#65;&#x42;'));
