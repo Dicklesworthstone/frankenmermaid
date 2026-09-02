@@ -307,7 +307,7 @@ struct DiagramSampleGallery: View {
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 118, alignment: .topLeading)
                                 .padding(15)
-                                .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 16))
+                                .background(Lab.panel, in: RoundedRectangle(cornerRadius: 16))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 16)
                                         .stroke(Lab.cyan.opacity(0.18))
@@ -329,6 +329,5 @@ struct DiagramSampleGallery: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }

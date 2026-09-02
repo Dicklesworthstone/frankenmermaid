@@ -11,6 +11,7 @@ private enum StudioLane: String, CaseIterable, Identifiable {
 
 struct StudioView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @AppStorage(LabAppearance.storageKey) private var appearance = LabAppearance.dark.rawValue
     @AppStorage("diagramTheme") private var diagramTheme = "dark"
     @AppStorage("renderFontScale") private var renderFontScale = 1.0
     @AppStorage("diagramShadows") private var diagramShadows = true
@@ -90,12 +91,20 @@ struct StudioView: View {
         } message: {
             Text(exportError ?? "Unknown export error")
         }
+        .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
     }
 
     private var masthead: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) { brand; Spacer(); statusPill }
-            VStack(alignment: .leading, spacing: 10) { brand; statusPill }
+            HStack(spacing: 12) { brand; Spacer(); statusControls }
+            VStack(alignment: .leading, spacing: 10) { brand; statusControls }
+        }
+    }
+
+    private var statusControls: some View {
+        HStack(spacing: 8) {
+            LabAppearanceButton(selection: $appearance)
+            statusPill
         }
     }
 
@@ -131,7 +140,7 @@ struct StudioView: View {
         .foregroundStyle(statusColor)
         .padding(.horizontal, 13)
         .padding(.vertical, 9)
-        .background(Color.black.opacity(0.38), in: Capsule())
+        .background(Lab.statusBackground, in: Capsule())
         .overlay(Capsule().stroke(statusColor.opacity(0.3)))
     }
 
@@ -184,7 +193,7 @@ struct StudioView: View {
                         .foregroundStyle(Lab.secondary)
                 }
                 MermaidCodeEditor(text: $renderer.source, isFocused: $editorFocused)
-                    .background(Color.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 12))
+                    .background(Lab.statusBackground.opacity(0.58), in: RoundedRectangle(cornerRadius: 12))
                     .frame(minHeight: 320)
 #if !targetEnvironment(macCatalyst)
                 if horizontalSizeClass == .compact {

@@ -8,6 +8,7 @@ import UIKit
 struct MermaidCodeEditor: UIViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -41,7 +42,8 @@ struct MermaidCodeEditor: UIViewRepresentable {
 
     func updateUIView(_ view: MermaidTextView, context: Context) {
         context.coordinator.parent = self
-        if view.text != text {
+        if view.text != text || context.coordinator.lastColorScheme != colorScheme {
+            context.coordinator.lastColorScheme = colorScheme
             context.coordinator.applyHighlight(to: view, replacingText: text)
         } else {
             context.coordinator.refreshTypingAttributes(in: view)
@@ -55,6 +57,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: MermaidCodeEditor
+        var lastColorScheme: ColorScheme?
         private var isApplyingHighlight = false
 
         init(_ parent: MermaidCodeEditor) { self.parent = parent }
@@ -108,17 +111,17 @@ struct MermaidCodeEditor: UIViewRepresentable {
                   fontWeight: .semibold, to: storage, source: source, range: fullRange)
             apply(Self.arrowRegex, color: UIColor(Lab.emerald), fontWeight: .semibold,
                   to: storage, source: source, range: fullRange)
-            apply(Self.nodeLabelRegex, color: UIColor(red: 0.75, green: 0.63, blue: 1, alpha: 1),
+            apply(Self.nodeLabelRegex, color: UIColor(Lab.cyan),
                   to: storage, source: source, range: fullRange)
             apply(Self.edgeLabelRegex, color: UIColor(Lab.amber), fontWeight: .semibold,
                   to: storage, source: source, range: fullRange)
-            apply(Self.stringRegex, color: UIColor(red: 0.98, green: 0.55, blue: 0.72, alpha: 1),
+            apply(Self.stringRegex, color: UIColor(Lab.emerald),
                   to: storage, source: source, range: fullRange)
             apply(Self.commentRegex, color: UIColor(Lab.secondary).withAlphaComponent(0.72),
                   italic: true, to: storage, source: source, range: fullRange)
             apply(Self.directiveRegex, color: UIColor(Lab.amber), fontWeight: .bold,
                   to: storage, source: source, range: fullRange)
-            apply(Self.numberRegex, color: UIColor(red: 0.96, green: 0.62, blue: 0.36, alpha: 1),
+            apply(Self.numberRegex, color: UIColor(Lab.amber),
                   to: storage, source: source, range: fullRange)
 
             view.attributedText = storage
