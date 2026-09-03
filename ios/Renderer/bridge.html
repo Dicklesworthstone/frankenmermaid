@@ -114,11 +114,44 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
           return false;
         }
       };
-      window.frankenExport = (command) => {
+      async function pngDataURL(svg) {
+        const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
+        const root = document.documentElement;
+        if (!root || root.nodeName.toLowerCase() !== 'svg') throw new Error('invalid SVG export');
+        const viewBox = (root.getAttribute('viewBox') || '').trim().split(/[ ,]+/).map(Number);
+        const rawWidth = Number.parseFloat(root.getAttribute('width'));
+        const rawHeight = Number.parseFloat(root.getAttribute('height'));
+        const hasViewBox = viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0;
+        const width = hasViewBox ? viewBox[2] : rawWidth;
+        const height = hasViewBox ? viewBox[3] : rawHeight;
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+          throw new Error('diagram has no rasterizable dimensions');
+        }
+        const scale = Math.min(2, 4096 / Math.max(width, height), Math.sqrt(16000000 / (width * height)));
+        if (!Number.isFinite(scale) || scale <= 0) throw new Error('diagram is too large to rasterize');
+        const canvas = window.document.createElement('canvas');
+        canvas.width = Math.max(1, Math.ceil(width * scale));
+        canvas.height = Math.max(1, Math.ceil(height * scale));
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('PNG canvas is unavailable');
+        const blobURL = URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml;charset=utf-8'}));
+        try {
+          const image = new Image();
+          image.src = blobURL;
+          await image.decode();
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          return canvas.toDataURL('image/png');
+        } finally {
+          URL.revokeObjectURL(blobURL);
+        }
+      }
+
+      window.frankenExport = async (command) => {
         const svg = serializedDiagram();
         if (command.kind === 'animatedHTML') {
           return animatedDocument(svg, command.title);
         }
+        if (command.kind === 'png') return pngDataURL(svg);
         return svg;
       };
       bridge.postMessage({type: 'ready'});

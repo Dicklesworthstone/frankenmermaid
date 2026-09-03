@@ -37,6 +37,8 @@ struct MermaidDiagnostic: Identifiable, Equatable, Sendable {
 enum MermaidExportKind: String, CaseIterable, Identifiable {
     case source
     case svg
+    case png
+    case pdf
     case animatedHTML
 
     var id: Self { self }
@@ -45,6 +47,8 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         switch self {
         case .source: "Mermaid Source"
         case .svg: "Vector SVG"
+        case .png: "Raster PNG (2x)"
+        case .pdf: "PDF Document"
         case .animatedHTML: "Animated Web Page"
         }
     }
@@ -53,6 +57,8 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         switch self {
         case .source: "chevron.left.forwardslash.chevron.right"
         case .svg: "scribble.variable"
+        case .png: "photo"
+        case .pdf: "doc.richtext"
         case .animatedHTML: "sparkles.rectangle.stack"
         }
     }
@@ -61,6 +67,8 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         switch self {
         case .source: "mmd"
         case .svg: "svg"
+        case .png: "png"
+        case .pdf: "pdf"
         case .animatedHTML: "html"
         }
     }
@@ -189,9 +197,9 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     }
 
     func prepareExport(_ kind: MermaidExportKind) async throws -> URL {
-        let contents: String
+        let bytes: Data
         if kind == .source {
-            contents = source
+            bytes = Data(source.utf8)
         } else {
             guard hasCurrentRenderedArtifact, phase == .ready else {
                 throw CocoaError(.fileWriteUnknown, userInfo: [
@@ -199,23 +207,28 @@ final class MermaidRendererModel: NSObject, ObservableObject {
                         "Wait for the current diagram to finish rendering before exporting it."
                 ])
             }
-            let command: [String: Any] = [
-                "kind": kind.rawValue,
-                "title": "FrankenMermaid \(diagramType) diagram"
-            ]
-            let result = try await webView.callAsyncJavaScript(
-                "return window.frankenExport(command)",
-                arguments: ["command": command],
-                in: nil,
-                contentWorld: .page
-            )
-            guard let exported = result as? String, !exported.isEmpty else {
-                throw CocoaError(.fileWriteUnknown, userInfo: [
-                    NSLocalizedDescriptionKey: "The rendered diagram was not available to export."
-                ])
+            if kind == .pdf {
+                bytes = try await webView.pdf()
+            } else {
+                let command: [String: Any] = [
+                    "kind": kind.rawValue,
+                    "title": "FrankenMermaid \(diagramType) diagram"
+                ]
+                let result = try await webView.callAsyncJavaScript(
+                    "return await window.frankenExport(command)",
+                    arguments: ["command": command],
+                    in: nil,
+                    contentWorld: .page
+                )
+                guard let exported = result as? String, !exported.isEmpty else {
+                    throw MermaidExportError.missingArtifact
+                }
+                bytes = kind == .png
+                    ? try MermaidExportCodec.decodePNGDataURL(exported)
+                    : Data(exported.utf8)
             }
-            contents = exported
         }
+        try MermaidExportCodec.validateSize(bytes)
 
         let safeType = diagramType
             .lowercased()
@@ -224,7 +237,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         let filename = "FrankenMermaid-\(safeType.isEmpty ? "diagram" : safeType)-" +
             "\(UUID().uuidString.prefix(8)).\(kind.fileExtension)"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try Data(contents.utf8).write(to: url, options: .atomic)
+        try bytes.write(to: url, options: .atomic)
         return url
     }
 

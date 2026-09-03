@@ -18,9 +18,11 @@
 		A4186EDAE7F8F31B496ADCDB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0C48617619448DF0AB92D9A /* Assets.xcassets */; };
 		ADD3D2C2B804BD5184F2F272 /* HTMLShareUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C411534DDA87CA920CF6AA2A /* HTMLShareUITests.swift */; };
 		B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8682A866E00E57A642FB42 /* RendererHost.swift */; };
+		C38CA4C592AD02BBD181E464 /* MermaidExportCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB28A9F06587CA860B1B8785 /* MermaidExportCodec.swift */; };
 		C8EE7E761CA0E1E561C21028 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114A8B45321005FF3AF13396 /* Theme.swift */; };
 		DDB9B136B4FACEDD3913AA22 /* DiagramInsightPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C118BA0AD79E2A7724010588 /* DiagramInsightPanel.swift */; };
 		F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */; };
+		F879F45CD1BC6B3BF07314E9 /* MermaidExportCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DBD693C9F5AE8A1B935D41C /* MermaidExportCodecTests.swift */; };
 		F8C112B99787DE6A6318F68E /* MermaidSourceLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6C6A72423D7AAB73DADFEE /* MermaidSourceLoaderTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -46,6 +48,7 @@
 		114A8B45321005FF3AF13396 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidDiagnosticTests.swift; sourceTree = "<group>"; };
 		2CC45DF6459061EB2B480E6E /* Renderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Renderer; sourceTree = SOURCE_ROOT; };
+		2DBD693C9F5AE8A1B935D41C /* MermaidExportCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidExportCodecTests.swift; sourceTree = "<group>"; };
 		6E89BCA9A690AD54DC017615 /* MermaidSourceLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidSourceLoader.swift; sourceTree = "<group>"; };
 		6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrankenMermaidApp.swift; sourceTree = "<group>"; };
 		7D8682A866E00E57A642FB42 /* RendererHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendererHost.swift; sourceTree = "<group>"; };
@@ -55,6 +58,7 @@
 		C0C48617619448DF0AB92D9A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C118BA0AD79E2A7724010588 /* DiagramInsightPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagramInsightPanel.swift; sourceTree = "<group>"; };
 		C411534DDA87CA920CF6AA2A /* HTMLShareUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLShareUITests.swift; sourceTree = "<group>"; };
+		CB28A9F06587CA860B1B8785 /* MermaidExportCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidExportCodec.swift; sourceTree = "<group>"; };
 		CC6C6A72423D7AAB73DADFEE /* MermaidSourceLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidSourceLoaderTests.swift; sourceTree = "<group>"; };
 		DE0E98ED92D765875E8194C6 /* FrankenMermaidTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenMermaidTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E3D72BEE3C3241B52B539BCC /* StudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioView.swift; sourceTree = "<group>"; };
@@ -68,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */,
+				2DBD693C9F5AE8A1B935D41C /* MermaidExportCodecTests.swift */,
 				CC6C6A72423D7AAB73DADFEE /* MermaidSourceLoaderTests.swift */,
 			);
 			path = Tests;
@@ -90,6 +95,7 @@
 				6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */,
 				FE54E15D819A299BF5C0B0D7 /* Info.plist */,
 				AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */,
+				CB28A9F06587CA860B1B8785 /* MermaidExportCodec.swift */,
 				6E89BCA9A690AD54DC017615 /* MermaidSourceLoader.swift */,
 				8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */,
 				7D8682A866E00E57A642FB42 /* RendererHost.swift */,
@@ -274,6 +280,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				08DA67C03E1999190BC227A0 /* MermaidDiagnosticTests.swift in Sources */,
+				F879F45CD1BC6B3BF07314E9 /* MermaidExportCodecTests.swift in Sources */,
 				F8C112B99787DE6A6318F68E /* MermaidSourceLoaderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -286,6 +293,7 @@
 				05C42C83CFE30B89F3D4A9E5 /* DiagramSamples.swift in Sources */,
 				F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */,
 				95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */,
+				C38CA4C592AD02BBD181E464 /* MermaidExportCodec.swift in Sources */,
 				8E983EE2B5F3C4DFE047D3DB /* MermaidSourceLoader.swift in Sources */,
 				B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */,
 				882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */,

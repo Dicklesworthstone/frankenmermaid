@@ -83,8 +83,8 @@ Inputs:
 Outputs:
 
 - SVG with namespace, accessible metadata, embedded theme styling, and deterministic source output;
-- transparent or themed PNG at user-selected scale;
-- PDF through WebKit’s local PDF generation over the exact SVG stage;
+- bounded transparent PNG from the exact SVG stage at up to 2x scale (shipped; explicit scale/background controls remain future work);
+- PDF through WebKit’s local PDF generation over the exact SVG stage (shipped);
 - original Mermaid source; and
 - Graph Deck presentation HTML package when a deck manifest is present.
 

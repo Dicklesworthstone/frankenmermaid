@@ -300,7 +300,7 @@ struct StudioView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .tint(Lab.cyan)
-                        .accessibilityHint("Share source, vector art, or a self-contained animated web page")
+                        .accessibilityHint("Share source, SVG, PNG, PDF, or a self-contained animated web page")
                     }
                 }
             }
