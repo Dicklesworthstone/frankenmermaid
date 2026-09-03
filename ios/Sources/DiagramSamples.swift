@@ -329,5 +329,6 @@ struct DiagramSampleGallery: View {
                 }
             }
         }
+        .accessibilityIdentifier("sample-gallery")
     }
 }

@@ -158,6 +158,7 @@ struct StudioView: View {
                     .foregroundStyle(Lab.secondary)
             }
         }
+        .accessibilityIdentifier("frankenmermaid-brand")
     }
 
     private var statusPill: some View {
@@ -189,10 +190,33 @@ struct StudioView: View {
     }
 
     private var wideStudio: some View {
+#if targetEnvironment(macCatalyst)
         HStack(spacing: 14) {
             editorPanel.frame(minWidth: 320, maxWidth: .infinity)
             diagramPanel.frame(minWidth: 380, maxWidth: .infinity)
         }
+#else
+        VStack(spacing: 12) {
+            Picker("Studio", selection: $lane) {
+                ForEach(StudioLane.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+
+            HStack(spacing: 14) {
+                switch lane {
+                case .code:
+                    editorPanel.frame(minWidth: 320, maxWidth: .infinity)
+                    diagramPanel.frame(minWidth: 380, maxWidth: .infinity)
+                case .diagram:
+                    diagramPanel.frame(minWidth: 380, maxWidth: .infinity)
+                    inspectorPanel.frame(minWidth: 300, maxWidth: .infinity)
+                case .inspect:
+                    inspectorPanel.frame(minWidth: 300, maxWidth: .infinity)
+                    diagramPanel.frame(minWidth: 380, maxWidth: .infinity)
+                }
+            }
+        }
+#endif
     }
 
     private var desktopStudio: some View {
@@ -255,6 +279,7 @@ struct StudioView: View {
 #endif
             }
         }
+        .accessibilityIdentifier("source-editor-panel")
     }
 
     private var diagramPanel: some View {
@@ -274,6 +299,8 @@ struct StudioView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Lab.stroke))
                     .frame(minHeight: 320)
+                    .accessibilityIdentifier("live-diagram-stage")
+                    .accessibilityLabel("Live Mermaid diagram preview")
                 HStack {
                     Text(renderer.diagramType)
                         .font(.system(size: Lab.size(10), weight: .bold, design: .monospaced))
@@ -377,6 +404,7 @@ struct StudioView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .accessibilityIdentifier("diagram-inspector-panel")
     }
 
     private var renderFontSizeControl: some View {
@@ -417,15 +445,7 @@ struct StudioView: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 4) {
-            Text("Rendered entirely on this device · no source or diagram is uploaded")
-            Text(
-                "If you like this free app, please show your appreciation by trying out my paid skills site at " +
-                    "[JeffreysSkills.md](https://jeffreys-skills.md)."
-            )
-                .tint(Lab.cyan)
-                .frame(maxWidth: 560)
-        }
+        Text("Rendered entirely on this device · no source or diagram is uploaded")
         .font(.system(size: Lab.size(9), design: .monospaced))
         .foregroundStyle(Lab.secondary.opacity(0.78))
         .multilineTextAlignment(.center)
