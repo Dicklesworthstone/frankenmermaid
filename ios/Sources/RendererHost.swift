@@ -3,9 +3,7 @@ import SwiftUI
 import WebKit
 
 enum GraphPhase: Equatable {
-    case loading
-    case ready
-    case rendering
+    case loading, ready, rendering
     case failed(String)
 }
 
@@ -34,44 +32,13 @@ struct MermaidDiagnostic: Identifiable, Equatable, Sendable {
     }
 }
 
-enum MermaidExportKind: String, CaseIterable, Identifiable {
-    case source
-    case svg
-    case png
-    case pdf
-    case animatedHTML
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .source: "Mermaid Source"
-        case .svg: "Vector SVG"
-        case .png: "Raster PNG (2x)"
-        case .pdf: "PDF Document"
-        case .animatedHTML: "Animated Web Page"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .source: "chevron.left.forwardslash.chevron.right"
-        case .svg: "scribble.variable"
-        case .png: "photo"
-        case .pdf: "doc.richtext"
-        case .animatedHTML: "sparkles.rectangle.stack"
-        }
-    }
-
-    var fileExtension: String {
-        switch self {
-        case .source: "mmd"
-        case .svg: "svg"
-        case .png: "png"
-        case .pdf: "pdf"
-        case .animatedHTML: "html"
-        }
-    }
+struct MermaidRenderStyle: Equatable, Sendable {
+    let theme: String
+    let fontSize: Double
+    let padding: Double
+    let shadows: Bool
+    let roundedCorners: Double
+    let nodeGradients: Bool
 }
 
 @MainActor
@@ -118,21 +85,13 @@ final class MermaidRendererModel: NSObject, ObservableObject {
 
     deinit { scheduledRender?.cancel() }
 
-    func updateStyle(
-        theme: String,
-        fontSize: Double,
-        padding: Double,
-        shadows: Bool,
-        roundedCorners: Double,
-        nodeGradients: Bool,
-        renderImmediately: Bool
-    ) {
-        self.theme = theme
-        self.fontSize = min(22, max(9, fontSize))
-        self.padding = min(48, max(8, padding))
-        self.shadows = shadows
-        self.roundedCorners = min(24, max(0, roundedCorners))
-        self.nodeGradients = nodeGradients
+    func updateStyle(_ style: MermaidRenderStyle, renderImmediately: Bool) {
+        theme = style.theme
+        fontSize = min(22, max(9, style.fontSize))
+        padding = min(48, max(8, style.padding))
+        shadows = style.shadows
+        roundedCorners = min(24, max(0, style.roundedCorners))
+        nodeGradients = style.nodeGradients
         hasCurrentRenderedArtifact = false
         hasCurrentInsights = false
         lensBindingCount = 0
@@ -247,6 +206,49 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try bytes.write(to: url, options: .atomic)
         return url
+    }
+
+    func applySelectedLensEdit(replacement: String) async throws {
+        guard phase == .ready, hasCurrentRenderedArtifact,
+              let binding = selectedLensBinding,
+              binding.exactSourceSnippet(in: source) != nil else {
+            throw MermaidLensEditError.unavailable
+        }
+        let trimmed = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw MermaidLensEditError.emptyReplacement }
+        guard replacement.utf8.count <= 4_096 else {
+            throw MermaidLensEditError.replacementTooLarge
+        }
+
+        let expectedSource = source
+        let expectedRequestID = requestID
+        let command: [String: Any] = [
+            "requestID": expectedRequestID,
+            "source": expectedSource,
+            "elementID": binding.id,
+            "replacement": replacement
+        ]
+        let result = try await webView.callAsyncJavaScript(
+            "return window.frankenApplyLensEdit(command)",
+            arguments: ["command": command],
+            in: nil,
+            contentWorld: .page
+        )
+        guard requestID == expectedRequestID, source == expectedSource else {
+            throw MermaidLensEditError.staleSelection
+        }
+        guard let receipt = result as? [String: Any],
+              receipt["requestID"] as? Int == expectedRequestID,
+              receipt["elementID"] as? String == binding.id,
+              receipt["previousSnippet"] as? String == binding.snippet,
+              receipt["replacement"] as? String == replacement,
+              let updatedSource = receipt["updatedSource"] as? String,
+              !updatedSource.isEmpty,
+              updatedSource.utf8.count <= MermaidSourceLoader.maximumBytes else {
+            throw MermaidLensEditError.invalidReceipt
+        }
+        selectedLensBinding = nil
+        source = updatedSource
     }
 
     private func receiveLensSelection(_ payload: [String: Any]) {

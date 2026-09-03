@@ -17,10 +17,11 @@
 <body>
   <main id="stage" aria-label="Rendered Mermaid diagram"></main>
   <script type="module">
-    import init, { describeDiagram, detectType, diagramLens, parse, renderSvg } from './frankenmermaid.js';
+    import init, { applyLensEdit, describeDiagram, detectType, diagramLens, parse, renderSvg } from './frankenmermaid.js';
     const bridge = window.webkit.messageHandlers.frankenBridge;
     const stage = document.querySelector('#stage');
     let latestRequest = 0;
+    let latestSource = '';
 
     function publishLensSelection(requestID, binding) {
       stage.querySelectorAll('.fm-lens-selected').forEach((element) => {
@@ -135,6 +136,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
           const source = String(command.source);
           const svg = renderSvg(source, command.options || {theme: 'dark', responsive: true, accessible: true});
           if (requestID !== latestRequest) return false;
+          latestSource = source;
           const insight = inspectDiagram(source);
           if (requestID !== latestRequest) return false;
           stage.innerHTML = svg;
@@ -158,6 +160,39 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
           bridge.postMessage({type: 'failure', requestID, message: String(error)});
           return false;
         }
+      };
+      window.frankenApplyLensEdit = (command) => {
+        const requestID = Number(command.requestID);
+        const source = String(command.source ?? '');
+        const elementID = String(command.elementID ?? '');
+        const replacement = String(command.replacement ?? '');
+        if (!Number.isSafeInteger(requestID) || requestID !== latestRequest) {
+          throw new Error('The selected element belongs to an older render. Select it again.');
+        }
+        if (source !== latestSource) {
+          throw new Error('The Mermaid source changed after this element was selected. Select it again.');
+        }
+        if (!elementID || !replacement.trim()) {
+          throw new Error('Choose a source-bound element and enter a non-empty replacement.');
+        }
+        if (new TextEncoder().encode(replacement).byteLength > 4096) {
+          throw new Error('A source-lens replacement cannot exceed 4 KB.');
+        }
+        const result = applyLensEdit(source, elementID, replacement);
+        const updatedSource = String(result?.updatedSource ?? '');
+        if (result?.elementId !== elementID || !updatedSource) {
+          throw new Error('The Rust source lens returned an invalid edit receipt.');
+        }
+        if (new TextEncoder().encode(updatedSource).byteLength > 2 * 1024 * 1024) {
+          throw new Error('The edit would exceed the 2 MB editor limit.');
+        }
+        return {
+          requestID,
+          elementID,
+          updatedSource,
+          previousSnippet: String(result.previousSnippet ?? ''),
+          replacement: String(result.replacement ?? '')
+        };
       };
       async function pngDataURL(svg) {
         const document = new DOMParser().parseFromString(svg, 'image/svg+xml');

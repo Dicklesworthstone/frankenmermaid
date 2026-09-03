@@ -1,5 +1,45 @@
 import Foundation
 
+enum MermaidExportKind: String, CaseIterable, Identifiable {
+    case source
+    case svg
+    case png
+    case pdf
+    case animatedHTML
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .source: "Mermaid Source"
+        case .svg: "Vector SVG"
+        case .png: "Raster PNG (2x)"
+        case .pdf: "PDF Document"
+        case .animatedHTML: "Animated Web Page"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .source: "chevron.left.forwardslash.chevron.right"
+        case .svg: "scribble.variable"
+        case .png: "photo"
+        case .pdf: "doc.richtext"
+        case .animatedHTML: "sparkles.rectangle.stack"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .source: "mmd"
+        case .svg: "svg"
+        case .png: "png"
+        case .pdf: "pdf"
+        case .animatedHTML: "html"
+        }
+    }
+}
+
 enum MermaidExportCodec {
     static let maximumBytes = 32 * 1_024 * 1_024
     private static let pngPrefix = "data:image/png;base64,"

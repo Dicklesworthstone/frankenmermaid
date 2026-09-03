@@ -443,12 +443,14 @@ struct StudioView: View {
 
     private func applyRenderStyle(renderImmediately: Bool = true) {
         renderer.updateStyle(
-            theme: diagramTheme,
-            fontSize: 14.0 * clampedRenderFontScale(renderFontScale),
-            padding: diagramPadding,
-            shadows: diagramShadows,
-            roundedCorners: diagramCornerRadius,
-            nodeGradients: diagramGradients,
+            MermaidRenderStyle(
+                theme: diagramTheme,
+                fontSize: 14.0 * clampedRenderFontScale(renderFontScale),
+                padding: diagramPadding,
+                shadows: diagramShadows,
+                roundedCorners: diagramCornerRadius,
+                nodeGradients: diagramGradients
+            ),
             renderImmediately: renderImmediately
         )
     }
