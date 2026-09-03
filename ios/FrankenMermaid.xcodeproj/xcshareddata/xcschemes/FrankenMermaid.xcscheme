@@ -29,6 +29,20 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "3582D18D7F1713933F4C9078"
+               BuildableName = "FrankenMermaidTests.xctest"
+               BlueprintName = "FrankenMermaidTests"
+               ReferencedContainer = "container:FrankenMermaid.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "243C726C8F9B2AA0CB823177"
                BuildableName = "FrankenMermaidUITests.xctest"
                BlueprintName = "FrankenMermaidUITests"
@@ -53,6 +67,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "3582D18D7F1713933F4C9078"
+               BuildableName = "FrankenMermaidTests.xctest"
+               BlueprintName = "FrankenMermaidTests"
+               ReferencedContainer = "container:FrankenMermaid.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
          <TestableReference
             skipped = "NO"
             parallelizable = "NO">

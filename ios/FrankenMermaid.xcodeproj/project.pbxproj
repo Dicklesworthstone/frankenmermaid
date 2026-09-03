@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		05C42C83CFE30B89F3D4A9E5 /* DiagramSamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928415AEC457CE85623EEEFC /* DiagramSamples.swift */; };
+		08DA67C03E1999190BC227A0 /* MermaidDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */; };
 		253A6289134C23366FCD9F11 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */; };
 		321FD792EC092CDC0EE8A0EE /* Renderer in Resources */ = {isa = PBXBuildFile; fileRef = 2CC45DF6459061EB2B480E6E /* Renderer */; };
 		882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D72BEE3C3241B52B539BCC /* StudioView.swift */; };
@@ -16,10 +17,18 @@
 		ADD3D2C2B804BD5184F2F272 /* HTMLShareUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C411534DDA87CA920CF6AA2A /* HTMLShareUITests.swift */; };
 		B2E97B9D54C8F264DDA10D99 /* RendererHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8682A866E00E57A642FB42 /* RendererHost.swift */; };
 		C8EE7E761CA0E1E561C21028 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114A8B45321005FF3AF13396 /* Theme.swift */; };
+		DDB9B136B4FACEDD3913AA22 /* DiagramInsightPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C118BA0AD79E2A7724010588 /* DiagramInsightPanel.swift */; };
 		F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		389FEBD357582F55837A3034 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3B65434ACF05E04F26BA82E0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 71205DB217368F71CE5D1547;
+			remoteInfo = FrankenMermaid;
+		};
 		73D0912F929C44B27FF33EC6 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3B65434ACF05E04F26BA82E0 /* Project object */;
@@ -32,6 +41,7 @@
 /* Begin PBXFileReference section */
 		10205D86068DDFD97F9D7196 /* FrankenMermaid.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FrankenMermaid.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		114A8B45321005FF3AF13396 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidDiagnosticTests.swift; sourceTree = "<group>"; };
 		2CC45DF6459061EB2B480E6E /* Renderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Renderer; sourceTree = SOURCE_ROOT; };
 		6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrankenMermaidApp.swift; sourceTree = "<group>"; };
 		7D8682A866E00E57A642FB42 /* RendererHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendererHost.swift; sourceTree = "<group>"; };
@@ -39,13 +49,23 @@
 		928415AEC457CE85623EEEFC /* DiagramSamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagramSamples.swift; sourceTree = "<group>"; };
 		AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MermaidCodeEditor.swift; sourceTree = "<group>"; };
 		C0C48617619448DF0AB92D9A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C118BA0AD79E2A7724010588 /* DiagramInsightPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagramInsightPanel.swift; sourceTree = "<group>"; };
 		C411534DDA87CA920CF6AA2A /* HTMLShareUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTMLShareUITests.swift; sourceTree = "<group>"; };
+		DE0E98ED92D765875E8194C6 /* FrankenMermaidTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenMermaidTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E3D72BEE3C3241B52B539BCC /* StudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioView.swift; sourceTree = "<group>"; };
 		F52FC3D2BE5C3C1134F06C59 /* FrankenMermaidUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenMermaidUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FE54E15D819A299BF5C0B0D7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		0B19B0494D3A0A1431ECCA19 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
 		8367348BE49B5D345DF4C6BD /* UITests */ = {
 			isa = PBXGroup;
 			children = (
@@ -57,6 +77,7 @@
 		8806C5BF358CE88ECE2CF469 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				C118BA0AD79E2A7724010588 /* DiagramInsightPanel.swift */,
 				928415AEC457CE85623EEEFC /* DiagramSamples.swift */,
 				6F7A0BCB43FBE5B9573EC0CB /* FrankenMermaidApp.swift */,
 				FE54E15D819A299BF5C0B0D7 /* Info.plist */,
@@ -73,6 +94,7 @@
 			isa = PBXGroup;
 			children = (
 				10205D86068DDFD97F9D7196 /* FrankenMermaid.app */,
+				DE0E98ED92D765875E8194C6 /* FrankenMermaidTests.xctest */,
 				F52FC3D2BE5C3C1134F06C59 /* FrankenMermaidUITests.xctest */,
 			);
 			name = Products;
@@ -84,6 +106,7 @@
 				C0C48617619448DF0AB92D9A /* Assets.xcassets */,
 				2CC45DF6459061EB2B480E6E /* Renderer */,
 				8806C5BF358CE88ECE2CF469 /* Sources */,
+				0B19B0494D3A0A1431ECCA19 /* Tests */,
 				8367348BE49B5D345DF4C6BD /* UITests */,
 				969D7E61D272C3C52A68D5B2 /* Products */,
 			);
@@ -110,12 +133,31 @@
 			productReference = F52FC3D2BE5C3C1134F06C59 /* FrankenMermaidUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		3582D18D7F1713933F4C9078 /* FrankenMermaidTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8A9A0A541FC166E1004E292E /* Build configuration list for PBXNativeTarget "FrankenMermaidTests" */;
+			buildPhases = (
+				15A30A6DB06A9364D27ECF5B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6062632845825418C5A80005 /* PBXTargetDependency */,
+			);
+			name = FrankenMermaidTests;
+			packageProductDependencies = (
+			);
+			productName = FrankenMermaidTests;
+			productReference = DE0E98ED92D765875E8194C6 /* FrankenMermaidTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		71205DB217368F71CE5D1547 /* FrankenMermaid */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 9BE016580D9CB9B1C8DF8650 /* Build configuration list for PBXNativeTarget "FrankenMermaid" */;
 			buildPhases = (
 				D629E6EE0BD68628AA94C670 /* Sources */,
 				B8D941AFA2153A3C73E6B9F4 /* Resources */,
+				30E7FC92BFE318D31E51F7F6 /* Stage tracked renderer package */,
 			);
 			buildRules = (
 			);
@@ -142,6 +184,10 @@
 						ProvisioningStyle = Automatic;
 						TestTargetID = 71205DB217368F71CE5D1547;
 					};
+					3582D18D7F1713933F4C9078 = {
+						DevelopmentTeam = AU8V2Z6NKY;
+						ProvisioningStyle = Automatic;
+					};
 					71205DB217368F71CE5D1547 = {
 						DevelopmentTeam = AU8V2Z6NKY;
 						ProvisioningStyle = Automatic;
@@ -164,6 +210,7 @@
 			targets = (
 				71205DB217368F71CE5D1547 /* FrankenMermaid */,
 				243C726C8F9B2AA0CB823177 /* FrankenMermaidUITests */,
+				3582D18D7F1713933F4C9078 /* FrankenMermaidTests */,
 			);
 		};
 /* End PBXProject section */
@@ -181,11 +228,51 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		30E7FC92BFE318D31E51F7F6 /* Stage tracked renderer package */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../pkg/frankenmermaid.js",
+				"$(SRCROOT)/../pkg/frankenmermaid_bg.wasm",
+				"$(SRCROOT)/../pkg/frankenmermaid.d.ts",
+				"$(SRCROOT)/../crates/fm-cli/src/deck_runtime.js",
+				"$(SRCROOT)/Renderer/RendererManifest.json",
+			);
+			name = "Stage tracked renderer package";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.js",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid_bg.wasm",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.d.ts",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/deck_runtime.js",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/RendererManifest.json",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/stage-renderer.sh\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Renderer\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
+		15A30A6DB06A9364D27ECF5B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				08DA67C03E1999190BC227A0 /* MermaidDiagnosticTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D629E6EE0BD68628AA94C670 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DDB9B136B4FACEDD3913AA22 /* DiagramInsightPanel.swift in Sources */,
 				05C42C83CFE30B89F3D4A9E5 /* DiagramSamples.swift in Sources */,
 				F22277EF1FCB699447D2404A /* FrankenMermaidApp.swift in Sources */,
 				95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */,
@@ -206,6 +293,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		6062632845825418C5A80005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 71205DB217368F71CE5D1547 /* FrankenMermaid */;
+			targetProxy = 389FEBD357582F55837A3034 /* PBXContainerItemProxy */;
+		};
 		AEF173CDD5F79E42787CA218 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 71205DB217368F71CE5D1547 /* FrankenMermaid */;
@@ -214,6 +306,23 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		0211A5B8BF6DAF2A6458449B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankenmermaid.FrankenMermaidTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenMermaid.app/FrankenMermaid";
+			};
+			name = Debug;
+		};
 		05BB0ADAF21108BF06DDA2F6 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -273,6 +382,23 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.10;
+			};
+			name = Release;
+		};
+		2BA0C5698F3DF04E2730FF71 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankenmermaid.FrankenMermaidTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenMermaid.app/FrankenMermaid";
 			};
 			name = Release;
 		};
@@ -438,6 +564,15 @@
 			buildConfigurations = (
 				5A1BD8FB79713A796C8680EF /* Debug */,
 				05BB0ADAF21108BF06DDA2F6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8A9A0A541FC166E1004E292E /* Build configuration list for PBXNativeTarget "FrankenMermaidTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0211A5B8BF6DAF2A6458449B /* Debug */,
+				2BA0C5698F3DF04E2730FF71 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

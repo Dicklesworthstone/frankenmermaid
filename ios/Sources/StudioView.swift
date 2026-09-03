@@ -324,6 +324,10 @@ struct StudioView: View {
 
                     Divider().background(Lab.stroke)
 
+                    DiagramInsightPanel(renderer: renderer)
+
+                    Divider().background(Lab.stroke)
+
                     Label("Real nodes and edges only", systemImage: "point.3.filled.connected.trianglepath.dotted")
                     Label("External links stay disabled", systemImage: "lock.shield")
                     Label("Exact bundled Rust/WASM renderer", systemImage: "shippingbox")
@@ -355,7 +359,9 @@ struct StudioView: View {
                     .frame(minWidth: 48)
             }
             .buttonStyle(.bordered)
-            .accessibilityLabel("Rendered diagram text size \(Int((renderFontScale * 100).rounded())) percent. Reset to 100 percent")
+            .accessibilityLabel(
+                "Rendered diagram text size \(Int((renderFontScale * 100).rounded())) percent. Reset to 100 percent"
+            )
 
             Button {
                 renderFontScale = clampedRenderFontScale(renderFontScale + 0.1)
@@ -373,7 +379,10 @@ struct StudioView: View {
     private var footer: some View {
         VStack(spacing: 4) {
             Text("Rendered entirely on this device · no source or diagram is uploaded")
-            Text("If you like this free app, please show your appreciation by trying out my paid skills site at [JeffreysSkills.md](https://jeffreys-skills.md).")
+            Text(
+                "If you like this free app, please show your appreciation by trying out my paid skills site at " +
+                    "[JeffreysSkills.md](https://jeffreys-skills.md)."
+            )
                 .tint(Lab.cyan)
                 .frame(maxWidth: 560)
         }

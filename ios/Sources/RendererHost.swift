@@ -9,6 +9,31 @@ enum GraphPhase: Equatable {
     case failed(String)
 }
 
+struct MermaidDiagnostic: Identifiable, Equatable, Sendable {
+    let id: String
+    let severity: String
+    let category: String
+    let message: String
+    let suggestion: String?
+    let line: Int?
+    let column: Int?
+
+    init?(payload: [String: Any], index: Int) {
+        guard let message = payload["message"] as? String, !message.isEmpty else { return nil }
+        let rawSeverity = (payload["severity"] as? String ?? "info").lowercased()
+        severity = ["error", "warning", "info", "hint"].contains(rawSeverity) ? rawSeverity : "info"
+        category = (payload["category"] as? String ?? "parser").lowercased()
+        self.message = message
+        let rawSuggestion = payload["suggestion"] as? String
+        suggestion = rawSuggestion.flatMap { $0.isEmpty ? nil : $0 }
+        let rawLine = payload["line"] as? Int ?? 0
+        let rawColumn = payload["column"] as? Int ?? 0
+        line = rawLine > 0 ? rawLine : nil
+        column = rawColumn > 0 ? rawColumn : nil
+        id = "\(index):\(severity):\(line ?? 0):\(column ?? 0):\(message)"
+    }
+}
+
 enum MermaidExportKind: String, CaseIterable, Identifiable {
     case source
     case svg
@@ -50,6 +75,9 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     @Published private(set) var nodeCount = 0
     @Published private(set) var edgeCount = 0
     @Published private(set) var hasCurrentRenderedArtifact = false
+    @Published private(set) var accessibilitySummary = "Render a diagram to create its semantic description."
+    @Published private(set) var diagnostics: [MermaidDiagnostic] = []
+    @Published private(set) var hasCurrentInsights = false
 
     let webView: WKWebView
     private var requestID = 0
@@ -96,6 +124,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         self.roundedCorners = min(24, max(0, roundedCorners))
         self.nodeGradients = nodeGradients
         hasCurrentRenderedArtifact = false
+        hasCurrentInsights = false
         if renderImmediately { renderNow() }
     }
 
@@ -105,6 +134,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         // contain the previous source. Mark the rendered artifact stale as soon
         // as editing begins, rather than only when WebKit starts rendering.
         hasCurrentRenderedArtifact = false
+        hasCurrentInsights = false
         let expectedSource = source
         scheduledRender = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
@@ -191,7 +221,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
             .lowercased()
             .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        let filename = "FrankenMermaid-\(safeType.isEmpty ? "diagram" : safeType)-\(UUID().uuidString.prefix(8)).\(kind.fileExtension)"
+        let filename = "FrankenMermaid-\(safeType.isEmpty ? "diagram" : safeType)-" +
+            "\(UUID().uuidString.prefix(8)).\(kind.fileExtension)"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try Data(contents.utf8).write(to: url, options: .atomic)
         return url
@@ -225,7 +256,14 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             diagramType = payload["diagramType"] as? String ?? "diagram"
             nodeCount = payload["nodeCount"] as? Int ?? 0
             edgeCount = payload["edgeCount"] as? Int ?? 0
+            accessibilitySummary = payload["accessibilitySummary"] as? String
+                ?? "The renderer did not return a semantic diagram description."
+            let rawDiagnostics = payload["diagnostics"] as? [[String: Any]] ?? []
+            diagnostics = rawDiagnostics.enumerated().compactMap { index, diagnostic in
+                MermaidDiagnostic(payload: diagnostic, index: index)
+            }
             hasCurrentRenderedArtifact = true
+            hasCurrentInsights = true
             phase = .ready
 #if DEBUG
             if debugExportProbePending {
@@ -244,6 +282,7 @@ extension MermaidRendererModel: WKScriptMessageHandler {
         case "failure":
             guard (payload["requestID"] as? Int) == requestID else { return }
             hasCurrentRenderedArtifact = false
+            hasCurrentInsights = false
             phase = .failed(payload["message"] as? String ?? "Renderer failed")
         default:
             break

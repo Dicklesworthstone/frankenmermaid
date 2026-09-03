@@ -20,9 +20,11 @@ schemes:
     build:
       targets:
         FrankenMermaid: all
+        FrankenMermaidTests: [test]
         FrankenMermaidUITests: [test]
     test:
       targets:
+        - FrankenMermaidTests
         - FrankenMermaidUITests
 
 targets:
@@ -43,6 +45,21 @@ targets:
       - path: Renderer
         type: folder
         buildPhase: resources
+    postBuildScripts:
+      - name: Stage tracked renderer package
+        script: '"${SRCROOT}/stage-renderer.sh" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Renderer"'
+        inputFiles:
+          - $(SRCROOT)/../pkg/frankenmermaid.js
+          - $(SRCROOT)/../pkg/frankenmermaid_bg.wasm
+          - $(SRCROOT)/../pkg/frankenmermaid.d.ts
+          - $(SRCROOT)/../crates/fm-cli/src/deck_runtime.js
+          - $(SRCROOT)/Renderer/RendererManifest.json
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.js
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid_bg.wasm
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.d.ts
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/deck_runtime.js
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/RendererManifest.json
     entitlements:
       path: FrankenMermaid.entitlements
       properties:
@@ -86,5 +103,15 @@ targets:
         TEST_TARGET_NAME: FrankenMermaid
     sources:
       - UITests
+    dependencies:
+      - target: FrankenMermaid
+  FrankenMermaidTests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+    sources:
+      - Tests
     dependencies:
       - target: FrankenMermaid

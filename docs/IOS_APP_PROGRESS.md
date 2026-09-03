@@ -12,7 +12,13 @@ The repository Beads store is currently in unresolved sync-merge state. This fil
 
 ## Still open
 
-- Package sync/check script and byte-identity gate.
-- Document browser, imports, autosave, state restoration, diagnostics, source lens, themes/config, export/Quick Look/share, Graph Deck, widgets, intents, Spotlight/Handoff, menus, and multiwindow.
+- Document browser, imports, autosave, state restoration, source lens, PNG/PDF/Quick Look, Graph Deck, widgets, intents, Spotlight/Handoff, menus, and multiwindow.
 - Remaining 19 visual rounds per platform in `FRANKEN_DOCUMENT_APPS_QA.md`.
 - Signed physical-device and Catalyst builds, distribution archive, App Store metadata, and worldwide availability.
+
+## 2026-09-02 engine parity and native insight
+
+- Added a build-time package gate that stages the tracked `pkg/` JavaScript/WASM/type artifacts and canonical deck runtime into the app bundle only when their SHA-256 values match the reviewed manifest. A fresh clone no longer depends on the ignored local WASM file under `ios/Renderer/`.
+- Wired the existing Rust/WASM `parse` and `describeDiagram` exports into every native render. Studio now exposes the engine-authored semantic description and structured parser/recovery diagnostics in the persistent Inspect lane, including source locations and suggestions when the core supplies them.
+- The bridge and Swift model retain request-ID rejection so an older parse/description cannot overwrite insight for newer source.
+- Themes/config, sample gallery, and SVG/source/animated-HTML sharing had already landed after the original progress snapshot; they are no longer open parity items. Remaining high-value gaps are document persistence/import, source-linked lens editing, PNG/PDF and Graph Deck presentation.
