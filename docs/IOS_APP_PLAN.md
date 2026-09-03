@@ -72,7 +72,8 @@ Large SVG/PNG outputs use the same ordered 64 KiB chunk protocol as FrankenMarkd
 
 Inputs:
 
-- Files/document browser;
+- Files/document browser (bounded UTF-8 `.mmd`, `.mermaid`, and plain-text import is shipped;
+  in-place document editing remains future work);
 - Share extension text or one compatible file;
 - clipboard paste through an explicit user action;
 - drag/drop on iPad and Mac;

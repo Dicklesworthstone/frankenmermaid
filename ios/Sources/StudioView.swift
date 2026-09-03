@@ -2,6 +2,13 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private extension UTType {
+    static let mermaidSource = UTType(
+        importedAs: "com.frankenmermaid.source",
+        conformingTo: .plainText
+    )
+}
+
 private enum StudioLane: String, CaseIterable, Identifiable {
     case code = "Code"
     case diagram = "Diagram"
@@ -22,9 +29,11 @@ struct StudioView: View {
     @State private var lane: StudioLane = .code
     @State private var editorFocused = false
     @State private var showingSamples = false
+    @State private var showingSourceImporter = false
     @State private var sharedArtifact: SharedArtifact?
     @State private var exporting = false
     @State private var exportError: String?
+    @State private var sourceImportError: String?
 
     init() {
         let requested = ProcessInfo.processInfo.environment["FM_INITIAL_LANE"]
@@ -83,6 +92,19 @@ struct StudioView: View {
         .sheet(item: $sharedArtifact) { artifact in
             SystemShareSheet(fileURL: artifact.url)
         }
+        .fileImporter(
+            isPresented: $showingSourceImporter,
+            allowedContentTypes: [.mermaidSource, .plainText],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                openSource(url)
+            case .failure(let error):
+                sourceImportError = error.localizedDescription
+            }
+        }
         .alert("Couldn’t prepare that export", isPresented: Binding(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
@@ -90,6 +112,14 @@ struct StudioView: View {
             Button("OK", role: .cancel) { exportError = nil }
         } message: {
             Text(exportError ?? "Unknown export error")
+        }
+        .alert("Couldn’t open that source", isPresented: Binding(
+            get: { sourceImportError != nil },
+            set: { if !$0 { sourceImportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { sourceImportError = nil }
+        } message: {
+            Text(sourceImportError ?? "Unknown source import error")
         }
         .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
     }
@@ -179,11 +209,21 @@ struct StudioView: View {
                 HStack {
                     LabLabel(text: "01 · The Graph Source")
                     Spacer()
-                    Button {
-                        editorFocused = false
-                        showingSamples = true
+                    Menu {
+                        Button {
+                            editorFocused = false
+                            showingSourceImporter = true
+                        } label: {
+                            Label("Open Mermaid file…", systemImage: "folder")
+                        }
+                        Button {
+                            editorFocused = false
+                            showingSamples = true
+                        } label: {
+                            Label("Sample gallery", systemImage: "square.grid.2x2")
+                        }
                     } label: {
-                        Label("Samples", systemImage: "square.grid.2x2")
+                        Label("Source", systemImage: "doc.badge.gearshape")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -457,6 +497,19 @@ struct StudioView: View {
                 exportError = error.localizedDescription
             }
             exporting = false
+        }
+    }
+
+    private func openSource(_ url: URL) {
+        Task {
+            do {
+                let source = try await MermaidSourceLoader.load(from: url)
+                editorFocused = false
+                renderer.source = source
+                lane = .code
+            } catch {
+                sourceImportError = error.localizedDescription
+            }
         }
     }
 }

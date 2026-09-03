@@ -79,7 +79,17 @@ targets:
             CFBundleTypeRole: Editor
             LSHandlerRank: Owner
             LSItemContentTypes:
+              - com.frankenmermaid.source
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.frankenmermaid.source
+            UTTypeDescription: Mermaid Diagram Source
+            UTTypeConformsTo:
               - public.plain-text
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - mmd
+                - mermaid
+              public.mime-type: text/plain
         CFBundleURLTypes:
           - CFBundleURLName: com.frankenmermaid.FrankenMermaid
             CFBundleURLSchemes:
