@@ -11,6 +11,7 @@
 		08DA67C03E1999190BC227A0 /* MermaidDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13C84AEEF65333EA194DD621 /* MermaidDiagnosticTests.swift */; };
 		253A6289134C23366FCD9F11 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8A3FF1ABD9448CD7692C42B1 /* PrivacyInfo.xcprivacy */; };
 		321FD792EC092CDC0EE8A0EE /* Renderer in Resources */ = {isa = PBXBuildFile; fileRef = 2CC45DF6459061EB2B480E6E /* Renderer */; };
+		3F19E3FAE5BB5A763BC2011B /* AppearanceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0CA50642DE676AD4CE719C /* AppearanceUITests.swift */; };
 		882B3DCE5818AFEB2061649F /* StudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D72BEE3C3241B52B539BCC /* StudioView.swift */; };
 		95AEBC9819F81024F600327B /* MermaidCodeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEDEECF9E9E9D245A282A847 /* MermaidCodeEditor.swift */; };
 		A4186EDAE7F8F31B496ADCDB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0C48617619448DF0AB92D9A /* Assets.xcassets */; };
@@ -54,6 +55,7 @@
 		DE0E98ED92D765875E8194C6 /* FrankenMermaidTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenMermaidTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E3D72BEE3C3241B52B539BCC /* StudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioView.swift; sourceTree = "<group>"; };
 		F52FC3D2BE5C3C1134F06C59 /* FrankenMermaidUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenMermaidUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FE0CA50642DE676AD4CE719C /* AppearanceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceUITests.swift; sourceTree = "<group>"; };
 		FE54E15D819A299BF5C0B0D7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -69,6 +71,7 @@
 		8367348BE49B5D345DF4C6BD /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				FE0CA50642DE676AD4CE719C /* AppearanceUITests.swift */,
 				C411534DDA87CA920CF6AA2A /* HTMLShareUITests.swift */,
 			);
 			path = UITests;
@@ -286,6 +289,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3F19E3FAE5BB5A763BC2011B /* AppearanceUITests.swift in Sources */,
 				ADD3D2C2B804BD5184F2F272 /* HTMLShareUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
