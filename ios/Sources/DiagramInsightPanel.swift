@@ -21,6 +21,52 @@ struct DiagramInsightPanel: View {
                 .accessibilityValue(renderer.accessibilitySummary)
 
             HStack {
+                Text("SOURCE LENS")
+                Spacer()
+                Text("\(renderer.lensBindingCount) ELEMENTS")
+                    .foregroundStyle(Lab.cyan)
+            }
+            .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+            .foregroundStyle(Lab.secondary)
+
+            if let binding = renderer.selectedLensBinding {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Label(binding.kind.uppercased(), systemImage: "scope")
+                        Spacer()
+                        if let line = binding.line {
+                            Text("\(line):\(binding.column ?? 1)")
+                        }
+                    }
+                    .font(.system(size: Lab.size(9), weight: .bold, design: .monospaced))
+                    .foregroundStyle(Lab.amber)
+                    if let sourceID = binding.sourceID {
+                        Text(sourceID)
+                            .font(.system(size: Lab.size(10), weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Lab.cyan)
+                    }
+                    if let snippet = binding.snippet {
+                        Text(snippet)
+                            .font(.system(size: Lab.size(10), design: .monospaced))
+                            .foregroundStyle(Lab.text)
+                            .textSelection(.enabled)
+                            .lineLimit(4)
+                    }
+                }
+                .padding(9)
+                .background(Lab.statusBackground, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Lab.amber.opacity(0.34)))
+                .accessibilityElement(children: .combine)
+            } else {
+                Label(
+                    "Tap a rendered node, edge, or cluster to inspect its exact source binding",
+                    systemImage: "cursorarrow.click"
+                )
+                    .font(.system(size: Lab.size(10)))
+                    .foregroundStyle(Lab.secondary)
+            }
+
+            HStack {
                 Text("RUST DIAGNOSTICS")
                 Spacer()
                 Text(renderer.diagnostics.isEmpty ? "CLEAR" : "\(renderer.diagnostics.count)")

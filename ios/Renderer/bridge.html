@@ -10,15 +10,58 @@
     body { display: grid; place-items: center; overflow: auto; }
     #stage { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 18px; box-sizing: border-box; }
     #stage > svg { width: 100% !important; height: 100% !important; max-width: 100%; max-height: 100%; filter: drop-shadow(0 12px 28px rgba(34,211,238,.12)); }
+    #stage .fm-lens-selected { filter: drop-shadow(0 0 8px rgba(251,191,36,.82)); }
+    #stage .fm-lens-selected :is(rect,path,circle,ellipse,polygon,line,polyline) { stroke: #fbbf24 !important; stroke-width: 3 !important; }
   </style>
 </head>
 <body>
   <main id="stage" aria-label="Rendered Mermaid diagram"></main>
   <script type="module">
-    import init, { describeDiagram, detectType, parse, renderSvg } from './frankenmermaid.js';
+    import init, { describeDiagram, detectType, diagramLens, parse, renderSvg } from './frankenmermaid.js';
     const bridge = window.webkit.messageHandlers.frankenBridge;
     const stage = document.querySelector('#stage');
     let latestRequest = 0;
+
+    function publishLensSelection(requestID, binding) {
+      stage.querySelectorAll('.fm-lens-selected').forEach((element) => {
+        element.classList.remove('fm-lens-selected');
+        element.setAttribute('aria-pressed', 'false');
+      });
+      if (binding) {
+        const selected = document.getElementById(binding.elementId);
+        selected?.classList.add('fm-lens-selected');
+        selected?.setAttribute('aria-pressed', 'true');
+      }
+      bridge.postMessage({type: 'lens.selection', requestID, binding: binding || null});
+    }
+
+    function installSourceLens(source, requestID) {
+      const bindings = Array.from(diagramLens(source) || []);
+      const bindingsByElement = new Map(bindings.map((binding) => [binding.elementId, binding]));
+      for (const element of stage.querySelectorAll('[id^="fm-node-"], [id^="fm-edge-"], [id^="fm-cluster-"]')) {
+        const binding = bindingsByElement.get(element.id);
+        if (!binding) continue;
+        element.setAttribute('tabindex', '0');
+        element.setAttribute('role', 'button');
+        element.setAttribute('aria-pressed', 'false');
+        const select = (event) => {
+          event.stopPropagation();
+          publishLensSelection(requestID, binding);
+        };
+        element.addEventListener('click', select);
+        element.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            select(event);
+          }
+        });
+      }
+      return bindings.length;
+    }
+
+    stage.addEventListener('click', (event) => {
+      if (event.target === stage) publishLensSelection(latestRequest, null);
+    });
 
     function inspectDiagram(source) {
       const parsed = parse(source);
@@ -95,6 +138,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
           const insight = inspectDiagram(source);
           if (requestID !== latestRequest) return false;
           stage.innerHTML = svg;
+          const lensBindingCount = installSourceLens(source, requestID);
           const typeResult = detectType(source);
           const diagramType = typeof typeResult === 'string'
             ? typeResult
@@ -105,6 +149,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
             diagramType,
             nodeCount: stage.querySelectorAll('[id^="fm-node-"]').length,
             edgeCount: stage.querySelectorAll('[id^="fm-edge-"]').length,
+            lensBindingCount,
             accessibilitySummary: insight.accessibilitySummary,
             diagnostics: insight.diagnostics
           });

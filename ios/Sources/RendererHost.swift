@@ -86,6 +86,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     @Published private(set) var accessibilitySummary = "Render a diagram to create its semantic description."
     @Published private(set) var diagnostics: [MermaidDiagnostic] = []
     @Published private(set) var hasCurrentInsights = false
+    @Published private(set) var lensBindingCount = 0
+    @Published private(set) var selectedLensBinding: MermaidLensBinding?
 
     let webView: WKWebView
     private var requestID = 0
@@ -133,6 +135,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         self.nodeGradients = nodeGradients
         hasCurrentRenderedArtifact = false
         hasCurrentInsights = false
+        lensBindingCount = 0
+        selectedLensBinding = nil
         if renderImmediately { renderNow() }
     }
 
@@ -142,6 +146,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         // contain the previous source. Mark the rendered artifact stale as soon
         // as editing begins, rather than only when WebKit starts rendering.
         hasCurrentRenderedArtifact = false
+        lensBindingCount = 0
+        selectedLensBinding = nil
         hasCurrentInsights = false
         let expectedSource = source
         scheduledRender = Task { [weak self] in
@@ -171,6 +177,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
             ]
         ]
         hasCurrentRenderedArtifact = false
+        lensBindingCount = 0
+        selectedLensBinding = nil
         phase = .rendering
         Task { [weak self, weak webView] in
             guard let self else { return }
@@ -241,6 +249,50 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         return url
     }
 
+    private func receiveLensSelection(_ payload: [String: Any]) {
+        guard (payload["requestID"] as? Int) == requestID else { return }
+        selectedLensBinding = (payload["binding"] as? [String: Any]).flatMap {
+            MermaidLensBinding(payload: $0)
+        }
+    }
+
+    private func receiveRenderResult(_ payload: [String: Any]) {
+        guard (payload["requestID"] as? Int) == requestID else { return }
+        elapsedMS = payload["elapsedMS"] as? Double
+        diagramType = payload["diagramType"] as? String ?? "diagram"
+        nodeCount = payload["nodeCount"] as? Int ?? 0
+        edgeCount = payload["edgeCount"] as? Int ?? 0
+        lensBindingCount = payload["lensBindingCount"] as? Int ?? 0
+        accessibilitySummary = payload["accessibilitySummary"] as? String
+            ?? "The renderer did not return a semantic diagram description."
+        let rawDiagnostics = payload["diagnostics"] as? [[String: Any]] ?? []
+        diagnostics = rawDiagnostics.enumerated().compactMap { index, diagnostic in
+            MermaidDiagnostic(payload: diagnostic, index: index)
+        }
+        hasCurrentRenderedArtifact = true
+        hasCurrentInsights = true
+        phase = .ready
+#if DEBUG
+        runDebugExportProbeIfNeeded()
+#endif
+    }
+
+#if DEBUG
+    private func runDebugExportProbeIfNeeded() {
+        guard debugExportProbePending else { return }
+        debugExportProbePending = false
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await self.prepareExport(.animatedHTML)
+                UserDefaults.standard.set(url.path, forKey: "FM_LAST_EXPORT_PROBE_PATH")
+            } catch {
+                UserDefaults.standard.set(error.localizedDescription, forKey: "FM_LAST_EXPORT_PROBE_ERROR")
+            }
+        }
+    }
+#endif
+
     static let sample = """
     flowchart TD
         Source[Mermaid source] --> Parse{Rust parser}
@@ -264,38 +316,15 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             phase = .ready
             renderNow()
         case "result":
-            guard (payload["requestID"] as? Int) == requestID else { return }
-            elapsedMS = payload["elapsedMS"] as? Double
-            diagramType = payload["diagramType"] as? String ?? "diagram"
-            nodeCount = payload["nodeCount"] as? Int ?? 0
-            edgeCount = payload["edgeCount"] as? Int ?? 0
-            accessibilitySummary = payload["accessibilitySummary"] as? String
-                ?? "The renderer did not return a semantic diagram description."
-            let rawDiagnostics = payload["diagnostics"] as? [[String: Any]] ?? []
-            diagnostics = rawDiagnostics.enumerated().compactMap { index, diagnostic in
-                MermaidDiagnostic(payload: diagnostic, index: index)
-            }
-            hasCurrentRenderedArtifact = true
-            hasCurrentInsights = true
-            phase = .ready
-#if DEBUG
-            if debugExportProbePending {
-                debugExportProbePending = false
-                Task { [weak self] in
-                    guard let self else { return }
-                    do {
-                        let url = try await self.prepareExport(.animatedHTML)
-                        UserDefaults.standard.set(url.path, forKey: "FM_LAST_EXPORT_PROBE_PATH")
-                    } catch {
-                        UserDefaults.standard.set(error.localizedDescription, forKey: "FM_LAST_EXPORT_PROBE_ERROR")
-                    }
-                }
-            }
-#endif
+            receiveRenderResult(payload)
+        case "lens.selection":
+            receiveLensSelection(payload)
         case "failure":
             guard (payload["requestID"] as? Int) == requestID else { return }
             hasCurrentRenderedArtifact = false
             hasCurrentInsights = false
+            lensBindingCount = 0
+            selectedLensBinding = nil
             phase = .failed(payload["message"] as? String ?? "Renderer failed")
         default:
             break

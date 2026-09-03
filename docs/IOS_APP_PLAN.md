@@ -95,7 +95,7 @@ Export uses Quick Look and ShareLink. Clipboard actions distinguish Copy Source,
 - **Studio**: source, live diagram canvas, and core render controls.
 - **Inspector**: diagram type, theme, supported configuration/layout controls, camera, accessibility, and export appearance.
 - **Diagnostics**: strict config/directive errors, parser/layout warnings, and source-linked issues.
-- **Lens**: select a rendered node/edge/cluster and edit its corresponding source safely through the engine’s lens APIs.
+- **Lens**: rendered node/edge/cluster selection and exact source-binding inspection are shipped; safe source edits through the engine lens remain future work.
 - **Deck**: create/edit deck metadata, rehearse, present, and export.
 - **Gallery**: searchable built-in samples for all supported families plus recent documents.
 
