@@ -186,10 +186,13 @@ impl RolloutState {
 
     /// Record a request with its latency and success status.
     pub fn record_request(&mut self, latency_us: u64, is_error: bool) {
-        self.requests_processed += 1;
-        self.latency_sum_us += latency_us;
+        // Telemetry is allowed to saturate but never to wrap. A long-lived process (or one bad
+        // restored snapshot) used to panic in checked builds and silently reset these counters in
+        // release, making an unhealthy canary look as if it had almost no traffic or latency.
+        self.requests_processed = self.requests_processed.saturating_add(1);
+        self.latency_sum_us = self.latency_sum_us.saturating_add(latency_us);
         if is_error {
-            self.error_count += 1;
+            self.error_count = self.error_count.saturating_add(1);
         }
     }
 
@@ -504,5 +507,22 @@ mod tests {
         let json = serde_json::to_string(&event).expect("should serialize");
         assert!(json.contains("rollback"));
         assert!(json.contains("error_rate_exceeded"));
+    }
+
+    #[test]
+    fn request_counters_saturate_instead_of_wrapping() {
+        let mut state = RolloutState {
+            requests_processed: u64::MAX,
+            error_count: u64::MAX,
+            latency_sum_us: u64::MAX,
+            ..RolloutState::default()
+        };
+
+        state.record_request(1, true);
+
+        assert_eq!(state.requests_processed, u64::MAX);
+        assert_eq!(state.error_count, u64::MAX);
+        assert_eq!(state.latency_sum_us, u64::MAX);
+        assert_eq!(state.error_rate(), 1.0);
     }
 }

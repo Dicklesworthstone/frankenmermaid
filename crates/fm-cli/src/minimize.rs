@@ -251,7 +251,6 @@ pub fn minimize(
             } else {
                 i += 1;
             }
-
         }
     }
 

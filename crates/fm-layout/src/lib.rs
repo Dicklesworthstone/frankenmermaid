@@ -40,10 +40,10 @@ use std::sync::Arc;
 use web_time::Instant;
 
 use fm_core::{
-    ArchitectureSide, DiagramType, FxHashMap, FxHashSet, GanttDate,
-    GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrGanttMeta,
-    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig,
-    MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    ArchitectureSide, DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType,
+    GanttTickInterval, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta,
+    IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
+    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
     MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
     MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
@@ -19490,8 +19490,8 @@ mod tests {
     fn layout_co_arrow_markers_match_the_primary_mapping() {
         // The module's `use super::{…}` is an explicit list rather than a glob, so the items this
         // test reaches for are imported here instead of widening that list for one test.
-        use fm_core::ArrowType;
         use super::co_arrow_marker_end;
+        use fm_core::ArrowType;
 
         let mismatches: Vec<String> = [
             ArrowType::AggregationReverse,
@@ -19538,7 +19538,6 @@ mod tests {
             })
             .expect("the one-edge diagram renders one path")
     }
-
 
     /// The committed capability-matrix artifact is the MERGED matrix (fm-core claims plus
     /// this crate's algorithm claims) — the exact payload the CLI and the WASM
@@ -19877,45 +19876,62 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn c4_directional_relationships_drive_geometry_without_redirecting_plain_relationships() {
-        let forced =
+    fn c4_directional_relationships_are_parser_metadata_not_layout_constraints() {
+        let directional =
             parse("C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel_Right(a, b, \"uses\")")
                 .ir;
-        let forced_trace = layout_diagram_traced(&forced);
-        assert_eq!(
-            forced_trace.trace.dispatch.selected,
-            LayoutAlgorithm::Architecture,
-            "the C4 directional relationship never selected the directed-grid layout"
-        );
-        let a = forced_trace
-            .layout
-            .nodes
-            .iter()
-            .find(|node| node.node_id == "a")
-            .expect("CONTROL FAILED: C4 source node was not laid out");
-        let b = forced_trace
-            .layout
-            .nodes
-            .iter()
-            .find(|node| node.node_id == "b")
-            .expect("CONTROL FAILED: C4 target node was not laid out");
-        assert!(
-            b.bounds.x > a.bounds.x,
-            "Rel_Right placed target x={} at or left of source x={}",
-            b.bounds.x,
-            a.bounds.x
-        );
-
-        // Negative control: the diagram family alone is not a direction constraint. A naive
-        // implementation that sent every C4 edge through the grid would fail this assertion and
-        // alter layouts for ordinary `Rel` statements.
         let plain =
             parse("C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"uses\")").ir;
-        assert_ne!(
-            dispatch_layout_algorithm(&plain, LayoutAlgorithm::Auto).selected,
-            LayoutAlgorithm::Architecture,
-            "a direction-free C4 relationship selected the directional-grid layout"
+
+        // The grammar preserves which macro was written, but Mermaid 11.15.0 measurably gives
+        // Rel and Rel_Right identical geometry. A stale test left behind when that parity fix was
+        // made still expected the abandoned directed-grid experiment and broke the workspace
+        // suite on every run.
+        assert_eq!(
+            directional.edges[0].c4_direction(),
+            Some(fm_core::C4RelationshipDirection::Right)
         );
+        assert_eq!(plain.edges[0].c4_direction(), None);
+
+        let directional_trace = layout_diagram_traced(&directional);
+        let plain_trace = layout_diagram_traced(&plain);
+        assert_eq!(
+            directional_trace.trace.dispatch.selected, plain_trace.trace.dispatch.selected,
+            "a directional C4 macro changed the selected layout algorithm"
+        );
+        assert_ne!(
+            directional_trace.trace.dispatch.selected,
+            LayoutAlgorithm::Architecture,
+            "C4 direction metadata incorrectly selected the architecture grid"
+        );
+        assert_eq!(directional_trace.layout.bounds, plain_trace.layout.bounds);
+        assert_eq!(
+            directional_trace.layout.nodes.len(),
+            plain_trace.layout.nodes.len()
+        );
+        for (directional_node, plain_node) in directional_trace
+            .layout
+            .nodes
+            .iter()
+            .zip(&plain_trace.layout.nodes)
+        {
+            assert_eq!(directional_node.node_id, plain_node.node_id);
+            assert_eq!(directional_node.rank, plain_node.rank);
+            assert_eq!(directional_node.order, plain_node.order);
+            assert_eq!(directional_node.bounds, plain_node.bounds);
+        }
+        assert_eq!(
+            directional_trace.layout.edges.len(),
+            plain_trace.layout.edges.len()
+        );
+        for (directional_edge, plain_edge) in directional_trace
+            .layout
+            .edges
+            .iter()
+            .zip(&plain_trace.layout.edges)
+        {
+            assert_eq!(directional_edge.points, plain_edge.points);
+        }
     }
 
     #[derive(Debug, Clone, Default)]

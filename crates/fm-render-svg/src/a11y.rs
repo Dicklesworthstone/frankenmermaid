@@ -355,7 +355,13 @@ pub fn describe_edge(
         .or_else(|| to_node.map(|n| n.id.as_str()))
         .unwrap_or("unknown");
 
-    describe_edge_labels(Some(from_label), Some(to_label), arrow_type, co_arrow, label)
+    describe_edge_labels(
+        Some(from_label),
+        Some(to_label),
+        arrow_type,
+        co_arrow,
+        label,
+    )
 }
 
 pub(crate) fn accessible_node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> &'a str {
@@ -685,8 +691,7 @@ mod tests {
         ];
         let mut silent = Vec::new();
         for (primary, co) in range {
-            let desc =
-                describe_edge_labels(Some("Alpha"), Some("Beta"), primary, Some(co), None);
+            let desc = describe_edge_labels(Some("Alpha"), Some("Beta"), primary, Some(co), None);
             let near = arrow_phrase(primary);
             let far = arrow_phrase(co);
             if desc != format!("Alpha {near} and {far} Beta") {
