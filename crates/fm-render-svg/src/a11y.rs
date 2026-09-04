@@ -58,17 +58,17 @@ pub fn describe_diagram_with_layout(
     if !ir.clusters.is_empty() {
         let _ = write!(
             desc,
-            ". organized in {} group{}",
+            ". Organized in {} group{}",
             ir.clusters.len(),
             plural_suffix(ir.clusters.len())
         );
     }
 
     let direction_desc = match ir.direction {
-        fm_core::GraphDirection::LR => "flowing left to right",
-        fm_core::GraphDirection::RL => "flowing right to left",
-        fm_core::GraphDirection::TB | fm_core::GraphDirection::TD => "flowing top to bottom",
-        fm_core::GraphDirection::BT => "flowing bottom to top",
+        fm_core::GraphDirection::LR => "Flowing left to right",
+        fm_core::GraphDirection::RL => "Flowing right to left",
+        fm_core::GraphDirection::TB | fm_core::GraphDirection::TD => "Flowing top to bottom",
+        fm_core::GraphDirection::BT => "Flowing bottom to top",
     };
     let _ = write!(desc, ". {direction_desc}");
 
@@ -113,11 +113,15 @@ pub fn describe_diagram_with_layout(
     if let Some(layout) = layout {
         let _ = write!(
             desc,
-            ". Layout spans {:.0} by {:.0} units with {} rendered node box{} and {} routed edge path{}",
+            ". Layout spans {:.0} by {:.0} units with {} rendered node {} and {} routed edge path{}",
             layout.bounds.width,
             layout.bounds.height,
             layout.nodes.len(),
-            plural_suffix(layout.nodes.len()),
+            if layout.nodes.len() == 1 {
+                "box"
+            } else {
+                "boxes"
+            },
             layout.edges.len(),
             plural_suffix(layout.edges.len())
         );
@@ -582,7 +586,7 @@ mod tests {
         assert!(desc.contains("2 nodes"));
         assert!(desc.contains("0 edges"));
         assert!(desc.contains("flowchart"));
-        assert!(desc.contains("left to right"));
+        assert!(desc.contains(". Flowing left to right"));
     }
 
     #[test]
@@ -608,6 +612,7 @@ mod tests {
         );
         assert!(desc.ends_with('.'));
         assert!(desc.contains("1 edge."));
+        assert!(desc.contains("2 rendered node boxes"), "{desc}");
     }
 
     #[test]

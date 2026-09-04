@@ -13,7 +13,7 @@ PACKAGE_BUGS_URL="https://github.com/Dicklesworthstone/frankenmermaid/issues"
 CAPABILITY_MATRIX_JSON="$ROOT_DIR/evidence/capability_matrix.json"
 WASM_PATH="$OUT_DIR/${OUT_NAME}_bg.wasm"
 TARGET_FEATURES="+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,+reference-types,+multivalue"
-RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
+RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpanic=immediate-abort"
 # Gzipped-wasm ceiling. Raised 500K -> 540K on 2026-07-24: the committed pkg/ had drifted ~2
 # months behind source (last regenerated May), so it predated the IncrementalLayoutEngine
 # integration and the parseLens/applyParseLensEdit bindings. The first regeneration since
@@ -61,10 +61,16 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # above: 20d8d9b4 already trimmed the embedded style payload for this bead; re-running wasm-opt
 # (-Oz --converge, and with --gufa) on the already-optimized module GROWS output (718159-719789
 # gzip); the module carries no name/producers/DWARF sections to strip; fm-render-term is already
-# outside the wasm surface. Next structural lever when this ratchet next binds:
-# -Zbuild-std=std,panic_abort with panic_immediate_abort (wasm-only panic machinery).
-# Headroom after raise: ~820 bytes -- deliberately tight; do not land a feature on this margin
-# without paying its own attribution.
+# outside the wasm surface. Headroom after that raise was ~820 bytes. The next structural lever was:
+# -Zbuild-std=std,panic_abort with immediate-abort panic machinery.
+#
+# Applied on 2026-09-03 after the defensive LayoutLens validation and parser/a11y correctness
+# fixes moved the package from 716954 to 720164 gzip bytes (+3210), 2340 bytes over this ratchet.
+# Rebuilding the WASM-only standard library with the nightly immediate-abort panic strategy reduced
+# the same source to 699884 bytes (-20280 versus the ordinary std build). Browser-visible errors
+# already cross the wasm-bindgen Result boundary; unwinding is unavailable on this target, so the
+# removed panic formatting/unwind machinery is not part of the package API.
+# Headroom after applying the lever: 17940 bytes (~17.5 KiB), without raising the ceiling.
 #
 # ⚠️ RAISED IN THE COMMIT THAT NEEDED IT, which is what the raises above also did, and it is
 # stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
@@ -133,8 +139,9 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Ensuring wasm32 target is available"
+echo "==> Ensuring wasm32 target and Rust sources are available"
 rustup target add wasm32-unknown-unknown >/dev/null
+rustup component add rust-src >/dev/null
 
 echo "==> Building fm-wasm with wasm-pack"
 mkdir -p "$OUT_DIR"
@@ -146,7 +153,9 @@ mkdir -p "$OUT_DIR"
       --target web \
       --out-dir "$OUT_DIR" \
       --out-name "$OUT_NAME" \
-      -- --config 'profile.release.package.fm-layout.opt-level="z"' \
+      . \
+      -- -Zbuild-std=std,panic_abort \
+         --config 'profile.release.package.fm-layout.opt-level="z"' \
          --config 'profile.release.package.fm-parser.opt-level="z"' \
          --config 'profile.release.package.fm-render-svg.opt-level="z"' \
          --config 'profile.release.package.fm-core.opt-level="z"'
