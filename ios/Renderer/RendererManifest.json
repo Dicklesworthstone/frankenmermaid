@@ -2,6 +2,6 @@
   "schema": "frankenmermaid-ios-renderer-v1",
   "source": "tracked pkg/ engine staged at build time",
   "wrapperSha256": "758d3b4189e254b2adb0cf7e2de317a5715c1258e8ef967accde49ac2c22e5a2",
-  "wasmSha256": "d19f89cb350a16d52975b68524790babfefc3f2a3a722035a7de86faeee197d9",
+  "wasmSha256": "dfd8c0091065a68b2f59e31a9dbf6e6ff1fb631c3d3bdf67810184355cdd8ad6",
   "deckRuntimeSha256": "60db90b3f2e2f170e8868a1390dc48c7c7f10774ff17be1d02221240c010875c"
 }

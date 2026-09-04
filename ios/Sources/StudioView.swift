@@ -87,7 +87,9 @@ struct StudioView: View {
             renderFontScale = clampedRenderFontScale(renderFontScale)
             applyRenderStyle(renderImmediately: false)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in renderer.renderNow() }
+        .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in
+            renderAndRevealDiagram()
+        }
         .sheet(isPresented: $showingSamples) {
             DiagramSampleGallery { sample in
                 editorFocused = false
@@ -273,9 +275,7 @@ struct StudioView: View {
                 if horizontalSizeClass == .compact {
                     HStack {
                         Button {
-                            editorFocused = false
-                            renderer.renderNow()
-                            withAnimation(.snappy) { lane = .diagram }
+                            renderAndRevealDiagram()
                         } label: {
                             Label("View Diagram", systemImage: "point.3.connected.trianglepath.dotted")
                         }
@@ -342,6 +342,12 @@ struct StudioView: View {
                 }
             }
         }
+    }
+
+    private func renderAndRevealDiagram() {
+        editorFocused = false
+        renderer.renderNow()
+        withAnimation(.snappy) { lane = .diagram }
     }
 
     private var inspectorPanel: some View {
