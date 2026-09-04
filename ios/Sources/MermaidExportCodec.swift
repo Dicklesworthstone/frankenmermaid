@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 enum MermaidExportKind: String, CaseIterable, Identifiable {
     case source
@@ -42,6 +44,8 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
 
 enum MermaidExportCodec {
     static let maximumBytes = 32 * 1_024 * 1_024
+    private static let maximumPNGDimension = 4_096
+    private static let maximumPNGPixelCount = 16_000_000
     private static let pngPrefix = "data:image/png;base64,"
 
     static func decodePNGDataURL(_ value: String) throws -> Data {
@@ -53,17 +57,34 @@ enum MermaidExportCodec {
         guard !payload.isEmpty, payload.utf8.count <= maximumCharacters else {
             throw MermaidExportError.tooLarge
         }
-        guard let data = Data(base64Encoded: String(payload)),
-              data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) else {
+        guard let data = Data(base64Encoded: String(payload)) else {
             throw MermaidExportError.invalidPNG
         }
         try validateSize(data)
+        try validatePNG(data)
         return data
     }
 
     static func validateSize(_ data: Data) throws {
         guard !data.isEmpty else { throw MermaidExportError.missingArtifact }
         guard data.count <= maximumBytes else { throw MermaidExportError.tooLarge }
+    }
+
+    private static func validatePNG(_ data: Data) throws {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options),
+              CGImageSourceGetCount(source) == 1,
+              let type = CGImageSourceGetType(source),
+              type as String == UTType.png.identifier,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0,
+              width <= maximumPNGDimension, height <= maximumPNGDimension,
+              width * height <= maximumPNGPixelCount,
+              CGImageSourceCreateImageAtIndex(source, 0, options) != nil else {
+            throw MermaidExportError.invalidPNG
+        }
     }
 }
 

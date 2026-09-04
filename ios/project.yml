@@ -80,7 +80,7 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes:
               - com.frankenmermaid.source
-        UTImportedTypeDeclarations:
+        UTExportedTypeDeclarations:
           - UTTypeIdentifier: com.frankenmermaid.source
             UTTypeDescription: Mermaid Diagram Source
             UTTypeConformsTo:

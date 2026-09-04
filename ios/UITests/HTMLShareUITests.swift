@@ -97,14 +97,14 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
 
     func testAppStoreSourceLensInspectorRenders() {
         let app = launch(lane: "Inspect")
-        assertExists(
-            app.descendants(matching: .any)["diagram-inspector-panel"],
-            in: app,
-            message: "The native diagram inspector did not render",
-            screenshotName: "App Store 4 - source lens and Rust diagnostics"
+        XCTAssertTrue(
+            app.descendants(matching: .any)["diagram-inspector-panel"].waitForExistence(timeout: 12),
+            "The native diagram inspector did not render"
         )
         XCTAssertTrue(app.staticTexts["SOURCE LENS"].waitForExistence(timeout: 12))
-        XCTAssertTrue(app.staticTexts["RUST DIAGNOSTICS"].exists)
+        XCTAssertTrue(app.staticTexts["RUST DIAGNOSTICS"].waitForExistence(timeout: 12))
+        Thread.sleep(forTimeInterval: 0.65)
+        keepScreenshot(of: app, named: "App Store 4 - source lens and Rust diagnostics")
         assertNoForeignAppIdentity(in: app)
     }
 

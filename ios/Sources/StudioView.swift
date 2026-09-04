@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 private extension UTType {
     static let mermaidSource = UTType(
-        importedAs: "com.frankenmermaid.source",
+        exportedAs: "com.frankenmermaid.source",
         conformingTo: .plainText
     )
 }
@@ -104,6 +104,10 @@ struct StudioView: View {
             case .failure(let error):
                 sourceImportError = error.localizedDescription
             }
+        }
+        .onOpenURL { url in
+            guard url.isFileURL else { return }
+            openSource(url)
         }
         .alert("Couldn’t prepare that export", isPresented: Binding(
             get: { exportError != nil },

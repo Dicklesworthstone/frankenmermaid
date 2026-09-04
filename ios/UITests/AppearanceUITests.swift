@@ -15,6 +15,17 @@ final class FrankenMermaidAppearanceUITests: XCTestCase {
             ["Switch to light mode", "Switch to dark mode"].contains(toggle.label),
             "Appearance control exposed an unexpected state: \(toggle.label)"
         )
+        let originalLabel = toggle.label
+        addTeardownBlock {
+            let cleanupApp = XCUIApplication()
+            cleanupApp.launch()
+            let cleanupToggle = cleanupApp.buttons["appearance-toggle"]
+            if cleanupToggle.waitForExistence(timeout: 12), cleanupToggle.label != originalLabel {
+                cleanupToggle.tap()
+                XCTAssertEqual(cleanupToggle.label, originalLabel)
+            }
+            cleanupApp.terminate()
+        }
 
         if toggle.label == "Switch to dark mode" {
             toggle.tap()

@@ -41,6 +41,17 @@ struct MermaidRenderStyle: Equatable, Sendable {
     let nodeGradients: Bool
 }
 
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        delegate?.userContentController(userContentController, didReceive: message)
+    }
+}
+
 @MainActor
 final class MermaidRendererModel: NSObject, ObservableObject {
     @Published var source = MermaidRendererModel.sample
@@ -69,13 +80,15 @@ final class MermaidRendererModel: NSObject, ObservableObject {
 
     override init() {
         debugExportProbePending = ProcessInfo.processInfo.environment["FM_EXPORT_PROBE"] == "1"
+        let messageHandler = WeakScriptMessageHandler()
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(MermaidResourceSchemeHandler(), forURLScheme: "frankenmermaid-resource")
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.websiteDataStore = .nonPersistent()
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
-        configuration.userContentController.add(self, name: "frankenBridge")
+        messageHandler.delegate = self
+        configuration.userContentController.add(messageHandler, name: "frankenBridge")
         webView.navigationDelegate = self
         webView.isOpaque = false
         webView.backgroundColor = .clear
@@ -118,6 +131,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
 
     func renderNow() {
         guard phase != .loading, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        scheduledRender?.cancel()
+        scheduledRender = nil
         requestID += 1
         let req = requestID
         let command: [String: Any] = [
