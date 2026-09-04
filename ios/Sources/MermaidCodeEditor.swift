@@ -45,6 +45,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
     func updateUIView(_ view: MermaidTextView, context: Context) {
         context.coordinator.parent = self
         let clampedTextScale = Lab.clampedTextScale(uiTextScale)
+        view.refreshTypographyLayout()
         if view.text != text
             || context.coordinator.lastColorScheme != colorScheme
             || context.coordinator.lastTextScale != clampedTextScale {
@@ -94,6 +95,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
         func applyHighlight(to view: MermaidTextView, replacingText replacement: String?) {
             isApplyingHighlight = true
             let selectedRange = view.selectedRange
+            let contentOffset = view.contentOffset
             if let replacement { view.text = replacement }
             let source = view.text ?? ""
             let fullRange = NSRange(location: 0, length: (source as NSString).length)
@@ -134,6 +136,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
             let selectionLength = min(selectedRange.length, fullRange.length - selectionLocation)
             view.selectedRange = NSRange(location: selectionLocation, length: selectionLength)
             refreshTypingAttributes(in: view)
+            view.setContentOffset(contentOffset, animated: false)
             view.setNeedsDisplay()
             isApplyingHighlight = false
         }
@@ -194,15 +197,31 @@ struct MermaidCodeEditor: UIViewRepresentable {
 }
 
 final class MermaidTextView: UITextView {
-    private let gutterWidth: CGFloat = 42
+    private var gutterWidth: CGFloat { max(42, Lab.size(31)) }
+    private var editorInsets: UIEdgeInsets {
+        UIEdgeInsets(top: 14, left: gutterWidth + 12, bottom: 18, right: 14)
+    }
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
-        textContainerInset = UIEdgeInsets(top: 14, left: gutterWidth + 12, bottom: 18, right: 14)
+        textContainerInset = editorInsets
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func refreshTypographyLayout() {
+        if textContainerInset != editorInsets {
+            textContainerInset = editorInsets
+            setNeedsLayout()
+            setNeedsDisplay()
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        refreshTypographyLayout()
+    }
 
     override func draw(_ rect: CGRect) {
         drawCurrentLine()
