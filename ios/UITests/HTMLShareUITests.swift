@@ -95,16 +95,54 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertNoForeignAppIdentity(in: app)
     }
 
-    func testAppStoreSourceLensInspectorRenders() {
-        let app = launch(lane: "Inspect")
+    func testAppStoreSourceLensSelectsAndAppliesAnExactEdit() {
+        let app = launch(lane: "Diagram")
         XCTAssertTrue(
-            app.descendants(matching: .any)["diagram-inspector-panel"].waitForExistence(timeout: 12),
-            "The native diagram inspector did not render"
+            app.descendants(matching: .any)["live-diagram-stage"].waitForExistence(timeout: 12),
+            "The bundled diagram stage did not render"
         )
-        XCTAssertTrue(app.staticTexts["SOURCE LENS"].waitForExistence(timeout: 12))
-        XCTAssertTrue(app.staticTexts["RUST DIAGNOSTICS"].waitForExistence(timeout: 12))
-        Thread.sleep(forTimeInterval: 0.65)
-        keepScreenshot(of: app, named: "App Store 4 - source lens and Rust diagnostics")
+
+        let sourceNode = app.webViews.buttons.matching(
+            NSPredicate(format: "label == %@", "Diagram node Source")
+        ).firstMatch
+        XCTAssertTrue(
+            sourceNode.waitForExistence(timeout: 12),
+            "The Rust source lens did not expose the rendered Source node as an accessible control.\n" +
+                app.debugDescription
+        )
+        XCTAssertTrue(sourceNode.isHittable)
+        sourceNode.tap()
+
+        XCTAssertTrue(app.navigationBars["Source Lens"].waitForExistence(timeout: 5))
+        let replacement = app.textViews.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Source replacement for")
+        ).firstMatch
+        XCTAssertTrue(
+            replacement.waitForExistence(timeout: 5),
+            "Selecting a source-bound diagram node did not reveal its exact native editor"
+        )
+        replacement.tap()
+        replacement.typeText(" ")
+
+        let apply = app.buttons["Apply exact edit"]
+        XCTAssertTrue(apply.waitForExistence(timeout: 3))
+        XCTAssertTrue(apply.isEnabled)
+        keepScreenshot(of: app, named: "App Store 4 - direct source lens edit")
+        apply.tap()
+
+        XCTAssertTrue(
+            app.navigationBars["Source Lens"].waitForNonExistence(timeout: 8),
+            "The native lens sheet remained after the Rust engine accepted the exact edit"
+        )
+        XCTAssertTrue(app.staticTexts["graph heart ready"].waitForExistence(timeout: 12))
+        app.buttons["Code"].tap()
+        let sourceEditor = app.textViews["Mermaid source editor"]
+        XCTAssertTrue(sourceEditor.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            String(describing: sourceEditor.value).contains("Source[Mermaid source] "),
+            "The engine-owned edit receipt did not update the native source editor"
+        )
+        keepScreenshot(of: app, named: "App Store 5 - source updated by Rust lens")
         assertNoForeignAppIdentity(in: app)
     }
 
@@ -117,7 +155,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
             app.descendants(matching: .any)["sample-gallery"],
             in: app,
             message: "The 24-family sample gallery did not render",
-            screenshotName: "App Store 5 - 24 diagram family gallery"
+            screenshotName: "App Store 6 - 24 diagram family gallery"
         )
         XCTAssertTrue(app.navigationBars["Diagram Specimens"].exists)
         assertNoForeignAppIdentity(in: app)

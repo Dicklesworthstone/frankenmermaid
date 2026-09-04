@@ -62,7 +62,7 @@ struct DiagramInsightPanel: View {
     }
 }
 
-private struct LensSourceEditor: View {
+struct LensSourceEditor: View {
     @ObservedObject var renderer: MermaidRendererModel
     let binding: MermaidLensBinding
     @State private var replacement: String

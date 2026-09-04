@@ -26,12 +26,12 @@
     function publishLensSelection(requestID, binding) {
       stage.querySelectorAll('.fm-lens-selected').forEach((element) => {
         element.classList.remove('fm-lens-selected');
-        element.setAttribute('aria-pressed', 'false');
+        element.removeAttribute('aria-current');
       });
       if (binding) {
         const selected = document.getElementById(binding.elementId);
         selected?.classList.add('fm-lens-selected');
-        selected?.setAttribute('aria-pressed', 'true');
+        selected?.setAttribute('aria-current', 'true');
       }
       bridge.postMessage({type: 'lens.selection', requestID, binding: binding || null});
     }
@@ -42,9 +42,12 @@
       for (const element of stage.querySelectorAll('[id^="fm-node-"], [id^="fm-edge-"], [id^="fm-cluster-"]')) {
         const binding = bindingsByElement.get(element.id);
         if (!binding) continue;
+        const kind = String(binding.kind || 'element').trim().toLowerCase();
+        const identity = String(binding.sourceId || binding.snippet || binding.elementId)
+          .trim().replace(/\s+/g, ' ').slice(0, 96);
         element.setAttribute('tabindex', '0');
         element.setAttribute('role', 'button');
-        element.setAttribute('aria-pressed', 'false');
+        element.setAttribute('aria-label', `Diagram ${kind} ${identity}`);
         const select = (event) => {
           event.stopPropagation();
           publishLensSelection(requestID, binding);

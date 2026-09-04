@@ -35,6 +35,7 @@ struct StudioView: View {
     @State private var exporting = false
     @State private var exportError: String?
     @State private var sourceImportError: String?
+    @State private var compactLensBinding: MermaidLensBinding?
 
     init() {
         let requested = ProcessInfo.processInfo.environment["FM_INITIAL_LANE"]
@@ -45,6 +46,11 @@ struct StudioView: View {
     }
 
     var body: some View {
+        alertedStudio
+            .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
+    }
+
+    private var studioLayout: some View {
         GeometryReader { geometry in
             ZStack {
                 LaboratoryBackground()
@@ -67,11 +73,31 @@ struct StudioView: View {
                 .padding(.top, 12)
             }
         }
+    }
+
+    private var renderObservedStudio: some View {
+        studioLayout
         .onChange(of: renderer.source) { _, _ in renderer.scheduleRender() }
+        .onChange(of: renderer.selectedLensBinding) { _, binding in
+            guard horizontalSizeClass == .compact else { return }
+            compactLensBinding = binding
+        }
         .onChange(of: uiTextScale) { _, value in
             let clamped = Lab.clampedTextScale(value)
             if clamped != value { uiTextScale = clamped }
         }
+        .onAppear {
+            uiTextScale = Lab.clampedTextScale(uiTextScale)
+            renderFontScale = clampedRenderFontScale(renderFontScale)
+            applyRenderStyle(renderImmediately: false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in
+            renderAndRevealDiagram()
+        }
+    }
+
+    private var styleObservedStudio: some View {
+        renderObservedStudio
         .onChange(of: diagramTheme) { _, _ in applyRenderStyle() }
         .onChange(of: renderFontScale) { _, value in
             let clamped = clampedRenderFontScale(value)
@@ -82,14 +108,10 @@ struct StudioView: View {
         .onChange(of: diagramGradients) { _, _ in applyRenderStyle() }
         .onChange(of: diagramCornerRadius) { _, _ in applyRenderStyle() }
         .onChange(of: diagramPadding) { _, _ in applyRenderStyle() }
-        .onAppear {
-            uiTextScale = Lab.clampedTextScale(uiTextScale)
-            renderFontScale = clampedRenderFontScale(renderFontScale)
-            applyRenderStyle(renderImmediately: false)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .renderMermaidNow)) { _ in
-            renderAndRevealDiagram()
-        }
+    }
+
+    private var presentedStudio: some View {
+        styleObservedStudio
         .sheet(isPresented: $showingSamples) {
             DiagramSampleGallery { sample in
                 editorFocused = false
@@ -99,6 +121,9 @@ struct StudioView: View {
         }
         .sheet(item: $sharedArtifact) { artifact in
             SystemShareSheet(fileURL: artifact.url)
+        }
+        .sheet(item: $compactLensBinding) { binding in
+            compactLensSheet(for: binding)
         }
         .fileImporter(
             isPresented: $showingSourceImporter,
@@ -117,6 +142,10 @@ struct StudioView: View {
             guard url.isFileURL else { return }
             openSource(url)
         }
+    }
+
+    private var alertedStudio: some View {
+        presentedStudio
         .alert("Couldn’t prepare that export", isPresented: Binding(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
@@ -133,7 +162,27 @@ struct StudioView: View {
         } message: {
             Text(sourceImportError ?? "Unknown source import error")
         }
-        .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
+    }
+
+    private func compactLensSheet(for binding: MermaidLensBinding) -> some View {
+        NavigationStack {
+            ZStack {
+                LaboratoryBackground()
+                ScrollView {
+                    LensSourceEditor(renderer: renderer, binding: binding)
+                        .padding(18)
+                }
+            }
+            .navigationTitle("Source Lens")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { compactLensBinding = nil }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private var masthead: some View {
