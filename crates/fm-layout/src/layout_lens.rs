@@ -158,9 +158,8 @@ impl LayoutLens {
         }
 
         let mut seen = BTreeSet::new();
-        let mut seen_orders = BTreeSet::new();
         for node in &layout.nodes {
-            if !seen.insert(node.node_id.clone()) {
+            if !seen.insert(node.node_id.as_str()) {
                 return Err(LayoutLensError::DuplicateNodeId(node.node_id.clone()));
             }
             if ir
@@ -177,18 +176,12 @@ impl LayoutLens {
                     node_count: layout.nodes.len(),
                 });
             }
-            if !seen_orders.insert((node.rank, node.order)) {
-                return Err(LayoutLensError::DuplicateOrder {
-                    rank: node.rank,
-                    order: node.order,
-                });
-            }
             let center = node.bounds.center();
             if !center.x.is_finite() || !center.y.is_finite() {
                 return Err(LayoutLensError::NonFinitePosition(node.node_id.clone()));
             }
         }
-        if seen.iter().map(String::as_str).collect::<BTreeSet<_>>() != ir_node_ids {
+        if seen != ir_node_ids {
             return Err(LayoutLensError::NodeSetChanged);
         }
 
@@ -215,8 +208,14 @@ impl LayoutLens {
                 center: node.bounds.center(),
             });
         }
-        for order in &mut rank_orders {
+        for (rank, order) in rank_orders.iter_mut().enumerate() {
             order.sort_unstable_by_key(|(node_order, _)| *node_order);
+            if let Some(duplicate) = order.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                return Err(LayoutLensError::DuplicateOrder {
+                    rank,
+                    order: duplicate[0].0,
+                });
+            }
         }
         let rank_orders = rank_orders
             .into_iter()
