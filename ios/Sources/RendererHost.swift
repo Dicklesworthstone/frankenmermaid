@@ -205,13 +205,15 @@ final class MermaidRendererModel: NSObject, ObservableObject {
                 guard let exported = result as? String, !exported.isEmpty else {
                     throw MermaidExportError.missingArtifact
                 }
-                bytes = kind == .png
-                    ? try MermaidExportCodec.decodePNGDataURL(exported)
-                    : Data(exported.utf8)
+                if kind == .png {
+                    bytes = try await Task.detached(priority: .userInitiated) {
+                        try MermaidExportCodec.decodePNGDataURL(exported)
+                    }.value
+                } else {
+                    bytes = Data(exported.utf8)
+                }
             }
         }
-        try MermaidExportCodec.validateSize(bytes)
-
         let safeType = diagramType
             .lowercased()
             .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
@@ -219,7 +221,10 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         let filename = "FrankenMermaid-\(safeType.isEmpty ? "diagram" : safeType)-" +
             "\(UUID().uuidString.prefix(8)).\(kind.fileExtension)"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try bytes.write(to: url, options: .atomic)
+        try await Task.detached(priority: .userInitiated) {
+            try MermaidExportCodec.validateSize(bytes)
+            try bytes.write(to: url, options: .atomic)
+        }.value
         return url
     }
 
