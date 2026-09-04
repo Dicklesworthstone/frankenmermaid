@@ -76,14 +76,26 @@ fn strip_leading_mermaid_directives(input: &str) -> &str {
             return rest;
         };
         let trimmed = line.trim();
-        if !(trimmed.starts_with("%%") || trimmed.ends_with("%%")) {
+        if !trimmed.starts_with("%%") {
             return rest;
         }
-        let Some(cut) = rest.find('\n') else {
-            // The whole remaining text is directive.
-            return "";
-        };
-        rest = rest[cut + 1..].trim_start();
+
+        // Deck directives are the one Mermaid directive family that supports multiline blocks.
+        // Reuse the parser's bounded scanner so the DOT routing path and the Mermaid lexical pass
+        // agree on the exact closing line. The old line-at-a-time loop removed only the opener and
+        // left the payload in front of the DOT header.
+        if trimmed.starts_with("%%{") && !trimmed.ends_with("}%%") {
+            let scan = crate::mermaid_parser::scan_multiline_deck_directives(rest);
+            let Some(block) = scan.blocks.first().filter(|block| block.start_byte == 0) else {
+                // An unterminated or oversized block is not safe to discard as metadata.
+                return rest;
+            };
+            rest = rest[block.end_byte..].trim_start();
+            continue;
+        }
+
+        let cut = rest.find('\n').map_or(rest.len(), |index| index + 1);
+        rest = rest[cut..].trim_start();
     }
 }
 
@@ -111,15 +123,26 @@ fn strip_mermaid_directives_around(input: &str) -> &str {
 fn strip_trailing_mermaid_directives(input: &str) -> &str {
     let mut rest = input.trim_end();
     loop {
-        let line = rest.lines().next_back().unwrap_or("").trim();
-        if !(line.starts_with("%%") || line.ends_with("%%")) {
+        // A completed multiline deck at the very end is one metadata block, not merely its
+        // `}%%` closing line. Removing only that line let the payload's JSON braces extend DOT's
+        // body and turn directive fields into phantom nodes.
+        let scan = crate::mermaid_parser::scan_multiline_deck_directives(rest);
+        if let Some(block) = scan
+            .blocks
+            .iter()
+            .rev()
+            .find(|block| block.end_byte == rest.len())
+        {
+            rest = rest[..block.start_byte].trim_end();
+            continue;
+        }
+
+        let line_start = rest.rfind('\n').map_or(0, |index| index + 1);
+        let line = rest[line_start..].trim();
+        if !line.starts_with("%%") {
             return rest;
         }
-        let Some(cut) = rest.rfind('\n') else {
-            // The whole remaining text is directive.
-            return "";
-        };
-        rest = rest[..cut].trim_end();
+        rest = rest[..line_start].trim_end();
     }
 }
 

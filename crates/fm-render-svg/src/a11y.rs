@@ -47,14 +47,21 @@ pub fn describe_diagram_with_layout(
     let diagnostics = ir.diagnostic_counts();
     let _ = write!(
         desc,
-        "{} with {} nodes and {} edges",
+        "{} with {} node{} and {} edge{}",
         leading_type_phrase(type_desc),
         ir.nodes.len(),
-        ir.edges.len()
+        plural_suffix(ir.nodes.len()),
+        ir.edges.len(),
+        plural_suffix(ir.edges.len())
     );
 
     if !ir.clusters.is_empty() {
-        let _ = write!(desc, ". organized in {} groups", ir.clusters.len());
+        let _ = write!(
+            desc,
+            ". organized in {} group{}",
+            ir.clusters.len(),
+            plural_suffix(ir.clusters.len())
+        );
     }
 
     let direction_desc = match ir.direction {
@@ -74,7 +81,6 @@ pub fn describe_diagram_with_layout(
         for node in rest {
             let _ = write!(desc, ", {node}");
         }
-        desc.push('.');
     }
 
     let relationships = summarize_key_relationships(ir);
@@ -83,7 +89,6 @@ pub fn describe_diagram_with_layout(
         for rel in rest {
             let _ = write!(desc, "; {rel}");
         }
-        desc.push('.');
     }
 
     if diagnostics.warnings > 0 || diagnostics.errors > 0 {
@@ -102,28 +107,31 @@ pub fn describe_diagram_with_layout(
                 plural_suffix(diagnostics.errors)
             ));
         }
-        let _ = write!(desc, ". Diagnostics: {}.", diag_parts.join(", "));
+        let _ = write!(desc, ". Diagnostics: {}", diag_parts.join(", "));
     }
 
     if let Some(layout) = layout {
         let _ = write!(
             desc,
-            ". Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
+            ". Layout spans {:.0} by {:.0} units with {} rendered node box{} and {} routed edge path{}",
             layout.bounds.width,
             layout.bounds.height,
             layout.nodes.len(),
-            layout.edges.len()
+            plural_suffix(layout.nodes.len()),
+            layout.edges.len(),
+            plural_suffix(layout.edges.len())
         );
         if layout.stats.crossing_count > 0 {
             let _ = write!(
                 desc,
-                ". The layout currently contains {} edge crossing{}.",
+                ". The layout currently contains {} edge crossing{}",
                 layout.stats.crossing_count,
                 plural_suffix(layout.stats.crossing_count)
             );
         }
     }
 
+    desc.push('.');
     desc
 }
 
@@ -588,6 +596,23 @@ mod tests {
         assert!(desc.contains("Key nodes"));
         assert!(desc.contains("Key relationships"));
         assert!(desc.contains("Layout spans"));
+        assert!(
+            !desc.contains(".."),
+            "sentence joins must not produce doubled punctuation: {desc}"
+        );
+        assert!(desc.ends_with('.'));
+        assert!(desc.contains("1 edge."));
+    }
+
+    #[test]
+    fn describe_diagram_pluralizes_singular_counts() {
+        let mut ir = create_test_ir();
+        ir.nodes.truncate(1);
+        let desc = describe_diagram(&ir);
+
+        assert!(desc.contains("1 node and 0 edges"), "{desc}");
+        assert!(!desc.contains("1 nodes"), "{desc}");
+        assert!(desc.ends_with('.'));
     }
 
     #[test]

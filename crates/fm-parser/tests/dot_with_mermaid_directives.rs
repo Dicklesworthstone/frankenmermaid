@@ -96,6 +96,47 @@ fn a_trailing_directive_does_not_destroy_the_graph() {
     }
 }
 
+#[test]
+fn multiline_deck_directives_at_either_end_do_not_destroy_the_graph() {
+    let deck = "%%{deck: {\n  title: 'Tour',\n  slides: [{id: 's', nodes: ['a']}],\n}}%%\n";
+    let baseline = parse(PLAIN);
+
+    for source in [format!("{deck}{PLAIN}"), format!("{PLAIN}{deck}")] {
+        let parsed = parse(&source);
+        assert_eq!(
+            parsed.detection_method,
+            DetectionMethod::DotFormat,
+            "a multiline directive re-routed the document away from DOT: {source:?}"
+        );
+        assert_eq!(parsed.ir.nodes.len(), baseline.ir.nodes.len());
+        assert_eq!(parsed.ir.edges.len(), baseline.ir.edges.len());
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "directive payload fields became phantom DOT nodes"
+        );
+    }
+}
+
+#[test]
+fn a_non_directive_line_ending_in_percent_markers_is_not_discarded() {
+    for source in [
+        format!("not metadata %%\n{PLAIN}"),
+        format!("{PLAIN}not metadata %%\n"),
+    ] {
+        assert_ne!(
+            detect_type_with_confidence(&source).method,
+            DetectionMethod::DotFormat,
+            "ordinary content ending in %% was silently stripped: {source:?}"
+        );
+    }
+}
+
 /// ⚠️ AND THE DIRECTIVE'S OWN BRACES MUST NOT BECOME GRAPH CONTENT.
 ///
 /// The second half of the defect, invisible until the first was fixed: with detection corrected but

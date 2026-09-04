@@ -55,6 +55,15 @@ pub enum LayoutLensError {
     NotFlowchart,
     NodeSetChanged,
     DuplicateNodeId(String),
+    InvalidRank {
+        node_id: String,
+        rank: usize,
+        node_count: usize,
+    },
+    DuplicateOrder {
+        rank: usize,
+        order: usize,
+    },
     RankChanged {
         node_id: String,
         expected: usize,
@@ -76,6 +85,18 @@ impl std::fmt::Display for LayoutLensError {
             Self::DuplicateNodeId(node_id) => {
                 write!(formatter, "LayoutLens requires unique node IDs; '{node_id}' appears more than once")
             }
+            Self::InvalidRank {
+                node_id,
+                rank,
+                node_count,
+            } => write!(
+                formatter,
+                "node '{node_id}' has rank {rank}, outside a {node_count}-node layout"
+            ),
+            Self::DuplicateOrder { rank, order } => write!(
+                formatter,
+                "LayoutLens requires unique order values within each rank; rank {rank} repeats order {order}"
+            ),
             Self::RankChanged {
                 node_id,
                 expected,
@@ -125,6 +146,55 @@ impl LayoutLens {
             return Err(LayoutLensError::NotFlowchart);
         }
 
+        if layout.nodes.len() != ir.nodes.len() {
+            return Err(LayoutLensError::NodeSetChanged);
+        }
+
+        let mut ir_node_ids = BTreeSet::new();
+        for node in &ir.nodes {
+            if !ir_node_ids.insert(node.id.as_str()) {
+                return Err(LayoutLensError::DuplicateNodeId(node.id.clone()));
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut seen_orders = BTreeSet::new();
+        for node in &layout.nodes {
+            if !seen.insert(node.node_id.clone()) {
+                return Err(LayoutLensError::DuplicateNodeId(node.node_id.clone()));
+            }
+            if ir
+                .nodes
+                .get(node.node_index)
+                .is_none_or(|ir_node| ir_node.id != node.node_id)
+            {
+                return Err(LayoutLensError::NodeSetChanged);
+            }
+            if node.rank >= layout.nodes.len() {
+                return Err(LayoutLensError::InvalidRank {
+                    node_id: node.node_id.clone(),
+                    rank: node.rank,
+                    node_count: layout.nodes.len(),
+                });
+            }
+            if !seen_orders.insert((node.rank, node.order)) {
+                return Err(LayoutLensError::DuplicateOrder {
+                    rank: node.rank,
+                    order: node.order,
+                });
+            }
+            let center = node.bounds.center();
+            if !center.x.is_finite() || !center.y.is_finite() {
+                return Err(LayoutLensError::NonFinitePosition(node.node_id.clone()));
+            }
+        }
+        if seen.iter().map(String::as_str).collect::<BTreeSet<_>>() != ir_node_ids {
+            return Err(LayoutLensError::NodeSetChanged);
+        }
+
+        // Rank validity is established before sizing this vector. A caller-supplied layout with a
+        // rank near `usize::MAX` used to overflow `rank + 1` (or request an impossible allocation)
+        // before `from_layout` had a chance to reject it.
         let rank_axis = rank_axis(ir.direction);
         let mut rank_orders = vec![
             Vec::new();
@@ -136,11 +206,7 @@ impl LayoutLens {
                 .map_or(0, |rank| rank + 1)
         ];
         let mut nodes = Vec::with_capacity(layout.nodes.len());
-        let mut seen = BTreeSet::new();
         for node in &layout.nodes {
-            if !seen.insert(node.node_id.clone()) {
-                return Err(LayoutLensError::DuplicateNodeId(node.node_id.clone()));
-            }
             rank_orders[node.rank].push((node.order, node.node_id.clone()));
             nodes.push(LayoutLensNode {
                 node_id: node.node_id.clone(),
@@ -382,6 +448,43 @@ mod tests {
         assert!(matches!(
             lens.put(&edited),
             Err(LayoutLensError::RankAxisMoved(node_id)) if node_id == edited.nodes[0].node_id
+        ));
+    }
+
+    #[test]
+    fn malformed_layout_order_is_rejected_before_it_can_duplicate_ir_nodes() {
+        let source = flowchart();
+        let mut layout = crate::layout_diagram(&source);
+        let sibling_indexes: Vec<usize> = layout
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.rank == 1)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(sibling_indexes.len() >= 2, "fixture needs rank siblings");
+        layout.nodes[sibling_indexes[1]].order = layout.nodes[sibling_indexes[0]].order;
+
+        assert!(matches!(
+            LayoutLens::from_layout(&source, &layout),
+            Err(LayoutLensError::DuplicateOrder { rank: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn impossible_rank_is_rejected_without_sizing_from_untrusted_input() {
+        let source = flowchart();
+        let mut layout = crate::layout_diagram(&source);
+        let node_id = layout.nodes[0].node_id.clone();
+        layout.nodes[0].rank = usize::MAX;
+
+        assert!(matches!(
+            LayoutLens::from_layout(&source, &layout),
+            Err(LayoutLensError::InvalidRank {
+                node_id: rejected,
+                rank: usize::MAX,
+                ..
+            }) if rejected == node_id
         ));
     }
 }

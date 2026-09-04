@@ -247,7 +247,7 @@ impl AnalysisCache {
     /// Check if caching is enabled.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.config.enabled
+        self.config.enabled && self.config.max_entries > 0
     }
 
     /// Get current statistics.
@@ -262,7 +262,7 @@ impl AnalysisCache {
         ir: &MermaidDiagramIr,
         config: &ProjectionConfig,
     ) -> Option<FnxAnalysisResults> {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return None;
         }
 
@@ -284,7 +284,7 @@ impl AnalysisCache {
         config: &ProjectionConfig,
         scoring: &CriticalityScoringConfig,
     ) -> Option<CriticalityScoringResults> {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return None;
         }
 
@@ -306,7 +306,7 @@ impl AnalysisCache {
         config: &ProjectionConfig,
         diagnostics: FnxAnalysisResults,
     ) {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return;
         }
 
@@ -324,7 +324,7 @@ impl AnalysisCache {
         scoring: &CriticalityScoringConfig,
         criticality: CriticalityScoringResults,
     ) {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return;
         }
 
@@ -355,12 +355,24 @@ impl AnalysisCache {
     where
         F: FnOnce(&mut CachedAnalysis),
     {
-        // Evict if at capacity
+        let access = self.access_counter.fetch_add(1, Ordering::Relaxed);
+
+        // Replacing one component of an existing entry consumes no capacity. Evicting first used
+        // to discard an unrelated hot entry whenever the cache was full, even though its size did
+        // not grow at all.
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.last_access = access;
+            updater(entry);
+            return;
+        }
+
+        // Evict only for a genuinely new key. `is_enabled` has already rejected zero capacity;
+        // without that guard, `0 >= 0` made this loop permanent because an empty cache has no LRU
+        // entry to evict.
         while self.entries.len() >= self.config.max_entries {
             self.evict_lru();
         }
 
-        let access = self.access_counter.fetch_add(1, Ordering::Relaxed);
         let entry = self.entries.entry(key).or_insert_with(|| {
             self.stats.entries += 1;
             CachedAnalysis {
@@ -618,5 +630,43 @@ mod tests {
 
         cache.put_diagnostics(&ir, &proj_config, FnxAnalysisResults::default());
         assert!(cache.get_diagnostics(&ir, &proj_config).is_none());
+    }
+
+    #[test]
+    fn zero_capacity_behaves_as_disabled_instead_of_spinning() {
+        let mut cache = AnalysisCache::new(CacheConfig {
+            max_entries: 0,
+            enabled: true,
+        });
+        let ir = make_test_ir(3, 2);
+        let projection = ProjectionConfig::default();
+
+        assert!(!cache.is_enabled());
+        cache.put_diagnostics(&ir, &projection, FnxAnalysisResults::default());
+        assert!(cache.get_diagnostics(&ir, &projection).is_none());
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().misses, 0);
+    }
+
+    #[test]
+    fn updating_existing_key_at_capacity_does_not_evict_another_entry() {
+        let mut cache = AnalysisCache::new(CacheConfig {
+            max_entries: 2,
+            enabled: true,
+        });
+        let projection = ProjectionConfig::default();
+        let ir1 = make_test_ir(2, 1);
+        let ir2 = make_test_ir(3, 2);
+
+        cache.put_diagnostics(&ir1, &projection, FnxAnalysisResults::default());
+        cache.put_diagnostics(&ir2, &projection, FnxAnalysisResults::default());
+        // Make ir1 the most-recently-used key. The old replacement path still evicted ir2 here.
+        assert!(cache.get_diagnostics(&ir1, &projection).is_some());
+        cache.put_diagnostics(&ir1, &projection, FnxAnalysisResults::default());
+
+        assert!(cache.get_diagnostics(&ir1, &projection).is_some());
+        assert!(cache.get_diagnostics(&ir2, &projection).is_some());
+        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().evictions, 0);
     }
 }

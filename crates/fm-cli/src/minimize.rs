@@ -223,16 +223,25 @@ pub fn minimize(
         };
     }
 
+    // Keep each line ending attached to its line. `str::lines()` discards the final terminator,
+    // which meant a zero-budget run (and any run that found no reduction) silently rewrote an
+    // otherwise untouched repro before returning it.
+    let mut lines: Vec<String> = input.split_inclusive('\n').map(str::to_owned).collect();
+    let mut hit_iteration_cap = false;
+
     // Pass 1: Line-level reduction.
-    let mut lines: Vec<String> = input.lines().map(str::to_owned).collect();
     let mut changed = true;
-    while changed {
+    'line_pass: while changed {
         changed = false;
         let mut i = 0;
         while i < lines.len() {
+            if iterations >= max_iterations {
+                hit_iteration_cap = true;
+                break 'line_pass;
+            }
             let mut candidate = lines.clone();
             candidate.remove(i);
-            let candidate_input = candidate.join("\n");
+            let candidate_input = candidate.concat();
             iterations += 1;
 
             if test_failure(&candidate_input, signature, stage) {
@@ -243,26 +252,23 @@ pub fn minimize(
                 i += 1;
             }
 
-            // Safety limit.
-            if iterations > max_iterations {
-                break;
-            }
-        }
-        if iterations > max_iterations {
-            break;
         }
     }
 
     // Pass 2: Try removing contiguous blocks of 2, 4, 8 lines.
-    for block_size in [8, 4, 2] {
+    'block_pass: for block_size in [8, 4, 2] {
         if lines.len() <= block_size {
             continue;
         }
         let mut i = 0;
         while i + block_size <= lines.len() {
+            if iterations >= max_iterations {
+                hit_iteration_cap = true;
+                break 'block_pass;
+            }
             let mut candidate = lines.clone();
             candidate.drain(i..i + block_size);
-            let candidate_input = candidate.join("\n");
+            let candidate_input = candidate.concat();
             iterations += 1;
 
             if test_failure(&candidate_input, signature, stage) {
@@ -270,17 +276,13 @@ pub fn minimize(
             } else {
                 i += 1;
             }
-
-            if iterations > max_iterations {
-                break;
-            }
         }
     }
 
     // Pass 3: Apply ddmin to each retained line.  Byte slicing would corrupt
     // non-ASCII labels, so candidates are built from `char_indices` boundaries.
     let mut line_index = 0;
-    while line_index < lines.len() && iterations <= max_iterations {
+    'character_pass: while line_index < lines.len() {
         let mut granularity = 2;
         // The line is cloned out because the body reassigns `lines` whenever a chunk removal
         // reproduces, which a borrow held across the loop condition would forbid.
@@ -299,6 +301,10 @@ pub fn minimize(
             let mut removed_chunk = false;
             let mut start_char = 0;
             while start_char < char_count {
+                if iterations >= max_iterations {
+                    hit_iteration_cap = true;
+                    break 'character_pass;
+                }
                 let end = (start_char + chunk_size).min(char_count);
                 let (Some(prefix_end), Some(suffix_start)) =
                     (boundaries.get(start_char), boundaries.get(end))
@@ -319,7 +325,7 @@ pub fn minimize(
                     break;
                 };
                 *candidate_slot = candidate_line;
-                let candidate_input = candidate.join("\n");
+                let candidate_input = candidate.concat();
                 iterations += 1;
 
                 if test_failure(&candidate_input, signature, stage) {
@@ -328,17 +334,10 @@ pub fn minimize(
                     removed_chunk = true;
                     break;
                 }
-
-                if iterations > max_iterations {
-                    break;
-                }
                 start_char = end;
             }
 
-            if iterations > max_iterations || removed_chunk {
-                if iterations > max_iterations {
-                    break;
-                }
+            if removed_chunk {
                 continue;
             }
             if granularity >= char_count {
@@ -349,8 +348,8 @@ pub fn minimize(
         line_index += 1;
     }
 
-    let minimized_input = lines.join("\n");
-    let minimized_lines = lines.len();
+    let minimized_input = lines.concat();
+    let minimized_lines = minimized_input.lines().count();
 
     MinimizeResult {
         reproduced: true,
@@ -362,7 +361,7 @@ pub fn minimize(
         minimized_bytes: minimized_input.len(),
         minimized_input,
         iterations,
-        hit_iteration_cap: iterations > max_iterations,
+        hit_iteration_cap,
         elapsed: start.elapsed(),
     }
 }
@@ -532,6 +531,32 @@ mod tests {
         assert!(
             result.hit_iteration_cap,
             "a one-iteration budget on a six-line input must report truncation"
+        );
+        assert_eq!(
+            result.iterations, 1,
+            "the advertised probe budget is a hard upper bound"
+        );
+    }
+
+    #[test]
+    fn zero_iteration_budget_preserves_the_original_bytes() {
+        let input = "flowchart LR\n  A --> B\n";
+        let result = minimize(
+            input,
+            &FailureSignature::OutputContains("\"A\"".to_string()),
+            MinimizeOptions {
+                stage: Stage::Parse,
+                max_iterations: 0,
+            },
+        );
+
+        assert!(result.reproduced);
+        assert_eq!(result.iterations, 0);
+        assert!(result.hit_iteration_cap);
+        assert_eq!(
+            result.minimized_input.as_bytes(),
+            input.as_bytes(),
+            "an untouched repro must retain its terminal newline"
         );
     }
 
