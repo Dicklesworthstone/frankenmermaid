@@ -9,6 +9,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(Lab.textScaleStorageKey) private var uiTextScale = Lab.defaultTextScale
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -36,14 +37,19 @@ struct MermaidCodeEditor: UIViewRepresentable {
         view.selectedTextRange = view.textRange(from: view.beginningOfDocument, to: view.beginningOfDocument)
         view.accessibilityLabel = "Mermaid source editor"
         view.accessibilityHint = "Edit Mermaid syntax. Diagnostics from the Rust parser appear after rendering."
+        context.coordinator.lastTextScale = Lab.clampedTextScale(uiTextScale)
         context.coordinator.applyHighlight(to: view, replacingText: text)
         return view
     }
 
     func updateUIView(_ view: MermaidTextView, context: Context) {
         context.coordinator.parent = self
-        if view.text != text || context.coordinator.lastColorScheme != colorScheme {
+        let clampedTextScale = Lab.clampedTextScale(uiTextScale)
+        if view.text != text
+            || context.coordinator.lastColorScheme != colorScheme
+            || context.coordinator.lastTextScale != clampedTextScale {
             context.coordinator.lastColorScheme = colorScheme
+            context.coordinator.lastTextScale = clampedTextScale
             context.coordinator.applyHighlight(to: view, replacingText: text)
         } else {
             context.coordinator.refreshTypingAttributes(in: view)
@@ -58,6 +64,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: MermaidCodeEditor
         var lastColorScheme: ColorScheme?
+        var lastTextScale: Double?
         private var isApplyingHighlight = false
 
         init(_ parent: MermaidCodeEditor) { self.parent = parent }
@@ -93,9 +100,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 4
             paragraph.paragraphSpacing = 1
-            let baseFont = UIFontMetrics(forTextStyle: .body).scaledFont(
-                for: .monospacedSystemFont(ofSize: 15, weight: .regular)
-            )
+            let baseFont = UIFont.monospacedSystemFont(ofSize: Lab.size(15), weight: .regular)
             let storage = NSMutableAttributedString(
                 string: source,
                 attributes: [
@@ -135,9 +140,7 @@ struct MermaidCodeEditor: UIViewRepresentable {
 
         func refreshTypingAttributes(in view: UITextView) {
             view.typingAttributes = [
-                .font: UIFontMetrics(forTextStyle: .body).scaledFont(
-                    for: .monospacedSystemFont(ofSize: 15, weight: .regular)
-                ),
+                .font: UIFont.monospacedSystemFont(ofSize: Lab.size(15), weight: .regular),
                 .foregroundColor: UIColor(Lab.text)
             ]
         }
@@ -156,17 +159,14 @@ struct MermaidCodeEditor: UIViewRepresentable {
                 guard let match else { return }
                 storage.addAttribute(.foregroundColor, value: color, range: match.range)
                 if let fontWeight {
-                    let font = UIFontMetrics(forTextStyle: .body).scaledFont(
-                        for: .monospacedSystemFont(ofSize: 15, weight: fontWeight)
-                    )
+                    let font = UIFont.monospacedSystemFont(ofSize: Lab.size(15), weight: fontWeight)
                     storage.addAttribute(.font, value: font, range: match.range)
                 } else if italic {
-                    let baseFont = UIFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+                    let size = Lab.size(15)
+                    let baseFont = UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
                     let descriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic)
                         ?? baseFont.fontDescriptor
-                    let font = UIFontMetrics(forTextStyle: .body).scaledFont(
-                        for: UIFont(descriptor: descriptor, size: 15)
-                    )
+                    let font = UIFont(descriptor: descriptor, size: size)
                     storage.addAttribute(.font, value: font, range: match.range)
                 }
             }
@@ -239,7 +239,7 @@ final class MermaidTextView: UITextView {
             }
         }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            .font: UIFont.monospacedDigitSystemFont(ofSize: Lab.size(10), weight: .medium),
             .foregroundColor: UIColor(Lab.secondary).withAlphaComponent(0.58)
         ]
         if nsText.length == 0 {

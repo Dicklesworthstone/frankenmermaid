@@ -19,6 +19,7 @@ private enum StudioLane: String, CaseIterable, Identifiable {
 struct StudioView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage(LabAppearance.storageKey) private var appearance = LabAppearance.dark.rawValue
+    @AppStorage(Lab.textScaleStorageKey) private var uiTextScale = Lab.defaultTextScale
     @AppStorage("diagramTheme") private var diagramTheme = "dark"
     @AppStorage("renderFontScale") private var renderFontScale = 1.0
     @AppStorage("diagramShadows") private var diagramShadows = true
@@ -67,6 +68,10 @@ struct StudioView: View {
             }
         }
         .onChange(of: renderer.source) { _, _ in renderer.scheduleRender() }
+        .onChange(of: uiTextScale) { _, value in
+            let clamped = Lab.clampedTextScale(value)
+            if clamped != value { uiTextScale = clamped }
+        }
         .onChange(of: diagramTheme) { _, _ in applyRenderStyle() }
         .onChange(of: renderFontScale) { _, value in
             let clamped = clampedRenderFontScale(value)
@@ -78,6 +83,7 @@ struct StudioView: View {
         .onChange(of: diagramCornerRadius) { _, _ in applyRenderStyle() }
         .onChange(of: diagramPadding) { _, _ in applyRenderStyle() }
         .onAppear {
+            uiTextScale = Lab.clampedTextScale(uiTextScale)
             renderFontScale = clampedRenderFontScale(renderFontScale)
             applyRenderStyle(renderImmediately: false)
         }

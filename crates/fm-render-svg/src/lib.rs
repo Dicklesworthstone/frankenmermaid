@@ -19238,8 +19238,8 @@ mod tests {
     fn accessibility_enhanced_description() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
-        // Enhanced description includes direction
-        assert!(svg.contains("flowing"));
+        // Enhanced description includes a properly delimited direction sentence.
+        assert!(svg.contains(". Flowing top to bottom."));
     }
 
     #[test]

@@ -22,6 +22,34 @@ struct FrankenMermaidApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+            TextSizeCommands()
+        }
+    }
+}
+
+private struct TextSizeCommands: Commands {
+    @AppStorage(Lab.textScaleStorageKey) private var textScale = Lab.defaultTextScale
+
+    var body: some Commands {
+        CommandMenu("Text Size") {
+            Button("Increase Text Size") {
+                textScale = Lab.adjustedTextScale(textScale, steps: 1)
+            }
+            .keyboardShortcut("+", modifiers: .command)
+            .disabled(textScale >= Lab.maximumTextScale)
+
+            Button("Decrease Text Size") {
+                textScale = Lab.adjustedTextScale(textScale, steps: -1)
+            }
+            .keyboardShortcut("-", modifiers: .command)
+            .disabled(textScale <= Lab.minimumTextScale)
+
+            Divider()
+
+            Button("Actual Text Size") {
+                textScale = Lab.defaultTextScale
+            }
+            .keyboardShortcut("0", modifiers: .command)
         }
     }
 }

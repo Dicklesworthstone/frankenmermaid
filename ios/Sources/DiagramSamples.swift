@@ -283,25 +283,25 @@ struct DiagramSampleGallery: View {
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack(spacing: 9) {
                                         Image(systemName: sample.symbol)
-                                            .font(.title3.weight(.bold))
+                                            .font(.system(size: Lab.size(20), weight: .bold))
                                             .foregroundStyle(Lab.cyan)
                                             .frame(width: 28)
                                         VStack(alignment: .leading, spacing: 1) {
                                             Text(sample.name)
-                                                .font(.headline.weight(.bold))
+                                                .font(.system(size: Lab.size(17), weight: .bold))
                                                 .foregroundStyle(Lab.text)
                                             Text(sample.category.uppercased())
-                                                .font(.caption2.weight(.black).monospaced())
+                                                .font(.system(size: Lab.size(11), weight: .black, design: .monospaced))
                                                 .tracking(1.2)
                                                 .foregroundStyle(Lab.secondary)
                                         }
                                     }
                                     Text(sample.summary)
-                                        .font(.subheadline)
+                                        .font(.system(size: Lab.size(15)))
                                         .foregroundStyle(Lab.secondary)
                                         .multilineTextAlignment(.leading)
                                     Text(sample.source.split(separator: "\n").first.map(String.init) ?? sample.id)
-                                        .font(.caption.weight(.bold).monospaced())
+                                        .font(.system(size: Lab.size(12), weight: .bold, design: .monospaced))
                                         .foregroundStyle(Lab.emerald)
                                         .lineLimit(1)
                                 }

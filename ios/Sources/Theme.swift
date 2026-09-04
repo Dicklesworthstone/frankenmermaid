@@ -9,6 +9,12 @@ enum LabAppearance: String {
 }
 
 enum Lab {
+    static let textScaleStorageKey = "frankenmermaid.uiTextScale"
+    static let defaultTextScale = 1.0
+    static let minimumTextScale = 0.8
+    static let maximumTextScale = 1.6
+    static let textScaleStep = 0.1
+
     static let background = adaptive(dark: UIColor(red: 0.002, green: 0.025, blue: 0.033, alpha: 1), light: UIColor(red: 0.925, green: 0.965, blue: 0.975, alpha: 1))
     static let panel = adaptive(dark: UIColor(white: 0, alpha: 0.52), light: UIColor(red: 0.985, green: 0.997, blue: 1, alpha: 0.97))
     static let stroke = adaptive(dark: UIColor(white: 1, alpha: 0.08), light: UIColor(red: 0.025, green: 0.22, blue: 0.29, alpha: 0.18))
@@ -24,11 +30,27 @@ enum Lab {
         Color(uiColor: UIColor { traits in traits.userInterfaceStyle == .dark ? dark : light })
     }
 
+    static func clampedTextScale(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultTextScale }
+        return min(maximumTextScale, max(minimumTextScale, value))
+    }
+
+    static func adjustedTextScale(_ value: Double, steps: Int) -> Double {
+        let adjusted = clampedTextScale(value) + Double(steps) * textScaleStep
+        return (clampedTextScale(adjusted) * 10).rounded() / 10
+    }
+
+    private static var currentTextScale: CGFloat {
+        let stored = (UserDefaults.standard.object(forKey: textScaleStorageKey) as? NSNumber)?.doubleValue
+        return CGFloat(clampedTextScale(stored ?? defaultTextScale))
+    }
+
     static func size(_ base: CGFloat) -> CGFloat {
+        let scaledBase = base * currentTextScale
 #if targetEnvironment(macCatalyst)
-        base * 1.38
+        return scaledBase * 1.38
 #else
-        UIFontMetrics(forTextStyle: .body).scaledValue(for: base)
+        return UIFontMetrics(forTextStyle: .body).scaledValue(for: scaledBase)
 #endif
     }
 }
