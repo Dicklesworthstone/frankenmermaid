@@ -54,3 +54,51 @@ final class MermaidLensBindingTests: XCTestCase {
         XCTAssertNil(binding.exactSourceSnippet(in: "XOther"), "stale source must not reuse a prior snippet")
     }
 }
+
+final class MermaidSourceHistoryTests: XCTestCase {
+    func testUndoAndRedoRoundTripEverySourceMutationPath() throws {
+        let history = MermaidSourceHistory()
+        history.recordChange(from: "first", to: "second", continuous: false)
+
+        XCTAssertTrue(history.canUndo)
+        XCTAssertFalse(history.canRedo)
+        let restored = try XCTUnwrap(history.undo(currentSource: "second"))
+        XCTAssertEqual(restored, "first")
+        XCTAssertFalse(history.canUndo)
+        XCTAssertTrue(history.canRedo)
+
+        history.recordChange(from: "second", to: restored, continuous: false)
+        let replayed = try XCTUnwrap(history.redo(currentSource: restored))
+        XCTAssertEqual(replayed, "second")
+        history.recordChange(from: restored, to: replayed, continuous: false)
+        XCTAssertTrue(history.canUndo)
+        XCTAssertFalse(history.canRedo)
+    }
+
+    func testContinuousTypingCoalescesIntoOneUndoStep() throws {
+        let history = MermaidSourceHistory()
+        let start = Date(timeIntervalSince1970: 1_000)
+        history.recordChange(from: "A", to: "AB", continuous: true, now: start)
+        history.recordChange(
+            from: "AB",
+            to: "ABC",
+            continuous: true,
+            now: start.addingTimeInterval(0.4)
+        )
+
+        XCTAssertEqual(try XCTUnwrap(history.undo(currentSource: "ABC")), "A")
+        XCTAssertFalse(history.canUndo)
+    }
+
+    func testFreshChangeAfterUndoClearsRedo() throws {
+        let history = MermaidSourceHistory()
+        history.recordChange(from: "A", to: "B", continuous: false)
+        let restored = try XCTUnwrap(history.undo(currentSource: "B"))
+        history.recordChange(from: "B", to: restored, continuous: false)
+        XCTAssertTrue(history.canRedo)
+
+        history.recordChange(from: restored, to: "C", continuous: false)
+        XCTAssertFalse(history.canRedo)
+        XCTAssertEqual(history.undo(currentSource: "C"), restored)
+    }
+}

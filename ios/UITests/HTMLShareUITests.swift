@@ -70,6 +70,38 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertNoForeignAppIdentity(in: app)
     }
 
+    func testSourceUndoAndRedoRoundTripASampleReplacement() {
+        let app = launch(lane: "Code")
+        let undo = app.buttons["undo-source-change"]
+        let redo = app.buttons["redo-source-change"]
+        XCTAssertTrue(undo.waitForExistence(timeout: 5))
+        XCTAssertTrue(redo.exists)
+        XCTAssertFalse(undo.isEnabled)
+        XCTAssertFalse(redo.isEnabled)
+        XCTAssertGreaterThanOrEqual(undo.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(redo.frame.height, 44)
+
+        app.buttons["Source"].tap()
+        app.buttons["Sample gallery"].tap()
+        let sample = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Decision Flow")
+        ).firstMatch
+        XCTAssertTrue(sample.waitForExistence(timeout: 5))
+        sample.tap()
+
+        app.buttons["Code"].tap()
+        let editor = app.textViews["Mermaid source editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue(of: editor, containing: "A[Start]"))
+        XCTAssertTrue(undo.isEnabled)
+        undo.tap()
+        XCTAssertTrue(waitForValue(of: editor, containing: "Source[Mermaid source]"))
+        XCTAssertTrue(redo.isEnabled)
+        redo.tap()
+        XCTAssertTrue(waitForValue(of: editor, containing: "A[Start]"))
+        keepScreenshot(of: app, named: "App Store - source undo and redo")
+    }
+
     func testAppStoreLiveDiagramAndExportFormatsRender() {
         let app = launch(lane: "Diagram")
         XCTAssertTrue(
@@ -194,6 +226,15 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func waitForValue(of element: XCUIElement, containing text: String) -> Bool {
+        let changed = expectation(
+            for: NSPredicate(format: "value CONTAINS %@", text),
+            evaluatedWith: element
+        )
+        let result = XCTWaiter.wait(for: [changed], timeout: 8)
+        return result == .completed
     }
 
     private func assertNoForeignAppIdentity(in app: XCUIApplication) {

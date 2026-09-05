@@ -1,6 +1,77 @@
 import SwiftUI
 import UIKit
 
+/// Product-level Mermaid source history shared by direct typing, sample/file
+/// replacement, and engine-owned source-lens edits. UIKit's responder-local
+/// undo stack cannot see the latter operations, so the studio owns one bounded
+/// history for every path that changes the canonical source string.
+final class MermaidSourceHistory: ObservableObject {
+    private struct ReplayTransition {
+        let from: String
+        let to: String
+    }
+
+    @Published private var undoSources: [String] = []
+    @Published private var redoSources: [String] = []
+    private var pendingReplay: ReplayTransition?
+    private var lastContinuousEditAt: Date?
+
+    private let maximumEntries = 100
+    private let continuousEditInterval: TimeInterval = 0.8
+
+    var canUndo: Bool { !undoSources.isEmpty }
+    var canRedo: Bool { !redoSources.isEmpty }
+
+    func recordChange(
+        from previousSource: String,
+        to source: String,
+        continuous: Bool,
+        now: Date = Date()
+    ) {
+        guard previousSource != source else { return }
+
+        if let replay = pendingReplay {
+            pendingReplay = nil
+            if replay.from == previousSource, replay.to == source { return }
+        }
+
+        let continuesCurrentEdit = continuous
+            && lastContinuousEditAt.map { now.timeIntervalSince($0) <= continuousEditInterval } == true
+            && !undoSources.isEmpty
+        if !continuesCurrentEdit {
+            appendBounded(previousSource, to: &undoSources)
+        }
+        redoSources.removeAll(keepingCapacity: true)
+        lastContinuousEditAt = continuous ? now : nil
+    }
+
+    func endContinuousEditing() {
+        lastContinuousEditAt = nil
+    }
+
+    func undo(currentSource: String) -> String? {
+        guard let previousSource = undoSources.popLast() else { return nil }
+        appendBounded(currentSource, to: &redoSources)
+        pendingReplay = ReplayTransition(from: currentSource, to: previousSource)
+        lastContinuousEditAt = nil
+        return previousSource
+    }
+
+    func redo(currentSource: String) -> String? {
+        guard let nextSource = redoSources.popLast() else { return nil }
+        appendBounded(currentSource, to: &undoSources)
+        pendingReplay = ReplayTransition(from: currentSource, to: nextSource)
+        lastContinuousEditAt = nil
+        return nextSource
+    }
+
+    private func appendBounded(_ source: String, to stack: inout [String]) {
+        if stack.last == source { return }
+        if stack.count == maximumEntries { stack.removeFirst() }
+        stack.append(source)
+    }
+}
+
 /// A native editing surface with lexical Mermaid presentation. This does not
 /// parse, validate, or mutate Mermaid structure—the Rust engine remains the
 /// only parser. The highlighter merely colors stable lexical cues so typing is

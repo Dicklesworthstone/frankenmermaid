@@ -27,6 +27,7 @@ struct StudioView: View {
     @AppStorage("diagramCornerRadius") private var diagramCornerRadius = 10.0
     @AppStorage("diagramPadding") private var diagramPadding = 18.0
     @StateObject private var renderer = MermaidRendererModel()
+    @StateObject private var sourceHistory = MermaidSourceHistory()
     @State private var lane: StudioLane = .code
     @State private var editorFocused = false
     @State private var showingSamples = false
@@ -77,7 +78,17 @@ struct StudioView: View {
 
     private var renderObservedStudio: some View {
         studioLayout
-        .onChange(of: renderer.source) { _, _ in renderer.scheduleRender() }
+        .onChange(of: renderer.source) { previousSource, source in
+            sourceHistory.recordChange(
+                from: previousSource,
+                to: source,
+                continuous: editorFocused
+            )
+            renderer.scheduleRender()
+        }
+        .onChange(of: editorFocused) { _, isFocused in
+            if !isFocused { sourceHistory.endContinuousEditing() }
+        }
         .onChange(of: renderer.selectedLensBinding) { _, binding in
             guard horizontalSizeClass == .compact else { return }
             compactLensBinding = binding
@@ -294,6 +305,11 @@ struct StudioView: View {
                 HStack {
                     LabLabel(text: "01 · The Graph Source")
                     Spacer()
+                    Text("\(renderer.source.utf8.count) bytes")
+                        .font(.system(size: Lab.size(9), design: .monospaced))
+                        .foregroundStyle(Lab.secondary)
+                }
+                HStack(spacing: 8) {
                     Menu {
                         Button {
                             editorFocused = false
@@ -311,11 +327,36 @@ struct StudioView: View {
                         Label("Source", systemImage: "doc.badge.gearshape")
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .controlSize(.regular)
                     .tint(Lab.cyan)
-                    Text("\(renderer.source.utf8.count) bytes")
-                        .font(.system(size: Lab.size(9), design: .monospaced))
-                        .foregroundStyle(Lab.secondary)
+                    Spacer(minLength: 4)
+                    Button {
+                        undoSourceChange()
+                    } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .tint(Lab.amber)
+                    .disabled(!sourceHistory.canUndo)
+                    .frame(minHeight: 44)
+                    .keyboardShortcut("z", modifiers: .command)
+                    .accessibilityIdentifier("undo-source-change")
+                    .accessibilityHint("Restore the source before the most recent edit, import, sample, or source-lens change")
+
+                    Button {
+                        redoSourceChange()
+                    } label: {
+                        Label("Redo", systemImage: "arrow.uturn.forward")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .tint(Lab.amber)
+                    .disabled(!sourceHistory.canRedo)
+                    .frame(minHeight: 44)
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .accessibilityIdentifier("redo-source-change")
+                    .accessibilityHint("Reapply the last undone Mermaid source change")
                 }
                 MermaidCodeEditor(text: $renderer.source, isFocused: $editorFocused)
                     .background(Lab.statusBackground.opacity(0.58), in: RoundedRectangle(cornerRadius: 12))
@@ -397,6 +438,16 @@ struct StudioView: View {
         editorFocused = false
         renderer.renderNow()
         withAnimation(.snappy) { lane = .diagram }
+    }
+
+    private func undoSourceChange() {
+        guard let source = sourceHistory.undo(currentSource: renderer.source) else { return }
+        renderer.source = source
+    }
+
+    private func redoSourceChange() {
+        guard let source = sourceHistory.redo(currentSource: renderer.source) else { return }
+        renderer.source = source
     }
 
     private var inspectorPanel: some View {
