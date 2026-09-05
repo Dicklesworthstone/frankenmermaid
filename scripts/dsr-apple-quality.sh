@@ -9,6 +9,7 @@ mkdir -p "$build_root/tmp"
 result_bundle="$build_root/frankenmermaid-iphone-ui-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
 sbh check --need 20G "$build_root"
 command -v xcodegen >/dev/null
+command -v jq >/dev/null
 xcodegen generate --spec project.yml
 git diff --exit-code -- FrankenMermaid.xcodeproj Sources/Info.plist
 git ls-files -z -- '*.swift' | xargs -0 xcrun swiftc -parse -enable-bare-slash-regex
@@ -29,10 +30,14 @@ TMPDIR="$build_root/tmp" xcodebuild -project FrankenMermaid.xcodeproj -scheme Fr
 /Users/jemanuel/.local/bin/ensure-simulator-audio-safe prepare
 simulator_id="${FM_IOS_SIMULATOR_ID:-}"
 if [[ -z "$simulator_id" ]]; then
-  simulator_id="$({ xcrun simctl list devices available || true; } | awk -F '[()]' '
-    /iPhone/ && /\(Booted\)$/ { print $2; found = 1; exit }
-    /iPhone/ && fallback == "" { fallback = $2 }
-    END { if (!found) print fallback }
+  simulator_id="$(xcrun simctl list devices available --json | jq -r '
+    [.devices[][] | select(.isAvailable == true) | select(.name | test("iPhone"; "i"))] as $devices
+    | (($devices | map(select(.name | test("^FrankenMermaid "; "i"))))
+        + ($devices | map(select(.name | test("^App Store Screenshots "; "i"))))
+        + ($devices | map(select(.name | test("^App Store 2026 FrankenSuite "; "i"))))
+        + ($devices | map(select(.state == "Booted")))
+        + $devices)
+    | .[0].udid // empty
   ')"
 fi
 if [[ -z "$simulator_id" ]]; then
