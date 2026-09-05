@@ -532,6 +532,7 @@ struct StudioView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .tint(Lab.amber)
+                        .keyboardShortcut("p", modifiers: [.command, .shift])
                         .accessibilityIdentifier("present-graph-deck")
                         .accessibilityHint(
                             "Open \(deck.title), \(deck.sceneCount) presentation scenes, in the full-screen theater"

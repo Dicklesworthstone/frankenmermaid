@@ -28,13 +28,15 @@
     let deckController = null;
     let deckChrome = null;
     let deckObserver = null;
-    const deckTemplatePromise = fetch('./deck_template.html').then((response) => {
-      if (!response.ok) throw new Error('The bundled Graph Deck template is unavailable.');
-      return response.text();
+    const deckTemplatePromise = fetch('./deck_template.html').then(async (response) => {
+      const template = await response.text();
+      if (!template) throw new Error('The bundled Graph Deck template is unavailable.');
+      return template;
     });
-    const deckRuntimePromise = fetch('./deck_runtime.js').then((response) => {
-      if (!response.ok) throw new Error('The bundled Graph Deck runtime is unavailable.');
-      return response.text();
+    const deckRuntimePromise = fetch('./deck_runtime.js').then(async (response) => {
+      const runtime = await response.text();
+      if (!runtime) throw new Error('The bundled Graph Deck runtime is unavailable.');
+      return runtime;
     });
 
     function deckSummary(manifest) {
@@ -71,6 +73,9 @@
       deckChrome = null;
       stage.classList.remove('fm-deck-stage');
       stage.removeAttribute('tabindex');
+      stage.removeAttribute('role');
+      stage.removeAttribute('aria-roledescription');
+      stage.setAttribute('aria-label', 'Rendered Mermaid diagram');
       stage.textContent = '';
       if (restoreDiagram && latestDeck?.svg) {
         stage.innerHTML = latestDeck.svg;
@@ -128,13 +133,18 @@
         throw new Error('This diagram has no usable Graph Deck manifest to export.');
       }
       const [template, runtime] = await Promise.all([deckTemplatePromise, deckRuntimePromise]);
-      return template
-        .replace('{{TITLE}}', escapeHTML(latestDeck.summary.title))
-        .replace('{{BG}}', '#061116')
-        .replace('{{FG}}', '#e7eef0')
-        .replace('{{MANIFEST_JSON}}', guardInlineScript(JSON.stringify(latestDeck.manifest)))
-        .replace('{{RUNTIME_JS}}', runtime)
-        .replace('{{SVG_JS_STRING}}', guardInlineScript(JSON.stringify(latestDeck.svg)));
+      const replacements = [
+        ['{{TITLE}}', escapeHTML(latestDeck.summary.title)],
+        ['{{BG}}', '#061116'],
+        ['{{FG}}', '#e7eef0'],
+        ['{{MANIFEST_JSON}}', guardInlineScript(JSON.stringify(latestDeck.manifest))],
+        ['{{RUNTIME_JS}}', runtime],
+        ['{{SVG_JS_STRING}}', guardInlineScript(JSON.stringify(latestDeck.svg))]
+      ];
+      return replacements.reduce(
+        (document, [placeholder, value]) => document.replace(placeholder, () => value),
+        template
+      );
     }
 
     function publishLensSelection(requestID, binding) {
