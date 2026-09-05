@@ -78,6 +78,190 @@ struct LabAppearanceButton: View {
     }
 }
 
+struct MermaidDocumentControls: View {
+    @ObservedObject var session: MermaidDocumentSession
+    let source: String
+    let canUndo: Bool
+    let canRedo: Bool
+    let save: () -> Void
+    let saveCopy: () -> Void
+    let reopen: () -> Void
+    let open: () -> Void
+    let showSamples: () -> Void
+    let openRecent: (MermaidRecentDocument) -> Void
+    let undo: () -> Void
+    let redo: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            documentStatus
+            ViewThatFits(in: .horizontal) {
+                controlRow(compact: false)
+                controlRow(compact: true)
+            }
+        }
+    }
+
+    private var documentStatus: some View {
+        let dirty = session.isDirty(source: source)
+        let status = if session.isSaving {
+            "SAVING"
+        } else if session.attention == .changedOnDisk {
+            "CHANGED ON DISK"
+        } else if session.attention == .unavailable {
+            "FILE UNAVAILABLE"
+        } else if !session.hasCurrentDocument {
+            dirty ? "UNSAVED" : "READY"
+        } else {
+            dirty ? "EDITED" : "SAVED"
+        }
+        let statusColor = if session.isSaving {
+            Lab.cyan
+        } else if session.attention != nil {
+            Lab.danger
+        } else if dirty {
+            Lab.amber
+        } else if session.hasCurrentDocument {
+            Lab.emerald
+        } else {
+            Lab.cyan
+        }
+        return HStack(spacing: 8) {
+            Image(systemName: session.hasCurrentDocument ? "doc.text.fill" : "doc.text")
+                .foregroundStyle(dirty ? Lab.amber : Lab.cyan)
+            Text(session.displayName)
+                .font(.system(size: Lab.size(11), weight: .bold, design: .rounded))
+                .foregroundStyle(Lab.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(status)
+            }
+            .font(.system(size: Lab.size(9), weight: .black, design: .monospaced))
+            .foregroundStyle(statusColor)
+        }
+        .padding(.horizontal, 11)
+        .frame(minHeight: 36)
+        .background(Lab.statusBackground.opacity(0.58), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Lab.stroke.opacity(0.75)))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(session.displayName), \(status.lowercased())")
+        .accessibilityIdentifier("source-document-status")
+    }
+
+    private func controlRow(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            sourceMenu
+
+            Button(action: save) {
+                if compact {
+                    Image(systemName: "square.and.arrow.down")
+                        .frame(minWidth: 24, minHeight: 28)
+                } else {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .tint(Lab.cyan)
+            .disabled(saveDisabled)
+            .accessibilityLabel(session.hasCurrentDocument ? "Save" : "Save new Mermaid file")
+            .accessibilityHint(
+                session.hasCurrentDocument
+                    ? "Save changes back to \(session.displayName)"
+                    : "Choose a Files location for this Mermaid source"
+            )
+            .accessibilityIdentifier("save-source-document")
+
+            Spacer(minLength: compact ? 0 : 4)
+
+            historyButton(compact: compact, isUndo: true)
+            historyButton(compact: compact, isUndo: false)
+        }
+    }
+
+    private func historyButton(compact: Bool, isUndo: Bool) -> some View {
+        let title = isUndo ? "Undo" : "Redo"
+        let symbol = isUndo ? "arrow.uturn.backward" : "arrow.uturn.forward"
+        return Button(action: isUndo ? undo : redo) {
+            if compact {
+                Image(systemName: symbol)
+                    .frame(minWidth: 24, minHeight: 28)
+            } else {
+                Label(title, systemImage: symbol)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(Lab.amber)
+        .disabled(isUndo ? !canUndo : !canRedo)
+        .frame(minHeight: 44)
+        .keyboardShortcut("z", modifiers: isUndo ? .command : [.command, .shift])
+        .accessibilityLabel("\(title) source change")
+        .accessibilityIdentifier(isUndo ? "undo-source-change" : "redo-source-change")
+        .accessibilityHint(
+            isUndo
+                ? "Restore the source before the most recent edit, import, sample, or source-lens change"
+                : "Reapply the last undone Mermaid source change"
+        )
+    }
+
+    private var sourceMenu: some View {
+        Menu {
+            Button(action: save) {
+                Label("Save", systemImage: "square.and.arrow.down")
+            }
+            .disabled(saveDisabled)
+
+            Button(action: saveCopy) {
+                Label("Save a Copy…", systemImage: "doc.on.doc")
+            }
+
+            if session.hasCurrentDocument {
+                Button(action: reopen) {
+                    Label("Reopen from Disk", systemImage: "arrow.clockwise")
+                }
+            }
+
+            Divider()
+
+            Button(action: open) {
+                Label("Open Mermaid File…", systemImage: "folder")
+            }
+            Button(action: showSamples) {
+                Label("Sample Gallery", systemImage: "square.grid.2x2")
+            }
+
+            if !session.recentDocuments.isEmpty {
+                Divider()
+                Section("Recent Files") {
+                    ForEach(session.recentDocuments) { recent in
+                        Button {
+                            openRecent(recent)
+                        } label: {
+                            Label(recent.displayName, systemImage: "clock.arrow.circlepath")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("Source", systemImage: "doc.badge.gearshape")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(Lab.cyan)
+        .accessibilityHint("Open, save, copy, reopen, or choose a recent Mermaid source file")
+    }
+
+    private var saveDisabled: Bool {
+        session.isSaving || (session.hasCurrentDocument && !session.isDirty(source: source))
+    }
+}
+
 /// The FrankenSuite wordmark uses full-size initials and uppercase small caps
 /// so FrankenMermaid reads immediately as two words instead of one text block.
 struct FrankenWordmark: View {

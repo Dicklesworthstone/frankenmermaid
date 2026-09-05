@@ -16,6 +16,17 @@ struct FrankenMermaidApp: App {
         .windowResizability(.contentMinSize)
 #endif
         .commands {
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") {
+                    NotificationCenter.default.post(name: .saveMermaidSource, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: .command)
+
+                Button("Save a Copy…") {
+                    NotificationCenter.default.post(name: .saveMermaidSourceCopy, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
             CommandMenu("Diagram") {
                 Button("Render Diagram") {
                     NotificationCenter.default.post(name: .renderMermaidNow, object: nil)
@@ -81,4 +92,6 @@ private struct CatalystWindowFreedom: UIViewControllerRepresentable {
 
 extension Notification.Name {
     static let renderMermaidNow = Notification.Name("FrankenMermaid.renderNow")
+    static let saveMermaidSource = Notification.Name("FrankenMermaid.saveSource")
+    static let saveMermaidSourceCopy = Notification.Name("FrankenMermaid.saveSourceCopy")
 }

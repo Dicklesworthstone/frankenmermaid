@@ -12,7 +12,8 @@ The repository Beads store is currently in unresolved sync-merge state. This fil
 
 ## Still open
 
-- In-place document persistence, autosave, state restoration, Quick Look, Graph Deck, widgets, intents, Spotlight/Handoff, menus, and multiwindow.
+- Autosave, automatic current-document state restoration, a full document browser, Quick Look,
+  widgets, intents, Spotlight/Handoff, comprehensive menus, drag/drop, and multiwindow.
 - Remaining 19 visual rounds per platform in `FRANKEN_DOCUMENT_APPS_QA.md`.
 - Signed physical-device and Catalyst builds, distribution archive, App Store metadata, and worldwide availability.
 
@@ -46,3 +47,25 @@ The repository Beads store is currently in unresolved sync-merge state. This fil
 - Added a verified three-slide Graph Deck specimen to the gallery and a self-contained Graph Deck HTML share format assembled from the canonical CLI template and runtime. Both canonical files are SHA-256 fenced and staged from their repository sources at build time.
 - Added strict Swift receipt tests, bridge/staging contract tests, and an iPhone UI journey covering sample selection, presentation, reveal/scene navigation, whole-graph overview, screenshots, and return to Studio.
 - Static evidence is green: renderer/package hash gate, canonical runtime verifier, real packaged-WASM render of the new sample with three slides and zero warnings, standalone HTML assembly, bridge bundling/parser check, Swift parsing, iOS SDK source typecheck, plist validation, and generated-project consistency. DSR build/test/Simulator evidence remains pending because `sbh check --need 20G ios/build` reports the primary APFS container at 13.49% free, below the repository's 14% safety floor; no Simulator action was attempted.
+
+## 2026-09-05 in-place document ownership
+
+- Promoted Files import from a one-way source replacement into a real current-document session.
+  Opened `.mmd`, `.mermaid`, and plain-text files retain their URL identity and a persisted
+  security-scoped bookmark, while the Source menu exposes a bounded six-file recent list.
+- Added coordinated, atomic in-place Save with a byte-exact last-read guard. If another app changes
+  or removes the file, FrankenMermaid refuses to overwrite it, keeps the local editor source, marks
+  the persistent document status, and offers Save a Copy or an explicit Reopen from Disk recovery.
+- Added a real Files-based Save flow for an untitled source, Save a Copy for both untitled and opened
+  documents, standard Command-S and Shift-Command-S menu commands, visible saved/edited/conflict
+  state, and discard confirmation before an incoming file replaces unsaved edits.
+- Kept all existing source history, gallery, lens, render, Share, and Graph Deck controls. A compact
+  `ViewThatFits` row preserves 44-point Save/Undo/Redo targets on iPhone while retaining titled
+  controls at wider iPad and Catalyst widths.
+- Added focused tests for UTF-8/BOM preservation, in-place identity, external-change refusal,
+  persistent conflict state, bounded recent bookmarks, bookmark reopening, and compact control
+  discoverability. iOS and Mac Catalyst source typechecks, Swift parsing, plist/project-membership
+  checks, `git diff --check`, and focused UBS are green or reviewed with contextual false positives.
+  Executable DSR build/unit/UI evidence remains pending: the exact configured lane is
+  `scripts/dsr-apple-quality.sh`, but the APFS safety gate is still critical at 13.49% free, so no
+  Xcode build, test action, or Simulator operation was attempted.

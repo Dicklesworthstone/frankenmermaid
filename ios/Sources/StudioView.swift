@@ -2,18 +2,16 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-private extension UTType {
-    static let mermaidSource = UTType(
-        exportedAs: "com.frankenmermaid.source",
-        conformingTo: .plainText
-    )
-}
-
 private enum StudioLane: String, CaseIterable, Identifiable {
     case code = "Code"
     case diagram = "Diagram"
     case inspect = "Inspect"
     var id: Self { self }
+}
+
+private enum SourceExportPurpose: Equatable {
+    case saveNewDocument
+    case saveCopy
 }
 
 struct StudioView: View {
@@ -28,19 +26,29 @@ struct StudioView: View {
     @AppStorage("diagramPadding") private var diagramPadding = 18.0
     @StateObject private var renderer = MermaidRendererModel()
     @StateObject private var sourceHistory = MermaidSourceHistory()
+    @StateObject private var documentSession: MermaidDocumentSession
     @State private var lane: StudioLane = .code
     @State private var editorFocused = false
     @State private var showingSamples = false
     @State private var showingSourceImporter = false
+    @State private var showingSourceExporter = false
+    @State private var sourceFileToExport = MermaidSourceFile(source: "")
+    @State private var sourceExportPurpose = SourceExportPurpose.saveCopy
     @State private var sharedArtifact: SharedArtifact?
     @State private var exporting = false
     @State private var exportError: String?
     @State private var deckError: String?
     @State private var sourceImportError: String?
+    @State private var documentError: String?
+    @State private var pendingDocument: MermaidOpenedDocument?
+    @State private var confirmingRevert = false
     @State private var compactLensBinding: MermaidLensBinding?
 
     init() {
         let requested = ProcessInfo.processInfo.environment["FM_INITIAL_LANE"]
+        _documentSession = StateObject(
+            wrappedValue: MermaidDocumentSession(initialSource: MermaidRendererModel.sample)
+        )
         _lane = State(initialValue: StudioLane(rawValue: requested ?? "") ?? .code)
         _showingSamples = State(
             initialValue: ProcessInfo.processInfo.environment["FM_SHOW_SAMPLES"] == "1"
@@ -266,9 +274,23 @@ struct StudioView: View {
                 sourceImportError = error.localizedDescription
             }
         }
+        .fileExporter(
+            isPresented: $showingSourceExporter,
+            document: sourceFileToExport,
+            contentType: .mermaidSource,
+            defaultFilename: documentSession.suggestedFilename()
+        ) { result in
+            finishSourceExport(result)
+        }
         .onOpenURL { url in
             guard url.isFileURL else { return }
             openSource(url)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveMermaidSource)) { _ in
+            saveCurrentSource()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveMermaidSourceCopy)) { _ in
+            beginSourceExport(.saveCopy)
         }
     }
 
@@ -289,6 +311,38 @@ struct StudioView: View {
             Button("OK", role: .cancel) { sourceImportError = nil }
         } message: {
             Text(sourceImportError ?? "Unknown source import error")
+        }
+        .alert("Couldn’t save that source", isPresented: Binding(
+            get: { documentError != nil },
+            set: { if !$0 { documentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { documentError = nil }
+        } message: {
+            Text(documentError ?? "Unknown document error")
+        }
+        .alert(
+            "Open \(pendingDocument?.url.lastPathComponent ?? "this file")?",
+            isPresented: Binding(
+                get: { pendingDocument != nil },
+                set: { if !$0 { pendingDocument = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { pendingDocument = nil }
+            Button("Discard Edits and Open", role: .destructive) {
+                guard let document = pendingDocument else { return }
+                pendingDocument = nil
+                adopt(document)
+            }
+        } message: {
+            Text("The current source has unsaved edits. Save a copy first if you want to keep them.")
+        }
+        .alert("Reopen the saved file?", isPresented: $confirmingRevert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Discard Edits and Reopen", role: .destructive) {
+                reloadCurrentDocument()
+            }
+        } message: {
+            Text("This replaces the editor with the file’s current contents. It also picks up changes made by another app.")
         }
     }
 
@@ -427,55 +481,26 @@ struct StudioView: View {
                         .font(.system(size: Lab.size(9), design: .monospaced))
                         .foregroundStyle(Lab.secondary)
                 }
-                HStack(spacing: 8) {
-                    Menu {
-                        Button {
-                            editorFocused = false
-                            showingSourceImporter = true
-                        } label: {
-                            Label("Open Mermaid file…", systemImage: "folder")
-                        }
-                        Button {
-                            editorFocused = false
-                            showingSamples = true
-                        } label: {
-                            Label("Sample gallery", systemImage: "square.grid.2x2")
-                        }
-                    } label: {
-                        Label("Source", systemImage: "doc.badge.gearshape")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .tint(Lab.cyan)
-                    Spacer(minLength: 4)
-                    Button {
-                        undoSourceChange()
-                    } label: {
-                        Label("Undo", systemImage: "arrow.uturn.backward")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .tint(Lab.amber)
-                    .disabled(!sourceHistory.canUndo)
-                    .frame(minHeight: 44)
-                    .keyboardShortcut("z", modifiers: .command)
-                    .accessibilityIdentifier("undo-source-change")
-                    .accessibilityHint("Restore the source before the most recent edit, import, sample, or source-lens change")
-
-                    Button {
-                        redoSourceChange()
-                    } label: {
-                        Label("Redo", systemImage: "arrow.uturn.forward")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .tint(Lab.amber)
-                    .disabled(!sourceHistory.canRedo)
-                    .frame(minHeight: 44)
-                    .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .accessibilityIdentifier("redo-source-change")
-                    .accessibilityHint("Reapply the last undone Mermaid source change")
-                }
+                MermaidDocumentControls(
+                    session: documentSession,
+                    source: renderer.source,
+                    canUndo: sourceHistory.canUndo,
+                    canRedo: sourceHistory.canRedo,
+                    save: saveCurrentSource,
+                    saveCopy: { beginSourceExport(.saveCopy) },
+                    reopen: requestReopen,
+                    open: {
+                        editorFocused = false
+                        showingSourceImporter = true
+                    },
+                    showSamples: {
+                        editorFocused = false
+                        showingSamples = true
+                    },
+                    openRecent: openRecent,
+                    undo: undoSourceChange,
+                    redo: redoSourceChange
+                )
                 MermaidCodeEditor(text: $renderer.source, isFocused: $editorFocused)
                     .background(Lab.statusBackground.opacity(0.58), in: RoundedRectangle(cornerRadius: 12))
                     .frame(minHeight: 320)
@@ -801,10 +826,99 @@ struct StudioView: View {
     private func openSource(_ url: URL) {
         Task {
             do {
-                let source = try await MermaidSourceLoader.load(from: url)
-                editorFocused = false
-                renderer.source = source
-                lane = .code
+                let document = try await MermaidSourceLoader.open(from: url)
+                requestAdoption(of: document)
+            } catch {
+                sourceImportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func openRecent(_ recent: MermaidRecentDocument) {
+        editorFocused = false
+        Task {
+            do {
+                requestAdoption(of: try await documentSession.openRecent(recent))
+            } catch {
+                sourceImportError = "\(recent.displayName) could not be reopened. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func requestAdoption(of document: MermaidOpenedDocument) {
+        editorFocused = false
+        if documentSession.isDirty(source: renderer.source) {
+            pendingDocument = document
+        } else {
+            adopt(document)
+        }
+    }
+
+    private func adopt(_ document: MermaidOpenedDocument) {
+        editorFocused = false
+        sourceHistory.endContinuousEditing()
+        documentSession.adopt(document)
+        renderer.source = document.source
+        lane = .code
+    }
+
+    private func saveCurrentSource() {
+        editorFocused = false
+        guard documentSession.hasCurrentDocument else {
+            beginSourceExport(.saveNewDocument)
+            return
+        }
+        Task {
+            do {
+                try await documentSession.save(source: renderer.source)
+            } catch {
+                documentError = error.localizedDescription
+            }
+        }
+    }
+
+    private func beginSourceExport(_ purpose: SourceExportPurpose) {
+        editorFocused = false
+        sourceExportPurpose = purpose
+        sourceFileToExport = MermaidSourceFile(source: renderer.source)
+        showingSourceExporter = true
+    }
+
+    private func finishSourceExport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            documentError = error.localizedDescription
+        case .success(let url):
+            guard sourceExportPurpose == .saveNewDocument else { return }
+            let expectedSource = sourceFileToExport.source
+            Task {
+                do {
+                    let document = try await MermaidSourceLoader.open(from: url)
+                    guard document.source == expectedSource else {
+                        throw SourceDocumentError.savedCopyMismatch
+                    }
+                    adopt(document)
+                } catch {
+                    documentError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func requestReopen() {
+        if documentSession.isDirty(source: renderer.source) {
+            confirmingRevert = true
+        } else {
+            reloadCurrentDocument()
+        }
+    }
+
+    private func reloadCurrentDocument() {
+        guard let url = documentSession.currentDocument?.url else { return }
+        editorFocused = false
+        Task {
+            do {
+                adopt(try await MermaidSourceLoader.open(from: url))
             } catch {
                 sourceImportError = error.localizedDescription
             }

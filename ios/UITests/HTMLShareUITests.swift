@@ -70,6 +70,26 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertNoForeignAppIdentity(in: app)
     }
 
+    func testSourceDocumentControlsStayDiscoverableOnIPhone() {
+        let app = launch(lane: "Code")
+        let documentStatus = app.descendants(matching: .any)["source-document-status"]
+        let save = app.buttons["save-source-document"]
+        let undo = app.buttons["undo-source-change"]
+        let redo = app.buttons["redo-source-change"]
+
+        XCTAssertTrue(documentStatus.waitForExistence(timeout: 5))
+        XCTAssertTrue(save.exists)
+        XCTAssertTrue(save.isHittable)
+        XCTAssertGreaterThanOrEqual(save.frame.height, 44)
+        XCTAssertTrue(undo.exists)
+        XCTAssertTrue(redo.exists)
+
+        app.buttons["Source"].tap()
+        XCTAssertTrue(app.buttons["Save a Copy…"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Open Mermaid File…"].exists)
+        XCTAssertTrue(app.buttons["Sample Gallery"].exists)
+    }
+
     func testSourceUndoAndRedoRoundTripASampleReplacement() {
         let app = launch(lane: "Code")
         let undo = app.buttons["undo-source-change"]
@@ -82,7 +102,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(redo.frame.height, 44)
 
         app.buttons["Source"].tap()
-        app.buttons["Sample gallery"].tap()
+        app.buttons["Sample Gallery"].tap()
         let sample = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "Decision Flow")
         ).firstMatch
