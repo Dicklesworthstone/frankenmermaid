@@ -304,6 +304,7 @@ struct StudioView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     LabLabel(text: "01 · The Graph Source")
+                        .accessibilityIdentifier("source-editor-panel")
                     Spacer()
                     Text("\(renderer.source.utf8.count) bytes")
                         .font(.system(size: Lab.size(9), design: .monospaced))
@@ -327,7 +328,7 @@ struct StudioView: View {
                         Label("Source", systemImage: "doc.badge.gearshape")
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.large)
                     .tint(Lab.cyan)
                     Spacer(minLength: 4)
                     Button {
@@ -336,7 +337,7 @@ struct StudioView: View {
                         Label("Undo", systemImage: "arrow.uturn.backward")
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.large)
                     .tint(Lab.amber)
                     .disabled(!sourceHistory.canUndo)
                     .frame(minHeight: 44)
@@ -350,7 +351,7 @@ struct StudioView: View {
                         Label("Redo", systemImage: "arrow.uturn.forward")
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.large)
                     .tint(Lab.amber)
                     .disabled(!sourceHistory.canRedo)
                     .frame(minHeight: 44)
@@ -379,7 +380,6 @@ struct StudioView: View {
 #endif
             }
         }
-        .accessibilityIdentifier("source-editor-panel")
     }
 
     private var diagramPanel: some View {
