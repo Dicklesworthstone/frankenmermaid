@@ -534,7 +534,7 @@ struct StudioView: View {
                         .tint(Lab.amber)
                         .accessibilityIdentifier("present-graph-deck")
                         .accessibilityHint(
-                            "Open (deck.title), (deck.sceneCount) presentation scenes, in the full-screen theater"
+                            "Open \(deck.title), \(deck.sceneCount) presentation scenes, in the full-screen theater"
                         )
                     }
                     if exporting {

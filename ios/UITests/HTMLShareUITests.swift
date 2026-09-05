@@ -178,7 +178,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertNoForeignAppIdentity(in: app)
     }
 
-    func testAppStoreTwentyFourFamilyGalleryRenders() {
+    func testAppStoreTwentyFourFamiliesAndGraphDeckGalleryRender() {
         let app = XCUIApplication()
         app.launchEnvironment["FM_SHOW_SAMPLES"] = "1"
         app.launch()
@@ -186,10 +186,54 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertExists(
             app.descendants(matching: .any)["sample-gallery"],
             in: app,
-            message: "The 24-family sample gallery did not render",
-            screenshotName: "App Store 6 - 24 diagram family gallery"
+            message: "The 24-family plus Graph Deck sample gallery did not render",
+            screenshotName: "App Store 6 - diagram family and Graph Deck gallery"
         )
         XCTAssertTrue(app.navigationBars["Diagram Specimens"].exists)
+        assertNoForeignAppIdentity(in: app)
+    }
+
+    func testGraphDeckSamplePresentsAndNavigatesCanonicalScenes() {
+        let app = XCUIApplication()
+        app.launchEnvironment["FM_SHOW_SAMPLES"] = "1"
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8))
+
+        let deckSample = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Graph Deck Tour")
+        ).firstMatch
+        XCTAssertTrue(deckSample.waitForExistence(timeout: 8))
+        deckSample.tap()
+
+        let present = app.buttons["present-graph-deck"]
+        XCTAssertTrue(present.waitForExistence(timeout: 15))
+        XCTAssertTrue(present.isHittable)
+        present.tap()
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["graph-deck-theater"].waitForExistence(timeout: 8),
+            "The native full-screen Graph Deck theater did not appear"
+        )
+        XCTAssertTrue(app.staticTexts["Start with source"].waitForExistence(timeout: 5))
+        keepScreenshot(of: app, named: "App Store - Graph Deck opening scene")
+
+        let next = app.buttons["graph-deck-next"]
+        XCTAssertTrue(next.waitForExistence(timeout: 3))
+        next.tap() // reveal the parser
+        next.tap() // advance to the engine scene
+        XCTAssertTrue(app.staticTexts["One deterministic engine"].waitForExistence(timeout: 5))
+
+        let overview = app.buttons["graph-deck-overview"]
+        XCTAssertTrue(overview.waitForExistence(timeout: 3))
+        overview.tap()
+        XCTAssertTrue(app.staticTexts["Overview"].waitForExistence(timeout: 5))
+        keepScreenshot(of: app, named: "App Store - Graph Deck whole graph")
+
+        app.buttons["close-graph-deck"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["live-diagram-stage"].waitForExistence(timeout: 8),
+            "Closing Graph Deck did not restore the native diagram studio"
+        )
         assertNoForeignAppIdentity(in: app)
     }
 

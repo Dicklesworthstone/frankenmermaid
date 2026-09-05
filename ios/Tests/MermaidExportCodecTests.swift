@@ -5,8 +5,9 @@ final class MermaidExportCodecTests: XCTestCase {
     func testExportKindsExposePromisedNativeFormats() {
         XCTAssertEqual(
             MermaidExportKind.allCases.map(\.fileExtension),
-            ["mmd", "svg", "png", "pdf", "html"]
+            ["mmd", "svg", "png", "pdf", "html", "html"]
         )
+        XCTAssertEqual(MermaidExportKind.deckHTML.title, "Graph Deck Presentation")
     }
 
     func testPNGDataURLRequiresDecodablePNG() throws {

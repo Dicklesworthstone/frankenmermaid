@@ -53,12 +53,14 @@ targets:
           - $(SRCROOT)/../pkg/frankenmermaid_bg.wasm
           - $(SRCROOT)/../pkg/frankenmermaid.d.ts
           - $(SRCROOT)/../crates/fm-cli/src/deck_runtime.js
+          - $(SRCROOT)/../crates/fm-cli/src/deck_template.html
           - $(SRCROOT)/Renderer/RendererManifest.json
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.js
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid_bg.wasm
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/frankenmermaid.d.ts
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/deck_runtime.js
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/deck_template.html
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Renderer/RendererManifest.json
     entitlements:
       path: FrankenMermaid.entitlements

@@ -11,10 +11,28 @@ struct DiagramSample: Identifiable, Hashable {
 
 extension DiagramSample {
     /// One verified starter for every diagram family currently implemented by
-    /// FrankenMermaid. The source comes from the engine's own conformance
-    /// corpus, so the gallery cannot quietly promise syntax the bundled Rust
-    /// renderer does not understand.
+    /// FrankenMermaid, plus a Graph Deck specimen that exposes the engine's
+    /// presentation mode. The sources follow the engine's own conformance
+    /// corpus so the gallery cannot quietly promise unsupported syntax.
     static let all: [DiagramSample] = [
+        .init(id: "graph-deck", name: "Graph Deck Tour", category: "Presentations", summary: "A guided, animated presentation made from real graph scenes.", symbol: "rectangle.on.rectangle.angled", source: """
+        flowchart LR
+        %%{deck: {
+          title: 'Pipeline Tour',
+          tips: { ir: 'One engine-owned IR, many outputs' },
+          slides: [
+            { id: 'input', title: 'Start with source', caption: 'Private Mermaid text enters the Rust parser.', nodes: ['src', 'parser'], reveal: [['parser']] },
+            { id: 'engine', title: 'One deterministic engine', caption: 'The graph itself rearranges around this scene.', nodes: ['subgraph:core'], edges: 'touching', reveal: 'auto' },
+            { id: 'output', title: 'Many useful outputs', caption: 'The same IR reaches SVG and terminal renderers.', nodes: ['svg', 'term'], reveal: [['term']] }
+          ]
+        }}%%
+            src[Mermaid source] --> parser[Parser]
+            subgraph core[Deterministic core]
+                parser --> ir[Shared IR] --> layout[Layout]
+            end
+            layout --> svg[Accessible SVG]
+            layout --> term[Terminal]
+        """),
         .init(id: "flowchart", name: "Decision Flow", category: "Graphs", summary: "Branches, labeled edges, and a shared destination.", symbol: "point.3.connected.trianglepath.dotted", source: """
         flowchart TD
             A[Start] --> B{Decision}
@@ -322,7 +340,7 @@ struct DiagramSampleGallery: View {
             }
             .navigationTitle("Diagram Specimens")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $query, prompt: "Search 24 diagram families")
+            .searchable(text: $query, prompt: "Search 24 families + Graph Deck")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

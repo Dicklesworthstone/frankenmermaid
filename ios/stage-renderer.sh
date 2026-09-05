@@ -12,14 +12,17 @@ digest() {
 expected_wrapper=$(sed -n 's/.*"wrapperSha256": "\([0-9a-f]*\)".*/\1/p' "$manifest")
 expected_wasm=$(sed -n 's/.*"wasmSha256": "\([0-9a-f]*\)".*/\1/p' "$manifest")
 expected_deck=$(sed -n 's/.*"deckRuntimeSha256": "\([0-9a-f]*\)".*/\1/p' "$manifest")
+expected_deck_template=$(sed -n 's/.*"deckTemplateSha256": "\([0-9a-f]*\)".*/\1/p' "$manifest")
 
 actual_wrapper=$(digest "$repo_dir/pkg/frankenmermaid.js")
 actual_wasm=$(digest "$repo_dir/pkg/frankenmermaid_bg.wasm")
 actual_deck=$(digest "$repo_dir/crates/fm-cli/src/deck_runtime.js")
+actual_deck_template=$(digest "$repo_dir/crates/fm-cli/src/deck_template.html")
 
 if [ "$expected_wrapper" != "$actual_wrapper" ] || \
    [ "$expected_wasm" != "$actual_wasm" ] || \
-   [ "$expected_deck" != "$actual_deck" ]; then
+   [ "$expected_deck" != "$actual_deck" ] || \
+   [ "$expected_deck_template" != "$actual_deck_template" ]; then
     echo "error: FrankenMermaid Apple renderer manifest does not match tracked engine artifacts" >&2
     exit 1
 fi
@@ -34,4 +37,5 @@ cp "$repo_dir/pkg/frankenmermaid.js" "$destination/frankenmermaid.js"
 cp "$repo_dir/pkg/frankenmermaid_bg.wasm" "$destination/frankenmermaid_bg.wasm"
 cp "$repo_dir/pkg/frankenmermaid.d.ts" "$destination/frankenmermaid.d.ts"
 cp "$repo_dir/crates/fm-cli/src/deck_runtime.js" "$destination/deck_runtime.js"
+cp "$repo_dir/crates/fm-cli/src/deck_template.html" "$destination/deck_template.html"
 cp "$manifest" "$destination/RendererManifest.json"
