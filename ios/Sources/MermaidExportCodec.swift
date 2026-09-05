@@ -8,6 +8,7 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
     case png
     case pdf
     case animatedHTML
+    case deckHTML
 
     var id: Self { self }
 
@@ -18,6 +19,7 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         case .png: "Raster PNG (2x)"
         case .pdf: "PDF Document"
         case .animatedHTML: "Animated Web Page"
+        case .deckHTML: "Graph Deck Presentation"
         }
     }
 
@@ -28,6 +30,7 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         case .png: "photo"
         case .pdf: "doc.richtext"
         case .animatedHTML: "sparkles.rectangle.stack"
+        case .deckHTML: "rectangle.on.rectangle.angled"
         }
     }
 
@@ -37,7 +40,7 @@ enum MermaidExportKind: String, CaseIterable, Identifiable {
         case .svg: "svg"
         case .png: "png"
         case .pdf: "pdf"
-        case .animatedHTML: "html"
+        case .animatedHTML, .deckHTML: "html"
         }
     }
 }

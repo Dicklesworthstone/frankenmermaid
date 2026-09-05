@@ -35,6 +35,7 @@ struct StudioView: View {
     @State private var sharedArtifact: SharedArtifact?
     @State private var exporting = false
     @State private var exportError: String?
+    @State private var deckError: String?
     @State private var sourceImportError: String?
     @State private var compactLensBinding: MermaidLensBinding?
 
@@ -47,8 +48,124 @@ struct StudioView: View {
     }
 
     var body: some View {
-        alertedStudio
-            .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
+        Group {
+            if renderer.isPresentingDeck {
+                deckTheater
+            } else {
+                alertedStudio
+            }
+        }
+        .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
+        .alert("Graph Deck couldn’t continue", isPresented: Binding(
+            get: { deckError != nil },
+            set: { if !$0 { deckError = nil } }
+        )) {
+            Button("OK", role: .cancel) { deckError = nil }
+        } message: {
+            Text(deckError ?? "Unknown Graph Deck error")
+        }
+    }
+
+    private var deckTheater: some View {
+        ZStack {
+            Color(red: 0.012, green: 0.047, blue: 0.055)
+                .ignoresSafeArea()
+            MermaidWebView(webView: renderer.webView)
+                .ignoresSafeArea()
+                .accessibilityIdentifier("graph-deck-theater")
+
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 12) {
+                    Button {
+                        Task { await renderer.stopDeckPresentation() }
+                    } label: {
+                        Label("Done", systemImage: "xmark")
+                            .font(.system(size: Lab.size(12), weight: .bold))
+                            .padding(.horizontal, 13)
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black.opacity(0.72))
+                    .accessibilityIdentifier("close-graph-deck")
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(renderer.deckScene?.title ?? renderer.deckSummary?.title ?? "Graph Deck")
+                            .font(.system(size: Lab.size(17), weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let caption = renderer.deckScene?.caption, !caption.isEmpty {
+                            Text(caption)
+                                .font(.system(size: Lab.size(11), weight: .medium))
+                                .foregroundStyle(.white.opacity(0.72))
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Text(renderer.deckScene?.position ?? "")
+                        .font(.system(size: Lab.size(11), weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.top, 12)
+                        .accessibilityIdentifier("graph-deck-position")
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 20)
+                .background(
+                    LinearGradient(
+                        colors: [.black.opacity(0.74), .black.opacity(0)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    Button {
+                        performDeckAction(.previous)
+                    } label: {
+                        Label("Previous", systemImage: "chevron.left")
+                            .frame(minWidth: 74, minHeight: 48)
+                    }
+                    .accessibilityIdentifier("graph-deck-previous")
+
+                    if renderer.deckSummary?.overviewEnabled == true {
+                        Button {
+                            performDeckAction(.overview)
+                        } label: {
+                            Label("Whole graph", systemImage: "square.dashed.inset.filled")
+                                .frame(minHeight: 48)
+                        }
+                        .accessibilityIdentifier("graph-deck-overview")
+                    }
+
+                    Button {
+                        performDeckAction(.next)
+                    } label: {
+                        Label("Next", systemImage: "chevron.right")
+                            .labelStyle(.titleAndIcon)
+                            .frame(minWidth: 74, minHeight: 48)
+                    }
+                    .accessibilityIdentifier("graph-deck-next")
+                }
+                .font(.system(size: Lab.size(12), weight: .bold))
+                .buttonStyle(.borderedProminent)
+                .tint(.black.opacity(0.76))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.top, 24)
+                .padding(.bottom, 10)
+                .background(
+                    LinearGradient(
+                        colors: [.black.opacity(0), .black.opacity(0.78)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+        }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
     }
 
     private var studioLayout: some View {
@@ -406,6 +523,20 @@ struct StudioView: View {
                         .font(.system(size: Lab.size(10), weight: .bold, design: .monospaced))
                         .foregroundStyle(Lab.cyan)
                     Spacer()
+                    if let deck = renderer.deckSummary {
+                        Button {
+                            startDeckPresentation()
+                        } label: {
+                            Label("Present", systemImage: "play.rectangle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(Lab.amber)
+                        .accessibilityIdentifier("present-graph-deck")
+                        .accessibilityHint(
+                            "Open (deck.title), (deck.sceneCount) presentation scenes, in the full-screen theater"
+                        )
+                    }
                     if exporting {
                         ProgressView()
                             .controlSize(.small)
@@ -419,7 +550,12 @@ struct StudioView: View {
                                 } label: {
                                     Label(kind.title, systemImage: kind.symbol)
                                 }
-                                .disabled(kind != .source && !renderer.hasCurrentRenderedArtifact)
+                                .disabled(
+                                    kind != .source && (
+                                        !renderer.hasCurrentRenderedArtifact ||
+                                        (kind == .deckHTML && renderer.deckSummary == nil)
+                                    )
+                                )
                             }
                         } label: {
                             Label("Share", systemImage: "square.and.arrow.up")
@@ -427,7 +563,9 @@ struct StudioView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .tint(Lab.cyan)
-                        .accessibilityHint("Share source, SVG, PNG, PDF, or a self-contained animated web page")
+                        .accessibilityHint(
+                            "Share source, SVG, PNG, PDF, an animated page, or a self-contained Graph Deck presentation"
+                        )
                     }
                 }
             }
@@ -438,6 +576,27 @@ struct StudioView: View {
         editorFocused = false
         renderer.renderNow()
         withAnimation(.snappy) { lane = .diagram }
+    }
+
+    private func startDeckPresentation() {
+        editorFocused = false
+        Task {
+            do {
+                try await renderer.startDeckPresentation()
+            } catch {
+                deckError = error.localizedDescription
+            }
+        }
+    }
+
+    private func performDeckAction(_ action: MermaidDeckAction) {
+        Task {
+            do {
+                try await renderer.performDeckAction(action)
+            } catch {
+                deckError = error.localizedDescription
+            }
+        }
     }
 
     private func undoSourceChange() {

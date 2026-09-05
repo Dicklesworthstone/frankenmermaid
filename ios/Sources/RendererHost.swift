@@ -41,6 +41,48 @@ struct MermaidRenderStyle: Equatable, Sendable {
     let nodeGradients: Bool
 }
 
+struct MermaidDeckSummary: Equatable, Sendable {
+    let title: String
+    let slideCount: Int
+    let sceneCount: Int
+    let overviewEnabled: Bool
+
+    init?(payload: [String: Any]) {
+        guard let title = payload["title"] as? String, !title.isEmpty,
+              let slideCount = payload["slideCount"] as? Int, slideCount > 0,
+              let sceneCount = payload["sceneCount"] as? Int, sceneCount >= slideCount,
+              let overviewEnabled = payload["overviewEnabled"] as? Bool,
+              sceneCount == slideCount + (overviewEnabled ? 1 : 0) else { return nil }
+        self.title = title
+        self.slideCount = slideCount
+        self.sceneCount = sceneCount
+        self.overviewEnabled = overviewEnabled
+    }
+}
+
+struct MermaidDeckSceneState: Equatable, Sendable {
+    let title: String
+    let caption: String
+    let position: String
+
+    init?(payload: [String: Any]) {
+        guard payload["presented"] as? Bool == true,
+              let title = payload["title"] as? String, !title.isEmpty,
+              let caption = payload["caption"] as? String,
+              let position = payload["position"] as? String else { return nil }
+        self.title = title
+        self.caption = caption
+        self.position = position
+    }
+}
+
+enum MermaidDeckAction: String, Sendable {
+    case next
+    case previous
+    case overview
+    case first
+}
+
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
 
@@ -66,6 +108,9 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     @Published private(set) var hasCurrentInsights = false
     @Published private(set) var lensBindingCount = 0
     @Published private(set) var selectedLensBinding: MermaidLensBinding?
+    @Published private(set) var deckSummary: MermaidDeckSummary?
+    @Published private(set) var deckScene: MermaidDeckSceneState?
+    @Published private(set) var isPresentingDeck = false
 
     let webView: WKWebView
     private var requestID = 0
@@ -109,6 +154,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         hasCurrentInsights = false
         lensBindingCount = 0
         selectedLensBinding = nil
+        deckSummary = nil
         if renderImmediately { renderNow() }
     }
 
@@ -121,6 +167,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         lensBindingCount = 0
         selectedLensBinding = nil
         hasCurrentInsights = false
+        deckSummary = nil
         let expectedSource = source
         scheduledRender = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
@@ -153,6 +200,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         hasCurrentRenderedArtifact = false
         lensBindingCount = 0
         selectedLensBinding = nil
+        deckSummary = nil
         phase = .rendering
         Task { [weak self, weak webView] in
             guard let self else { return }
@@ -176,6 +224,56 @@ final class MermaidRendererModel: NSObject, ObservableObject {
                 self.phase = .failed(error.localizedDescription)
             }
         }
+    }
+
+    func startDeckPresentation() async throws {
+        guard phase == .ready, hasCurrentRenderedArtifact, deckSummary != nil else {
+            throw MermaidDeckError.unavailable
+        }
+        let payload = try await callDeck(action: "start")
+        guard MermaidDeckSceneState(payload: payload) != nil else {
+            throw MermaidDeckError.invalidReceipt
+        }
+        receiveDeckState(payload)
+    }
+
+    func performDeckAction(_ action: MermaidDeckAction) async throws {
+        guard isPresentingDeck else { throw MermaidDeckError.unavailable }
+        let payload = try await callDeck(action: action.rawValue)
+        guard MermaidDeckSceneState(payload: payload) != nil else {
+            throw MermaidDeckError.invalidReceipt
+        }
+        receiveDeckState(payload)
+    }
+
+    func stopDeckPresentation() async {
+        do {
+            let payload = try await callDeck(action: "stop")
+            guard payload["presented"] as? Bool == false else {
+                throw MermaidDeckError.invalidReceipt
+            }
+            receiveDeckState(payload)
+        } catch {
+            isPresentingDeck = false
+            deckScene = nil
+            renderNow()
+        }
+    }
+
+    private func callDeck(action: String) async throws -> [String: Any] {
+        let expectedRequestID = requestID
+        let result = try await webView.callAsyncJavaScript(
+            "return window.frankenDeck(command)",
+            arguments: ["command": ["action": action]],
+            in: nil,
+            contentWorld: .page
+        )
+        guard requestID == expectedRequestID,
+              let payload = result as? [String: Any],
+              payload["requestID"] as? Int == expectedRequestID else {
+            throw MermaidDeckError.invalidReceipt
+        }
+        return payload
     }
 
     func prepareExport(_ kind: MermaidExportKind) async throws -> URL {
@@ -285,6 +383,7 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         nodeCount = payload["nodeCount"] as? Int ?? 0
         edgeCount = payload["edgeCount"] as? Int ?? 0
         lensBindingCount = payload["lensBindingCount"] as? Int ?? 0
+        deckSummary = (payload["deck"] as? [String: Any]).flatMap(MermaidDeckSummary.init)
         accessibilitySummary = payload["accessibilitySummary"] as? String
             ?? "The renderer did not return a semantic diagram description."
         let rawDiagnostics = payload["diagnostics"] as? [[String: Any]] ?? []
@@ -297,6 +396,12 @@ final class MermaidRendererModel: NSObject, ObservableObject {
 #if DEBUG
         runDebugExportProbeIfNeeded()
 #endif
+    }
+
+    private func receiveDeckState(_ payload: [String: Any]) {
+        guard (payload["requestID"] as? Int) == requestID else { return }
+        isPresentingDeck = payload["presented"] as? Bool == true
+        deckScene = MermaidDeckSceneState(payload: payload)
     }
 
 #if DEBUG
@@ -341,15 +446,34 @@ extension MermaidRendererModel: WKScriptMessageHandler {
             receiveRenderResult(payload)
         case "lens.selection":
             receiveLensSelection(payload)
+        case "deck.state":
+            receiveDeckState(payload)
         case "failure":
             guard (payload["requestID"] as? Int) == requestID else { return }
             hasCurrentRenderedArtifact = false
             hasCurrentInsights = false
             lensBindingCount = 0
             selectedLensBinding = nil
+            deckSummary = nil
+            deckScene = nil
+            isPresentingDeck = false
             phase = .failed(payload["message"] as? String ?? "Renderer failed")
         default:
             break
+        }
+    }
+}
+
+enum MermaidDeckError: LocalizedError {
+    case unavailable
+    case invalidReceipt
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            "This diagram does not contain a usable Graph Deck. Choose the Graph Deck sample or add a valid deck directive."
+        case .invalidReceipt:
+            "The private Graph Deck renderer returned an invalid navigation receipt."
         }
     }
 }

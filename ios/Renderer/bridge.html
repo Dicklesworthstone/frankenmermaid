@@ -10,18 +10,132 @@
     body { display: grid; place-items: center; overflow: auto; }
     #stage { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 18px; box-sizing: border-box; }
     #stage > svg { width: 100% !important; height: 100% !important; max-width: 100%; max-height: 100%; filter: drop-shadow(0 12px 28px rgba(34,211,238,.12)); }
+    #stage.fm-deck-stage { position: relative; display: block; padding: 0; touch-action: none; cursor: grab; outline: none; }
     #stage .fm-lens-selected { filter: drop-shadow(0 0 8px rgba(251,191,36,.82)); }
     #stage .fm-lens-selected :is(rect,path,circle,ellipse,polygon,line,polyline) { stroke: #fbbf24 !important; stroke-width: 3 !important; }
   </style>
 </head>
 <body>
   <main id="stage" aria-label="Rendered Mermaid diagram"></main>
+  <script src="./deck_runtime.js"></script>
   <script type="module">
-    import init, { applyLensEdit, describeDiagram, detectType, diagramLens, parse, renderSvg } from './frankenmermaid.js';
+    import init, { applyLensEdit, describeDiagram, detectType, diagramLens, parse, renderDeck } from './frankenmermaid.js';
     const bridge = window.webkit.messageHandlers.frankenBridge;
     const stage = document.querySelector('#stage');
     let latestRequest = 0;
     let latestSource = '';
+    let latestDeck = null;
+    let deckController = null;
+    let deckChrome = null;
+    let deckObserver = null;
+    const deckTemplatePromise = fetch('./deck_template.html').then((response) => {
+      if (!response.ok) throw new Error('The bundled Graph Deck template is unavailable.');
+      return response.text();
+    });
+    const deckRuntimePromise = fetch('./deck_runtime.js').then((response) => {
+      if (!response.ok) throw new Error('The bundled Graph Deck runtime is unavailable.');
+      return response.text();
+    });
+
+    function deckSummary(manifest) {
+      if (!manifest || !Array.isArray(manifest.slides) || manifest.slides.length === 0) return null;
+      const overviewEnabled = manifest.overview?.enabled !== false;
+      return {
+        title: String(manifest.title || 'Graph Deck'),
+        slideCount: manifest.slides.length,
+        sceneCount: manifest.slides.length + (overviewEnabled ? 1 : 0),
+        overviewEnabled
+      };
+    }
+
+    function deckState(presented = Boolean(deckController)) {
+      return {
+        type: 'deck.state',
+        requestID: latestRequest,
+        presented,
+        title: String(deckChrome?.title?.textContent || latestDeck?.summary?.title || 'Graph Deck'),
+        caption: String(deckChrome?.caption?.textContent || ''),
+        position: String(deckChrome?.num?.textContent || '')
+      };
+    }
+
+    function publishDeckState() {
+      bridge.postMessage(deckState());
+    }
+
+    function stopDeck(restoreDiagram) {
+      deckObserver?.disconnect();
+      deckObserver = null;
+      deckController?.destroy();
+      deckController = null;
+      deckChrome = null;
+      stage.classList.remove('fm-deck-stage');
+      stage.removeAttribute('tabindex');
+      stage.textContent = '';
+      if (restoreDiagram && latestDeck?.svg) {
+        stage.innerHTML = latestDeck.svg;
+        installSourceLens(latestSource, latestRequest);
+      }
+      bridge.postMessage(deckState(false));
+    }
+
+    function startDeck() {
+      if (!latestDeck?.manifest || !latestDeck?.summary) {
+        throw new Error('Add a valid %%{deck: …}%% directive before starting a presentation.');
+      }
+      if (deckController) return deckState(true);
+      if (!window.FmDeckRuntime?.mount) {
+        throw new Error('The canonical Graph Deck runtime did not load.');
+      }
+      stage.textContent = '';
+      stage.classList.add('fm-deck-stage');
+      stage.setAttribute('tabindex', '0');
+      deckChrome = {
+        title: document.createElement('span'),
+        caption: document.createElement('span'),
+        num: document.createElement('span')
+      };
+      deckObserver = new MutationObserver(publishDeckState);
+      Object.values(deckChrome).forEach((element) => {
+        deckObserver.observe(element, {childList: true, characterData: true, subtree: true});
+      });
+      deckController = window.FmDeckRuntime.mount({
+        stage,
+        svg: latestDeck.svg,
+        manifest: latestDeck.manifest,
+        ui: deckChrome,
+        onSlideChange: () => queueMicrotask(publishDeckState)
+      });
+      stage.focus();
+      publishDeckState();
+      return deckState(true);
+    }
+
+    function guardInlineScript(value) {
+      return String(value).replaceAll('</', '<\\/');
+    }
+
+    function escapeHTML(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    async function standaloneDeckDocument() {
+      if (!latestDeck?.manifest || !latestDeck?.summary) {
+        throw new Error('This diagram has no usable Graph Deck manifest to export.');
+      }
+      const [template, runtime] = await Promise.all([deckTemplatePromise, deckRuntimePromise]);
+      return template
+        .replace('{{TITLE}}', escapeHTML(latestDeck.summary.title))
+        .replace('{{BG}}', '#061116')
+        .replace('{{FG}}', '#e7eef0')
+        .replace('{{MANIFEST_JSON}}', guardInlineScript(JSON.stringify(latestDeck.manifest)))
+        .replace('{{RUNTIME_JS}}', runtime)
+        .replace('{{SVG_JS_STRING}}', guardInlineScript(JSON.stringify(latestDeck.svg)));
+    }
 
     function publishLensSelection(requestID, binding) {
       stage.querySelectorAll('.fm-lens-selected').forEach((element) => {
@@ -137,10 +251,27 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
         const started = performance.now();
         try {
           const source = String(command.source);
-          const svg = renderSvg(source, command.options || {theme: 'dark', responsive: true, accessible: true});
+          if (deckController) stopDeck(false);
+          const deckOutput = renderDeck(
+            source,
+            command.options || {theme: 'dark', responsive: true, accessible: true}
+          );
+          const svg = String(deckOutput?.svg || '');
+          if (!svg.startsWith('<svg')) throw new Error('The renderer returned an invalid SVG artifact.');
           if (requestID !== latestRequest) return false;
           latestSource = source;
+          const summary = deckSummary(deckOutput?.manifest);
+          latestDeck = summary ? {svg, manifest: deckOutput.manifest, summary} : null;
           const insight = inspectDiagram(source);
+          for (const warning of Array.from(deckOutput?.warnings || [])) {
+            const message = String(warning?.message || warning);
+            if (!insight.diagnostics.some((diagnostic) => diagnostic.message === message)) {
+              insight.diagnostics.push({
+                severity: 'warning', category: 'deck', message,
+                suggestion: '', line: 0, column: 0
+              });
+            }
+          }
           if (requestID !== latestRequest) return false;
           stage.innerHTML = svg;
           const lensBindingCount = installSourceLens(source, requestID);
@@ -155,6 +286,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
             nodeCount: stage.querySelectorAll('[id^="fm-node-"]').length,
             edgeCount: stage.querySelectorAll('[id^="fm-edge-"]').length,
             lensBindingCount,
+            deck: summary,
             accessibilitySummary: insight.accessibilitySummary,
             diagnostics: insight.diagnostics
           });
@@ -197,6 +329,22 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
           replacement: String(result.replacement ?? '')
         };
       };
+      window.frankenDeck = (command) => {
+        const action = String(command?.action || '');
+        if (action === 'start') return startDeck();
+        if (action === 'stop') {
+          stopDeck(true);
+          return deckState(false);
+        }
+        if (!deckController) throw new Error('Start the Graph Deck before navigating it.');
+        if (action === 'next') deckController.next();
+        else if (action === 'previous') deckController.prev();
+        else if (action === 'overview') deckController.overview();
+        else if (action === 'first') deckController.go(0);
+        else throw new Error('Unknown Graph Deck command.');
+        publishDeckState();
+        return deckState(true);
+      };
       async function pngDataURL(svg) {
         const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
         const root = document.documentElement;
@@ -230,6 +378,7 @@ svg{width:100%!important;height:100%!important;max-width:100%;max-height:100%;fi
       }
 
       window.frankenExport = async (command) => {
+        if (command.kind === 'deckHTML') return standaloneDeckDocument();
         const svg = serializedDiagram();
         if (command.kind === 'animatedHTML') {
           return animatedDocument(svg, command.title);
