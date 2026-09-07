@@ -56,6 +56,18 @@ final class MermaidLensBindingTests: XCTestCase {
 }
 
 final class MermaidSourceHistoryTests: XCTestCase {
+    func testResetClearsAutomaticLaunchTransitions() {
+        let history = MermaidSourceHistory()
+        history.recordChange(from: "starter", to: "recovered", continuous: false)
+        XCTAssertTrue(history.canUndo)
+
+        history.reset()
+
+        XCTAssertFalse(history.canUndo)
+        XCTAssertFalse(history.canRedo)
+        XCTAssertNil(history.undo(currentSource: "recovered"))
+    }
+
     func testUndoAndRedoRoundTripEverySourceMutationPath() throws {
         let history = MermaidSourceHistory()
         history.recordChange(from: "first", to: "second", continuous: false)

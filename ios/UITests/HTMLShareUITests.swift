@@ -3,6 +3,7 @@ import XCTest
 final class HTMLShareUITests: XCTestCase {
     func testAnimatedWebPageIsSharedAsAFile() throws {
         let app = XCUIApplication()
+        app.launchEnvironment["FM_TEST_WORKSPACE_ID"] = UUID().uuidString
         app.launch()
 
         // Follow the same explicit render path a compact-width user takes. Tapping the
@@ -86,6 +87,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
 
         app.buttons["Source"].tap()
         XCTAssertTrue(app.buttons["Save a Copy…"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["New Diagram"].exists)
         XCTAssertTrue(app.buttons["Open Mermaid File…"].exists)
         XCTAssertTrue(app.buttons["Sample Gallery"].exists)
     }
@@ -200,6 +202,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
 
     func testAppStoreTwentyFourFamiliesAndGraphDeckGalleryRender() {
         let app = XCUIApplication()
+        app.launchEnvironment["FM_TEST_WORKSPACE_ID"] = UUID().uuidString
         app.launchEnvironment["FM_SHOW_SAMPLES"] = "1"
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8))
@@ -215,6 +218,7 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
 
     func testGraphDeckSamplePresentsAndNavigatesCanonicalScenes() {
         let app = XCUIApplication()
+        app.launchEnvironment["FM_TEST_WORKSPACE_ID"] = UUID().uuidString
         app.launchEnvironment["FM_SHOW_SAMPLES"] = "1"
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8))
@@ -257,10 +261,50 @@ final class FrankenMermaidStorefrontUITests: XCTestCase {
         assertNoForeignAppIdentity(in: app)
     }
 
+    func testUntitledDiagramDraftSurvivesTerminateAndRelaunch() {
+        let workspaceID = UUID().uuidString
+        let app = launch(lane: "Code", workspaceID: workspaceID)
+
+        app.buttons["Source"].tap()
+        app.buttons["Sample Gallery"].tap()
+        let sample = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Decision Flow")
+        ).firstMatch
+        XCTAssertTrue(sample.waitForExistence(timeout: 5))
+        sample.tap()
+        app.buttons["Code"].tap()
+
+        let editor = app.textViews["Mermaid source editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue(of: editor, containing: "A[Start]"))
+        let draftStatus = app.descendants(matching: .any)["local-draft-status"]
+        XCTAssertTrue(draftStatus.waitForExistence(timeout: 5))
+        let saved = expectation(
+            for: NSPredicate(format: "label CONTAINS[c] %@", "saved locally"),
+            evaluatedWith: draftStatus
+        )
+        wait(for: [saved], timeout: 8)
+
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8))
+        let restoredEditor = app.textViews["Mermaid source editor"]
+        XCTAssertTrue(restoredEditor.waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForValue(of: restoredEditor, containing: "A[Start]"))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["source-document-status"].label.lowercased().contains("unsaved")
+        )
+        keepScreenshot(of: app, named: "App Store - recovered unsaved Mermaid draft")
+    }
+
     @discardableResult
-    private func launch(lane: String) -> XCUIApplication {
+    private func launch(
+        lane: String,
+        workspaceID: String = UUID().uuidString
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["FM_INITIAL_LANE"] = lane
+        app.launchEnvironment["FM_TEST_WORKSPACE_ID"] = workspaceID
         app.launch()
         XCTAssertTrue(
             app.wait(for: .runningForeground, timeout: 8),

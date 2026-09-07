@@ -85,6 +85,7 @@ struct MermaidDocumentControls: View {
     let canRedo: Bool
     let save: () -> Void
     let saveCopy: () -> Void
+    let new: () -> Void
     let reopen: () -> Void
     let open: () -> Void
     let showSamples: () -> Void
@@ -108,6 +109,8 @@ struct MermaidDocumentControls: View {
             "SAVING"
         } else if session.attention == .changedOnDisk {
             "CHANGED ON DISK"
+        } else if session.attention == .recoveryConflict {
+            "RECOVERY CONFLICT"
         } else if session.attention == .unavailable {
             "FILE UNAVAILABLE"
         } else if !session.hasCurrentDocument {
@@ -221,6 +224,10 @@ struct MermaidDocumentControls: View {
                 Label("Save a Copy…", systemImage: "doc.on.doc")
             }
 
+            Button(action: new) {
+                Label("New Diagram", systemImage: "doc.badge.plus")
+            }
+
             if session.hasCurrentDocument {
                 Button(action: reopen) {
                     Label("Reopen from Disk", systemImage: "arrow.clockwise")
@@ -258,7 +265,8 @@ struct MermaidDocumentControls: View {
     }
 
     private var saveDisabled: Bool {
-        session.isSaving || (session.hasCurrentDocument && !session.isDirty(source: source))
+        session.isSaving || session.attention != nil ||
+            (session.hasCurrentDocument && !session.isDirty(source: source))
     }
 }
 

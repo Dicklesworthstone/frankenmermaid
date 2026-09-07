@@ -97,6 +97,7 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 @MainActor
 final class MermaidRendererModel: NSObject, ObservableObject {
     @Published var source = MermaidRendererModel.sample
+    @Published var documentIdentity: UUID?
     @Published private(set) var phase: GraphPhase = .loading
     @Published private(set) var elapsedMS: Double?
     @Published private(set) var diagramType = "detecting"
@@ -111,11 +112,16 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     @Published private(set) var deckSummary: MermaidDeckSummary?
     @Published private(set) var deckScene: MermaidDeckSceneState?
     @Published private(set) var isPresentingDeck = false
+    @Published private(set) var draftStatus = "Checking local recovery…"
+    @Published private(set) var draftRecoveryIsComplete = false
+    @Published private(set) var draftWasRecovered = false
 
     let webView: WKWebView
     private var requestID = 0
     private var scheduledRender: Task<Void, Never>?
+    private var scheduledDraftSave: Task<Void, Never>?
     private var debugExportProbePending = false
+    private let draftStore: MermaidDraftStore
     private var theme = "dark"
     private var fontSize = 14.0
     private var padding = 18.0
@@ -123,7 +129,8 @@ final class MermaidRendererModel: NSObject, ObservableObject {
     private var roundedCorners = 10.0
     private var nodeGradients = true
 
-    override init() {
+    init(draftStore: MermaidDraftStore = MermaidDraftStore()) {
+        self.draftStore = draftStore
         debugExportProbePending = ProcessInfo.processInfo.environment["FM_EXPORT_PROBE"] == "1"
         let messageHandler = WeakScriptMessageHandler()
         let configuration = WKWebViewConfiguration()
@@ -139,9 +146,13 @@ final class MermaidRendererModel: NSObject, ObservableObject {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
         webView.load(URLRequest(url: URL(string: "frankenmermaid-resource://bundle/bridge.html")!))
+        restoreDraftIfUnedited()
     }
 
-    deinit { scheduledRender?.cancel() }
+    deinit {
+        scheduledRender?.cancel()
+        scheduledDraftSave?.cancel()
+    }
 
     func updateStyle(_ style: MermaidRenderStyle, renderImmediately: Bool) {
         theme = style.theme
@@ -174,6 +185,66 @@ final class MermaidRendererModel: NSObject, ObservableObject {
             guard !Task.isCancelled, let self, self.source == expectedSource else { return }
             self.renderNow()
         }
+    }
+
+    func scheduleDraftSave(delay: Duration = .milliseconds(350)) {
+        scheduledDraftSave?.cancel()
+        draftStatus = "Saving locally…"
+        let draft = activeDraft()
+        let store = draftStore
+        scheduledDraftSave = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self, self.matchesCurrentDraft(draft) else { return }
+                try await Task.detached(priority: .utility) { try store.save(draft) }.value
+                guard self.matchesCurrentDraft(draft) else { return }
+                self.draftStatus = "Saved locally"
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.draftStatus = "Local draft not saved"
+            }
+        }
+    }
+
+    func persistDraftNow() {
+        scheduleDraftSave(delay: .zero)
+    }
+
+    private func activeDraft(now: Date = .now) -> MermaidActiveDraft {
+        MermaidActiveDraft(
+            schema: MermaidActiveDraft.currentSchema,
+            savedAtMilliseconds: Int64((now.timeIntervalSince1970 * 1_000).rounded()),
+            documentIdentity: documentIdentity,
+            source: source
+        )
+    }
+
+    private func restoreDraftIfUnedited() {
+        let store = draftStore
+        Task { [weak self] in
+            let draft = await Task.detached(priority: .utility) { store.load() }.value
+            guard let self else { return }
+            guard self.source == Self.sample, self.documentIdentity == nil else {
+                self.draftStatus = "Active draft changed"
+                self.draftRecoveryIsComplete = true
+                return
+            }
+            guard let draft else {
+                self.draftStatus = "Local recovery ready"
+                self.draftRecoveryIsComplete = true
+                return
+            }
+            self.draftWasRecovered = true
+            self.documentIdentity = draft.documentIdentity
+            self.source = draft.source
+            self.draftStatus = "Recovered local draft"
+            self.draftRecoveryIsComplete = true
+        }
+    }
+
+    private func matchesCurrentDraft(_ draft: MermaidActiveDraft) -> Bool {
+        draft.source == source && draft.documentIdentity == documentIdentity
     }
 
     func renderNow() {

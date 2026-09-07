@@ -6,7 +6,9 @@ final class FrankenMermaidAppearanceUITests: XCTestCase {
     }
 
     func testAppearanceTogglePersistsLightModeAcrossLaunches() throws {
+        let workspaceID = UUID().uuidString
         let app = XCUIApplication()
+        app.launchEnvironment["FM_TEST_WORKSPACE_ID"] = workspaceID
         app.launch()
 
         let toggle = app.buttons["appearance-toggle"]
@@ -18,6 +20,7 @@ final class FrankenMermaidAppearanceUITests: XCTestCase {
         let originalLabel = toggle.label
         addTeardownBlock {
             let cleanupApp = XCUIApplication()
+            cleanupApp.launchEnvironment["FM_TEST_WORKSPACE_ID"] = workspaceID
             cleanupApp.launch()
             let cleanupToggle = cleanupApp.buttons["appearance-toggle"]
             if cleanupToggle.waitForExistence(timeout: 12), cleanupToggle.label != originalLabel {

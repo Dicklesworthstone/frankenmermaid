@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -47,41 +48,216 @@ struct MermaidRecentDocument: Codable, Equatable, Identifiable, Sendable {
     let lastOpenedAt: Date
 }
 
+struct MermaidActiveDraft: Codable, Equatable, Sendable {
+    static let currentSchema = 1
+
+    let schema: Int
+    let savedAtMilliseconds: Int64
+    let documentIdentity: UUID?
+    let source: String
+}
+
+struct MermaidDraftStore: Sendable {
+    enum StoreError: Error, Equatable {
+        case invalidDraft
+        case oversizedDraft
+    }
+
+    static let maximumEncodedBytes = MermaidSourceLoader.maximumBytes + 32 * 1_024
+
+    let fileURL: URL
+
+    init(fileURL: URL? = nil) {
+        if let fileURL {
+            self.fileURL = fileURL
+            return
+        }
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        self.fileURL = applicationSupport
+            .appendingPathComponent("FrankenMermaid", isDirectory: true)
+            .appendingPathComponent("active-draft.json", isDirectory: false)
+    }
+
+    func load() -> MermaidActiveDraft? {
+        guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize > 0,
+              fileSize <= Self.maximumEncodedBytes,
+              let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe),
+              let draft = try? JSONDecoder().decode(MermaidActiveDraft.self, from: data),
+              isValid(draft) else {
+            return nil
+        }
+        return draft
+    }
+
+    func save(_ draft: MermaidActiveDraft) throws {
+        guard isValid(draft) else { throw StoreError.invalidDraft }
+        let data = try JSONEncoder().encode(draft)
+        guard data.count <= Self.maximumEncodedBytes else { throw StoreError.oversizedDraft }
+
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(values)
+        try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+    }
+
+    private func isValid(_ draft: MermaidActiveDraft) -> Bool {
+        draft.schema == MermaidActiveDraft.currentSchema &&
+            draft.savedAtMilliseconds > 0 &&
+            draft.source.utf8.count <= MermaidSourceLoader.maximumBytes &&
+            !draft.source.unicodeScalars.contains(where: { $0.value == 0 })
+    }
+}
+
+private struct MermaidActiveDocumentReference: Codable, Equatable, Sendable {
+    let documentIdentity: UUID
+    let bookmarkData: Data
+    let displayName: String
+    let baselineSourceDigest: Data
+    let baselineDiskDigest: Data
+}
+
+struct MermaidRestoredDocument: Equatable, Sendable {
+    let document: MermaidOpenedDocument
+    let documentIdentity: UUID
+}
+
+enum MermaidDocumentRestoration: Equatable, Sendable {
+    case none
+    case fileVersion(MermaidRestoredDocument)
+    case recoveredEdits(MermaidRestoredDocument)
+    case conflict(MermaidRestoredDocument)
+    case unassociatedDraft(MermaidRestoredDocument)
+}
+
 enum MermaidDocumentAttention: Equatable {
     case changedOnDisk
+    case recoveryConflict
     case unavailable
 }
 
 @MainActor
 final class MermaidDocumentSession: ObservableObject {
     static let recentsStorageKey = "frankenmermaid.recentSourceDocuments.v1"
+    static let activeDocumentStorageKey = "frankenmermaid.activeSourceDocument.v1"
     static let maximumRecentDocuments = 6
 
     @Published private(set) var currentDocument: MermaidOpenedDocument?
     @Published private(set) var recentDocuments: [MermaidRecentDocument]
     @Published private(set) var isSaving = false
     @Published private(set) var attention: MermaidDocumentAttention?
+    @Published private(set) var currentDocumentIdentity: UUID?
 
-    private let untitledBaseline: String
+    private var untitledBaseline: String
+    private var activeDocumentReference: MermaidActiveDocumentReference?
+    private var restorationDisplayName: String?
     private let defaults: UserDefaults
 
     init(initialSource: String, defaults: UserDefaults = .standard) {
         untitledBaseline = initialSource
         self.defaults = defaults
         recentDocuments = Self.loadRecents(from: defaults)
+        activeDocumentReference = Self.loadActiveDocument(from: defaults)
+        restorationDisplayName = activeDocumentReference?.displayName
     }
 
-    var displayName: String { currentDocument?.displayName ?? "Untitled Diagram" }
+    var displayName: String {
+        currentDocument?.displayName ?? restorationDisplayName ?? "Untitled Diagram"
+    }
     var hasCurrentDocument: Bool { currentDocument != nil }
 
     func isDirty(source: String) -> Bool {
         source != (currentDocument?.source ?? untitledBaseline)
     }
 
-    func adopt(_ document: MermaidOpenedDocument) {
-        currentDocument = document
+    func beginUntitled(source: String) {
+        currentDocument = nil
+        currentDocumentIdentity = nil
+        untitledBaseline = source
         attention = nil
+        restorationDisplayName = nil
+        activeDocumentReference = nil
+        defaults.removeObject(forKey: Self.activeDocumentStorageKey)
+    }
+
+    func adopt(
+        _ document: MermaidOpenedDocument,
+        documentIdentity: UUID = UUID()
+    ) {
+        currentDocument = document
+        currentDocumentIdentity = documentIdentity
+        attention = nil
+        restorationDisplayName = nil
+        recordActive(document, documentIdentity: documentIdentity)
         recordRecent(document)
+    }
+
+    func adoptRecoveredEdits(
+        from document: MermaidOpenedDocument,
+        documentIdentity: UUID,
+        changedOnDisk: Bool
+    ) {
+        currentDocument = document
+        currentDocumentIdentity = documentIdentity
+        attention = changedOnDisk ? .changedOnDisk : nil
+        restorationDisplayName = nil
+        if !changedOnDisk {
+            recordActive(document, documentIdentity: documentIdentity)
+        }
+    }
+
+    func adoptUnassociatedDraft(
+        while retaining: MermaidOpenedDocument,
+        documentIdentity: UUID
+    ) {
+        currentDocument = retaining
+        currentDocumentIdentity = documentIdentity
+        attention = .recoveryConflict
+        restorationDisplayName = nil
+    }
+
+    func restoreActiveDocument(
+        recoveredSource: String?,
+        recoveredDocumentIdentity: UUID?
+    ) async throws -> MermaidDocumentRestoration {
+        guard let reference = activeDocumentReference else { return .none }
+        do {
+            let url = try MermaidSourceLoader.resolveBookmark(reference.bookmarkData)
+            let document = try await MermaidSourceLoader.open(from: url)
+            let restored = MermaidRestoredDocument(
+                document: document,
+                documentIdentity: reference.documentIdentity
+            )
+            guard let recoveredSource else { return .fileVersion(restored) }
+            guard recoveredDocumentIdentity == reference.documentIdentity else {
+                return .unassociatedDraft(restored)
+            }
+
+            let recoveredSourceDigest = Self.digest(Data(recoveredSource.utf8))
+            if recoveredSourceDigest == reference.baselineSourceDigest {
+                return .fileVersion(restored)
+            }
+            if Self.digest(document.diskData) == reference.baselineDiskDigest {
+                return .recoveredEdits(restored)
+            }
+            return .conflict(restored)
+        } catch {
+            attention = .unavailable
+            restorationDisplayName = reference.displayName
+            throw error
+        }
     }
 
     func openRecent(_ recent: MermaidRecentDocument) async throws -> MermaidOpenedDocument {
@@ -91,6 +267,8 @@ final class MermaidDocumentSession: ObservableObject {
 
     func save(source: String) async throws {
         guard let currentDocument else { throw SourceDocumentError.noCurrentDocument }
+        if attention == .changedOnDisk { throw SourceDocumentError.changedOnDisk }
+        if attention == .recoveryConflict { throw SourceDocumentError.recoveryConflict }
         guard !isSaving else { return }
         isSaving = true
         defer { isSaving = false }
@@ -98,6 +276,7 @@ final class MermaidDocumentSession: ObservableObject {
             let saved = try await MermaidSourceLoader.save(source, replacing: currentDocument)
             self.currentDocument = saved
             attention = nil
+            recordActive(saved, documentIdentity: currentDocumentIdentity ?? UUID())
             recordRecent(saved)
         } catch {
             if error as? SourceDocumentError == .changedOnDisk {
@@ -132,12 +311,40 @@ final class MermaidDocumentSession: ObservableObject {
         }
     }
 
+    private func recordActive(
+        _ document: MermaidOpenedDocument,
+        documentIdentity: UUID
+    ) {
+        let reference = MermaidActiveDocumentReference(
+            documentIdentity: documentIdentity,
+            bookmarkData: document.bookmarkData,
+            displayName: document.displayName,
+            baselineSourceDigest: Self.digest(Data(document.source.utf8)),
+            baselineDiskDigest: Self.digest(document.diskData)
+        )
+        activeDocumentReference = reference
+        if let encoded = try? JSONEncoder().encode(reference) {
+            defaults.set(encoded, forKey: Self.activeDocumentStorageKey)
+        }
+    }
+
     private static func loadRecents(from defaults: UserDefaults) -> [MermaidRecentDocument] {
         guard let data = defaults.data(forKey: recentsStorageKey),
               let decoded = try? JSONDecoder().decode([MermaidRecentDocument].self, from: data) else {
             return []
         }
         return Array(decoded.prefix(maximumRecentDocuments))
+    }
+
+    private static func loadActiveDocument(
+        from defaults: UserDefaults
+    ) -> MermaidActiveDocumentReference? {
+        guard let data = defaults.data(forKey: activeDocumentStorageKey) else { return nil }
+        return try? JSONDecoder().decode(MermaidActiveDocumentReference.self, from: data)
+    }
+
+    private static func digest(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
     }
 
     private static func isUnavailableFileError(_ error: Error) -> Bool {
@@ -302,6 +509,7 @@ enum MermaidSourceLoader {
 enum SourceDocumentError: LocalizedError, Equatable {
     case noCurrentDocument
     case changedOnDisk
+    case recoveryConflict
     case coordinationFailed
     case savedCopyMismatch
 
@@ -312,6 +520,9 @@ enum SourceDocumentError: LocalizedError, Equatable {
         case .changedOnDisk:
             "That file changed outside FrankenMermaid. Your edits were not overwritten. " +
                 "Save a copy, or reopen the file to use its newer contents."
+        case .recoveryConflict:
+            "This recovered draft could not be safely matched to the last file. " +
+                "Use Save a Copy or reopen the file."
         case .coordinationFailed:
             "The document provider did not complete the coordinated file operation. " +
                 "Your source was not changed."

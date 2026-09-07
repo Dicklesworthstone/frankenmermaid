@@ -16,6 +16,7 @@ private enum SourceExportPurpose: Equatable {
 
 struct StudioView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(LabAppearance.storageKey) private var appearance = LabAppearance.dark.rawValue
     @AppStorage(Lab.textScaleStorageKey) private var uiTextScale = Lab.defaultTextScale
     @AppStorage("diagramTheme") private var diagramTheme = "dark"
@@ -24,7 +25,7 @@ struct StudioView: View {
     @AppStorage("diagramGradients") private var diagramGradients = true
     @AppStorage("diagramCornerRadius") private var diagramCornerRadius = 10.0
     @AppStorage("diagramPadding") private var diagramPadding = 18.0
-    @StateObject private var renderer = MermaidRendererModel()
+    @StateObject private var renderer: MermaidRendererModel
     @StateObject private var sourceHistory = MermaidSourceHistory()
     @StateObject private var documentSession: MermaidDocumentSession
     @State private var lane: StudioLane = .code
@@ -41,17 +42,39 @@ struct StudioView: View {
     @State private var sourceImportError: String?
     @State private var documentError: String?
     @State private var pendingDocument: MermaidOpenedDocument?
+    @State private var confirmingNewDocument = false
     @State private var confirmingRevert = false
     @State private var compactLensBinding: MermaidLensBinding?
+    @State private var attemptedDocumentRestoration = false
+    @State private var showingRestorationConflict = false
 
     init() {
-        let requested = ProcessInfo.processInfo.environment["FM_INITIAL_LANE"]
+        let environment = ProcessInfo.processInfo.environment
+        let requested = environment["FM_INITIAL_LANE"]
+        var defaults: UserDefaults = .standard
+        var draftStore = MermaidDraftStore()
+#if DEBUG
+        if let rawWorkspaceID = environment["FM_TEST_WORKSPACE_ID"],
+           let workspaceID = UUID(uuidString: rawWorkspaceID)?.uuidString {
+            defaults = UserDefaults(suiteName: "FrankenMermaidUITests.\(workspaceID)") ?? .standard
+            draftStore = MermaidDraftStore(
+                fileURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FrankenMermaidUITests", isDirectory: true)
+                    .appendingPathComponent(workspaceID, isDirectory: true)
+                    .appendingPathComponent("active-draft.json", isDirectory: false)
+            )
+        }
+#endif
+        _renderer = StateObject(wrappedValue: MermaidRendererModel(draftStore: draftStore))
         _documentSession = StateObject(
-            wrappedValue: MermaidDocumentSession(initialSource: MermaidRendererModel.sample)
+            wrappedValue: MermaidDocumentSession(
+                initialSource: MermaidRendererModel.sample,
+                defaults: defaults
+            )
         )
         _lane = State(initialValue: StudioLane(rawValue: requested ?? "") ?? .code)
         _showingSamples = State(
-            initialValue: ProcessInfo.processInfo.environment["FM_SHOW_SAMPLES"] == "1"
+            initialValue: environment["FM_SHOW_SAMPLES"] == "1"
         )
     }
 
@@ -61,6 +84,14 @@ struct StudioView: View {
                 deckTheater
             } else {
                 alertedStudio
+            }
+        }
+        .onChange(of: renderer.draftRecoveryIsComplete, initial: true) { _, isComplete in
+            if isComplete { restoreActiveDocumentAfterLaunch() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .inactive || phase == .background {
+                renderer.persistDraftNow()
             }
         }
         .preferredColorScheme((LabAppearance(rawValue: appearance) ?? .dark).colorScheme)
@@ -210,7 +241,9 @@ struct StudioView: View {
                 continuous: editorFocused
             )
             renderer.scheduleRender()
+            renderer.scheduleDraftSave()
         }
+        .onChange(of: renderer.documentIdentity) { _, _ in renderer.scheduleDraftSave() }
         .onChange(of: editorFocused) { _, isFocused in
             if !isFocused { sourceHistory.endContinuousEditing() }
         }
@@ -342,7 +375,33 @@ struct StudioView: View {
                 reloadCurrentDocument()
             }
         } message: {
-            Text("This replaces the editor with the file’s current contents. It also picks up changes made by another app.")
+            Text(
+                "This replaces the editor with the file’s current contents. " +
+                    "It also picks up changes made by another app."
+            )
+        }
+        .alert("Start a new diagram?", isPresented: $confirmingNewDocument) {
+            Button("Cancel", role: .cancel) {}
+            Button("Discard Edits and Start New", role: .destructive) {
+                newSourceDocument()
+            }
+        } message: {
+            Text("The current source has unsaved edits. Save a copy first if you want to keep them.")
+        }
+        .alert("Recovered Edits Need Attention", isPresented: $showingRestorationConflict) {
+            Button("Keep Editing", role: .cancel) {}
+            Button("Save Recovered Copy…") {
+                beginSourceExport(.saveCopy)
+            }
+            Button("Use File Version", role: .destructive) {
+                reloadCurrentDocument()
+            }
+        } message: {
+            Text(
+                "FrankenMermaid could not safely combine this recovered draft with " +
+                    "\(documentSession.displayName). The file may also have changed. " +
+                    "In-place Save is paused so neither version is overwritten."
+            )
         }
     }
 
@@ -488,6 +547,7 @@ struct StudioView: View {
                     canRedo: sourceHistory.canRedo,
                     save: saveCurrentSource,
                     saveCopy: { beginSourceExport(.saveCopy) },
+                    new: requestNewDocument,
                     reopen: requestReopen,
                     open: {
                         editorFocused = false
@@ -746,11 +806,12 @@ struct StudioView: View {
     }
 
     private var footer: some View {
-        Text("Rendered entirely on this device · no source or diagram is uploaded")
+        Text("\(renderer.draftStatus) · rendered entirely on this device · no source or diagram is uploaded")
         .font(.system(size: Lab.size(9), design: .monospaced))
         .foregroundStyle(Lab.secondary.opacity(0.78))
         .multilineTextAlignment(.center)
         .padding(.bottom, 8)
+        .accessibilityIdentifier("local-draft-status")
     }
 
     private var statusText: String {
@@ -854,12 +915,87 @@ struct StudioView: View {
         }
     }
 
-    private func adopt(_ document: MermaidOpenedDocument) {
+    private func adopt(
+        _ document: MermaidOpenedDocument,
+        documentIdentity: UUID = UUID()
+    ) {
         editorFocused = false
         sourceHistory.endContinuousEditing()
-        documentSession.adopt(document)
+        documentSession.adopt(document, documentIdentity: documentIdentity)
+        renderer.documentIdentity = documentIdentity
         renderer.source = document.source
         lane = .code
+    }
+
+    private func restoreActiveDocumentAfterLaunch() {
+        guard !attemptedDocumentRestoration else { return }
+        attemptedDocumentRestoration = true
+        Task {
+            do {
+                let recoveredSource = renderer.draftWasRecovered ? renderer.source : nil
+                switch try await documentSession.restoreActiveDocument(
+                    recoveredSource: recoveredSource,
+                    recoveredDocumentIdentity: renderer.documentIdentity
+                ) {
+                case .none:
+                    break
+                case .fileVersion(let restored):
+                    adopt(restored.document, documentIdentity: restored.documentIdentity)
+                case .recoveredEdits(let restored):
+                    adoptRecoveredEdits(from: restored, changedOnDisk: false)
+                case .conflict(let restored):
+                    adoptRecoveredEdits(from: restored, changedOnDisk: true)
+                    showingRestorationConflict = true
+                case .unassociatedDraft(let restored):
+                    documentSession.adoptUnassociatedDraft(
+                        while: restored.document,
+                        documentIdentity: restored.documentIdentity
+                    )
+                    showingRestorationConflict = true
+                }
+            } catch {
+                let prefix = renderer.draftWasRecovered
+                    ? "Your recovered draft is still available, but "
+                    : ""
+                sourceImportError = prefix + "\(documentSession.displayName) could not be reopened: " +
+                    error.localizedDescription
+            }
+            await Task.yield()
+            sourceHistory.reset()
+        }
+    }
+
+    private func adoptRecoveredEdits(
+        from restored: MermaidRestoredDocument,
+        changedOnDisk: Bool
+    ) {
+        documentSession.adoptRecoveredEdits(
+            from: restored.document,
+            documentIdentity: restored.documentIdentity,
+            changedOnDisk: changedOnDisk
+        )
+        renderer.documentIdentity = restored.documentIdentity
+        lane = .code
+        sourceImportError = nil
+        documentError = nil
+    }
+
+    private func requestNewDocument() {
+        editorFocused = false
+        if documentSession.isDirty(source: renderer.source) {
+            confirmingNewDocument = true
+        } else {
+            newSourceDocument()
+        }
+    }
+
+    private func newSourceDocument() {
+        documentSession.beginUntitled(source: MermaidRendererModel.sample)
+        renderer.documentIdentity = nil
+        renderer.source = MermaidRendererModel.sample
+        lane = .code
+        sourceImportError = nil
+        documentError = nil
     }
 
     private func saveCurrentSource() {

@@ -49,6 +49,13 @@ final class MermaidSourceHistory: ObservableObject {
         lastContinuousEditAt = nil
     }
 
+    func reset() {
+        undoSources.removeAll(keepingCapacity: true)
+        redoSources.removeAll(keepingCapacity: true)
+        pendingReplay = nil
+        lastContinuousEditAt = nil
+    }
+
     func undo(currentSource: String) -> String? {
         guard let previousSource = undoSources.popLast() else { return nil }
         appendBounded(currentSource, to: &redoSources)
