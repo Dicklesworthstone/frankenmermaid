@@ -12,8 +12,8 @@ The repository Beads store is currently in unresolved sync-merge state. This fil
 
 ## Still open
 
-- Autosave, automatic current-document state restoration, a full document browser, Quick Look,
-  widgets, intents, Spotlight/Handoff, comprehensive menus, drag/drop, and multiwindow.
+- Automatic in-place file autosave, a full document browser, Quick Look, widgets, intents,
+  Spotlight/Handoff, comprehensive menus, drag/drop, and multiwindow.
 - Remaining 19 visual rounds per platform in `FRANKEN_DOCUMENT_APPS_QA.md`.
 - Signed physical-device and Catalyst builds, distribution archive, App Store metadata, and worldwide availability.
 
@@ -69,3 +69,27 @@ The repository Beads store is currently in unresolved sync-merge state. This fil
   Executable DSR build/unit/UI evidence remains pending: the exact configured lane is
   `scripts/dsr-apple-quality.sh`, but the APFS safety gate is still critical at 13.49% free, so no
   Xcode build, test action, or Simulator operation was attempted.
+
+## 2026-09-07 crash-safe work restoration and executable proof
+
+- Added bounded, atomically written, complete-file-protected local draft persistence. The app saves
+  source and an opaque per-document UUID after edits and again when the scene becomes inactive or
+  backgrounded; the status footer makes the local-save state visible without replacing any existing
+  editor, gallery, lens, render, export, or Graph Deck control.
+- Added privacy-conscious active-document restoration using a security-scoped bookmark, display
+  name, UUID, and SHA-256 source/disk baselines. The active reference stores neither Mermaid source
+  nor a clear-text path.
+- Launch now distinguishes the current file version, safely recovered local edits, a two-sided
+  file/draft conflict, a draft belonging to another document, and an unavailable bookmark. Unsafe
+  in-place Save is disabled; users can keep editing, save the recovered source as a copy, or use the
+  current file version. A discoverable New Diagram action clears automatic file restoration.
+- Added focused corruption, size-bound, identity, privacy, restore, and conflict unit coverage plus
+  a real iPhone UI journey that edits an untitled diagram, waits for local persistence, terminates
+  the app, relaunches it, and verifies the unsaved source is recovered.
+- Pushed implementation commit `bc8bd1be` to both `main` and mirrored `master`. DSR receipt
+  `/Users/jemanuel/.local/state/dsr/quality-logs/frankenmermaid/20260907T050853-73589/receipt.json`
+  has identical clean source fences at `bc8bd1be9195f6a1e203b81bdac84c773cb6232f` and passes
+  generated-project drift, all tracked Swift parsing, plist/privacy validation, repeated Simulator
+  audio-safety preparation, a generic iOS Simulator build, 37/37 Catalyst unit tests, and 10/10
+  serialized iPhone UI tests. This is not physical file-provider, physical-device, iPad/Catalyst UI,
+  archive, signing, or App Store evidence.
