@@ -242,6 +242,7 @@ struct StudioView: View {
             )
             renderer.scheduleRender()
             renderer.scheduleDraftSave()
+            documentSession.scheduleAutosave(source: source)
         }
         .onChange(of: renderer.documentIdentity) { _, _ in renderer.scheduleDraftSave() }
         .onChange(of: editorFocused) { _, isFocused in
@@ -1000,6 +1001,7 @@ struct StudioView: View {
 
     private func saveCurrentSource() {
         editorFocused = false
+        documentSession.cancelAutosave()
         guard documentSession.hasCurrentDocument else {
             beginSourceExport(.saveNewDocument)
             return

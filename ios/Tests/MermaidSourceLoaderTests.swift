@@ -90,6 +90,45 @@ final class MermaidSourceLoaderTests: XCTestCase {
     }
 
     @MainActor
+    func testDocumentSessionAutosavesLatestEditInPlace() async throws {
+        let defaults = try makeDefaults()
+        let original = "flowchart LR\n  Original --> File\n"
+        let staleEdit = "flowchart LR\n  Stale --> Edit\n"
+        let latestEdit = "flowchart LR\n  Latest --> Edit\n"
+        let url = try temporarySourceURL(contents: Data(original.utf8))
+        let session = MermaidDocumentSession(initialSource: original, defaults: defaults)
+        session.adopt(try await MermaidSourceLoader.open(from: url))
+
+        session.scheduleAutosave(source: staleEdit, delay: .seconds(10))
+        session.scheduleAutosave(source: latestEdit, delay: .zero)
+
+        try await waitForAutosave(session, source: latestEdit)
+        XCTAssertEqual(try MermaidSourceLoader.decode(Data(contentsOf: url)), latestEdit)
+        XCTAssertNil(session.autosaveFailureDescription)
+    }
+
+    @MainActor
+    func testDocumentSessionAutosaveRefusesExternalChange() async throws {
+        let defaults = try makeDefaults()
+        let original = "flowchart LR\n  Original --> File\n"
+        let external = "flowchart LR\n  External --> Edit\n"
+        let local = "flowchart LR\n  Local --> Edit\n"
+        let url = try temporarySourceURL(contents: Data(original.utf8))
+        let session = MermaidDocumentSession(initialSource: original, defaults: defaults)
+        session.adopt(try await MermaidSourceLoader.open(from: url))
+        try Data(external.utf8).write(to: url, options: .atomic)
+
+        session.scheduleAutosave(source: local, delay: .zero)
+
+        for _ in 0..<100 where session.attention != .changedOnDisk {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(session.attention, .changedOnDisk)
+        XCTAssertNotNil(session.autosaveFailureDescription)
+        XCTAssertEqual(try MermaidSourceLoader.decode(Data(contentsOf: url)), external)
+    }
+
+    @MainActor
     func testDocumentSessionTracksDirtyStateAndPersistsBoundedRecents() async throws {
         let suiteName = "MermaidSourceLoaderTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -340,6 +379,18 @@ final class MermaidSourceLoaderTests: XCTestCase {
 
     private func makeDefaults() throws -> UserDefaults {
         try XCTUnwrap(UserDefaults(suiteName: "MermaidRestorationTests.\(UUID().uuidString)"))
+    }
+
+    @MainActor
+    private func waitForAutosave(
+        _ session: MermaidDocumentSession,
+        source: String
+    ) async throws {
+        for _ in 0..<100 {
+            if !session.isSaving, !session.isDirty(source: source) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for document autosave")
     }
 
     private func makeDraft(

@@ -107,6 +107,8 @@ struct MermaidDocumentControls: View {
         let dirty = session.isDirty(source: source)
         let status = if session.isSaving {
             "SAVING"
+        } else if session.autosaveFailureDescription != nil {
+            "SAVE FAILED"
         } else if session.attention == .changedOnDisk {
             "CHANGED ON DISK"
         } else if session.attention == .recoveryConflict {
@@ -120,6 +122,8 @@ struct MermaidDocumentControls: View {
         }
         let statusColor = if session.isSaving {
             Lab.cyan
+        } else if session.autosaveFailureDescription != nil {
+            Lab.danger
         } else if session.attention != nil {
             Lab.danger
         } else if dirty {
@@ -152,8 +156,15 @@ struct MermaidDocumentControls: View {
         .background(Lab.statusBackground.opacity(0.58), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Lab.stroke.opacity(0.75)))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(session.displayName), \(status.lowercased())")
+        .accessibilityLabel(documentStatusAccessibilityLabel(status: status))
         .accessibilityIdentifier("source-document-status")
+    }
+
+    private func documentStatusAccessibilityLabel(status: String) -> String {
+        guard let failure = session.autosaveFailureDescription else {
+            return "\(session.displayName), \(status.lowercased())"
+        }
+        return "\(session.displayName), save failed, \(failure)"
     }
 
     private func controlRow(compact: Bool) -> some View {

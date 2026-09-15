@@ -159,10 +159,12 @@ final class MermaidDocumentSession: ObservableObject {
     @Published private(set) var isSaving = false
     @Published private(set) var attention: MermaidDocumentAttention?
     @Published private(set) var currentDocumentIdentity: UUID?
+    @Published private(set) var autosaveFailureDescription: String?
 
     private var untitledBaseline: String
     private var activeDocumentReference: MermaidActiveDocumentReference?
     private var restorationDisplayName: String?
+    private var scheduledAutosave: Task<Void, Never>?
     private let defaults: UserDefaults
 
     init(initialSource: String, defaults: UserDefaults = .standard) {
@@ -183,6 +185,7 @@ final class MermaidDocumentSession: ObservableObject {
     }
 
     func beginUntitled(source: String) {
+        cancelAutosave()
         currentDocument = nil
         currentDocumentIdentity = nil
         untitledBaseline = source
@@ -196,6 +199,7 @@ final class MermaidDocumentSession: ObservableObject {
         _ document: MermaidOpenedDocument,
         documentIdentity: UUID = UUID()
     ) {
+        cancelAutosave()
         currentDocument = document
         currentDocumentIdentity = documentIdentity
         attention = nil
@@ -209,6 +213,7 @@ final class MermaidDocumentSession: ObservableObject {
         documentIdentity: UUID,
         changedOnDisk: Bool
     ) {
+        cancelAutosave()
         currentDocument = document
         currentDocumentIdentity = documentIdentity
         attention = changedOnDisk ? .changedOnDisk : nil
@@ -222,6 +227,7 @@ final class MermaidDocumentSession: ObservableObject {
         while retaining: MermaidOpenedDocument,
         documentIdentity: UUID
     ) {
+        cancelAutosave()
         currentDocument = retaining
         currentDocumentIdentity = documentIdentity
         attention = .recoveryConflict
@@ -276,6 +282,7 @@ final class MermaidDocumentSession: ObservableObject {
             let saved = try await MermaidSourceLoader.save(source, replacing: currentDocument)
             self.currentDocument = saved
             attention = nil
+            autosaveFailureDescription = nil
             recordActive(saved, documentIdentity: currentDocumentIdentity ?? UUID())
             recordRecent(saved)
         } catch {
@@ -286,6 +293,42 @@ final class MermaidDocumentSession: ObservableObject {
             }
             throw error
         }
+    }
+
+    func scheduleAutosave(
+        source: String,
+        delay: Duration = .milliseconds(650)
+    ) {
+        scheduledAutosave?.cancel()
+        guard currentDocument != nil,
+              attention == nil,
+              isDirty(source: source) else {
+            return
+        }
+
+        let documentIdentity = currentDocumentIdentity
+        scheduledAutosave = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+                guard !Task.isCancelled,
+                      let self,
+                      self.currentDocumentIdentity == documentIdentity,
+                      self.isDirty(source: source) else {
+                    return
+                }
+                try await self.save(source: source)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.autosaveFailureDescription = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelAutosave() {
+        scheduledAutosave?.cancel()
+        scheduledAutosave = nil
+        autosaveFailureDescription = nil
     }
 
     func suggestedFilename() -> String {
