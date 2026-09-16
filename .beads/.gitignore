@@ -2,6 +2,12 @@
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.db-wal*
+*.vacuum-wal-cert*
+*.fsqlite-migration-state
+*.db.bad_*
+*.db.rebuild_*
 
 # Lock files
 *.lock
@@ -9,6 +15,8 @@
 # Temporary
 last-touched
 *.tmp
+recovery_*/
+.br_recovery/
 
 # br fsqlite-ns VFS sidecars — per-machine runtime state, like -wal/-shm.
 # Covers beads.db-fsqlite-ns-{gate,use} and vacuum copies named
