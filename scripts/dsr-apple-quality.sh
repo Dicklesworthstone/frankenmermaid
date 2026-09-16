@@ -6,8 +6,10 @@ cd "$repo_root/ios"
 
 build_root="${FRANKEN_APPLE_BUILD_ROOT:-${DSR_QUALITY_RUN_DIR:-$repo_root/ios/build/dsr-apple-quality}}"
 mkdir -p "$build_root/tmp"
-result_bundle="$build_root/frankenmermaid-iphone-ui-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
 sbh check --need 20G "$build_root"
+result_root="${FRANKEN_APPLE_RESULT_ROOT:-$build_root}"
+mkdir -p "$result_root"
+result_bundle="$result_root/frankenmermaid-iphone-ui-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
 xcode_product_settings=()
 if [[ -n "${FRANKEN_APPLE_PRODUCT_ROOT:-}" ]]; then
   mkdir -p "$FRANKEN_APPLE_PRODUCT_ROOT"
@@ -40,6 +42,7 @@ TMPDIR="$build_root/tmp" xcodebuild -project FrankenMermaid.xcodeproj -scheme Fr
   -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$build_root/derived-data" \
   "${xcode_product_settings[@]}" \
+  -resultBundlePath "$result_root/frankenmermaid-catalyst-$(date -u +%Y%m%dT%H%M%SZ).xcresult" \
   CODE_SIGNING_ALLOWED=NO test -only-testing:FrankenMermaidTests
 
 # Resolve a concrete phone only after re-proving the Simulator audio fence;
