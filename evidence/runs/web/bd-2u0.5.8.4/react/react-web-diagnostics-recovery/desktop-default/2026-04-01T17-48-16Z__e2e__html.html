@@ -8620,8 +8620,8 @@ Expecting 'AMP', 'COLON', 'PIPE', 'TESTSTR', 'DOWN', 'DEFAULT', 'NUM', 'COMMA', 
         .replace(/^%%.*$/gm, (match) => `<span class="token-comment">${match}</span>`)
         .replace(/\b(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram-v2|erDiagram|gantt|journey|timeline|pie|gitGraph|subgraph|section|participant|actor|class|state|title|dateFormat|branch|checkout|merge|commit)\b/g, '<span class="token-keyword">$1</span>')
         .replace(/\b(TD|TB|BT|LR|RL)\b/g, '<span class="token-directive">$1</span>')
-        .replace(/(\-\->|\-\.\->|==>|-->|->>|-->>|==>|:::|:)/g, '<span class="token-arrow">$1</span>')
-        .replace(/(\[[^\]]+\]|\([^)]+\)|\{[^}]+\}|\"[^\"]+\")/g, '<span class="token-literal">$1</span>')
+        .replace(/(-->|-\.->|==>|-->|->>|-->>|==>|:::|:)/g, '<span class="token-arrow">$1</span>')
+        .replace(/(\[[^\]]+\]|\([^)]+\)|\{[^}]+\}|"[^"]+")/g, '<span class="token-literal">$1</span>')
         .replace(/\b([A-Z][A-Za-z0-9_]*)\b/g, '<span class="token-node">$1</span>');
     }
 

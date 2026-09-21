@@ -3493,7 +3493,7 @@ A<span class="text-emerald-400">--</span>&gt;
     function updateSyntaxHighlight(source) {
       if (!els.editorHighlight) return;
       // Simple syntax colorizer for the overlay
-      let highlighted = source
+      const highlighted = source
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")

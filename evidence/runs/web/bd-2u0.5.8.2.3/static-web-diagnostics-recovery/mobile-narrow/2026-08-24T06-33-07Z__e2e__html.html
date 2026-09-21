@@ -3234,7 +3234,7 @@ A<span class="text-emerald-400 font-bold">--</span>&gt;
 
     function updateSyntaxHighlight(source) {
       if (!els.editorHighlight) return;
-      let highlighted = source
+      const highlighted = source
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")

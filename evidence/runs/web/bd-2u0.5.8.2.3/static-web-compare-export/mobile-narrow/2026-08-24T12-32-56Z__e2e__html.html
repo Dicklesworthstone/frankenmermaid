@@ -4862,7 +4862,7 @@ end">Subgraph</button>
 
     function updateSyntaxHighlight(source) {
       if (!els.editorHighlight) return;
-      let highlighted = source
+      const highlighted = source
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
