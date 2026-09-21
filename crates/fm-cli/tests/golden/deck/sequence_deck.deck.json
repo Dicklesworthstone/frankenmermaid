@@ -116,16 +116,9 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-alice-0": [
-      "handshake"
-    ],
-    "fm-node-bob-1": [
-      "handshake",
-      "server"
-    ],
-    "fm-node-server-2": [
-      "server"
-    ]
+    "fm-node-alice-0": ["handshake"],
+    "fm-node-bob-1": ["handshake", "server"],
+    "fm-node-server-2": ["server"]
   },
   "nodeGeometry": {
     "fm-node-alice-0": {

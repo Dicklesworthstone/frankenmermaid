@@ -6,14 +6,8 @@
   "surface": "web",
   "host_kind": "static-web",
   "repeat": 5,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
-  "scenarios": [
-    "static-web-presenter-tour"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
+  "scenarios": ["static-web-presenter-tour"],
   "results": [
     {
       "scenario_id": "static-web-presenter-tour",

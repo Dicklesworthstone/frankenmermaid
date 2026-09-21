@@ -3,10 +3,7 @@
   "static_root": "evidence/runs/web/bd-2u0.5.8.4/static",
   "react_root": "evidence/runs/web/bd-2u0.5.8.4/react",
   "allowed_metric_delta_ms": 250,
-  "required_host_kinds": [
-    "static-web",
-    "react-web"
-  ],
+  "required_host_kinds": ["static-web", "react-web"],
   "strict_fields": [
     "renderer",
     "theme",

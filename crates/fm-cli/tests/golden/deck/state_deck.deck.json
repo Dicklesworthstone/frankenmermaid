@@ -64,17 +64,11 @@
       "steps": [
         {
           "step": 1,
-          "elementIds": [
-            "fm-node-done-3",
-            "fm-edge-2"
-          ]
+          "elementIds": ["fm-node-done-3", "fm-edge-2"]
         },
         {
           "step": 2,
-          "elementIds": [
-            "fm-node-idle-1",
-            "fm-edge-1"
-          ]
+          "elementIds": ["fm-node-idle-1", "fm-edge-1"]
         }
       ]
     },
@@ -138,19 +132,10 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-busy-2": [
-      "happy",
-      "errors"
-    ],
-    "fm-node-done-3": [
-      "happy"
-    ],
-    "fm-node-failed-4": [
-      "errors"
-    ],
-    "fm-node-idle-1": [
-      "happy"
-    ]
+    "fm-node-busy-2": ["happy", "errors"],
+    "fm-node-done-3": ["happy"],
+    "fm-node-failed-4": ["errors"],
+    "fm-node-idle-1": ["happy"]
   },
   "nodeGeometry": {
     "fm-node-busy-2": {

@@ -180,10 +180,7 @@
       "undecidable": 6,
       "incumbent_dnf": 2
     },
-    "excluded_fixtures": [
-      "fuzzy_keyword_recovery",
-      "malformed_recovery"
-    ],
+    "excluded_fixtures": ["fuzzy_keyword_recovery", "malformed_recovery"],
     "exclusion_reason": "resilience fixtures: the incumbent refusing deliberately-broken input is expected, not a parity signal",
     "note": "per-diagram verdicts are authoritative; the pooled all-goldens multiset produced one artifact (sankey), re-verified per golden"
   }

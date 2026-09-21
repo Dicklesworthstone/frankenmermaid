@@ -24,9 +24,7 @@
       "category": "recovery",
       "input_path": "crates/fm-cli/tests/golden/fuzzy_keyword_recovery.mmd",
       "svg_path": "crates/fm-cli/tests/golden/fuzzy_keyword_recovery.svg",
-      "expected_warning_substrings": [
-        "Fuzzy match"
-      ],
+      "expected_warning_substrings": ["Fuzzy match"],
       "min_warning_count": 1,
       "max_warning_count": 4,
       "expected_degradation_tier": "degraded",

@@ -5,11 +5,7 @@
   "surface": "web_react",
   "host_kind": "react-web",
   "repeat": 1,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
   "results": [
     {
       "scenario_id": "react-web-compare-export",
@@ -175,9 +171,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:fd9eb8af2dc128bb36e0c7fc3a15b6956e647c9c48480aa6a3ab3dafacfd9d70"
-      ]
+      "output_hashes": ["sha256:fd9eb8af2dc128bb36e0c7fc3a15b6956e647c9c48480aa6a3ab3dafacfd9d70"]
     },
     {
       "scenario_id": "react-web-compare-export",
@@ -185,9 +179,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:f87b7a8063e22358bac111cc3feee08ef01553065e1a198ee701ef48e20f6670"
-      ]
+      "output_hashes": ["sha256:f87b7a8063e22358bac111cc3feee08ef01553065e1a198ee701ef48e20f6670"]
     },
     {
       "scenario_id": "react-web-compare-export",
@@ -195,9 +187,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:1c7c44ca813eaaf3190aa7b2d61409cafb205dbf69486fcb3ca5dcffed2aafc9"
-      ]
+      "output_hashes": ["sha256:1c7c44ca813eaaf3190aa7b2d61409cafb205dbf69486fcb3ca5dcffed2aafc9"]
     },
     {
       "scenario_id": "react-web-diagnostics-recovery",
@@ -205,9 +195,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:7840da2467ceac075bfd2241ef02514cc7b1d29e588fe2a2ef44093ece60bf47"
-      ]
+      "output_hashes": ["sha256:7840da2467ceac075bfd2241ef02514cc7b1d29e588fe2a2ef44093ece60bf47"]
     },
     {
       "scenario_id": "react-web-diagnostics-recovery",
@@ -215,9 +203,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:ef191621b17d89f67ec667986a40be902bfc8acda7f560f83b85b313bf630fa5"
-      ]
+      "output_hashes": ["sha256:ef191621b17d89f67ec667986a40be902bfc8acda7f560f83b85b313bf630fa5"]
     },
     {
       "scenario_id": "react-web-diagnostics-recovery",
@@ -225,9 +211,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:c66bfcb1e60b810359b87bd29dbea5dd6baa382035823ce0dd4c765672997789"
-      ]
+      "output_hashes": ["sha256:c66bfcb1e60b810359b87bd29dbea5dd6baa382035823ce0dd4c765672997789"]
     },
     {
       "scenario_id": "react-web-determinism-check",
@@ -235,9 +219,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "react-web-determinism-check",
@@ -245,9 +227,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "react-web-determinism-check",
@@ -255,9 +235,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "react-web-presenter-tour",
@@ -265,9 +243,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:99a83faee1605c437c2b16634680c4806b6847ea38d319bd233eb8f8f488830b"
-      ]
+      "output_hashes": ["sha256:99a83faee1605c437c2b16634680c4806b6847ea38d319bd233eb8f8f488830b"]
     },
     {
       "scenario_id": "react-web-presenter-tour",
@@ -275,9 +251,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:5c94a4536e2a90bc94ac65ba69549eb811c53ae9fe7009d4da747279bb12d550"
-      ]
+      "output_hashes": ["sha256:5c94a4536e2a90bc94ac65ba69549eb811c53ae9fe7009d4da747279bb12d550"]
     },
     {
       "scenario_id": "react-web-presenter-tour",
@@ -285,9 +259,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:8b542c1409af7eca6fee1836a0feee6d1e4fa897771acb901a2efd2c0a17c8c4"
-      ]
+      "output_hashes": ["sha256:8b542c1409af7eca6fee1836a0feee6d1e4fa897771acb901a2efd2c0a17c8c4"]
     }
   ]
 }

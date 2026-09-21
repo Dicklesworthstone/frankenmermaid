@@ -144,22 +144,11 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-m1-0": [
-      "tight",
-      "whole"
-    ],
-    "fm-node-m2-1": [
-      "whole"
-    ],
-    "fm-node-m3-2": [
-      "whole"
-    ],
-    "fm-node-m4-3": [
-      "whole"
-    ],
-    "fm-node-m5-4": [
-      "whole"
-    ]
+    "fm-node-m1-0": ["tight", "whole"],
+    "fm-node-m2-1": ["whole"],
+    "fm-node-m3-2": ["whole"],
+    "fm-node-m4-3": ["whole"],
+    "fm-node-m5-4": ["whole"]
   },
   "nodeGeometry": {
     "fm-node-far-5": {

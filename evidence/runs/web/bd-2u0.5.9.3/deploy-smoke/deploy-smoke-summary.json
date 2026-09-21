@@ -8,13 +8,8 @@
   "chromium": "/snap/bin/chromium",
   "timeout_seconds": 8,
   "repeat": 2,
-  "scenario_ids": [
-    "static-web-compare-export",
-    "static-web-diagnostics-recovery"
-  ],
-  "profile_ids": [
-    "desktop-default"
-  ],
+  "scenario_ids": ["static-web-compare-export", "static-web-diagnostics-recovery"],
+  "profile_ids": ["desktop-default"],
   "route_integrity": {
     "ok": true,
     "checks": [
@@ -68,13 +63,8 @@
     "host_kind": "static-web",
     "result_count": 4,
     "determinism_count": 2,
-    "profiles": [
-      "desktop-default"
-    ],
-    "scenarios": [
-      "static-web-compare-export",
-      "static-web-diagnostics-recovery"
-    ],
+    "profiles": ["desktop-default"],
+    "scenarios": ["static-web-compare-export", "static-web-diagnostics-recovery"],
     "has_replay_bundle": true,
     "differential_count": 2,
     "trace_count": 4
@@ -85,13 +75,8 @@
     "host_kind": "react-web",
     "result_count": 4,
     "determinism_count": 2,
-    "profiles": [
-      "desktop-default"
-    ],
-    "scenarios": [
-      "react-web-compare-export",
-      "react-web-diagnostics-recovery"
-    ],
+    "profiles": ["desktop-default"],
+    "scenarios": ["react-web-compare-export", "react-web-diagnostics-recovery"],
     "has_replay_bundle": true,
     "differential_count": 2,
     "trace_count": 4
@@ -102,10 +87,7 @@
     "static_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
     "react_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react",
     "allowed_metric_delta_ms": 250,
-    "required_host_kinds": [
-      "static-web",
-      "react-web"
-    ],
+    "required_host_kinds": ["static-web", "react-web"],
     "strict_fields": [
       "renderer",
       "theme",

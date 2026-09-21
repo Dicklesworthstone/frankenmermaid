@@ -2,11 +2,7 @@
   "ok": true,
   "base_url": "http://127.0.0.1:59083",
   "repeat": 5,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
   "results": [
     {
       "scenario_id": "static-web-compare-export",

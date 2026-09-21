@@ -12,9 +12,7 @@
       "category": "diagram_type",
       "title": "Support flowchart diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -31,18 +29,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/sequence",
       "category": "diagram_type",
       "title": "Support sequence diagrams",
       "status": "partial",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -59,18 +53,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as partial capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as partial capability"]
     },
     {
       "id": "diagram-type/class",
       "category": "diagram_type",
       "title": "Support class diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -87,18 +77,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/state",
       "category": "diagram_type",
       "title": "Support state diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -115,18 +101,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/er",
       "category": "diagram_type",
       "title": "Support er diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -143,18 +125,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/C4Context",
       "category": "diagram_type",
       "title": "Support C4Context diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -171,18 +149,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/C4Container",
       "category": "diagram_type",
       "title": "Support C4Container diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -199,18 +173,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/C4Component",
       "category": "diagram_type",
       "title": "Support C4Component diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -227,18 +197,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/C4Dynamic",
       "category": "diagram_type",
       "title": "Support C4Dynamic diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -255,18 +221,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/C4Deployment",
       "category": "diagram_type",
       "title": "Support C4Deployment diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -283,18 +245,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/architecture-beta",
       "category": "diagram_type",
       "title": "Support architecture-beta diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -311,18 +269,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/block-beta",
       "category": "diagram_type",
       "title": "Support block-beta diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -339,18 +293,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/gantt",
       "category": "diagram_type",
       "title": "Support gantt diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -367,18 +317,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/timeline",
       "category": "diagram_type",
       "title": "Support timeline diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -395,18 +341,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/journey",
       "category": "diagram_type",
       "title": "Support journey diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -423,18 +365,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/gitGraph",
       "category": "diagram_type",
       "title": "Support gitGraph diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -451,18 +389,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/sankey",
       "category": "diagram_type",
       "title": "Support sankey diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -479,18 +413,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/mindmap",
       "category": "diagram_type",
       "title": "Support mindmap diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -507,18 +437,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/pie",
       "category": "diagram_type",
       "title": "Support pie diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -535,18 +461,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/quadrantChart",
       "category": "diagram_type",
       "title": "Support quadrantChart diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -563,18 +485,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/xyChart",
       "category": "diagram_type",
       "title": "Support xyChart diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -591,18 +509,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/requirementDiagram",
       "category": "diagram_type",
       "title": "Support requirementDiagram diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -619,18 +533,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/packet-beta",
       "category": "diagram_type",
       "title": "Support packet-beta diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -647,18 +557,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/kanban",
       "category": "diagram_type",
       "title": "Support kanban diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -675,18 +581,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/treemap",
       "category": "diagram_type",
       "title": "Support treemap diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -703,18 +605,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/radar-beta",
       "category": "diagram_type",
       "title": "Support radar-beta diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -731,18 +629,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "diagram-type/info",
       "category": "diagram_type",
       "title": "Support info diagrams",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#supported-diagram-types"
-      ],
+      "advertised_in": ["README.md#supported-diagram-types"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::DiagramType",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -759,18 +653,14 @@
           "note": "Verifies advertised support level mapping"
         }
       ],
-      "notes": [
-        "README advertises this family; current code marks it as full capability"
-      ]
+      "notes": ["README advertises this family; current code marks it as full capability"]
     },
     {
       "id": "surface/wasm-render-deck",
       "category": "surface",
       "title": "WASM API renders deck manifests",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#graph-decks"
-      ],
+      "advertised_in": ["README.md#graph-decks"],
       "code_paths": [
         "crates/fm-wasm/src/lib.rs::render_deck_js",
         "crates/fm-render-svg/src/deck.rs::render_svg_with_deck"
@@ -794,9 +684,7 @@
       "category": "surface",
       "title": "CLI deck command emitting a standalone HTML presentation",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Deck",
         "crates/fm-cli/src/main.rs::cmd_deck",
@@ -821,10 +709,7 @@
       "category": "surface",
       "title": "CLI detect command",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#quick-example",
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#quick-example", "README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Detect",
         "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
@@ -848,10 +733,7 @@
       "category": "surface",
       "title": "CLI parse command with IR JSON evidence",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#quick-example",
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#quick-example", "README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Parse",
         "crates/fm-parser/src/lib.rs::parse_evidence_json"
@@ -870,10 +752,7 @@
       "category": "surface",
       "title": "CLI SVG rendering",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#quick-example",
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#quick-example", "README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Render",
         "crates/fm-render-svg/src/lib.rs::render_svg_with_layout"
@@ -892,10 +771,7 @@
       "category": "surface",
       "title": "CLI terminal rendering",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#quick-example",
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#quick-example", "README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Render",
         "crates/fm-render-term/src/lib.rs::render_term_with_config"
@@ -914,10 +790,7 @@
       "category": "surface",
       "title": "CLI validate command with structured diagnostics",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#quick-example",
-        "README.md#command-reference"
-      ],
+      "advertised_in": ["README.md#quick-example", "README.md#command-reference"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Validate",
         "crates/fm-core/src/lib.rs::StructuredDiagnostic"
@@ -936,10 +809,7 @@
       "category": "surface",
       "title": "CLI capability matrix command",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#command-reference",
-        "README.md#runtime-capability-metadata"
-      ],
+      "advertised_in": ["README.md#command-reference", "README.md#runtime-capability-metadata"],
       "code_paths": [
         "crates/fm-cli/src/main.rs::Command::Capabilities",
         "crates/fm-cli/src/main.rs::cmd_capabilities",
@@ -964,10 +834,7 @@
       "category": "surface",
       "title": "WASM API renders SVG",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#javascript--wasm-api",
-        "README.md#technical-architecture"
-      ],
+      "advertised_in": ["README.md#javascript--wasm-api", "README.md#technical-architecture"],
       "code_paths": [
         "crates/fm-wasm/src/lib.rs::render",
         "crates/fm-wasm/src/lib.rs::render_svg_js",
@@ -987,10 +854,7 @@
       "category": "surface",
       "title": "WASM API exposes capability matrix metadata",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#javascript--wasm-api",
-        "README.md#runtime-capability-metadata"
-      ],
+      "advertised_in": ["README.md#javascript--wasm-api", "README.md#runtime-capability-metadata"],
       "code_paths": [
         "crates/fm-wasm/src/lib.rs::capability_matrix_js",
         "crates/fm-core/src/lib.rs::capability_matrix"
@@ -1009,10 +873,7 @@
       "category": "surface",
       "title": "Canvas rendering backend",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#why-use-frankenmermaid",
-        "README.md#technical-architecture"
-      ],
+      "advertised_in": ["README.md#why-use-frankenmermaid", "README.md#technical-architecture"],
       "code_paths": [
         "crates/fm-render-canvas/src/lib.rs::render_to_canvas",
         "crates/fm-wasm/src/lib.rs::Diagram::render"
@@ -1031,10 +892,7 @@
       "category": "layout",
       "title": "Deterministic layout output",
       "status": "implemented",
-      "advertised_in": [
-        "README.md#design-philosophy",
-        "README.md#faq"
-      ],
+      "advertised_in": ["README.md#design-philosophy", "README.md#faq"],
       "code_paths": [
         "crates/fm-layout/src/lib.rs::layout_diagram_traced",
         "crates/fm-layout/src/lib.rs::crossing_refinement"
@@ -1053,10 +911,7 @@
       "category": "parser",
       "title": "Best-effort parse with warnings instead of hard failure",
       "status": "partial",
-      "advertised_in": [
-        "README.md#tl-dr",
-        "README.md#design-philosophy"
-      ],
+      "advertised_in": ["README.md#tl-dr", "README.md#design-philosophy"],
       "code_paths": [
         "crates/fm-parser/src/lib.rs::parse",
         "crates/fm-core/src/lib.rs::MermaidWarning"
@@ -1068,19 +923,14 @@
           "note": "Current coverage proves warning-based fallback for empty input"
         }
       ],
-      "notes": [
-        "Recovery exists, but README claims are broader than current automated evidence"
-      ]
+      "notes": ["Recovery exists, but README claims are broader than current automated evidence"]
     },
     {
       "id": "runtime/guard-report",
       "category": "runtime",
       "title": "Guard and degradation report types exist in shared IR",
       "status": "experimental",
-      "advertised_in": [
-        "AGENTS.md#key-design-decisions",
-        "README.md#technical-architecture"
-      ],
+      "advertised_in": ["AGENTS.md#key-design-decisions", "README.md#technical-architecture"],
       "code_paths": [
         "crates/fm-core/src/lib.rs::MermaidGuardReport",
         "crates/fm-core/src/lib.rs::MermaidDegradationPlan"
@@ -1092,9 +942,7 @@
           "note": "Types are threaded into IR metadata but not yet fully activated"
         }
       ],
-      "notes": [
-        "Data model exists; cross-pipeline activation is still an open backlog item"
-      ]
+      "notes": ["Data model exists; cross-pipeline activation is still an open backlog item"]
     },
     {
       "id": "layout/auto",
@@ -1105,9 +953,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1120,9 +966,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "All types"
-      ]
+      "notes": ["All types"]
     },
     {
       "id": "layout/sugiyama",
@@ -1133,9 +977,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1148,9 +990,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "General graphs (flowchart, class, state, ER, requirement, DOT)"
-      ]
+      "notes": ["General graphs (flowchart, class, state, ER, requirement, DOT)"]
     },
     {
       "id": "layout/force",
@@ -1161,9 +1001,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1176,9 +1014,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "General (fallback for dense/cyclic)"
-      ]
+      "notes": ["General (fallback for dense/cyclic)"]
     },
     {
       "id": "layout/tree",
@@ -1189,9 +1025,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1204,9 +1038,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Tree-like graphs"
-      ]
+      "notes": ["Tree-like graphs"]
     },
     {
       "id": "layout/radial",
@@ -1217,9 +1049,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1232,9 +1062,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Mindmap"
-      ]
+      "notes": ["Mindmap"]
     },
     {
       "id": "layout/sequence",
@@ -1245,9 +1073,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1260,9 +1086,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Sequence diagrams"
-      ]
+      "notes": ["Sequence diagrams"]
     },
     {
       "id": "layout/timeline",
@@ -1273,9 +1097,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1288,9 +1110,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Timeline"
-      ]
+      "notes": ["Timeline"]
     },
     {
       "id": "layout/gantt",
@@ -1301,9 +1121,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1316,9 +1134,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Gantt charts"
-      ]
+      "notes": ["Gantt charts"]
     },
     {
       "id": "layout/xychart",
@@ -1329,9 +1145,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1344,9 +1158,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "XY charts"
-      ]
+      "notes": ["XY charts"]
     },
     {
       "id": "layout/sankey",
@@ -1357,9 +1169,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1372,9 +1182,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Sankey diagrams"
-      ]
+      "notes": ["Sankey diagrams"]
     },
     {
       "id": "layout/kanban",
@@ -1385,9 +1193,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1400,9 +1206,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Journey, kanban"
-      ]
+      "notes": ["Journey, kanban"]
     },
     {
       "id": "layout/grid",
@@ -1413,9 +1217,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1428,9 +1230,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Block-beta"
-      ]
+      "notes": ["Block-beta"]
     },
     {
       "id": "layout/pie",
@@ -1441,9 +1241,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1456,9 +1254,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Pie charts"
-      ]
+      "notes": ["Pie charts"]
     },
     {
       "id": "layout/quadrant",
@@ -1469,9 +1265,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1484,9 +1278,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Quadrant charts"
-      ]
+      "notes": ["Quadrant charts"]
     },
     {
       "id": "layout/gitgraph",
@@ -1497,9 +1289,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1512,9 +1302,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Git graphs"
-      ]
+      "notes": ["Git graphs"]
     },
     {
       "id": "layout/packet",
@@ -1525,9 +1313,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1540,9 +1326,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Packet-beta"
-      ]
+      "notes": ["Packet-beta"]
     },
     {
       "id": "layout/architecture",
@@ -1553,9 +1337,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1568,9 +1350,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Architecture-beta, C4 (conditional)"
-      ]
+      "notes": ["Architecture-beta, C4 (conditional)"]
     },
     {
       "id": "layout/treemap",
@@ -1581,9 +1361,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1596,9 +1374,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Treemap"
-      ]
+      "notes": ["Treemap"]
     },
     {
       "id": "layout/radar",
@@ -1609,9 +1385,7 @@
         "README.md#layout-algorithms",
         "docs/planning/FEATURE_PARITY.md#layout-algorithms"
       ],
-      "code_paths": [
-        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
-      ],
+      "code_paths": ["crates/fm-layout/src/lib.rs::LayoutAlgorithm"],
       "evidence": [
         {
           "kind": "code_path",
@@ -1624,9 +1398,7 @@
           "note": "Every enum variant carries exactly one row"
         }
       ],
-      "notes": [
-        "Radar-beta"
-      ]
+      "notes": ["Radar-beta"]
     }
   ]
 }

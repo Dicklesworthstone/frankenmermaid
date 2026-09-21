@@ -3,10 +3,7 @@
   "static_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/static",
   "react_root": "/data/projects/frankenmermaid/evidence/runs/web/bd-2u0.5.9.3/deploy-smoke/react",
   "allowed_metric_delta_ms": 250,
-  "required_host_kinds": [
-    "static-web",
-    "react-web"
-  ],
+  "required_host_kinds": ["static-web", "react-web"],
   "strict_fields": [
     "renderer",
     "theme",

@@ -28,11 +28,7 @@
         "sequence_basic",
         "flowchart-1-incident-response-escalation"
       ],
-      "surface_targets": [
-        "cli",
-        "svg",
-        "wasm"
-      ],
+      "surface_targets": ["cli", "svg", "wasm"],
       "evidence_refs": [
         "crates/fm-parser/src/lib.rs",
         "crates/fm-cli/src/main.rs",
@@ -54,11 +50,7 @@
         "gantt-1-q2-reliability-hardening",
         "state-1-security-exception-lifecycle"
       ],
-      "surface_targets": [
-        "svg",
-        "terminal",
-        "wasm"
-      ],
+      "surface_targets": ["svg", "terminal", "wasm"],
       "evidence_refs": [
         "crates/fm-layout/src/lib.rs",
         "crates/fm-cli/tests/golden_layout_test.rs",
@@ -81,12 +73,7 @@
         "pie_basic",
         "gitGraph-1-release-train-alpha"
       ],
-      "surface_targets": [
-        "svg",
-        "terminal",
-        "canvas",
-        "wasm"
-      ],
+      "surface_targets": ["svg", "terminal", "canvas", "wasm"],
       "evidence_refs": [
         "crates/fm-render-svg/src/lib.rs",
         "crates/fm-render-term/src/lib.rs",
@@ -108,11 +95,7 @@
         "sequence_basic",
         "flowchart-1-incident-response-escalation"
       ],
-      "surface_targets": [
-        "cli",
-        "wasm",
-        "browser-showcase"
-      ],
+      "surface_targets": ["cli", "wasm", "browser-showcase"],
       "evidence_refs": [
         "crates/fm-cli/src/main.rs",
         "crates/fm-wasm/src/lib.rs",
@@ -133,11 +116,7 @@
         "state_basic",
         "flowchart-1-incident-response-escalation"
       ],
-      "surface_targets": [
-        "cli",
-        "json",
-        "wasm"
-      ],
+      "surface_targets": ["cli", "json", "wasm"],
       "evidence_refs": [
         "crates/fm-core/src/lib.rs",
         "crates/fm-parser/src/lib.rs",
@@ -158,11 +137,7 @@
         "gantt-3-partner-api-migration",
         "flowchart-8-partner-api-migration"
       ],
-      "surface_targets": [
-        "cli",
-        "svg",
-        "wasm"
-      ],
+      "surface_targets": ["cli", "svg", "wasm"],
       "evidence_refs": [
         "crates/fm-layout/src/lib.rs",
         "crates/fm-cli/tests/golden_layout_test.rs",
@@ -183,11 +158,7 @@
         "flowchart-1-incident-response-escalation",
         "journey-1-new-customer-launch-journey"
       ],
-      "surface_targets": [
-        "svg",
-        "wasm",
-        "browser-showcase"
-      ],
+      "surface_targets": ["svg", "wasm", "browser-showcase"],
       "evidence_refs": [
         "crates/fm-render-svg/src/a11y.rs",
         "crates/fm-wasm/src/lib.rs",
@@ -199,24 +170,13 @@
     {
       "id": "J1",
       "label": "Messy Input to Useful Output",
-      "feature_family_ids": [
-        "parser",
-        "diagnostics",
-        "rendering"
-      ],
-      "scenario_ids": [
-        "malformed_recovery",
-        "flowchart-1-incident-response-escalation"
-      ]
+      "feature_family_ids": ["parser", "diagnostics", "rendering"],
+      "scenario_ids": ["malformed_recovery", "flowchart-1-incident-response-escalation"]
     },
     {
       "id": "J2",
       "label": "One Diagram, Many Surfaces",
-      "feature_family_ids": [
-        "rendering",
-        "export",
-        "accessibility"
-      ],
+      "feature_family_ids": ["rendering", "export", "accessibility"],
       "scenario_ids": [
         "flowchart-1-incident-response-escalation",
         "sequence-1-checkout-risk-review",
@@ -226,37 +186,19 @@
     {
       "id": "J3",
       "label": "Deterministic and Reviewable for CI",
-      "feature_family_ids": [
-        "layout",
-        "diagnostics",
-        "performance"
-      ],
-      "scenario_ids": [
-        "flowchart_simple",
-        "flowchart_cycle",
-        "gantt_basic"
-      ]
+      "feature_family_ids": ["layout", "diagnostics", "performance"],
+      "scenario_ids": ["flowchart_simple", "flowchart_cycle", "gantt_basic"]
     },
     {
       "id": "J4",
       "label": "Terminal-First Incident or Remote Workflow",
-      "feature_family_ids": [
-        "rendering",
-        "diagnostics"
-      ],
-      "scenario_ids": [
-        "flowchart_cycle",
-        "state-1-security-exception-lifecycle"
-      ]
+      "feature_family_ids": ["rendering", "diagnostics"],
+      "scenario_ids": ["flowchart_cycle", "state-1-security-exception-lifecycle"]
     },
     {
       "id": "J5",
       "label": "Embeddable Browser Runtime with Inspectable Metadata",
-      "feature_family_ids": [
-        "export",
-        "accessibility",
-        "diagnostics"
-      ],
+      "feature_family_ids": ["export", "accessibility", "diagnostics"],
       "scenario_ids": [
         "flowchart-1-incident-response-escalation",
         "journey-1-new-customer-launch-journey",
@@ -274,10 +216,7 @@
         "crates/fm-cli/tests/golden/flowchart_simple.mmd",
         "crates/fm-cli/tests/golden/flowchart_simple.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "flowchart_cycle",
@@ -288,10 +227,7 @@
         "crates/fm-cli/tests/golden/flowchart_cycle.mmd",
         "crates/fm-cli/tests/golden/flowchart_cycle.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "sequence_basic",
@@ -302,10 +238,7 @@
         "crates/fm-cli/tests/golden/sequence_basic.mmd",
         "crates/fm-cli/tests/golden/sequence_basic.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "state_basic",
@@ -316,10 +249,7 @@
         "crates/fm-cli/tests/golden/state_basic.mmd",
         "crates/fm-cli/tests/golden/state_basic.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "gantt_basic",
@@ -330,10 +260,7 @@
         "crates/fm-cli/tests/golden/gantt_basic.mmd",
         "crates/fm-cli/tests/golden/gantt_basic.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "pie_basic",
@@ -344,10 +271,7 @@
         "crates/fm-cli/tests/golden/pie_basic.mmd",
         "crates/fm-cli/tests/golden/pie_basic.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg"
-      ]
+      "surfaces": ["cli", "svg"]
     },
     {
       "id": "malformed_recovery",
@@ -358,11 +282,7 @@
         "crates/fm-cli/tests/golden/malformed_recovery.mmd",
         "crates/fm-cli/tests/golden/malformed_recovery.svg"
       ],
-      "surfaces": [
-        "cli",
-        "svg",
-        "diagnostics"
-      ]
+      "surfaces": ["cli", "svg", "diagnostics"]
     },
     {
       "id": "flowchart-1-incident-response-escalation",
@@ -376,42 +296,24 @@
         "J2 shared-engine story anchor",
         "strongest currently implemented family"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "wasm",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "wasm", "mermaid-baseline"]
     },
     {
       "id": "flowchart-3-change-approval-pipeline",
       "title": "Change Approval Pipeline",
       "kind": "showcase-gallery",
       "diagram_family": "flowchart",
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "wasm",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "wasm", "mermaid-baseline"]
     },
     {
       "id": "flowchart-8-partner-api-migration",
       "title": "Partner API Migration",
       "kind": "showcase-gallery",
       "diagram_family": "flowchart",
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "wasm",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "wasm", "mermaid-baseline"]
     },
     {
       "id": "sequence-1-checkout-risk-review",
@@ -425,13 +327,8 @@
         "partial-family honesty with still-useful output",
         "browser baseline comparison value"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     },
     {
       "id": "state-1-security-exception-lifecycle",
@@ -445,13 +342,8 @@
         "cycle/rollback readability",
         "partial-family seriousness"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     },
     {
       "id": "gantt-1-q2-reliability-hardening",
@@ -465,26 +357,16 @@
         "J5 browser-runtime proof support",
         "time-based planning coverage"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     },
     {
       "id": "gantt-3-partner-api-migration",
       "title": "Partner API Migration Program",
       "kind": "showcase-gallery",
       "diagram_family": "gantt",
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     },
     {
       "id": "journey-1-new-customer-launch-journey",
@@ -498,13 +380,8 @@
         "accessibility/inspectability relevance",
         "non-ops narrative breadth"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     },
     {
       "id": "gitGraph-1-release-train-alpha",
@@ -518,13 +395,8 @@
         "release-train storytelling",
         "gallery breadth with credible workflow context"
       ],
-      "source_refs": [
-        "frankenmermaid_demo_showcase.html"
-      ],
-      "surfaces": [
-        "showcase",
-        "mermaid-baseline"
-      ]
+      "source_refs": ["frankenmermaid_demo_showcase.html"],
+      "surfaces": ["showcase", "mermaid-baseline"]
     }
   ]
 }

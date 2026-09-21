@@ -1,7 +1,13 @@
 {
   "theme": "dark",
   "themeVariables": { "primaryColor": "#111111", "fontSize": 15 },
-  "flowchart": { "direction": "LR", "rankDir": "tb", "curve": "basis", "nodeSpacing": 24, "rankSpacing": 40 },
+  "flowchart": {
+    "direction": "LR",
+    "rankDir": "tb",
+    "curve": "basis",
+    "nodeSpacing": 24,
+    "rankSpacing": 40
+  },
   "sequence": { "mirrorActors": true, "showSequenceNumbers": true },
   "gantt": { "topAxis": false },
   "securityLevel": "antiscript",

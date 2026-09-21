@@ -6,14 +6,8 @@
   "surface": "web",
   "host_kind": "static-web",
   "repeat": 5,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
-  "scenarios": [
-    "static-web-diagnostics-recovery"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
+  "scenarios": ["static-web-diagnostics-recovery"],
   "results": [
     {
       "scenario_id": "static-web-diagnostics-recovery",

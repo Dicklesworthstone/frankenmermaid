@@ -6,14 +6,8 @@
   "surface": "web",
   "host_kind": "static-web",
   "repeat": 5,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
-  "scenarios": [
-    "static-web-determinism-check"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
+  "scenarios": ["static-web-determinism-check"],
   "results": [
     {
       "scenario_id": "static-web-determinism-check",

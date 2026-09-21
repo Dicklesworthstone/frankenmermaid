@@ -5,11 +5,7 @@
   "surface": "web_react",
   "host_kind": "react-web",
   "repeat": 5,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
   "scenarios": [
     "react-web-compare-export",
     "react-web-diagnostics-recovery",

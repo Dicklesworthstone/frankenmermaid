@@ -70,18 +70,11 @@
       "steps": [
         {
           "step": 1,
-          "elementIds": [
-            "fm-node-retry-2",
-            "fm-edge-1"
-          ]
+          "elementIds": ["fm-node-retry-2", "fm-edge-1"]
         },
         {
           "step": 2,
-          "elementIds": [
-            "fm-node-fetch-0",
-            "fm-edge-0",
-            "fm-edge-2"
-          ]
+          "elementIds": ["fm-node-fetch-0", "fm-edge-0", "fm-edge-2"]
         }
       ]
     },
@@ -127,19 +120,10 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-check-1": [
-      "loop",
-      "exit"
-    ],
-    "fm-node-done-3": [
-      "exit"
-    ],
-    "fm-node-fetch-0": [
-      "loop"
-    ],
-    "fm-node-retry-2": [
-      "loop"
-    ]
+    "fm-node-check-1": ["loop", "exit"],
+    "fm-node-done-3": ["exit"],
+    "fm-node-fetch-0": ["loop"],
+    "fm-node-retry-2": ["loop"]
   },
   "nodeGeometry": {
     "fm-node-check-1": {

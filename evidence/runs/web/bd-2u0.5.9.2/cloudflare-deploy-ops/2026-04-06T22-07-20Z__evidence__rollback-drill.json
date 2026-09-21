@@ -13,9 +13,7 @@
   "preflight_request": {
     "method": "GET",
     "url": "https://api.cloudflare.com/client/v4/accounts/demo-account/pages/projects/frankenmermaid/deployments",
-    "required_env": [
-      "CLOUDFLARE_API_TOKEN"
-    ],
+    "required_env": ["CLOUDFLARE_API_TOKEN"],
     "docs_url": "https://developers.cloudflare.com/pages/configuration/api/"
   },
   "docs": {

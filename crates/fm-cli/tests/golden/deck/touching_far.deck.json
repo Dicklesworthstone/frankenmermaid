@@ -69,12 +69,8 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-a-0": [
-      "left"
-    ],
-    "fm-node-b-1": [
-      "left"
-    ]
+    "fm-node-a-0": ["left"],
+    "fm-node-b-1": ["left"]
   },
   "nodeGeometry": {
     "fm-node-a-0": {

@@ -110,17 +110,11 @@
       "steps": [
         {
           "step": 1,
-          "elementIds": [
-            "fm-node-core2-3",
-            "fm-edge-2"
-          ]
+          "elementIds": ["fm-node-core2-3", "fm-edge-2"]
         },
         {
           "step": 2,
-          "elementIds": [
-            "fm-node-core3-4",
-            "fm-edge-3"
-          ]
+          "elementIds": ["fm-node-core3-4", "fm-edge-3"]
         }
       ]
     },
@@ -191,29 +185,12 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-core1-2": [
-      "core",
-      "all"
-    ],
-    "fm-node-core2-3": [
-      "core",
-      "all"
-    ],
-    "fm-node-core3-4": [
-      "core",
-      "all"
-    ],
-    "fm-node-done-5": [
-      "all"
-    ],
-    "fm-node-gate-1": [
-      "intro",
-      "all"
-    ],
-    "fm-node-start-0": [
-      "intro",
-      "all"
-    ]
+    "fm-node-core1-2": ["core", "all"],
+    "fm-node-core2-3": ["core", "all"],
+    "fm-node-core3-4": ["core", "all"],
+    "fm-node-done-5": ["all"],
+    "fm-node-gate-1": ["intro", "all"],
+    "fm-node-start-0": ["intro", "all"]
   },
   "nodeGeometry": {
     "fm-node-core1-2": {

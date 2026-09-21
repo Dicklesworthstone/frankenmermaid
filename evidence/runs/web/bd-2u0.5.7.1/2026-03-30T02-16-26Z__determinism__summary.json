@@ -2,11 +2,7 @@
   "ok": true,
   "base_url": "http://127.0.0.1:59383",
   "repeat": 1,
-  "profiles": [
-    "desktop-default",
-    "desktop-reduced-motion",
-    "mobile-narrow"
-  ],
+  "profiles": ["desktop-default", "desktop-reduced-motion", "mobile-narrow"],
   "results": [
     {
       "scenario_id": "static-web-compare-export",
@@ -172,9 +168,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:2e2ac888cab78cace8812845a4044469d18e217233b9513c8e9c086cbaa16fc0"
-      ]
+      "output_hashes": ["sha256:2e2ac888cab78cace8812845a4044469d18e217233b9513c8e9c086cbaa16fc0"]
     },
     {
       "scenario_id": "static-web-compare-export",
@@ -182,9 +176,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:95f1f02c90255207c90e5a04cc0275dfd8d23af26f18a3d6b8b42448f9726d82"
-      ]
+      "output_hashes": ["sha256:95f1f02c90255207c90e5a04cc0275dfd8d23af26f18a3d6b8b42448f9726d82"]
     },
     {
       "scenario_id": "static-web-compare-export",
@@ -192,9 +184,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:d8b1b89d2a133d81d7abfd969c627245d7a39dc3d8b08351edaf2dad5fef0b77"
-      ]
+      "output_hashes": ["sha256:d8b1b89d2a133d81d7abfd969c627245d7a39dc3d8b08351edaf2dad5fef0b77"]
     },
     {
       "scenario_id": "static-web-diagnostics-recovery",
@@ -202,9 +192,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:a64f953d9430910e8e044430909531c1d72626f02077f9b2c2d8f2616ca158c8"
-      ]
+      "output_hashes": ["sha256:a64f953d9430910e8e044430909531c1d72626f02077f9b2c2d8f2616ca158c8"]
     },
     {
       "scenario_id": "static-web-diagnostics-recovery",
@@ -212,9 +200,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:f7feddbefc37bca42d59cdfe38f06d06b0b2f9f9bcaaf567aee759bb4fa1c10c"
-      ]
+      "output_hashes": ["sha256:f7feddbefc37bca42d59cdfe38f06d06b0b2f9f9bcaaf567aee759bb4fa1c10c"]
     },
     {
       "scenario_id": "static-web-diagnostics-recovery",
@@ -222,9 +208,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:fd731043d45f9a00db08f383518b1511a164e7c2e52b04a2a025d3e57c84f53e"
-      ]
+      "output_hashes": ["sha256:fd731043d45f9a00db08f383518b1511a164e7c2e52b04a2a025d3e57c84f53e"]
     },
     {
       "scenario_id": "static-web-determinism-check",
@@ -232,9 +216,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "static-web-determinism-check",
@@ -242,9 +224,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "static-web-determinism-check",
@@ -252,9 +232,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"
-      ]
+      "output_hashes": ["sha256:db3c964ed90d6368297ca10441e854bb7415fab99c8931f20eae52464ffc6100"]
     },
     {
       "scenario_id": "static-web-presenter-tour",
@@ -262,9 +240,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:c377f8a793f2c2f5d1c70addefb64d51055161da46e64b26313989f86defadae"
-      ]
+      "output_hashes": ["sha256:c377f8a793f2c2f5d1c70addefb64d51055161da46e64b26313989f86defadae"]
     },
     {
       "scenario_id": "static-web-presenter-tour",
@@ -272,9 +248,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:d9c3ea4c213480a29426469e57c6e71d3146b37e93dddeb9665d14cf65201c9d"
-      ]
+      "output_hashes": ["sha256:d9c3ea4c213480a29426469e57c6e71d3146b37e93dddeb9665d14cf65201c9d"]
     },
     {
       "scenario_id": "static-web-presenter-tour",
@@ -282,9 +256,7 @@
       "runs": 1,
       "stable_output_hash": true,
       "stable_normalized_log": true,
-      "output_hashes": [
-        "sha256:70b8b94de8b4487ded5d941714c5b2433ed04eb724fc7ad831ed4eae4f798ac2"
-      ]
+      "output_hashes": ["sha256:70b8b94de8b4487ded5d941714c5b2433ed04eb724fc7ad831ed4eae4f798ac2"]
     }
   ]
 }

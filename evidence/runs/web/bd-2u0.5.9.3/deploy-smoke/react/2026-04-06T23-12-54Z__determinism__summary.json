@@ -6,13 +6,8 @@
   "surface": "web_react",
   "host_kind": "react-web",
   "repeat": 2,
-  "profiles": [
-    "desktop-default"
-  ],
-  "scenarios": [
-    "react-web-compare-export",
-    "react-web-diagnostics-recovery"
-  ],
+  "profiles": ["desktop-default"],
+  "scenarios": ["react-web-compare-export", "react-web-diagnostics-recovery"],
   "results": [
     {
       "scenario_id": "react-web-compare-export",

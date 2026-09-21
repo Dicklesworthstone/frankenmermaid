@@ -40,10 +40,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::flowchart_simple",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::flowchart_simple", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
       "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
       "output_sha256": "22b389670fb53dc77043860adec98cdb8de31983197c087b805056d6292ad7f3",
@@ -73,10 +70,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::flowchart_simple",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::flowchart_simple", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/flowchart_simple.mmd",
       "fixture_sha256": "dba55000ecb4ecc34a9bfd4dde2c6fd9112acae0678a075bca23f9a088396efd",
       "output_sha256": null,
@@ -173,10 +167,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::sequence_advanced",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::sequence_advanced", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
       "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
       "output_sha256": "6dde98b49f57955d44b932ce0525513e93f58719bbf5fcbf7b053ab296b131fe",
@@ -206,10 +197,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::sequence_advanced",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::sequence_advanced", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sequence_advanced.mmd",
       "fixture_sha256": "7949186d79193cb3a7b70a17bc0d21af8fe345bf42ec07104cc1fc8de710a660",
       "output_sha256": null,
@@ -306,10 +294,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::class_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::class_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
       "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
       "output_sha256": "8493fcc220bf8d0ac5f24fef73139c10f85d96c5a475504370132fb4fff9de7e",
@@ -339,10 +324,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::class_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::class_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/class_basic.mmd",
       "fixture_sha256": "7bcaebb713728cf5696ec64e78f39cb809ffbc4a3a0328c98a6c69717a079d63",
       "output_sha256": null,
@@ -439,10 +421,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::state_composite",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::state_composite", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
       "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
       "output_sha256": "839256d950a968c381fcddbe5c3e5f85898bcd6993ea05fcecca9ab758bdd0e6",
@@ -472,10 +451,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::state_composite",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::state_composite", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/state_composite.mmd",
       "fixture_sha256": "4ccdb1d2acfafc91b11278fe82655cf023af58a9ec7f9a55079759260ce37003",
       "output_sha256": null,
@@ -572,10 +548,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::er_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::er_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
       "output_sha256": "7af208d8aecf7b77efab16e43d6ffc244b5c1470a6fb2bab9e8b14ee4f350774",
@@ -605,10 +578,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::er_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::er_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/er_basic.mmd",
       "fixture_sha256": "8d0ae0635fefa2c5e9ba4dfce1fbb245c58041f91a8fc554e00cb384762512c5",
       "output_sha256": null,
@@ -705,10 +675,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
       "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
       "output_sha256": "e8276183b1cda836025df95b7b4e17088dadf5f8a735d9c5df2c24b9f323a2da",
@@ -738,10 +705,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_basic.mmd",
       "fixture_sha256": "0dbd28f2f1c494ccb74e7fde1aa3df58f07cb2691b05670875202c70c25427aa",
       "output_sha256": null,
@@ -806,10 +770,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_container",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_container", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
       "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
       "output_sha256": "0e1c75d11e8c8c44bd2a3185ecd2404f9f13aa40813ea856ec76dcd6b5a3957a",
@@ -839,10 +800,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_container",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_container", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
       "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
       "output_sha256": "e41e14fa7560576174f59926b67e301b8fac97ac7758671f34a3300c2fa1bb50",
@@ -872,10 +830,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_container",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_container", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_container.mmd",
       "fixture_sha256": "2c3b7d45284d92e708c2ef401697a9f9e1660993f7f7d249a40cc647e05b866c",
       "output_sha256": null,
@@ -940,10 +895,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_component",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_component", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
       "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
       "output_sha256": "f60a8f1be58ec26db97bb0635c4fa5221e8a4328ff695c3d3119f6a5fead80da",
@@ -973,10 +925,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_component",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_component", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
       "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
       "output_sha256": "ed30a66beb7198cfa99e4cd5da829552cbad4a5400fcfa31850196e154c83505",
@@ -1006,10 +955,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_component",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_component", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_component.mmd",
       "fixture_sha256": "455554a863ceb0dcfdacb48134b4e3315e76e63dedf502991a65a5d8717db64e",
       "output_sha256": null,
@@ -1074,10 +1020,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_dynamic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_dynamic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
       "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
       "output_sha256": "5f12519372d66c2fbbc3a2f02006229e770f282df955f289654d8612b9ea57e0",
@@ -1107,10 +1050,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_dynamic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_dynamic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
       "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
       "output_sha256": "dd3ae74349fac72c7bdab56a8623e663b766550cc0d78f6358b3e1ae0709936e",
@@ -1140,10 +1080,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_dynamic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_dynamic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_dynamic.mmd",
       "fixture_sha256": "323c0dca10a1257c73f1d84358d9fafe2cdc7e040192e77cc1c131b063eb16e2",
       "output_sha256": null,
@@ -1208,10 +1145,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_deployment",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_deployment", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
       "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
       "output_sha256": "d506a84f3e52b8851112509a1f1603cbdca531428bcc2508d04a76c1e8163c79",
@@ -1241,10 +1175,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_deployment",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_deployment", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
       "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
       "output_sha256": "d96fc6b2303bd3623caacd43f2b05838ba0fca05822d00e39d58c03aef5c841a",
@@ -1274,10 +1205,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::c4_deployment",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::c4_deployment", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/c4_deployment.mmd",
       "fixture_sha256": "d77ff0bae4e5df1e5a381e7712c55217867b74d600cebc9b3267e70b5ca90b58",
       "output_sha256": null,
@@ -1342,10 +1270,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::architecture_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::architecture_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
       "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
       "output_sha256": "cd29a2b8c4a31572741e616709aa805297c7bab2a2351578383272442e77c3e7",
@@ -1375,10 +1300,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::architecture_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::architecture_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
       "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
       "output_sha256": "94479c7fc91cb7310d0c085e8ad97fb15b196cf52fc079b105a4779bd44c8aae",
@@ -1408,10 +1330,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::architecture_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::architecture_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/architecture_basic.mmd",
       "fixture_sha256": "3c5dc19f8cc198a15043ec3695a6db5835f0a997c35372c361184b5ab532970f",
       "output_sha256": null,
@@ -1508,10 +1427,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::block_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::block_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
       "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
       "output_sha256": "a46f277087107fb6848143f36ff7aaf2542d47a82a9f3e2093d135e74250b50e",
@@ -1541,10 +1457,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::block_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::block_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/block_basic.mmd",
       "fixture_sha256": "715e2c4965a7aa1e656b1d175aae0bfe5f1dbbfa1de4a8eb0dd03e4843807834",
       "output_sha256": null,
@@ -1641,10 +1554,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::gantt_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::gantt_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
       "output_sha256": "adf2968d1d49dbf16f6c3029a8f4cd8e34b3b409cbf9928b7adde808dd96216b",
@@ -1674,10 +1584,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::gantt_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::gantt_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gantt_basic.mmd",
       "fixture_sha256": "2b6f1d760714813e04a6b5a243881e0ec038ab22972368f8a9a0e8cd6fd1496c",
       "output_sha256": null,
@@ -1742,10 +1649,7 @@
       "reasons": [
         "oracle chromium_text_diff reports UNDECIDABLE for this cell; promotion requires a deciding oracle"
       ],
-      "evidence_ids": [
-        "golden_svg_test::timeline_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::timeline_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
       "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
       "output_sha256": "4c45442ac44a77db6cf6ea1197e6ff0df1e65fff5ef50f52bd16b019b09d747a",
@@ -1775,10 +1679,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::timeline_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::timeline_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
       "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
       "output_sha256": "5ee0de70732b91041d9517d14f4bec05ea578d7579a34a4368dcb61781403457",
@@ -1808,10 +1709,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::timeline_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::timeline_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/timeline_basic.mmd",
       "fixture_sha256": "e94a329d7b79ff8efeeef981d9aa3c390d4b3fd16372bae0f5d8d2203bc6934f",
       "output_sha256": null,
@@ -1908,10 +1806,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::journey_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::journey_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
       "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
       "output_sha256": "afd20ac5fc4ae11f4492650b1b77a81510805531b40f2412e127097b452ff566",
@@ -1941,10 +1836,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::journey_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::journey_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/journey_basic.mmd",
       "fixture_sha256": "64ab516547d4089ce80cc5f4c69e331ca041d4d873426d2d246b0ce3035eec17",
       "output_sha256": null,
@@ -2009,10 +1901,7 @@
       "reasons": [
         "oracle chromium_text_diff reports DIVERGE for this cell (known deliberate: commit ids (mermaid auto-hashes \"0-67d0e3d\"; we use commit_1..N); the reverse half (\"merge develop\") needs case triage): semantic promotion is refused until the divergence is fixed or recorded as deliberate"
       ],
-      "evidence_ids": [
-        "golden_svg_test::gitgraph_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::gitgraph_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
       "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
       "output_sha256": "b3bfc35a8ebc266ccdf164ecc3a13aec9ab020a7228105ed4ae0a75269eea68a",
@@ -2042,10 +1931,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::gitgraph_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::gitgraph_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
       "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
       "output_sha256": "9ebad521ed20980739a81e9c8cb2bd5e62add3bebc1436ec2378d9bb8f97c480",
@@ -2075,10 +1961,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::gitgraph_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::gitgraph_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/gitgraph_basic.mmd",
       "fixture_sha256": "99dd03ef14b551c69e1078be5e2e0e1c788e763086a3ecb667e67f9e94cd84c2",
       "output_sha256": null,
@@ -2175,10 +2058,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::sankey_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::sankey_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
       "output_sha256": "2283bd6a0a531fc866a8fe6fc82306f6b46f93e3f1d91237f3d3453ba977b60b",
@@ -2208,10 +2088,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::sankey_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::sankey_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/sankey_basic.mmd",
       "fixture_sha256": "8185bb836daf7d36907d06e7aeb7d8899241244d06a99118a8f9cdece6071cd0",
       "output_sha256": null,
@@ -2308,10 +2185,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::mindmap_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::mindmap_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
       "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
       "output_sha256": "d8b939e395f300b0b0fdbf9f9e73e0456af840e67831bafd958bff7771bead3f",
@@ -2341,10 +2215,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::mindmap_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::mindmap_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/mindmap_basic.mmd",
       "fixture_sha256": "f6bcbb653b47862ae7e127e358d0711bc9f478ec80ef22254e29779a1ef128cc",
       "output_sha256": null,
@@ -2441,10 +2312,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::pie_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::pie_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
       "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
       "output_sha256": "6e67322fe9f2bf2955dd275e0ca5f1a532bf13a892b5191a9365596272bf8f88",
@@ -2474,10 +2342,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::pie_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::pie_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/pie_basic.mmd",
       "fixture_sha256": "71231007a564c8f127f1100841fe64375a7bd07d29e477adbb9d827c77425f5c",
       "output_sha256": null,
@@ -2574,10 +2439,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::quadrant_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::quadrant_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
       "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
       "output_sha256": "1a390ed0ec7bc63255bcc7e9fffa1ea9e4c4ee86f97cff08ea272585f7dce5c3",
@@ -2607,10 +2469,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::quadrant_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::quadrant_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/quadrant_basic.mmd",
       "fixture_sha256": "995c0a6d856ed1912196fe711fed31b1b709da611a8615014426407162e5f404",
       "output_sha256": null,
@@ -2707,10 +2566,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::xychart_comprehensive",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::xychart_comprehensive", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
       "output_sha256": "f8dccaa22eabe00bc8bf3e50b13a5649ded7b3617e2aa4f6f605b15cc9e0e669",
@@ -2740,10 +2596,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::xychart_comprehensive",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::xychart_comprehensive", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/xychart_comprehensive.mmd",
       "fixture_sha256": "35f348cc3e853cb996782cca82083bfe8a8592ba1e7ef74a9c23cff230f8116c",
       "output_sha256": null,
@@ -2840,10 +2693,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::requirement_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::requirement_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
       "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
       "output_sha256": "1a076411f4569c74e5b9e8e977d1a326e85337c66e8eb6722a608db0ef262fd6",
@@ -2873,10 +2723,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::requirement_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::requirement_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/requirement_basic.mmd",
       "fixture_sha256": "f8578fa13b4e77e461e6af18fdc6a0ef884775f5d293f28cce93d2644ccb706b",
       "output_sha256": null,
@@ -2973,10 +2820,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::packet_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::packet_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
       "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
       "output_sha256": "24122ac94ff1578241da0458ac9458cf8029443410bcc0c7b37a9432486fc20b",
@@ -3006,10 +2850,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::packet_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::packet_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/packet_basic.mmd",
       "fixture_sha256": "a3b038e9425e6f354e5e70eba5172b39337a792ce29683c564090dee23bf4ccc",
       "output_sha256": null,
@@ -3106,10 +2947,7 @@
       "reasons": [
         "capped at structural: LayoutExtensions surface coverage is uneven (bd-t1jj: terminal reads 5/13 fields, canvas 4/13), so the same IR does not yet render with equal semantics on this surface"
       ],
-      "evidence_ids": [
-        "golden_svg_test::kanban_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::kanban_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
       "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
       "output_sha256": "ad0fad1da70468f58a6b15c491ad071879f15a0449a35a3d23b7f8b9a33c3109",
@@ -3139,10 +2977,7 @@
       "reasons": [
         "render failed: this fm-cli build omits the canvas link (default features, bd-53p4): rebuild with --features support-matrix to measure canvas cells"
       ],
-      "evidence_ids": [
-        "golden_svg_test::kanban_basic",
-        "renderer_agreement"
-      ],
+      "evidence_ids": ["golden_svg_test::kanban_basic", "renderer_agreement"],
       "fixture": "/data/projects/frankenmermaid/crates/fm-cli/tests/golden/kanban_basic.mmd",
       "fixture_sha256": "d6af011414fd2f80b6d9bb52d8a624c2763ad7550ada54727f266c5949ebeeb6",
       "output_sha256": null,

@@ -25,15 +25,8 @@
           "tooltip": "Go to site"
         }
       ],
-      "svg_contains": [
-        "href=\"https://example.com\"",
-        "target=\"_blank\"",
-        "A",
-        "B"
-      ],
-      "svg_not_contains": [
-        "data-callback="
-      ]
+      "svg_contains": ["href=\"https://example.com\"", "target=\"_blank\"", "A", "B"],
+      "svg_not_contains": ["data-callback="]
     }
   },
   {
@@ -58,20 +51,13 @@
       "nodes": [
         {
           "id": "A",
-          "classes": [
-            "has-callback"
-          ],
+          "classes": ["has-callback"],
           "callback": "handleNodeClick",
           "tooltip": "Open details"
         }
       ],
-      "svg_contains": [
-        "data-callback=\"handleNodeClick\"",
-        "fm-node-has-callback"
-      ],
-      "svg_not_contains": [
-        "href=\""
-      ]
+      "svg_contains": ["data-callback=\"handleNodeClick\"", "fm-node-has-callback"],
+      "svg_not_contains": ["href=\""]
     }
   },
   {
@@ -96,25 +82,15 @@
       "nodes": [
         {
           "id": "a",
-          "classes": [
-            "block-beta",
-            "block-beta-span-2"
-          ]
+          "classes": ["block-beta", "block-beta-span-2"]
         },
         {
           "id": "c",
-          "classes": [
-            "block-beta"
-          ]
+          "classes": ["block-beta"]
         }
       ],
-      "svg_contains": [
-        "class=\"fm-cluster\"",
-        "fm-node-block-beta"
-      ],
-      "svg_not_contains": [
-        "inner1"
-      ]
+      "svg_contains": ["class=\"fm-cluster\"", "fm-node-block-beta"],
+      "svg_not_contains": ["inner1"]
     }
   },
   {
@@ -139,22 +115,11 @@
       "nodes": [
         {
           "id": "Bio-energy",
-          "classes": [
-            "sankey-node"
-          ]
+          "classes": ["sankey-node"]
         }
       ],
-      "edge_labels": [
-        "124.729",
-        "35.793"
-      ],
-      "svg_contains": [
-        "Agriculture",
-        "Bio-energy",
-        "Electricity",
-        "124.729",
-        "35.793"
-      ]
+      "edge_labels": ["124.729", "35.793"],
+      "svg_contains": ["Agriculture", "Bio-energy", "Electricity", "124.729", "35.793"]
     }
   },
   {
@@ -178,11 +143,7 @@
       },
       "xychart": {
         "title": "Sales",
-        "x_categories": [
-          "jan",
-          "feb",
-          "mar"
-        ],
+        "x_categories": ["jan", "feb", "mar"],
         "y_label": "Revenue",
         "y_min": 0.0,
         "y_max": 100.0,
@@ -190,20 +151,12 @@
           {
             "kind": "bar",
             "name": "Revenue",
-            "values": [
-              10.0,
-              20.0,
-              30.0
-            ]
+            "values": [10.0, 20.0, 30.0]
           },
           {
             "kind": "line",
             "name": "Target",
-            "values": [
-              15.0,
-              25.0,
-              35.0
-            ]
+            "values": [15.0, 25.0, 35.0]
           }
         ]
       },
@@ -222,9 +175,7 @@
     "id": "sequence_basic",
     "description": "Sequence diagram with participants and message exchanges.",
     "input_path": "fixtures/frankentui_conformance/sequence_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_parser"],
     "expected": {
       "diagram_type": "sequence",
       "warnings": {
@@ -236,21 +187,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Alice",
-        "Bob",
-        "Hello Bob",
-        "Hi Alice"
-      ]
+      "svg_contains": ["Alice", "Bob", "Hello Bob", "Hi Alice"]
     }
   },
   {
     "id": "class_inheritance",
     "description": "Class diagram with inheritance relationships and members.",
     "input_path": "fixtures/frankentui_conformance/class_inheritance.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:class_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:class_parser"],
     "expected": {
       "diagram_type": "class",
       "warnings": {
@@ -262,20 +206,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Animal",
-        "Duck",
-        "Fish"
-      ]
+      "svg_contains": ["Animal", "Duck", "Fish"]
     }
   },
   {
     "id": "state_transitions",
     "description": "State diagram with transitions between states.",
     "input_path": "fixtures/frankentui_conformance/state_transitions.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:state_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:state_parser"],
     "expected": {
       "diagram_type": "state",
       "warnings": {
@@ -287,20 +225,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Still",
-        "Moving",
-        "Crash"
-      ]
+      "svg_contains": ["Still", "Moving", "Crash"]
     }
   },
   {
     "id": "er_relationships",
     "description": "ER diagram with entities and relationships.",
     "input_path": "fixtures/frankentui_conformance/er_relationships.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:er_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:er_parser"],
     "expected": {
       "diagram_type": "er",
       "warnings": {
@@ -312,21 +244,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "CUSTOMER",
-        "ORDER",
-        "LINE-ITEM",
-        "PRODUCT"
-      ]
+      "svg_contains": ["CUSTOMER", "ORDER", "LINE-ITEM", "PRODUCT"]
     }
   },
   {
     "id": "gantt_project",
     "description": "Gantt chart with tasks and dependencies.",
     "input_path": "fixtures/frankentui_conformance/gantt_project.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:gantt_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:gantt_parser"],
     "expected": {
       "diagram_type": "gantt",
       "warnings": {
@@ -338,22 +263,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Project Schedule",
-        "Research",
-        "Design",
-        "Implementation",
-        "Testing"
-      ]
+      "svg_contains": ["Project Schedule", "Research", "Design", "Implementation", "Testing"]
     }
   },
   {
     "id": "pie_chart",
     "description": "Pie chart with labeled slices and values.",
     "input_path": "fixtures/frankentui_conformance/pie_chart.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:pie_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:pie_parser"],
     "expected": {
       "diagram_type": "pie",
       "warnings": {
@@ -365,21 +282,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Pets adopted",
-        "Dogs",
-        "Cats",
-        "Rats"
-      ]
+      "svg_contains": ["Pets adopted", "Dogs", "Cats", "Rats"]
     }
   },
   {
     "id": "mindmap_basic",
     "description": "Mindmap with root topic and branches.",
     "input_path": "fixtures/frankentui_conformance/mindmap_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:mindmap_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:mindmap_parser"],
     "expected": {
       "diagram_type": "mindmap",
       "warnings": {
@@ -391,23 +301,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Main Topic",
-        "Branch1",
-        "Branch2",
-        "Leaf1",
-        "Leaf2",
-        "Leaf3"
-      ]
+      "svg_contains": ["Main Topic", "Branch1", "Branch2", "Leaf1", "Leaf2", "Leaf3"]
     }
   },
   {
     "id": "journey_user",
     "description": "User journey diagram with sections and tasks.",
     "input_path": "fixtures/frankentui_conformance/journey_user.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:journey_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:journey_parser"],
     "expected": {
       "diagram_type": "journey",
       "warnings": {
@@ -419,22 +320,14 @@
         "clusters": 2,
         "subgraphs": 2
       },
-      "svg_contains": [
-        "My working day",
-        "Go to work",
-        "At work",
-        "Make tea",
-        "Sit down"
-      ]
+      "svg_contains": ["My working day", "Go to work", "At work", "Make tea", "Sit down"]
     }
   },
   {
     "id": "timeline_events",
     "description": "Timeline diagram with dated events.",
     "input_path": "fixtures/frankentui_conformance/timeline_events.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:timeline_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:timeline_parser"],
     "expected": {
       "diagram_type": "timeline",
       "warnings": {
@@ -446,23 +339,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "History of major events",
-        "2020",
-        "2021",
-        "2022",
-        "COVID-19",
-        "Vaccines"
-      ]
+      "svg_contains": ["History of major events", "2020", "2021", "2022", "COVID-19", "Vaccines"]
     }
   },
   {
     "id": "gitgraph_basic",
     "description": "GitGraph diagram with commits, branches and merges.",
     "input_path": "fixtures/frankentui_conformance/gitgraph_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:gitgraph_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:gitgraph_parser"],
     "expected": {
       "diagram_type": "gitGraph",
       "warnings": {
@@ -474,20 +358,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "commit_1",
-        "commit_2",
-        "merge develop"
-      ]
+      "svg_contains": ["commit_1", "commit_2", "merge develop"]
     }
   },
   {
     "id": "flowchart_basic",
     "description": "Basic flowchart with decision node and multiple paths.",
     "input_path": "fixtures/frankentui_conformance/flowchart_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:flowchart_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:flowchart_parser"],
     "expected": {
       "diagram_type": "flowchart",
       "warnings": {
@@ -499,21 +377,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Start",
-        "Decision",
-        "Action",
-        "End"
-      ]
+      "svg_contains": ["Start", "Decision", "Action", "End"]
     }
   },
   {
     "id": "c4context_basic",
     "description": "C4 Context diagram with persons, systems and relationships.",
     "input_path": "fixtures/frankentui_conformance/c4context_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"],
     "expected": {
       "diagram_type": "C4Context",
       "warnings": {
@@ -525,22 +396,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "User",
-        "System",
-        "Email",
-        "Uses",
-        "Sends"
-      ]
+      "svg_contains": ["User", "System", "Email", "Uses", "Sends"]
     }
   },
   {
     "id": "requirement_basic",
     "description": "Requirements diagram with requirements and elements.",
     "input_path": "fixtures/frankentui_conformance/requirement_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:requirement_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:requirement_parser"],
     "expected": {
       "diagram_type": "requirementDiagram",
       "warnings": {
@@ -552,19 +415,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "req1",
-        "elem1"
-      ]
+      "svg_contains": ["req1", "elem1"]
     }
   },
   {
     "id": "quadrant_basic",
     "description": "Quadrant chart with labeled axes and data points.",
     "input_path": "fixtures/frankentui_conformance/quadrant_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:quadrant_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:quadrant_parser"],
     "expected": {
       "diagram_type": "quadrantChart",
       "warnings": {
@@ -576,21 +434,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Priority",
-        "Effort",
-        "Impact",
-        "Item"
-      ]
+      "svg_contains": ["Priority", "Effort", "Impact", "Item"]
     }
   },
   {
     "id": "packet_basic",
     "description": "Packet diagram with header fields. Fields carry bit ranges and are NOT connected: the extraction source models them as `PacketField { label, bit_start, bit_end }` collected into `packet_fields` with `packet_bits_per_row: 32` (mermaid.rs:3936, 4966, 5541-5543) and emits no edges between them. The former expectation of 2 edges pinned a sequential chain we added only so the generic grid layout would order the fields; bd-51tz replaced that with a bit ruler, so the chain is gone and the edge count matches the cited source.",
     "input_path": "fixtures/frankentui_conformance/packet_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:packet_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:packet_parser"],
     "expected": {
       "diagram_type": "packet-beta",
       "warnings": {
@@ -602,20 +453,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Header",
-        "Payload",
-        "Checksum"
-      ]
+      "svg_contains": ["Header", "Payload", "Checksum"]
     }
   },
   {
     "id": "architecture_basic",
     "description": "Architecture diagram with groups and services.",
     "input_path": "fixtures/frankentui_conformance/architecture_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:architecture_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:architecture_parser"],
     "expected": {
       "diagram_type": "architecture-beta",
       "warnings": {
@@ -627,20 +472,14 @@
         "clusters": 1,
         "subgraphs": 1
       },
-      "svg_contains": [
-        "Gateway",
-        "Auth",
-        "API"
-      ]
+      "svg_contains": ["Gateway", "Auth", "API"]
     }
   },
   {
     "id": "kanban_basic",
     "description": "Kanban board with columns and tasks.",
     "input_path": "fixtures/frankentui_conformance/kanban_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:kanban_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:kanban_parser"],
     "expected": {
       "diagram_type": "kanban",
       "warnings": {
@@ -652,20 +491,14 @@
         "clusters": 6,
         "subgraphs": 6
       },
-      "svg_contains": [
-        "data-type=\"kanban\"",
-        "kanban diagram",
-        "Organized in 6 groups"
-      ]
+      "svg_contains": ["data-type=\"kanban\"", "kanban diagram", "Organized in 6 groups"]
     }
   },
   {
     "id": "c4container_basic",
     "description": "C4 Container diagram with system boundary and containers.",
     "input_path": "fixtures/frankentui_conformance/c4container_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"],
     "expected": {
       "diagram_type": "C4Container",
       "warnings": {
@@ -677,21 +510,14 @@
         "clusters": 1,
         "subgraphs": 1
       },
-      "svg_contains": [
-        "User",
-        "Web App",
-        "API",
-        "Database"
-      ]
+      "svg_contains": ["User", "Web App", "API", "Database"]
     }
   },
   {
     "id": "c4component_basic",
     "description": "C4 Component diagram with container boundary and components.",
     "input_path": "fixtures/frankentui_conformance/c4component_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"],
     "expected": {
       "diagram_type": "C4Component",
       "warnings": {
@@ -703,20 +529,14 @@
         "clusters": 1,
         "subgraphs": 1
       },
-      "svg_contains": [
-        "Controller",
-        "Service",
-        "Repository"
-      ]
+      "svg_contains": ["Controller", "Service", "Repository"]
     }
   },
   {
     "id": "c4dynamic_basic",
     "description": "C4 Dynamic diagram with numbered interactions.",
     "input_path": "fixtures/frankentui_conformance/c4dynamic_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"],
     "expected": {
       "diagram_type": "C4Dynamic",
       "warnings": {
@@ -728,22 +548,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "User",
-        "Web App",
-        "API",
-        "Opens",
-        "Fetches"
-      ]
+      "svg_contains": ["User", "Web App", "API", "Opens", "Fetches"]
     }
   },
   {
     "id": "c4deployment_basic",
     "description": "C4 Deployment diagram with deployment nodes and infrastructure.",
     "input_path": "fixtures/frankentui_conformance/c4deployment_basic.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:c4_parser"],
     "expected": {
       "diagram_type": "C4Deployment",
       "warnings": {
@@ -755,22 +567,14 @@
         "clusters": 3,
         "subgraphs": 3
       },
-      "svg_contains": [
-        "AWS",
-        "EC2",
-        "RDS",
-        "API Server",
-        "Database"
-      ]
+      "svg_contains": ["AWS", "EC2", "RDS", "API Server", "Database"]
     }
   },
   {
     "id": "flowchart_subgraph",
     "description": "Flowchart with subgraphs for grouping related nodes.",
     "input_path": "fixtures/frankentui_conformance/flowchart_subgraph.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:subgraph_parser"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:subgraph_parser"],
     "expected": {
       "diagram_type": "flowchart",
       "warnings": {
@@ -782,22 +586,14 @@
         "clusters": 2,
         "subgraphs": 2
       },
-      "svg_contains": [
-        "User",
-        "Browser",
-        "API",
-        "Database",
-        "fm-cluster"
-      ]
+      "svg_contains": ["User", "Browser", "API", "Database", "fm-cluster"]
     }
   },
   {
     "id": "sequence_notes",
     "description": "Sequence diagram with notes attached to participants.",
     "input_path": "fixtures/frankentui_conformance/sequence_notes.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_notes"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_notes"],
     "expected": {
       "diagram_type": "sequence",
       "warnings": {
@@ -809,21 +605,14 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "Alice",
-        "Bob",
-        "thinks",
-        "greet"
-      ]
+      "svg_contains": ["Alice", "Bob", "thinks", "greet"]
     }
   },
   {
     "id": "sequence_fragments",
     "description": "Sequence diagram with alt/loop fragments.",
     "input_path": "fixtures/frankentui_conformance/sequence_fragments.mmd",
-    "source_refs": [
-      "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_fragments"
-    ],
+    "source_refs": ["/dp/frankentui/crates/ftui-extras/src/mermaid.rs:sequence_fragments"],
     "expected": {
       "diagram_type": "sequence",
       "warnings": {
@@ -835,13 +624,7 @@
         "clusters": 0,
         "subgraphs": 0
       },
-      "svg_contains": [
-        "User",
-        "Server",
-        "Request",
-        "OK",
-        "Error"
-      ]
+      "svg_contains": ["User", "Server", "Request", "OK", "Error"]
     }
   }
 ]
