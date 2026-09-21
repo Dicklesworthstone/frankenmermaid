@@ -15,15 +15,9 @@
       "kind": "linux_cpufreq",
       "platform": "linux",
       "complete": true,
-      "drivers": [
-        "amd-pstate-epp"
-      ],
-      "governors": [
-        "powersave"
-      ],
-      "energy_performance_preferences": [
-        "performance"
-      ],
+      "drivers": ["amd-pstate-epp"],
+      "governors": ["powersave"],
+      "energy_performance_preferences": ["performance"],
       "boost": {
         "source": "/sys/devices/system/cpu/cpufreq/boost",
         "enabled": true,
@@ -898,9 +892,7 @@
             "index": 0,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -1132,10 +1124,7 @@
             "index": 1,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 3,
             "checks_failed": 2,
             "checks": [
@@ -1432,9 +1421,7 @@
             "index": 2,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -1666,9 +1653,7 @@
             "index": 3,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -1900,10 +1885,7 @@
             "index": 4,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 3,
             "checks_failed": 2,
             "checks": [

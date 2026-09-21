@@ -15,15 +15,9 @@
       "kind": "linux_cpufreq",
       "platform": "linux",
       "complete": true,
-      "drivers": [
-        "amd-pstate-epp"
-      ],
-      "governors": [
-        "powersave"
-      ],
-      "energy_performance_preferences": [
-        "performance"
-      ],
+      "drivers": ["amd-pstate-epp"],
+      "governors": ["powersave"],
+      "energy_performance_preferences": ["performance"],
       "boost": {
         "source": "/sys/devices/system/cpu/cpufreq/boost",
         "enabled": true,

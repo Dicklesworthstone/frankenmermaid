@@ -96,10 +96,7 @@
     "rule": "phase mean-load ratio <= 1.25"
   },
   "cv_gate": "never",
-  "median_ci_gate_failures": [
-    "er_schema_1000x6",
-    "edit_trace_200x200"
-  ],
+  "median_ci_gate_failures": ["er_schema_1000x6", "edit_trace_200x200"],
   "speedup": {
     "min": 329.7854853291691,
     "median": 1414.8112584768649,

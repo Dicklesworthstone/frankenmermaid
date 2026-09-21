@@ -51,9 +51,7 @@
     "rule": "phase CPU-busy ratio <= 1.25"
   },
   "cv_gate": "never",
-  "median_ci_gate_failures": [
-    "edit_trace_200x200"
-  ],
+  "median_ci_gate_failures": ["edit_trace_200x200"],
   "speedup": {
     "min": 6374.082146128213,
     "median": 6374.082146128213,

@@ -35,11 +35,7 @@
   "dnf_items": 0,
   "dnf": [],
   "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
-  "measurement_order": [
-    "frankenmermaid-before",
-    "mermaid-js",
-    "frankenmermaid-after"
-  ],
+  "measurement_order": ["frankenmermaid-before", "mermaid-js", "frankenmermaid-after"],
   "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
   "fm_bracket_gate_failures": [],
   "arm_asymmetry": {
@@ -67,9 +63,7 @@
     "rule": "global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A"
   },
   "cv_gate": "never",
-  "median_ci_gate_failures": [
-    "edit_trace_200x200"
-  ],
+  "median_ci_gate_failures": ["edit_trace_200x200"],
   "speedup": {
     "min": 5724.5224861145125,
     "median": 5724.5224861145125,

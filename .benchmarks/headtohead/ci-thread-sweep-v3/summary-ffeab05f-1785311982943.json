@@ -18,15 +18,7 @@
     "loadavg_1m": 5.16,
     "load_warning": null,
     "thread_sweep": {
-      "threads": [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64
-      ],
+      "threads": [1, 2, 4, 8, 16, 32, 64],
       "local_machine_required": true,
       "scalar_reference_threads": 1,
       "parallel_executor": "rayon_persistent_pool",
@@ -72,15 +64,7 @@
   "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
   "fm_bracket_gate_failures": [],
   "thread_sweep": {
-    "threads": [
-      1,
-      2,
-      4,
-      8,
-      16,
-      32,
-      64
-    ],
+    "threads": [1, 2, 4, 8, 16, 32, 64],
     "scalar_output_identity": {
       "before": {
         "verdict": "pass",

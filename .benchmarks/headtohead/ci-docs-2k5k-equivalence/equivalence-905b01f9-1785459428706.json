@@ -155,10 +155,7 @@
             "index": 7,
             "family": "state",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 3,
             "checks_failed": 1,
             "checks": [
@@ -337,9 +334,7 @@
             "index": 12,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -534,9 +529,7 @@
             "index": 20,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -766,9 +759,7 @@
             "index": 29,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -998,9 +989,7 @@
             "index": 32,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 2,
             "checks": [
@@ -1354,10 +1343,7 @@
             "index": 7,
             "family": "state",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 3,
             "checks_failed": 1,
             "checks": [
@@ -1536,9 +1522,7 @@
             "index": 12,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -1733,9 +1717,7 @@
             "index": 20,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -1965,9 +1947,7 @@
             "index": 29,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 1,
             "checks": [
@@ -2197,9 +2177,7 @@
             "index": 32,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 2,
             "checks": [

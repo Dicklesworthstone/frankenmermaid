@@ -15,15 +15,9 @@
       "kind": "linux_cpufreq",
       "platform": "linux",
       "complete": true,
-      "drivers": [
-        "amd-pstate-epp"
-      ],
-      "governors": [
-        "powersave"
-      ],
-      "energy_performance_preferences": [
-        "balance_performance"
-      ],
+      "drivers": ["amd-pstate-epp"],
+      "governors": ["powersave"],
+      "energy_performance_preferences": ["balance_performance"],
       "boost": {
         "source": "/sys/devices/system/cpu/cpufreq/boost",
         "enabled": true,
@@ -899,9 +893,7 @@
             "index": 0,
             "family": "er",
             "verdict": "divergent",
-            "tiers_decided": [
-              1
-            ],
+            "tiers_decided": [1],
             "checks_decided": 2,
             "checks_failed": 2,
             "checks": [

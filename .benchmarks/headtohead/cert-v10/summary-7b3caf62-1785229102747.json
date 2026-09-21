@@ -44,11 +44,7 @@
     }
   ],
   "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
-  "measurement_order": [
-    "frankenmermaid-before",
-    "mermaid-js",
-    "frankenmermaid-after"
-  ],
+  "measurement_order": ["frankenmermaid-before", "mermaid-js", "frankenmermaid-after"],
   "fm_bracket_gate_rule": "Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)",
   "fm_bracket_gate_failures": [],
   "arm_asymmetry": {

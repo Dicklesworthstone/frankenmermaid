@@ -15,15 +15,9 @@
       "kind": "linux_cpufreq",
       "platform": "linux",
       "complete": true,
-      "drivers": [
-        "amd-pstate-epp"
-      ],
-      "governors": [
-        "powersave"
-      ],
-      "energy_performance_preferences": [
-        "performance"
-      ],
+      "drivers": ["amd-pstate-epp"],
+      "governors": ["powersave"],
+      "energy_performance_preferences": ["performance"],
       "boost": {
         "source": "/sys/devices/system/cpu/cpufreq/boost",
         "enabled": true,
@@ -943,10 +937,7 @@
             "index": 20,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -1205,10 +1196,7 @@
             "index": 32,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -1487,10 +1475,7 @@
             "index": 37,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -1729,10 +1714,7 @@
             "index": 54,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -1971,10 +1953,7 @@
             "index": 60,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -2364,10 +2343,7 @@
             "index": 20,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -2626,10 +2602,7 @@
             "index": 32,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -2908,10 +2881,7 @@
             "index": 37,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -3150,10 +3120,7 @@
             "index": 54,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
@@ -3392,10 +3359,7 @@
             "index": 60,
             "family": "class",
             "verdict": "divergent",
-            "tiers_decided": [
-              1,
-              2
-            ],
+            "tiers_decided": [1, 2],
             "checks_decided": 8,
             "checks_failed": 2,
             "checks": [
