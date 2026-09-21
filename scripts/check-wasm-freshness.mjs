@@ -21,17 +21,17 @@
 // Usage: node scripts/check-wasm-freshness.mjs
 // Exit 0 = the published package carries these fixes. Exit 1 = it is stale. Exit 2 = cannot run.
 
-import { readFileSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PKG_JS = join(ROOT, 'pkg', 'frankenmermaid.js');
-const PKG_WASM = join(ROOT, 'pkg', 'frankenmermaid_bg.wasm');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PKG_JS = join(ROOT, "pkg", "frankenmermaid.js");
+const PKG_WASM = join(ROOT, "pkg", "frankenmermaid_bg.wasm");
 
 if (!existsSync(PKG_JS) || !existsSync(PKG_WASM)) {
-  console.error(`cannot run: no published package at ${join(ROOT, 'pkg')}`);
-  console.error('build it with ./build-wasm.sh, or this repo no longer vendors the artifact.');
+  console.error(`cannot run: no published package at ${join(ROOT, "pkg")}`);
+  console.error("build it with ./build-wasm.sh, or this repo no longer vendors the artifact.");
   process.exit(2);
 }
 
@@ -47,7 +47,7 @@ try {
 
 /** Left edge of every `<rect>` inside a node group whose id matches `idPattern`. */
 function nodeRectXs(svg, idPattern) {
-  const re = new RegExp(`<g id="fm-node-${idPattern}"[\\s\\S]{0,400}?<rect x="([\\d.]+)"`, 'g');
+  const re = new RegExp(`<g id="fm-node-${idPattern}"[\\s\\S]{0,400}?<rect x="([\\d.]+)"`, "g");
   return [...svg.matchAll(re)].map((m) => Number(m[1]));
 }
 
@@ -55,18 +55,20 @@ function nodeRectXs(svg, idPattern) {
 function nodeRectWidths(svg, idPattern) {
   const re = new RegExp(
     `<g id="fm-node-${idPattern}"[\\s\\S]{0,400}?<rect x="[\\d.]+" y="[\\d.]+" width="([\\d.]+)"`,
-    'g',
+    "g",
   );
   return [...svg.matchAll(re)].map((m) => Number(m[1]));
 }
 
 const checks = [
   {
-    bead: 'bd-eg44',
-    what: 'kanban lanes are columns, not one stacked pile',
+    bead: "bd-eg44",
+    what: "kanban lanes are columns, not one stacked pile",
     run() {
-      const svg = renderSvg('kanban\n  Todo\n    Task A\n    Task B\n  Doing\n    Task C\n    Task D\n');
-      const xs = nodeRectXs(svg, 'task-[a-z]-\\d+');
+      const svg = renderSvg(
+        "kanban\n  Todo\n    Task A\n    Task B\n  Doing\n    Task C\n    Task D\n",
+      );
+      const xs = nodeRectXs(svg, "task-[a-z]-\\d+");
       const columns = new Set(xs);
       if (xs.length < 4) return `read ${xs.length} cards, expected 4`;
       if (columns.size < 2) return `all ${xs.length} cards share x=${xs[0]}`;
@@ -74,12 +76,14 @@ const checks = [
     },
   },
   {
-    bead: 'bd-51tz',
-    what: 'packet field width is its bit count, not its label length',
+    bead: "bd-51tz",
+    what: "packet field width is its bit count, not its label length",
     run() {
       // Two 16-bit fields with very different label lengths must render identically wide.
-      const svg = renderSvg('packet-beta\n0-15: "A"\n16-31: "An extremely long field name indeed"\n');
-      const widths = nodeRectWidths(svg, 'pkt-field-\\d+-\\d+');
+      const svg = renderSvg(
+        'packet-beta\n0-15: "A"\n16-31: "An extremely long field name indeed"\n',
+      );
+      const widths = nodeRectWidths(svg, "pkt-field-\\d+-\\d+");
       if (widths.length < 2) return `read ${widths.length} fields, expected 2`;
       if (Math.abs(widths[0] - widths[1]) > 0.5) {
         return `two 16-bit fields render ${widths[0]} and ${widths[1]} wide`;
@@ -88,25 +92,27 @@ const checks = [
     },
   },
   {
-    bead: 'bd-f3tc',
+    bead: "bd-f3tc",
     what: "a requirement's declared id: and text: reach the output",
     run() {
       const svg = renderSvg(
-        'requirementDiagram\n  requirement R {\n    id: REQ-001\n    text: Users must authenticate\n  }\n',
+        "requirementDiagram\n  requirement R {\n    id: REQ-001\n    text: Users must authenticate\n  }\n",
       );
-      const missing = ['REQ-001', 'Users must authenticate'].filter((v) => !svg.includes(v));
-      return missing.length ? `absent from the render: ${missing.join(', ')}` : null;
+      const missing = ["REQ-001", "Users must authenticate"].filter((v) => !svg.includes(v));
+      return missing.length ? `absent from the render: ${missing.join(", ")}` : null;
     },
   },
   {
-    bead: 'bd-9w54',
-    what: 'a composite state is drawn once, as its container',
+    bead: "bd-9w54",
+    what: "a composite state is drawn once, as its container",
     run() {
       const svg = renderSvg(
-        'stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    Validating --> Computing\n  }\n  Idle --> Processing\n',
+        "stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    Validating --> Computing\n  }\n  Idle --> Processing\n",
       );
       const drawn = [...svg.matchAll(/data-id="Processing"/g)].length;
-      return drawn === 0 ? null : `composite state also drawn as a plain node (${drawn} occurrence(s))`;
+      return drawn === 0
+        ? null
+        : `composite state also drawn as a plain node (${drawn} occurrence(s))`;
     },
   },
 ];
@@ -130,8 +136,8 @@ for (const check of checks) {
 if (stale > 0) {
   console.error(
     `\n${stale} of ${checks.length} checks failed: the published package in pkg/ predates fixes ` +
-      'already landed in this repo.\nRegenerate it with ./build-wasm.sh and commit the result ' +
-      '(the files are tracked but gitignored, so they need `git add -f` by explicit path).',
+      "already landed in this repo.\nRegenerate it with ./build-wasm.sh and commit the result " +
+      "(the files are tracked but gitignored, so they need `git add -f` by explicit path).",
   );
   process.exit(1);
 }

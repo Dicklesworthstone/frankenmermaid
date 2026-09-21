@@ -21,46 +21,64 @@
 // `Runtime` domain: `Runtime.evaluate` there answers
 // `{"code":-32601,"message":"'Runtime.evaluate' wasn't found"}`, which reads like a Chromium version
 // problem and is not one. The page target comes from `/json/list`.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+
+import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, '..', '..');
-const BUNDLE_PATH = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
-const PINS = JSON.parse(fs.readFileSync(path.join(HERE, 'pins.json'), 'utf8'));
+const REPO = path.resolve(HERE, "..", "..");
+const BUNDLE_PATH = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
+const PINS = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 const CHROMIUM = process.env.FM_CHROMIUM_BIN ?? PINS.chromium.binary;
-const FM_CLI = process.env.FM_CLI ?? path.join(REPO, 'target/local/debug/fm-cli');
-const GOLDEN_DIR = path.join(REPO, 'crates/fm-cli/tests/golden');
+const FM_CLI = process.env.FM_CLI ?? path.join(REPO, "target/local/debug/fm-cli");
+const GOLDEN_DIR = path.join(REPO, "crates/fm-cli/tests/golden");
 
 // Snap confinement denies hidden dirs under $HOME, so the profile goes where pins.json says the
 // harness puts it.
-const PROFILE_ROOT = path.join(os.homedir(), 'snap', 'chromium', 'common');
+const PROFILE_ROOT = path.join(os.homedir(), "snap", "chromium", "common");
 
 const argv = process.argv.slice(2);
-const files = argv.includes('--all-goldens')
-  ? fs.readdirSync(GOLDEN_DIR).filter((f) => f.endsWith('.mmd')).sort().map((f) => path.join(GOLDEN_DIR, f))
-  : argv.filter((a) => !a.startsWith('--'));
+const files = argv.includes("--all-goldens")
+  ? fs
+      .readdirSync(GOLDEN_DIR)
+      .filter((f) => f.endsWith(".mmd"))
+      .sort()
+      .map((f) => path.join(GOLDEN_DIR, f))
+  : argv.filter((a) => !a.startsWith("--"));
 
 if (files.length === 0) {
-  console.error('usage: chromium_text_diff.mjs <file.mmd> [...] | --all-goldens');
+  console.error("usage: chromium_text_diff.mjs <file.mmd> [...] | --all-goldens");
   process.exit(2);
 }
 
 async function launchChromium() {
-  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, 'fm-textdiff-'));
-  const proc = spawn(CHROMIUM, [
-    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-    '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-    '--disable-background-networking', '--disable-sync', '--mute-audio', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, "fm-textdiff-"));
+  const proc = spawn(
+    CHROMIUM,
+    [
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profile}`,
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-sync",
+      "--mute-audio",
+      "about:blank",
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
 
-  let stderr = '';
+  let stderr = "";
   let port = null;
-  proc.stderr.on('data', (chunk) => {
+  proc.stderr.on("data", (chunk) => {
     stderr += String(chunk);
     const m = stderr.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/);
     if (m) port = Number(m[1]);
@@ -74,14 +92,16 @@ async function launchChromium() {
         if (res.ok) {
           const info = await res.json();
           const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-          const page = list.find((t) => t.type === 'page');
+          const page = list.find((t) => t.type === "page");
           if (page) return { proc, info, page };
         }
-      } catch { /* not up yet */ }
+      } catch {
+        /* not up yet */
+      }
     }
     await new Promise((r) => setTimeout(r, 120));
   }
-  proc.kill('SIGKILL');
+  proc.kill("SIGKILL");
   throw new Error(`chromium never exposed a devtools port; stderr tail: ${stderr.slice(-400)}`);
 }
 
@@ -91,14 +111,21 @@ function attach(page) {
   let id = 0;
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)(msg);
+      pending.delete(msg.id);
+    }
   };
-  const send = (method, params) => new Promise((resolve) => {
-    const n = ++id;
-    pending.set(n, resolve);
-    ws.send(JSON.stringify({ id: n, method, params }));
+  const send = (method, params) =>
+    new Promise((resolve) => {
+      const n = ++id;
+      pending.set(n, resolve);
+      ws.send(JSON.stringify({ id: n, method, params }));
+    });
+  const ready = new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
   });
-  const ready = new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   return { ws, send, ready };
 }
 
@@ -106,23 +133,30 @@ function attach(page) {
 function ourRuns(source) {
   let svg;
   try {
-    svg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], {
-      input: source, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+    svg = execFileSync(FM_CLI, ["render", "-f", "svg", "-"], {
+      input: source,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
     });
   } catch (error) {
-    return { dnf: `fm-cli failed: ${String(error.message).split('\n')[0]}` };
+    return { dnf: `fm-cli failed: ${String(error.message).split("\n")[0]}` };
   }
   const runs = [...svg.matchAll(/<text[^>]*>(.*?)<\/text>/gs)]
-    .map((m) => m[1]
-      // ⚠️ A SEPARATOR BETWEEN TSPANS, NOT A BARE STRIP. Deleting the tags concatenates the lines of
-      // a wrapped label, so `Stores user` + `registration` becomes `Stores userregistration` — a
-      // string neither engine ever drew, differing from the other side in a way that looks like a
-      // lost space rather than a line break. `drawn_text_diff.mjs` hit exactly this on sankey and
-      // the rule is inherited: split first, join with a newline, and let `squash` decide.
-      .replace(/<\/tspan>\s*<tspan[^>]*>/g, '\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-      .trim())
+    .map((m) =>
+      m[1]
+        // ⚠️ A SEPARATOR BETWEEN TSPANS, NOT A BARE STRIP. Deleting the tags concatenates the lines of
+        // a wrapped label, so `Stores user` + `registration` becomes `Stores userregistration` — a
+        // string neither engine ever drew, differing from the other side in a way that looks like a
+        // lost space rather than a line break. `drawn_text_diff.mjs` hit exactly this on sankey and
+        // the rule is inherited: split first, join with a newline, and let `squash` decide.
+        .replace(/<\/tspan>\s*<tspan[^>]*>/g, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .trim(),
+    )
     .filter(Boolean);
   return { runs };
 }
@@ -159,24 +193,30 @@ function multisetDiff(mine, theirs) {
  * nothing about correctness. `drawn_text_diff.mjs` learned this the expensive way; the rule is
  * inherited here rather than rediscovered.
  */
-const squash = (s) => s.replace(/\s+/g, ' ').trim();
+const squash = (s) => s.replace(/\s+/g, " ").trim();
 
 const { proc, info, page } = await launchChromium();
 const { ws, send, ready } = attach(page);
 await ready;
-await send('Runtime.enable');
+await send("Runtime.enable");
 
 const evaluate = async (expression) => {
-  const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  const res = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
   if (res.error) throw new Error(JSON.stringify(res.error));
   if (res.result?.exceptionDetails) {
-    throw new Error(res.result.exceptionDetails.exception?.description
-      ?? JSON.stringify(res.result.exceptionDetails));
+    throw new Error(
+      res.result.exceptionDetails.exception?.description ??
+        JSON.stringify(res.result.exceptionDetails),
+    );
   }
   return res.result?.result?.value;
 };
 
-await evaluate(`${fs.readFileSync(BUNDLE_PATH, 'utf8')}\n;typeof mermaid`);
+await evaluate(`${fs.readFileSync(BUNDLE_PATH, "utf8")}\n;typeof mermaid`);
 await evaluate(`mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' }); 'ok'`);
 
 let agree = 0;
@@ -185,8 +225,8 @@ let undecidable = 0;
 let dnf = 0;
 
 for (const [index, file] of files.entries()) {
-  const name = path.basename(file, '.mmd');
-  const source = fs.readFileSync(file, 'utf8');
+  const name = path.basename(file, ".mmd");
+  const source = fs.readFileSync(file, "utf8");
 
   let theirs;
   try {
@@ -243,7 +283,9 @@ for (const [index, file] of files.entries()) {
       return runs;
     })()`);
   } catch (error) {
-    console.log(`INCUMBENT-DNF  ${name.padEnd(28)} ${String(error.message).split('\n')[0].slice(0, 90)}`);
+    console.log(
+      `INCUMBENT-DNF  ${name.padEnd(28)} ${String(error.message).split("\n")[0].slice(0, 90)}`,
+    );
     dnf += 1;
     continue;
   }
@@ -275,22 +317,29 @@ for (const [index, file] of files.entries()) {
   // by mermaid appears under "mermaid draws, we do not" — reading exactly like a run we omit
   // entirely, when in fact we draw it and the count differs. That misread cost a filing once
   // already; the counts settle it.
-  if (argv.includes('--dump')) {
-    const tally = (xs) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map())]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([text, n]) => (n > 1 ? `${JSON.stringify(text)}x${n}` : JSON.stringify(text)))
-      .join(' ');
+  if (argv.includes("--dump")) {
+    const tally = (xs) =>
+      [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map())]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([text, n]) => (n > 1 ? `${JSON.stringify(text)}x${n}` : JSON.stringify(text)))
+        .join(" ");
     console.log(`    incumbent (${theirs.length}): ${tally(theirs)}`);
     console.log(`    ours      (${mine.runs.length}): ${tally(mine.runs)}`);
   }
-  if (squashed.onlyTheirs.length) console.log(`    mermaid draws, we do not: ${JSON.stringify(squashed.onlyTheirs.slice(0, 12))}`);
-  if (squashed.onlyMine.length) console.log(`    we draw, mermaid does not: ${JSON.stringify(squashed.onlyMine.slice(0, 12))}`);
+  if (squashed.onlyTheirs.length)
+    console.log(
+      `    mermaid draws, we do not: ${JSON.stringify(squashed.onlyTheirs.slice(0, 12))}`,
+    );
+  if (squashed.onlyMine.length)
+    console.log(`    we draw, mermaid does not: ${JSON.stringify(squashed.onlyMine.slice(0, 12))}`);
   diverge += 1;
 }
 
-console.log(`\n${agree} agree, ${diverge} diverge, ${undecidable} undecidable, ${dnf} DNF  (chromium ${info.Browser}, bundle mermaid@11.15.0)`);
+console.log(
+  `\n${agree} agree, ${diverge} diverge, ${undecidable} undecidable, ${dnf} DNF  (chromium ${info.Browser}, bundle mermaid@11.15.0)`,
+);
 ws.close();
-proc.kill('SIGKILL');
+proc.kill("SIGKILL");
 // UNDECIDABLE and DNF are NOT failures: the first means the instrument cannot tell, the second means
 // one engine refused the input. Only a real divergence sets a non-zero status.
 process.exit(diverge === 0 ? 0 : 1);

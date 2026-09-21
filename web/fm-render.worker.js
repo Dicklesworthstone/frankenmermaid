@@ -19,7 +19,11 @@ const cancelledOffscreenRequestIds = new Set();
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
-  if (!moduleUrl || moduleUrl === "../pkg/frankenmermaid.js" || moduleUrl.endsWith("frankenmermaid.js")) {
+  if (
+    !moduleUrl ||
+    moduleUrl === "../pkg/frankenmermaid.js" ||
+    moduleUrl.endsWith("frankenmermaid.js")
+  ) {
     wasm = await import("../pkg/frankenmermaid.js");
   } else {
     wasm = await import(/* @vite-ignore */ `${moduleUrl}`);
@@ -36,9 +40,11 @@ function yieldToMessages() {
 }
 
 function isOffscreenRenderRequest(message) {
-  return message.kind === "render"
-    && Number.isSafeInteger(message.requestId)
-    && typeof message.input === "string";
+  return (
+    message.kind === "render" &&
+    Number.isSafeInteger(message.requestId) &&
+    typeof message.input === "string"
+  );
 }
 
 async function renderOffscreenIfStillLive(message) {

@@ -19,9 +19,9 @@
 // is never mixed into the ratio aggregate: we say "mermaid did not finish inside B seconds", which
 // is a claim about mermaid, not a number we made up for it.
 
-import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { EventEmitter } from 'node:events';
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   accessSync,
   constants,
@@ -30,15 +30,15 @@ import {
   mkdtempSync,
   readFileSync,
   writeFileSync,
-} from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { Script, createContext, runInContext } from 'node:vm';
-import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createContext, runInContext, Script } from "node:vm";
+import { CORPUS, generate, REVISION_SEP, sha256 } from "./corpus.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PINS = JSON.parse(readFileSync(join(HERE, 'pins.json'), 'utf8'));
+const PINS = JSON.parse(readFileSync(join(HERE, "pins.json"), "utf8"));
 const MIN_NULL_ROUNDS = 9;
 const ISOLATED_NULL_ROUNDS = 10;
 const ISOLATED_SAMPLE_MIN_DOCUMENTS = 100;
@@ -47,8 +47,7 @@ const BOOTSTRAP_RESAMPLES = 2_000;
 // run.mjs re-checks these exact values on the mermaid-js record, so the two files must move
 // together; the calibration target keeps the runner's floor + ceil(floor/2) rule.
 const PARSE_MIN_SAMPLE_MS = 250;
-const PARSE_CALIBRATION_TARGET_MS =
-  PARSE_MIN_SAMPLE_MS + Math.ceil(PARSE_MIN_SAMPLE_MS / 2);
+const PARSE_CALIBRATION_TARGET_MS = PARSE_MIN_SAMPLE_MS + Math.ceil(PARSE_MIN_SAMPLE_MS / 2);
 const CHROMIUM_STARTUP_ATTEMPTS = 2;
 const CHROMIUM_EXIT_CONFIRM_MS = 5_000;
 const CHROMIUM_STARTUP_STDERR_TAIL_BYTES = 4_096;
@@ -97,7 +96,7 @@ function lastDevtoolsPortIn(text) {
 /// The latch keeps a short carry so a line split across two chunk boundaries still matches, and it
 /// never un-latches: once a live port is known, later noise cannot erase it.
 function createDevtoolsPortLatch() {
-  let carry = '';
+  let carry = "";
   let port = null;
   return {
     feed(chunk) {
@@ -126,23 +125,25 @@ function createDevtoolsPortLatch() {
 function selectStartupDiagnostic(stderrTails) {
   const tails = Array.isArray(stderrTails) ? stderrTails : [];
   for (let i = 0; i < tails.length; i++) {
-    const hint = chromiumStartupRecoveryHint(tails[i] ?? '');
-    if (hint !== '') return { attempt: i + 1, tail: tails[i] ?? '', hint, reason: 'recovery_hint' };
+    const hint = chromiumStartupRecoveryHint(tails[i] ?? "");
+    if (hint !== "") return { attempt: i + 1, tail: tails[i] ?? "", hint, reason: "recovery_hint" };
   }
-  if (tails.length === 0) return { attempt: 0, tail: '', hint: '', reason: 'no_attempts' };
+  if (tails.length === 0) return { attempt: 0, tail: "", hint: "", reason: "no_attempts" };
   const attempt = tails.length;
-  return { attempt, tail: tails[attempt - 1] ?? '', hint: '', reason: 'last_attempt' };
+  return { attempt, tail: tails[attempt - 1] ?? "", hint: "", reason: "last_attempt" };
 }
 
 function chromiumStartupRecoveryHint(stderrTail) {
   if (
-    !stderrTail.includes('Failed to create socket directory') ||
-    !stderrTail.includes('Failed to create a ProcessSingleton')
+    !stderrTail.includes("Failed to create socket directory") ||
+    !stderrTail.includes("Failed to create a ProcessSingleton")
   ) {
-    return '';
+    return "";
   }
-  return ' Detected Chromium snap private-tmp namespace failure; ask the host operator to run ' +
-    '`sudo /usr/lib/snapd/snap-discard-ns chromium`, then retry.';
+  return (
+    " Detected Chromium snap private-tmp namespace failure; ask the host operator to run " +
+    "`sudo /usr/lib/snapd/snap-discard-ns chromium`, then retry."
+  );
 }
 
 /** Stable, queryable category for a comparator failure; the raw error remains the evidence. */
@@ -156,24 +157,32 @@ function chromiumStartupRecoveryHint(stderrTail) {
 /// `timeout` is a class in its own right, not a crash wearing a label: only `failed` reasons are
 /// pattern matched, and the record's `kind` field still separates "was still working" from "raised".
 function dnfFailureClass(kind, reason) {
-  return kind === 'failed' ? normalizedFailureClass(reason) : 'timeout';
+  return kind === "failed" ? normalizedFailureClass(reason) : "timeout";
 }
 
 function normalizedFailureClass(reason) {
   const text = String(reason);
-  if (/\brange[ _-]?error\b|maximum call stack size exceeded|too much recursion|stack overflow/i.test(text)) return 'range_error';
-  if (/\bout[ _-]?of[ _-]?memory\b|heap limit reached|\boom(?:[_-]?(?:error|failure))?\b/i.test(text)) return 'out_of_memory';
-  return 'uncategorized';
+  if (
+    /\brange[ _-]?error\b|maximum call stack size exceeded|too much recursion|stack overflow/i.test(
+      text,
+    )
+  )
+    return "range_error";
+  if (
+    /\bout[ _-]?of[ _-]?memory\b|heap limit reached|\boom(?:[_-]?(?:error|failure))?\b/i.test(text)
+  )
+    return "out_of_memory";
+  return "uncategorized";
 }
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
-const CACHE = join(homedir(), '.cache', 'fm-headtohead');
+const CACHE = join(homedir(), ".cache", "fm-headtohead");
 
 // Chromium's profile is another matter: snap's `home` interface denies access to *hidden*
 // directories under $HOME (`~/.cache/...` => "Failed to create SingletonLock: Permission denied"),
 // so the profile must live in the snap's own writable area. Each run gets a fresh mkdtemp profile;
 // nothing is ever deleted (AGENTS.md rule 1), the dirs are small and live outside the repo.
-const SNAP_COMMON = join(homedir(), 'snap', 'chromium', 'common');
+const SNAP_COMMON = join(homedir(), "snap", "chromium", "common");
 const PROFILE_ROOT = existsSync(SNAP_COMMON) ? SNAP_COMMON : homedir();
 
 function arg(name, fallback = null) {
@@ -181,7 +190,7 @@ function arg(name, fallback = null) {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
 }
 const has = (name) => process.argv.includes(`--${name}`);
-const log = (...a) => console.error('[mermaid]', ...a);
+const log = (...a) => console.error("[mermaid]", ...a);
 
 function isExecutable(path) {
   try {
@@ -194,19 +203,14 @@ function isExecutable(path) {
 
 function resolveChromiumBinary(override, pinned, executable = isExecutable) {
   const binary = override || pinned;
-  if (
-    typeof binary === 'string' &&
-    binary.length > 0 &&
-    isAbsolute(binary) &&
-    executable(binary)
-  ) {
+  if (typeof binary === "string" && binary.length > 0 && isAbsolute(binary) && executable(binary)) {
     return binary;
   }
 
-  const source = override ? 'FM_CHROMIUM_BIN' : 'pins.json chromium.binary';
+  const source = override ? "FM_CHROMIUM_BIN" : "pins.json chromium.binary";
   throw new Error(
-    `${source} is not an executable absolute path: ${binary || '<missing>'}; ` +
-    'set FM_CHROMIUM_BIN to the absolute path of Chrome or Chromium',
+    `${source} is not an executable absolute path: ${binary || "<missing>"}; ` +
+      "set FM_CHROMIUM_BIN to the absolute path of Chrome or Chromium",
   );
 }
 
@@ -218,23 +222,23 @@ async function bundle() {
   const cached = join(CACHE, `mermaid-${version}.min.js`);
   let text;
   if (existsSync(cached)) {
-    text = readFileSync(cached, 'utf8');
+    text = readFileSync(cached, "utf8");
   } else {
     log(`fetching pinned bundle ${url}`);
-    const res = await fetch(url, { redirect: 'follow' });
+    const res = await fetch(url, { redirect: "follow" });
     if (!res.ok) throw new Error(`bundle fetch failed: HTTP ${res.status} ${url}`);
     text = await res.text();
     writeFileSync(cached, text);
   }
-  const got = createHash('sha256').update(text, 'utf8').digest('hex');
-  if (has('pin')) {
+  const got = createHash("sha256").update(text, "utf8").digest("hex");
+  if (has("pin")) {
     console.error(`mermaid ${version} sha256 = ${got}`);
     process.exit(0);
   }
   if (want && got !== want) {
     throw new Error(
       `pinned bundle SHA-256 mismatch for mermaid ${version}\n  want ${want}\n  got  ${got}\n` +
-      `Refusing to benchmark against an unpinned bundle. Inspect or move ${cached}, then re-run.`,
+        `Refusing to benchmark against an unpinned bundle. Inspect or move ${cached}, then re-run.`,
     );
   }
   return { text, version, url, sha256: got };
@@ -243,7 +247,9 @@ async function bundle() {
 // ---------------------------------------------------------------- minimal CDP client
 
 class Cdp {
-  #ws; #next = 1; #pending = new Map();
+  #ws;
+  #next = 1;
+  #pending = new Map();
 
   #failPending(error) {
     for (const pending of this.#pending.values()) pending.reject(error);
@@ -253,15 +259,17 @@ class Cdp {
   static async attach(wsUrl) {
     const ws = new WebSocket(wsUrl);
     await new Promise((res, rej) => {
-      ws.addEventListener('open', res, { once: true });
-      ws.addEventListener('error', () => rej(new Error(`cdp connect failed: ${wsUrl}`)), { once: true });
+      ws.addEventListener("open", res, { once: true });
+      ws.addEventListener("error", () => rej(new Error(`cdp connect failed: ${wsUrl}`)), {
+        once: true,
+      });
     });
     const c = new Cdp();
     c.#ws = ws;
-    ws.addEventListener('message', (ev) => {
+    ws.addEventListener("message", (ev) => {
       const msg = JSON.parse(ev.data);
-      if (!('id' in msg)) {
-        if (msg.method === 'Inspector.targetCrashed' || msg.method === 'Target.targetCrashed') {
+      if (!("id" in msg)) {
+        if (msg.method === "Inspector.targetCrashed" || msg.method === "Target.targetCrashed") {
           c.#failPending(new Error(`chromium target crashed during benchmark (${msg.method})`));
         }
         return;
@@ -272,11 +280,11 @@ class Cdp {
       if (msg.error) p.reject(new Error(`${msg.error.message} (cdp ${msg.error.code})`));
       else p.resolve(msg.result);
     });
-    ws.addEventListener('close', () => {
-      c.#failPending(new Error('chromium devtools connection closed during benchmark'));
+    ws.addEventListener("close", () => {
+      c.#failPending(new Error("chromium devtools connection closed during benchmark"));
     });
-    ws.addEventListener('error', () => {
-      c.#failPending(new Error('chromium devtools connection failed during benchmark'));
+    ws.addEventListener("error", () => {
+      c.#failPending(new Error("chromium devtools connection failed during benchmark"));
     });
     return c;
   }
@@ -291,28 +299,30 @@ class Cdp {
     });
   }
 
-  close() { this.#ws.close(); }
+  close() {
+    this.#ws.close();
+  }
 }
 
 async function confirmChromiumExit(proc) {
   if (proc.exitCode !== null || proc.signalCode !== null) return true;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
-      proc.removeListener('exit', exited);
+      proc.removeListener("exit", exited);
       resolve(false);
     }, CHROMIUM_EXIT_CONFIRM_MS);
     const exited = () => {
       clearTimeout(timer);
       resolve(true);
     };
-    proc.once('exit', exited);
+    proc.once("exit", exited);
   });
 }
 
 async function stopChromiumForStartupRetry(proc) {
   if (proc.exitCode === null && proc.signalCode === null) {
     try {
-      proc.kill('SIGKILL');
+      proc.kill("SIGKILL");
     } catch {
       return false;
     }
@@ -325,31 +335,46 @@ async function launchChromium() {
   let lastError = null;
   const stderrTails = [];
   for (let attempt = 1; attempt <= CHROMIUM_STARTUP_ATTEMPTS; attempt++) {
-    const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
-    const proc = spawn(bin, [
-      '--headless=new',
-      '--remote-debugging-port=0',
-      `--user-data-dir=${profile}`,
-      '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-      '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-      '--disable-background-networking', '--disable-sync', '--metrics-recording-only',
-      '--mute-audio', '--hide-scrollbars',
-      'about:blank',
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderrTail = '';
+    const profile = mkdtempSync(join(PROFILE_ROOT, "fm-h2h-profile-"));
+    const proc = spawn(
+      bin,
+      [
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--hide-scrollbars",
+        "about:blank",
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let stderrTail = "";
     const portLatch = createDevtoolsPortLatch();
-    proc.stderr?.on('data', (chunk) => {
+    proc.stderr?.on("data", (chunk) => {
       portLatch.feed(chunk);
       stderrTail = appendStartupStderrTail(stderrTail, chunk);
     });
     let spawnError = null;
-    proc.once('error', (error) => { spawnError = error; });
+    proc.once("error", (error) => {
+      spawnError = error;
+    });
 
     try {
       const deadline = Date.now() + 30_000;
       for (;;) {
-        if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
-        if (Date.now() > deadline) throw new Error('chromium did not expose a devtools port within 30s');
+        if (spawnError)
+          throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
+        if (Date.now() > deadline)
+          throw new Error("chromium did not expose a devtools port within 30s");
         const port = portLatch.port();
         if (port === null) {
           await new Promise((r) => setTimeout(r, 120));
@@ -361,21 +386,26 @@ async function launchChromium() {
             const info = await res.json();
             return { proc, port, info, bin, cdp: await Cdp.attach(info.webSocketDebuggerUrl) };
           }
-        } catch { /* not up yet */ }
+        } catch {
+          /* not up yet */
+        }
         await new Promise((r) => setTimeout(r, 120));
       }
     } catch (error) {
       lastError = error;
       stderrTails.push(stderrTail);
       if (!(await stopChromiumForStartupRetry(proc))) {
-        throw new Error(`chromium startup failed and process exit was not confirmed: ${error.message}`);
+        throw new Error(
+          `chromium startup failed and process exit was not confirmed: ${error.message}`,
+        );
       }
     }
   }
   const selected = selectStartupDiagnostic(stderrTails);
-  const diagnostic = selected.tail.length > 0
-    ? `; chromium stderr tail (attempt ${selected.attempt}/${CHROMIUM_STARTUP_ATTEMPTS}, selected by ${selected.reason}): ${JSON.stringify(selected.tail)}`
-    : '';
+  const diagnostic =
+    selected.tail.length > 0
+      ? `; chromium stderr tail (attempt ${selected.attempt}/${CHROMIUM_STARTUP_ATTEMPTS}, selected by ${selected.reason}): ${JSON.stringify(selected.tail)}`
+      : "";
   throw new Error(
     `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}${selected.hint}`,
   );
@@ -398,13 +428,16 @@ function withDeadline(promise, ms) {
   if (!Number.isFinite(ms)) return promise;
   if (ms <= 0) {
     promise.catch(() => {});
-    return Promise.reject(new Deadline('item wall budget already exhausted'));
+    return Promise.reject(new Deadline("item wall budget already exhausted"));
   }
   let timer;
   return Promise.race([
     promise.finally(() => clearTimeout(timer)),
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Deadline(`exceeded the ${Math.round(ms / 1000)} s budget`)), ms);
+      timer = setTimeout(
+        () => reject(new Deadline(`exceeded the ${Math.round(ms / 1000)} s budget`)),
+        ms,
+      );
     }),
   ]);
 }
@@ -478,15 +511,14 @@ function nullControl(ratios, checksumBytes) {
       min_decidable_2x: null,
       cv_pct: null,
       mad_pct: null,
-      cv_gate: 'never',
+      cv_gate: "never",
       checksum_bytes: checksumBytes,
     };
   }
   const ratioMedian = median(ratios);
   const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
-  const variance = ratios.length > 1
-    ? ratios.reduce((a, b) => a + (b - mean) ** 2, 0) / (ratios.length - 1)
-    : 0;
+  const variance =
+    ratios.length > 1 ? ratios.reduce((a, b) => a + (b - mean) ** 2, 0) / (ratios.length - 1) : 0;
   const sd = Math.sqrt(variance);
   const mad = median(ratios.map((x) => Math.abs(x - ratioMedian)));
   const [ci95Lo, ci95Hi] = bootstrapMedianCi(ratios);
@@ -501,7 +533,7 @@ function nullControl(ratios, checksumBytes) {
     min_decidable_2x: Math.max(1.01, 1 + 2 * halfWidth),
     cv_pct: Number((mean === 0 ? 0 : (sd / mean) * 100).toFixed(2)),
     mad_pct: Number((ratioMedian === 0 ? 0 : (mad / ratioMedian) * 100).toFixed(2)),
-    cv_gate: 'never',
+    cv_gate: "never",
     // THE RAW PER-ROUND RATIOS, not just their summary (bd-tbd).
     //
     // Every A/A null observation the harness has ever banked was aggregated on the way out, so the
@@ -541,9 +573,9 @@ function isolatesSampleState(documentCount) {
  */
 function largestInput(texts) {
   let text = texts[0];
-  let bytes = Buffer.byteLength(text, 'utf8');
+  let bytes = Buffer.byteLength(text, "utf8");
   for (let i = 1; i < texts.length; i++) {
-    const candidateBytes = Buffer.byteLength(texts[i], 'utf8');
+    const candidateBytes = Buffer.byteLength(texts[i], "utf8");
     if (candidateBytes > bytes) {
       text = texts[i];
       bytes = candidateBytes;
@@ -784,115 +816,148 @@ const PAGE_PROBE = `async ({ text, tag }) => {
   }
 }`;
 
-if (has('self-test')) {
-  const startupTail = appendStartupStderrTail('abcd', 'efgh');
-  const boundedStartupTail = appendStartupStderrTail('x'.repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES), 'tail');
-  if (startupTail !== 'abcdefgh' || boundedStartupTail.length !== CHROMIUM_STARTUP_STDERR_TAIL_BYTES || !boundedStartupTail.endsWith('tail')) {
-    throw new Error('chromium startup stderr tail must retain only the newest bounded diagnostic');
+if (has("self-test")) {
+  const startupTail = appendStartupStderrTail("abcd", "efgh");
+  const boundedStartupTail = appendStartupStderrTail(
+    "x".repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES),
+    "tail",
+  );
+  if (
+    startupTail !== "abcdefgh" ||
+    boundedStartupTail.length !== CHROMIUM_STARTUP_STDERR_TAIL_BYTES ||
+    !boundedStartupTail.endsWith("tail")
+  ) {
+    throw new Error("chromium startup stderr tail must retain only the newest bounded diagnostic");
   }
   if (
-    devtoolsPortFromStderr('DevTools listening on ws://127.0.0.1:49321/devtools/browser/id') !== 49321 ||
-    devtoolsPortFromStderr('DevTools listening on ws://127.0.0.1:0/devtools/browser/id') !== null ||
-    devtoolsPortFromStderr('not a DevTools listener') !== null
+    devtoolsPortFromStderr("DevTools listening on ws://127.0.0.1:49321/devtools/browser/id") !==
+      49321 ||
+    devtoolsPortFromStderr("DevTools listening on ws://127.0.0.1:0/devtools/browser/id") !== null ||
+    devtoolsPortFromStderr("not a DevTools listener") !== null
   ) {
-    throw new Error('chromium DevTools port parser must accept only assigned loopback ports');
+    throw new Error("chromium DevTools port parser must accept only assigned loopback ports");
   }
   // The latch must survive the diagnostic window it used to share (bd-vaq3). The CONTROL is the
   // second half: the bounded tail genuinely loses the line, so this pair fails without the latch
   // rather than passing for free.
-  const announce = 'DevTools listening on ws://127.0.0.1:49321/devtools/browser/id\n';
+  const announce = "DevTools listening on ws://127.0.0.1:49321/devtools/browser/id\n";
   const overflowLatch = createDevtoolsPortLatch();
   overflowLatch.feed(announce);
-  let overflowTail = appendStartupStderrTail('', announce);
+  let overflowTail = appendStartupStderrTail("", announce);
   for (let i = 0; i < 4; i++) {
-    const noise = `${'W'.repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES)}\n`;
+    const noise = `${"W".repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES)}\n`;
     overflowLatch.feed(noise);
     overflowTail = appendStartupStderrTail(overflowTail, noise);
   }
   if (overflowLatch.port() !== 49321 || devtoolsPortFromStderr(overflowTail) !== null) {
-    throw new Error('chromium port discovery must outlive the bounded stderr diagnostic window');
+    throw new Error("chromium port discovery must outlive the bounded stderr diagnostic window");
   }
   const splitLatch = createDevtoolsPortLatch();
-  splitLatch.feed('DevTools listening on ws://127.0.0.1:493');
+  splitLatch.feed("DevTools listening on ws://127.0.0.1:493");
   if (splitLatch.port() !== null) {
-    throw new Error('chromium port latch must not accept a truncated announcement');
+    throw new Error("chromium port latch must not accept a truncated announcement");
   }
-  splitLatch.feed('21/devtools/browser/id\n');
+  splitLatch.feed("21/devtools/browser/id\n");
   if (splitLatch.port() !== 49321) {
-    throw new Error('chromium port latch must join an announcement split across chunks');
+    throw new Error("chromium port latch must join an announcement split across chunks");
   }
   const relaunchLatch = createDevtoolsPortLatch();
   relaunchLatch.feed(announce);
-  relaunchLatch.feed('DevTools listening on ws://127.0.0.1:51000/devtools/browser/id\n');
+  relaunchLatch.feed("DevTools listening on ws://127.0.0.1:51000/devtools/browser/id\n");
   if (
     relaunchLatch.port() !== 51000 ||
-    lastDevtoolsPortIn(`${announce}DevTools listening on ws://127.0.0.1:51000/devtools/browser/id`) !== 51000
+    lastDevtoolsPortIn(
+      `${announce}DevTools listening on ws://127.0.0.1:51000/devtools/browser/id`,
+    ) !== 51000
   ) {
-    throw new Error('chromium port discovery must name the newest listener, not the first');
+    throw new Error("chromium port discovery must name the newest listener, not the first");
   }
-  const singletonFailure = 'ERROR:chrome/browser/process_singleton_posix.cc:1043] Failed to create socket directory.\n' +
-    'ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory.';
+  const singletonFailure =
+    "ERROR:chrome/browser/process_singleton_posix.cc:1043] Failed to create socket directory.\n" +
+    "ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory.";
   if (
-    !chromiumStartupRecoveryHint(singletonFailure).includes('snap-discard-ns chromium') ||
-    chromiumStartupRecoveryHint('Failed to create socket directory') !== ''
+    !chromiumStartupRecoveryHint(singletonFailure).includes("snap-discard-ns chromium") ||
+    chromiumStartupRecoveryHint("Failed to create socket directory") !== ""
   ) {
-    throw new Error('chromium snap namespace recovery hint must require the complete failure signature');
+    throw new Error(
+      "chromium snap namespace recovery hint must require the complete failure signature",
+    );
   }
   // Diagnostic SELECTION must be deterministic and must not discard the actionable attempt
   // (bd-ghi7). Attempts fail independently, so the hint-bearing one is often not the last.
-  const genericTail = 'chromium did not expose a devtools port within 30s';
+  const genericTail = "chromium did not expose a devtools port within 30s";
   const hintFirst = selectStartupDiagnostic([singletonFailure, genericTail, genericTail]);
   const hintLast = selectStartupDiagnostic([genericTail, genericTail, singletonFailure]);
   const noHint = selectStartupDiagnostic([genericTail, `${genericTail} second`]);
   if (
-    hintFirst.attempt !== 1 || hintFirst.reason !== 'recovery_hint' ||
-    !hintFirst.hint.includes('snap-discard-ns chromium') ||
-    hintLast.attempt !== 3 || hintLast.reason !== 'recovery_hint' ||
-    noHint.attempt !== 2 || noHint.reason !== 'last_attempt' || noHint.hint !== '' ||
+    hintFirst.attempt !== 1 ||
+    hintFirst.reason !== "recovery_hint" ||
+    !hintFirst.hint.includes("snap-discard-ns chromium") ||
+    hintLast.attempt !== 3 ||
+    hintLast.reason !== "recovery_hint" ||
+    noHint.attempt !== 2 ||
+    noHint.reason !== "last_attempt" ||
+    noHint.hint !== "" ||
     noHint.tail !== `${genericTail} second`
   ) {
-    throw new Error('chromium startup diagnostic must prefer the attempt that names its own fix, else the last');
+    throw new Error(
+      "chromium startup diagnostic must prefer the attempt that names its own fix, else the last",
+    );
   }
   // Every DNF record carries a queryable class, timeouts included (bd-2o8j).
   if (
-    dnfFailureClass('timeout', 'budget expired while mermaid was still laying out') !== 'timeout' ||
-    dnfFailureClass('failed', 'RangeError: Maximum call stack size exceeded') !== 'range_error' ||
-    dnfFailureClass('failed', 'FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
-    dnfFailureClass('failed', 'something nobody has seen before') !== 'uncategorized'
+    dnfFailureClass("timeout", "budget expired while mermaid was still laying out") !== "timeout" ||
+    dnfFailureClass("failed", "RangeError: Maximum call stack size exceeded") !== "range_error" ||
+    dnfFailureClass("failed", "FATAL ERROR: JavaScript heap out of memory") !== "out_of_memory" ||
+    dnfFailureClass("failed", "something nobody has seen before") !== "uncategorized"
   ) {
-    throw new Error('DNF failure class must classify crashes and still name a timeout');
+    throw new Error("DNF failure class must classify crashes and still name a timeout");
   }
-  for (const [kind, reason] of [['timeout', ''], ['failed', ''], ['timeout', 'x'], ['failed', 'x']]) {
+  for (const [kind, reason] of [
+    ["timeout", ""],
+    ["failed", ""],
+    ["timeout", "x"],
+    ["failed", "x"],
+  ]) {
     const cls = dnfFailureClass(kind, reason);
-    if (typeof cls !== 'string' || !/^[a-z][a-z0-9_]*$/.test(cls)) {
-      throw new Error(`DNF failure class must be total over kinds; ${kind}/${JSON.stringify(reason)} gave ${JSON.stringify(cls)}`);
+    if (typeof cls !== "string" || !/^[a-z][a-z0-9_]*$/.test(cls)) {
+      throw new Error(
+        `DNF failure class must be total over kinds; ${kind}/${JSON.stringify(reason)} gave ${JSON.stringify(cls)}`,
+      );
     }
   }
-  if (selectStartupDiagnostic([]).reason !== 'no_attempts') {
-    throw new Error('chromium startup diagnostic selection must be total');
+  if (selectStartupDiagnostic([]).reason !== "no_attempts") {
+    throw new Error("chromium startup diagnostic selection must be total");
   }
   const repeated = [singletonFailure, genericTail];
-  if (JSON.stringify(selectStartupDiagnostic(repeated)) !== JSON.stringify(selectStartupDiagnostic(repeated))) {
-    throw new Error('chromium startup diagnostic selection must be deterministic for identical input');
+  if (
+    JSON.stringify(selectStartupDiagnostic(repeated)) !==
+    JSON.stringify(selectStartupDiagnostic(repeated))
+  ) {
+    throw new Error(
+      "chromium startup diagnostic selection must be deterministic for identical input",
+    );
   }
   if (
-    normalizedFailureClass('RangeError: Maximum call stack size exceeded') !== 'range_error' ||
-    normalizedFailureClass('rangeerror: maximum call stack size exceeded') !== 'range_error' ||
-    normalizedFailureClass('RangeError: too much recursion') !== 'range_error' ||
-    normalizedFailureClass('RangeError [ERR_STACK_OVERFLOW]') !== 'range_error' ||
-    normalizedFailureClass('range_error') !== 'range_error' ||
-    normalizedFailureClass('range-error') !== 'range_error' ||
-    normalizedFailureClass('maximum call stack size exceeded while rendering') !== 'range_error' ||
-    normalizedFailureClass('stack overflow while rendering') !== 'range_error' ||
-    normalizedFailureClass('render failed after parse accepted: Maximum call stack size exceeded') !== 'range_error' ||
-    normalizedFailureClass('FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
-    normalizedFailureClass('out_of_memory') !== 'out_of_memory' ||
-    normalizedFailureClass('out-of-memory') !== 'out_of_memory' ||
-    normalizedFailureClass('oom_error') !== 'out_of_memory' ||
-    normalizedFailureClass('FATAL ERROR: heap limit reached') !== 'out_of_memory' ||
-    normalizedFailureClass('mermaid rejected the render') !== 'uncategorized'
+    normalizedFailureClass("RangeError: Maximum call stack size exceeded") !== "range_error" ||
+    normalizedFailureClass("rangeerror: maximum call stack size exceeded") !== "range_error" ||
+    normalizedFailureClass("RangeError: too much recursion") !== "range_error" ||
+    normalizedFailureClass("RangeError [ERR_STACK_OVERFLOW]") !== "range_error" ||
+    normalizedFailureClass("range_error") !== "range_error" ||
+    normalizedFailureClass("range-error") !== "range_error" ||
+    normalizedFailureClass("maximum call stack size exceeded while rendering") !== "range_error" ||
+    normalizedFailureClass("stack overflow while rendering") !== "range_error" ||
+    normalizedFailureClass(
+      "render failed after parse accepted: Maximum call stack size exceeded",
+    ) !== "range_error" ||
+    normalizedFailureClass("FATAL ERROR: JavaScript heap out of memory") !== "out_of_memory" ||
+    normalizedFailureClass("out_of_memory") !== "out_of_memory" ||
+    normalizedFailureClass("out-of-memory") !== "out_of_memory" ||
+    normalizedFailureClass("oom_error") !== "out_of_memory" ||
+    normalizedFailureClass("FATAL ERROR: heap limit reached") !== "out_of_memory" ||
+    normalizedFailureClass("mermaid rejected the render") !== "uncategorized"
   ) {
-    throw new Error('mermaid failure classification must retain only stable error categories');
+    throw new Error("mermaid failure classification must retain only stable error categories");
   }
   const exitedProcess = new EventEmitter();
   exitedProcess.exitCode = null;
@@ -900,17 +965,24 @@ if (has('self-test')) {
   exitedProcess.kill = (signal) => {
     queueMicrotask(() => {
       exitedProcess.signalCode = signal;
-      exitedProcess.emit('exit', null, signal);
+      exitedProcess.emit("exit", null, signal);
     });
     return true;
   };
-  if (!(await stopChromiumForStartupRetry(exitedProcess)) || exitedProcess.signalCode !== 'SIGKILL') {
-    throw new Error('chromium startup retry must wait for confirmed process exit');
+  if (
+    !(await stopChromiumForStartupRetry(exitedProcess)) ||
+    exitedProcess.signalCode !== "SIGKILL"
+  ) {
+    throw new Error("chromium startup retry must wait for confirmed process exit");
   }
   const timing = stats([3, 1]);
-  if (timing.p50 !== 2) throw new Error('timing median must average the two middle values');
-  if (timing.samples.join(',') !== '1,3') throw new Error('timing samples must remain available for the effect CI');
-  const perfect = nullControl(Array.from({ length: 41 }, () => 1), 1234);
+  if (timing.p50 !== 2) throw new Error("timing median must average the two middle values");
+  if (timing.samples.join(",") !== "1,3")
+    throw new Error("timing samples must remain available for the effect CI");
+  const perfect = nullControl(
+    Array.from({ length: 41 }, () => 1),
+    1234,
+  );
   if (perfect.ci95_lo !== 1 || perfect.ci95_hi !== 1 || perfect.half_width !== 0) {
     throw new Error(`perfect-null bootstrap regression: ${JSON.stringify(perfect)}`);
   }
@@ -922,40 +994,42 @@ if (has('self-test')) {
     isolatesSampleState(ISOLATED_SAMPLE_MIN_DOCUMENTS - 1) ||
     !isolatesSampleState(ISOLATED_SAMPLE_MIN_DOCUMENTS)
   ) {
-    throw new Error('long-trace sample-isolation threshold regression');
+    throw new Error("long-trace sample-isolation threshold regression");
   }
-  const probe = largestInput(['three', 'ééé']);
-  if (probe.text !== 'ééé' || probe.bytes !== 6) {
+  const probe = largestInput(["three", "ééé"]);
+  if (probe.text !== "ééé" || probe.bytes !== 6) {
     throw new Error(`largest-input probe regression: ${JSON.stringify(probe)}`);
   }
   if (
-    resolveChromiumBinary('/override/chrome', '/pinned/chromium', (path) => path === '/override/chrome') !==
-    '/override/chrome'
+    resolveChromiumBinary(
+      "/override/chrome",
+      "/pinned/chromium",
+      (path) => path === "/override/chrome",
+    ) !== "/override/chrome"
   ) {
-    throw new Error('chromium override selection regression');
+    throw new Error("chromium override selection regression");
   }
   if (
-    resolveChromiumBinary('', '/pinned/chromium', (path) => path === '/pinned/chromium') !==
-    '/pinned/chromium'
+    resolveChromiumBinary("", "/pinned/chromium", (path) => path === "/pinned/chromium") !==
+    "/pinned/chromium"
   ) {
-    throw new Error('pinned chromium selection regression');
+    throw new Error("pinned chromium selection regression");
   }
   let missingChromiumRejected = false;
   try {
-    resolveChromiumBinary('/missing/chrome', '/pinned/chromium', () => false);
+    resolveChromiumBinary("/missing/chrome", "/pinned/chromium", () => false);
   } catch (error) {
-    missingChromiumRejected =
-      String(error.message).includes(
-        'FM_CHROMIUM_BIN is not an executable absolute path: /missing/chrome',
-      );
+    missingChromiumRejected = String(error.message).includes(
+      "FM_CHROMIUM_BIN is not an executable absolute path: /missing/chrome",
+    );
   }
-  if (!missingChromiumRejected) throw new Error('missing chromium executable was not rejected');
+  if (!missingChromiumRejected) throw new Error("missing chromium executable was not rejected");
   if (
     effectRepsForMode(2, true) !== MIN_NULL_ROUNDS ||
     effectRepsForMode(12, true) !== 12 ||
     effectRepsForMode(2, false) !== 2
   ) {
-    throw new Error('parse effect-sample floor regression');
+    throw new Error("parse effect-sample floor regression");
   }
   new Script(`(${PAGE_BENCH})`);
   new Script(`(${PAGE_PARSE_BENCH})`);
@@ -973,7 +1047,7 @@ if (has('self-test')) {
     performance: globalThis.performance,
   });
   const parsePageResult = await parsePage({
-    texts: ['flowchart-v2', 'stateDiagram'],
+    texts: ["flowchart-v2", "stateDiagram"],
     reps: 2,
     warmup: 1,
     nullReps: 1,
@@ -987,11 +1061,13 @@ if (has('self-test')) {
     parsePageResult.effectIntegratedSampleMs.length !== 2 ||
     parsePageResult.nullIntegratedSampleMs.length !== 2 ||
     parsePageResult.deterministicOutput !== true ||
-    parsePageResult.parseRecords.map((record) => record.diagramType).join(',') !==
-      'flowchart-v2,stateDiagram' ||
+    parsePageResult.parseRecords.map((record) => record.diagramType).join(",") !==
+      "flowchart-v2,stateDiagram" ||
     parseCalls !== 16
   ) {
-    throw new Error(`parse page protocol regression: ${JSON.stringify({ parsePageResult, parseCalls })}`);
+    throw new Error(
+      `parse page protocol regression: ${JSON.stringify({ parsePageResult, parseCalls })}`,
+    );
   }
   let unstableCalls = 0;
   const unstableParsePage = new Script(`(${PAGE_PARSE_BENCH})`).runInNewContext({
@@ -1006,7 +1082,7 @@ if (has('self-test')) {
     performance: globalThis.performance,
   });
   const unstableResult = await unstableParsePage({
-    texts: ['flowchart'],
+    texts: ["flowchart"],
     reps: 1,
     warmup: 0,
     nullReps: 0,
@@ -1015,7 +1091,7 @@ if (has('self-test')) {
   });
   if (
     unstableResult.deterministicOutput !== false ||
-    !unstableResult.error?.includes('nondeterministic mermaid.parse result')
+    !unstableResult.error?.includes("nondeterministic mermaid.parse result")
   ) {
     throw new Error(`parse determinism mutation escaped: ${JSON.stringify(unstableResult)}`);
   }
@@ -1027,7 +1103,7 @@ if (has('self-test')) {
       mermaid: {
         parse: async () => {
           transientCalls += 1;
-          return { diagramType: transientCalls === 3 ? 'stateDiagram' : 'flowchart-v2' };
+          return { diagramType: transientCalls === 3 ? "stateDiagram" : "flowchart-v2" };
         },
       },
     },
@@ -1036,7 +1112,7 @@ if (has('self-test')) {
     },
   });
   const transientResult = await transientParsePage({
-    texts: ['flowchart'],
+    texts: ["flowchart"],
     reps: 1,
     warmup: 0,
     nullReps: 0,
@@ -1045,78 +1121,80 @@ if (has('self-test')) {
   });
   if (
     transientResult.deterministicOutput !== false ||
-    !transientResult.error?.includes('nondeterministic mermaid.parse result')
+    !transientResult.error?.includes("nondeterministic mermaid.parse result")
   ) {
     throw new Error(`inner-batch parse mutation escaped: ${JSON.stringify(transientResult)}`);
   }
-  console.log(JSON.stringify({
-    self_test: 'ok',
-    perfect,
-    insufficient,
-    page_functions_compiled: 3,
-    parse_page_calls: parseCalls,
-    parse_determinism_mutation: 'rejected',
-    inner_batch_determinism_mutation: 'rejected',
-    chromium_binary_resolution_cases: 3,
-  }));
+  console.log(
+    JSON.stringify({
+      self_test: "ok",
+      perfect,
+      insufficient,
+      page_functions_compiled: 3,
+      parse_page_calls: parseCalls,
+      parse_determinism_mutation: "rejected",
+      inner_batch_determinism_mutation: "rejected",
+      chromium_binary_resolution_cases: 3,
+    }),
+  );
   process.exit(0);
 }
 
 /** mermaid renders a placeholder SVG on parse failure instead of throwing; treat that as an error. */
 function validate(svg) {
-  if (typeof svg !== 'string' || svg.length === 0) return 'empty output';
-  if (!svg.includes('<svg') || !svg.includes('</svg>')) return 'not an svg document';
-  if (svg.includes('aria-roledescription="error"')) return 'mermaid rendered its error placeholder';
-  if (/Syntax error in text/i.test(svg)) return 'mermaid reported a syntax error';
+  if (typeof svg !== "string" || svg.length === 0) return "empty output";
+  if (!svg.includes("<svg") || !svg.includes("</svg>")) return "not an svg document";
+  if (svg.includes('aria-roledescription="error"')) return "mermaid rendered its error placeholder";
+  if (/Syntax error in text/i.test(svg)) return "mermaid reported a syntax error";
   return null;
 }
 
 // ---------------------------------------------------------------- main
 
-const only = arg('only');
-const mode = arg('mode', 'render');
-if (!['render', 'parse'].includes(mode)) {
+const only = arg("only");
+const mode = arg("mode", "render");
+if (!["render", "parse"].includes(mode)) {
   log(`--mode must be render or parse, got ${JSON.stringify(mode)}`);
   process.exit(2);
 }
-const parseOnly = mode === 'parse';
+const parseOnly = mode === "parse";
 // Browserless transport (bd-9jm6). The incumbent needs Chromium to RENDER, which has blocked every
 // vs-incumbent timing row for this project. It does not need one to PARSE: the pinned UMD bundle
 // evaluates in a bare `node:vm` context whose globalThis/self/window point at the sandbox, and
 // `mermaid.parse()` runs there with no browser, no jsdom and no package install.
 //
 // This is deliberately confined to --mode parse. Render is untouched and still requires the browser.
-const browserless = has('browserless');
+const browserless = has("browserless");
 if (browserless && !parseOnly) {
-  log('--browserless applies to --mode parse only; render genuinely needs the browser');
+  log("--browserless applies to --mode parse only; render genuinely needs the browser");
   process.exit(2);
 }
-const repsScale = Number(arg('reps-scale', '1'));
-const jobBatch = Number(arg('job-batch', '1'));
+const repsScale = Number(arg("reps-scale", "1"));
+const jobBatch = Number(arg("job-batch", "1"));
 if (!Number.isSafeInteger(jobBatch) || jobBatch < 1) {
   log(`--job-batch must be a positive safe integer, got ${JSON.stringify(jobBatch)}`);
   process.exit(2);
 }
-const forceSampleIsolation = has('isolate-samples');
+const forceSampleIsolation = has("isolate-samples");
 // Scales every item's `js_budget_ms`. A smoke run wants short budgets; a claim run wants the
 // declared ones. Recorded on every DNF row, because "did not finish" is only meaningful with the
 // budget it did not finish inside.
-const budgetScale = Number(arg('js-budget-scale', '1'));
-const securityLevel = arg('security-level', PINS.mermaid.security_level);
+const budgetScale = Number(arg("js-budget-scale", "1"));
+const securityLevel = arg("security-level", PINS.mermaid.security_level);
 // Writes each item's final SVG to <dir>/<id>.mermaid.svg. Used to settle output-contract questions
 // ("does mermaid emit per-element role/tabindex/<title>?") against the real comparator output.
-const dumpSvgDir = arg('dump-svg');
+const dumpSvgDir = arg("dump-svg");
 // `--dump-svg` alone keeps its original one-file-per-item behaviour (settling output-contract
 // questions). `--dump-all-revisions` additionally writes every revision, which is what the
 // cross-engine equivalence phase needs for a multi-diagram job.
-const dumpAllRevisions = has('dump-all-revisions');
+const dumpAllRevisions = has("dump-all-revisions");
 // Equivalence needs exactly one set of rendered bytes, not timing samples. This mode is deliberately
 // separate from `--reps-scale`: measurement runs must retain the nine-round A/A floor even when
 // their effect sample count is scaled down.
-const renderOnce = has('render-once');
+const renderOnce = has("render-once");
 if (dumpSvgDir) mkdirSync(dumpSvgDir, { recursive: true });
 if (dumpAllRevisions && !dumpSvgDir) {
-  log('--dump-all-revisions requires --dump-svg <dir>');
+  log("--dump-all-revisions requires --dump-svg <dir>");
   process.exit(2);
 }
 
@@ -1144,9 +1222,9 @@ const INIT_EXPR = `(() => {
           + ' ver=' + String(m.version);
       // A dispatched baseline presents as a bound wrapper -- a zero-arg native stub with no body.
       // A genuine bundled implementation, minified arrow or function, carries its own source text.
-      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(renderSrc))
+      if (/^s*functions*(s*)s*{s*[native code]s*}s*$/.test(renderSrc))
         return 'mermaid.render is a bound/native shim, not the library function';
-      if (/^\s*function\s*\(\s*\)\s*\{\s*\[native code\]\s*\}\s*$/.test(parseSrc))
+      if (/^s*functions*(s*)s*{s*[native code]s*}s*$/.test(parseSrc))
         return 'mermaid.parse is a bound/native shim, not the library function';
       const reported = String(m.version ?? (typeof m.getVersion === 'function' ? m.getVersion() : ''));
       const want = ${JSON.stringify(PINS.mermaid.version)};
@@ -1199,16 +1277,16 @@ function newSandbox() {
   sandbox.Blob = Blob;
   const context = createContext(sandbox);
 
-  runInContext(bundleText, context, { filename: 'mermaid.min.js' });
-  const init = runInContext(INIT_EXPR, context, { filename: 'mermaid-init.js' });
-  if (init !== 'ok') throw new Error(String(init));
+  runInContext(bundleText, context, { filename: "mermaid.min.js" });
+  const init = runInContext(INIT_EXPR, context, { filename: "mermaid-init.js" });
+  if (init !== "ok") throw new Error(String(init));
   return { context, sandbox };
 }
 
 /** Evaluate `fn(args)` in the sandbox. Same contract as `evaluateInPage`, same bench body. */
 function evaluateInSandbox(fn, args, deadlineMs) {
   const invoke = (async () => {
-    const callable = runInContext(`(${fn})`, sandboxHost.context, { filename: 'bench-body.js' });
+    const callable = runInContext(`(${fn})`, sandboxHost.context, { filename: "bench-body.js" });
     return { result: { value: await callable(args) } };
   })();
   return withDeadline(invoke, deadlineMs);
@@ -1221,20 +1299,33 @@ function evaluateInSandbox(fn, args, deadlineMs) {
  */
 async function newBrowser() {
   const { proc, cdp, info, bin } = await launchChromium();
-  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  await cdp.send('Page.enable', {}, sessionId);
-  await cdp.send('Runtime.enable', {}, sessionId);
+  const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+  await cdp.send("Page.enable", {}, sessionId);
+  await cdp.send("Runtime.enable", {}, sessionId);
 
-  const { frameTree } = await cdp.send('Page.getFrameTree', {}, sessionId);
-  await cdp.send('Page.setDocumentContent', { frameId: frameTree.frame.id, html: PAGE_HTML }, sessionId);
+  const { frameTree } = await cdp.send("Page.getFrameTree", {}, sessionId);
+  await cdp.send(
+    "Page.setDocumentContent",
+    { frameId: frameTree.frame.id, html: PAGE_HTML },
+    sessionId,
+  );
 
-  const inject = await cdp.send('Runtime.evaluate', { expression: bundleText, returnByValue: false }, sessionId);
-  if (inject.exceptionDetails) throw new Error(`bundle eval failed: ${inject.exceptionDetails.text}`);
+  const inject = await cdp.send(
+    "Runtime.evaluate",
+    { expression: bundleText, returnByValue: false },
+    sessionId,
+  );
+  if (inject.exceptionDetails)
+    throw new Error(`bundle eval failed: ${inject.exceptionDetails.text}`);
 
-  const init = await cdp.send('Runtime.evaluate', { expression: INIT_EXPR, returnByValue: true }, sessionId);
+  const init = await cdp.send(
+    "Runtime.evaluate",
+    { expression: INIT_EXPR, returnByValue: true },
+    sessionId,
+  );
   switch (init.result.value) {
-    case 'ok':
+    case "ok":
       break;
     default:
       throw new Error(String(init.result.value));
@@ -1243,8 +1334,16 @@ async function newBrowser() {
 }
 
 function killBrowser(b) {
-  try { b.cdp.close(); } catch { /* already gone */ }
-  try { b.proc.kill('SIGKILL'); } catch { /* already gone */ }
+  try {
+    b.cdp.close();
+  } catch {
+    /* already gone */
+  }
+  try {
+    b.proc.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
 }
 
 let browser = browserless ? null : await newBrowser();
@@ -1258,11 +1357,15 @@ log(
 /** Evaluate `fn(args)` in the live page, under an optional wall deadline. */
 function evaluateInPage(fn, args, deadlineMs) {
   return withDeadline(
-    browser.cdp.send('Runtime.evaluate', {
-      expression: `(${fn})(${JSON.stringify(args)})`,
-      awaitPromise: true,
-      returnByValue: true,
-    }, browser.sessionId),
+    browser.cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: `(${fn})(${JSON.stringify(args)})`,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      browser.sessionId,
+    ),
     deadlineMs,
   );
 }
@@ -1277,37 +1380,49 @@ function evaluateInPage(fn, args, deadlineMs) {
  */
 async function evaluateRenderInPage(fn, args, deadlineMs) {
   const evaluated = await withDeadline(
-    browser.cdp.send('Runtime.evaluate', {
-      expression: `(${fn})(${JSON.stringify(args)})`,
-      awaitPromise: true,
-      returnByValue: false,
-    }, browser.sessionId),
+    browser.cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: `(${fn})(${JSON.stringify(args)})`,
+        awaitPromise: true,
+        returnByValue: false,
+      },
+      browser.sessionId,
+    ),
     deadlineMs,
   );
   const objectId = evaluated.result?.objectId;
   if (evaluated.exceptionDetails || !objectId) return evaluated;
 
   try {
-    const metadata = await browser.cdp.send('Runtime.callFunctionOn', {
-      objectId,
-      functionDeclaration: `function () {
+    const metadata = await browser.cdp.send(
+      "Runtime.callFunctionOn",
+      {
+        objectId,
+        functionDeclaration: `function () {
         const { svgs, ...rest } = this;
         return { ...rest, svgCount: Array.isArray(svgs) ? svgs.length : 0 };
       }`,
-      returnByValue: true,
-    }, browser.sessionId);
+        returnByValue: true,
+      },
+      browser.sessionId,
+    );
     if (metadata.exceptionDetails) return metadata;
 
     const value = metadata.result.value;
     const svgs = [];
     for (let offset = 0; offset < value.svgCount; offset += 8) {
-      const chunk = await browser.cdp.send('Runtime.callFunctionOn', {
-        objectId,
-        functionDeclaration:
-          'function (start, count) { return this.svgs.slice(start, start + count); }',
-        arguments: [{ value: offset }, { value: 8 }],
-        returnByValue: true,
-      }, browser.sessionId);
+      const chunk = await browser.cdp.send(
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration:
+            "function (start, count) { return this.svgs.slice(start, start + count); }",
+          arguments: [{ value: offset }, { value: 8 }],
+          returnByValue: true,
+        },
+        browser.sessionId,
+      );
       if (chunk.exceptionDetails) return chunk;
       svgs.push(...chunk.result.value);
     }
@@ -1316,7 +1431,7 @@ async function evaluateRenderInPage(fn, args, deadlineMs) {
     return { result: { value } };
   } finally {
     await browser.cdp
-      .send('Runtime.releaseObject', { objectId }, browser.sessionId)
+      .send("Runtime.releaseObject", { objectId }, browser.sessionId)
       .catch(() => {});
   }
 }
@@ -1324,7 +1439,7 @@ async function evaluateRenderInPage(fn, args, deadlineMs) {
 function remainingBudgetMs(startedAt, budgetMs) {
   if (!Number.isFinite(budgetMs)) return null;
   const remaining = budgetMs - (Date.now() - startedAt);
-  if (remaining <= 0) throw new Deadline('item wall budget already exhausted');
+  if (remaining <= 0) throw new Deadline("item wall budget already exhausted");
   return remaining;
 }
 
@@ -1357,8 +1472,8 @@ async function isolatedSample(texts, tag, startedAt, budgetMs, jobBatch) {
   const err =
     out.error ??
     out.svgs.map(validate).find(Boolean) ??
-    (out.svgs.length === texts.length ? null : 'revision count mismatch') ??
-    (out.times.length === 1 ? null : 'timing sample count mismatch');
+    (out.svgs.length === texts.length ? null : "revision count mismatch") ??
+    (out.times.length === 1 ? null : "timing sample count mismatch");
   if (err) throw new Error(err);
   return {
     ms: out.times[0],
@@ -1402,13 +1517,7 @@ async function isolatedBenchmark(
   const times = [];
   let svgs = [];
   for (let i = 0; i < reps; i++) {
-    const measured = await isolatedSample(
-      texts,
-      `${tag}_real_${i}`,
-      startedAt,
-      budgetMs,
-      jobBatch,
-    );
+    const measured = await isolatedSample(texts, `${tag}_real_${i}`, startedAt, budgetMs, jobBatch);
     times.push(measured.ms);
     svgs = measured.svgs;
     log(`real ${itemId}: ${i + 1}/${reps}`);
@@ -1441,12 +1550,12 @@ async function isolatedParseSample(texts, startedAt, budgetMs) {
   const out = res.result.value;
   const err =
     out.error ??
-    (out.signatures.length === texts.length ? null : 'parse revision count mismatch') ??
-    (out.times.length === 1 ? null : 'parse timing sample count mismatch') ??
+    (out.signatures.length === texts.length ? null : "parse revision count mismatch") ??
+    (out.times.length === 1 ? null : "parse timing sample count mismatch") ??
     (out.parseRecords.every((record) => record.accepted === true)
       ? null
-      : 'mermaid.parse rejected a revision') ??
-    (out.sampleFloorValid ? null : 'parse integrated sample missed the floor');
+      : "mermaid.parse rejected a revision") ??
+    (out.sampleFloorValid ? null : "parse integrated sample missed the floor");
   if (err) throw new Error(err);
   return {
     ms: out.times[0],
@@ -1522,8 +1631,9 @@ async function isolatedParseBenchmark(texts, reps, nullReps, startedAt, budgetMs
     deterministicOutput: true,
     sampleFloorValid:
       effectIntegratedSampleMs.length > 0 &&
-      [...effectIntegratedSampleMs, ...nullIntegratedSampleMs]
-        .every((value) => value >= PARSE_MIN_SAMPLE_MS),
+      [...effectIntegratedSampleMs, ...nullIntegratedSampleMs].every(
+        (value) => value >= PARSE_MIN_SAMPLE_MS,
+      ),
     nullRatios,
     nullChecksumBytes,
     nullOutputValid: true,
@@ -1534,7 +1644,7 @@ async function isolatedParseBenchmark(texts, reps, nullReps, startedAt, budgetMs
 let failed = false;
 try {
   // Matches run.mjs: one id, or a comma-separated list.
-  const onlyIds = only ? new Set(only.split(',').map((s) => s.trim())) : null;
+  const onlyIds = only ? new Set(only.split(",").map((s) => s.trim())) : null;
   const items = CORPUS.filter((i) => !onlyIds || onlyIds.has(i.id));
   for (const item of items) {
     const texts = generate(item);
@@ -1566,15 +1676,15 @@ try {
       warmup = 0;
     }
     const budgetMs = item.js_budget_ms ? item.js_budget_ms * budgetScale : null;
-    const tag = item.id.replace(/[^a-z0-9]/gi, '');
+    const tag = item.id.replace(/[^a-z0-9]/gi, "");
     const t0 = Date.now();
     const joined = texts.join(REVISION_SEP);
     const record = {
-      engine: 'mermaid-js',
+      engine: "mermaid-js",
       version,
       bundle_url: url,
       bundle_sha256: bundleSha,
-      transport: browserless ? 'node:vm' : 'chromium-cdp',
+      transport: browserless ? "node:vm" : "chromium-cdp",
       chromium_binary: browserless ? null : browser.bin,
       chromium_version: browserless ? null : browser.info.Browser,
       node_version: browserless ? process.version : null,
@@ -1586,21 +1696,21 @@ try {
         // Must describe the transport that actually ran. Claiming a CDP page with no browser
         // attached would defeat run.mjs's incumbent provenance gate rather than satisfy it.
         method: browserless
-          ? 'single_node_vm_main_context'
-          : 'single_cdp_page_main_execution_context',
+          ? "single_node_vm_main_context"
+          : "single_cdp_page_main_execution_context",
         caller_workers_observed: 1,
         portable_across_isa: true,
         inside_timed_region: false,
       },
-      execution_model: browserless ? 'single_vm_main_context' : 'single_page_main_thread',
+      execution_model: browserless ? "single_vm_main_context" : "single_page_main_thread",
       measurement_mode: mode,
-      measurement_boundary: parseOnly ? 'public_parse_validate' : 'parse_layout_render_svg',
+      measurement_boundary: parseOnly ? "public_parse_validate" : "parse_layout_render_svg",
       job_batch: parseOnly ? 1 : jobBatch,
       render_once: renderOnce,
       id: item.id,
       revisions: texts.length,
       input_sha256: sha256(joined),
-      input_bytes: Buffer.byteLength(joined, 'utf8'),
+      input_bytes: Buffer.byteLength(joined, "utf8"),
     };
     let probeMs = null;
     let probeInputBytes = null;
@@ -1618,18 +1728,20 @@ try {
     const dnf = async (phase, kind, reason) => {
       const elapsed = Date.now() - t0;
       log(`DNF  ${item.id}: ${phase} ${kind} ${reason} (${(elapsed / 1000).toFixed(1)}s elapsed)`);
-      console.log(JSON.stringify({
-        ...record,
-        status: 'dnf',
-        kind,
-        phase,
-        error: reason,
-        failure_class: dnfFailureClass(kind, reason),
-        budget_ms: budgetMs,
-        elapsed_ms: elapsed,
-        wall_s: elapsed / 1000,
-        probe_parse_accepted: probeParseAccepted,
-      }));
+      console.log(
+        JSON.stringify({
+          ...record,
+          status: "dnf",
+          kind,
+          phase,
+          error: reason,
+          failure_class: dnfFailureClass(kind, reason),
+          budget_ms: budgetMs,
+          elapsed_ms: elapsed,
+          wall_s: elapsed / 1000,
+          probe_parse_accepted: probeParseAccepted,
+        }),
+      );
       // The page is wedged inside mermaid's synchronous layout; nothing short of a new process
       // gets it back.
       await replaceBrowser();
@@ -1644,12 +1756,12 @@ try {
         const p = await evaluateInPage(PAGE_PROBE, { text: probe.text, tag }, budgetMs);
         if (p.exceptionDetails) throw new Error(p.exceptionDetails.text);
         const probeResult = p.result?.value;
-        if (!probeResult || typeof probeResult !== 'object') {
-          throw new Error('probe returned no structured result');
+        if (!probeResult || typeof probeResult !== "object") {
+          throw new Error("probe returned no structured result");
         }
         probeParseAccepted = probeResult.parseAccepted === true;
         if (!probeParseAccepted) {
-          throw new Error('mermaid.parse did not accept the probe input');
+          throw new Error("mermaid.parse did not accept the probe input");
         }
         if (probeResult.renderError) {
           throw new Error(`render failed after parse accepted: ${probeResult.renderError}`);
@@ -1661,9 +1773,11 @@ try {
       } catch (e) {
         if (!item.dnf_allowed) throw new Error(`${item.id}: probe: ${e.message}`);
         await dnf(
-          'probe',
-          e instanceof Deadline ? 'timeout' : 'failed',
-          e instanceof Deadline ? `mermaid did not finish one render, ${e.message}` : String(e.message),
+          "probe",
+          e instanceof Deadline ? "timeout" : "failed",
+          e instanceof Deadline
+            ? `mermaid did not finish one render, ${e.message}`
+            : String(e.message),
         );
         continue;
       }
@@ -1699,16 +1813,7 @@ try {
       if (isolateSamples) {
         out = parseOnly
           ? await isolatedParseBenchmark(texts, reps, nullReps, t0, budgetMs, item.id)
-          : await isolatedBenchmark(
-            texts,
-            reps,
-            nullReps,
-            tag,
-            t0,
-            budgetMs,
-            item.id,
-            jobBatch,
-          );
+          : await isolatedBenchmark(texts, reps, nullReps, tag, t0, budgetMs, item.id, jobBatch);
       } else {
         const evaluate = browserless ? evaluateInSandbox : evaluateInPage;
         res = await evaluate(
@@ -1722,9 +1827,11 @@ try {
         throw new Error(`${item.id}: ${e.message}`);
       }
       await dnf(
-        'timed',
-        e instanceof Deadline ? 'timeout' : 'failed',
-        e instanceof Deadline ? `mermaid did not finish ${reps} sample(s), ${e.message}` : String(e.message),
+        "timed",
+        e instanceof Deadline ? "timeout" : "failed",
+        e instanceof Deadline
+          ? `mermaid did not finish ${reps} sample(s), ${e.message}`
+          : String(e.message),
       );
       continue;
     }
@@ -1736,29 +1843,29 @@ try {
     // Every revision is validated, not just the last. Parse mode requires public-API acceptance;
     const outputs = parseOnly ? out.signatures : out.svgs;
     const err = parseOnly
-      ? out.error ??
-        (out.deterministicOutput ? null : 'nondeterministic mermaid.parse result') ??
-        (out.nullOutputValid ? null : 'A/A null control rejected a parse') ??
-        (outputs.length === texts.length ? null : 'parse revision count mismatch') ??
+      ? (out.error ??
+        (out.deterministicOutput ? null : "nondeterministic mermaid.parse result") ??
+        (out.nullOutputValid ? null : "A/A null control rejected a parse") ??
+        (outputs.length === texts.length ? null : "parse revision count mismatch") ??
         (out.parseRecords.every((record) => record.accepted === true)
           ? null
-          : 'mermaid.parse rejected a revision') ??
-        (out.sampleFloorValid ? null : 'parse integrated sample missed the floor')
-      : out.error ??
-        (out.nullOutputValid ? null : 'A/A null control produced invalid SVG') ??
+          : "mermaid.parse rejected a revision") ??
+        (out.sampleFloorValid ? null : "parse integrated sample missed the floor"))
+      : (out.error ??
+        (out.nullOutputValid ? null : "A/A null control produced invalid SVG") ??
         outputs.map(validate).find(Boolean) ??
-        (outputs.length === texts.length ? null : 'revision count mismatch');
+        (outputs.length === texts.length ? null : "revision count mismatch"));
     record.wall_s = (Date.now() - t0) / 1000;
     if (err) {
       // An in-page failure on a budgeted item is mermaid's own guardrail or an OOM at a size it
       // cannot serve -- a did-not-finish, not a broken harness.
       if (item.dnf_allowed && !parseOnly) {
-        await dnf('timed', 'failed', err);
+        await dnf("timed", "failed", err);
         continue;
       }
       failed = true;
       log(`FAIL ${item.id}: ${err}`);
-      console.log(JSON.stringify({ ...record, status: 'error', error: err }));
+      console.log(JSON.stringify({ ...record, status: "error", error: err }));
       continue;
     }
     const ms = stats(out.times);
@@ -1772,79 +1879,89 @@ try {
       // bytes joined, which lets the checker prove it read the measured render.
       if (dumpAllRevisions) {
         for (const [revision, svg] of outputs.entries()) {
-          writeFileSync(join(dumpSvgDir, `${item.id}.rev${String(revision).padStart(5, '0')}.mermaid.svg`), svg);
+          writeFileSync(
+            join(dumpSvgDir, `${item.id}.rev${String(revision).padStart(5, "0")}.mermaid.svg`),
+            svg,
+          );
         }
       }
     }
     const durationNs = Object.fromEntries(
       Object.entries(ms)
-        .filter(([k]) => !['cv_pct', 'mad_pct'].includes(k))
+        .filter(([k]) => !["cv_pct", "mad_pct"].includes(k))
         .map(([k, v]) => {
-          if (k === 'n' || v === null) return [k, v];
-          if (k === 'samples') return [k, v.map((sample) => Math.round(sample * 1e6))];
+          if (k === "n" || v === null) return [k, v];
+          if (k === "samples") return [k, v.map((sample) => Math.round(sample * 1e6))];
           return [k, Math.round(v * 1e6)];
         }),
     );
-    console.log(JSON.stringify({
-      ...record,
-      status: 'ok',
-      warmup,
-      reps,
-      null_reps: nullReps,
-      sample_isolation: isolateSamples ? 'fresh_browser_per_arm' : 'single_browser',
-      batch: parseOnly ? out.batch : 1,
-      min_sample_ns: parseOnly ? PARSE_MIN_SAMPLE_MS * 1e6 : null,
-      calibration_target_ns: parseOnly ? PARSE_CALIBRATION_TARGET_MS * 1e6 : null,
-      integrated_sample_ns: parseOnly
-        ? Math.round(stats(out.effectIntegratedSampleMs).p50 * 1e6)
-        : null,
-      effect_integrated_samples_ns: parseOnly
-        ? out.effectIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
-        : null,
-      null_integrated_samples_ns: parseOnly
-        ? out.nullIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
-        : null,
-      effect_batches: parseOnly ? out.effectBatches : null,
-      null_batches: parseOnly ? out.nullBatches : null,
-      parse_deterministic_output: parseOnly ? out.deterministicOutput : null,
-      budget_ms: budgetMs,
-      probe_ms: probeMs === null ? null : Math.round(probeMs),
-      probe_input_bytes: probeInputBytes,
-      probe_parse_accepted: parseOnly ? true : probeParseAccepted,
-      ...(parseOnly ? { parse_ns: durationNs } : { render_ns: durationNs }),
-      cv_pct: Number(ms.cv_pct.toFixed(2)),
-      mad_pct: Number(ms.mad_pct.toFixed(2)),
-      null_control: nullStats,
-      parse_accepted_revisions: parseOnly
-        ? out.parseRecords.filter((record) => record.accepted === true).length
-        : null,
-      parse_diagram_types: parseOnly
-        ? [...new Set(out.parseRecords.map((record) => record.diagramType).filter(Boolean))].sort()
-        : null,
-      parse_diagram_types_ordered: parseOnly
-        ? out.parseRecords.map((record) => record.diagramType)
-        : null,
-      parse_nonempty_config_revisions: parseOnly
-        ? out.parseRecords.filter((record) => record.configNonempty).length
-        : null,
-      ...(parseOnly
-        ? {
-            parse_result_bytes: outputBytes,
-            parse_result_sha256: sha256(outputs.join('')),
-          }
-        : {
-            output_bytes: outputBytes,
-            output_sha256: sha256(outputs.join('')),
-          }),
-    }));
+    console.log(
+      JSON.stringify({
+        ...record,
+        status: "ok",
+        warmup,
+        reps,
+        null_reps: nullReps,
+        sample_isolation: isolateSamples ? "fresh_browser_per_arm" : "single_browser",
+        batch: parseOnly ? out.batch : 1,
+        min_sample_ns: parseOnly ? PARSE_MIN_SAMPLE_MS * 1e6 : null,
+        calibration_target_ns: parseOnly ? PARSE_CALIBRATION_TARGET_MS * 1e6 : null,
+        integrated_sample_ns: parseOnly
+          ? Math.round(stats(out.effectIntegratedSampleMs).p50 * 1e6)
+          : null,
+        effect_integrated_samples_ns: parseOnly
+          ? out.effectIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
+          : null,
+        null_integrated_samples_ns: parseOnly
+          ? out.nullIntegratedSampleMs.map((sample) => Math.round(sample * 1e6))
+          : null,
+        effect_batches: parseOnly ? out.effectBatches : null,
+        null_batches: parseOnly ? out.nullBatches : null,
+        parse_deterministic_output: parseOnly ? out.deterministicOutput : null,
+        budget_ms: budgetMs,
+        probe_ms: probeMs === null ? null : Math.round(probeMs),
+        probe_input_bytes: probeInputBytes,
+        probe_parse_accepted: parseOnly ? true : probeParseAccepted,
+        ...(parseOnly ? { parse_ns: durationNs } : { render_ns: durationNs }),
+        cv_pct: Number(ms.cv_pct.toFixed(2)),
+        mad_pct: Number(ms.mad_pct.toFixed(2)),
+        null_control: nullStats,
+        parse_accepted_revisions: parseOnly
+          ? out.parseRecords.filter((record) => record.accepted === true).length
+          : null,
+        parse_diagram_types: parseOnly
+          ? [
+              ...new Set(out.parseRecords.map((record) => record.diagramType).filter(Boolean)),
+            ].sort()
+          : null,
+        parse_diagram_types_ordered: parseOnly
+          ? out.parseRecords.map((record) => record.diagramType)
+          : null,
+        parse_nonempty_config_revisions: parseOnly
+          ? out.parseRecords.filter((record) => record.configNonempty).length
+          : null,
+        ...(parseOnly
+          ? {
+              parse_result_bytes: outputBytes,
+              parse_result_sha256: sha256(outputs.join("")),
+            }
+          : {
+              output_bytes: outputBytes,
+              output_sha256: sha256(outputs.join("")),
+            }),
+      }),
+    );
     log(
-      `ok   ${item.id}  ${parseOnly ? 'parse-' : ''}p50=${ms.p50.toFixed(1)}ms ` +
-      `null=${nullStats.median === null ? 'missing' : `${nullStats.median.toFixed(6)} [${nullStats.ci95_lo.toFixed(6)},${nullStats.ci95_hi.toFixed(6)}]`} ` +
-      `bytes=${outputBytes}`,
+      `ok   ${item.id}  ${parseOnly ? "parse-" : ""}p50=${ms.p50.toFixed(1)}ms ` +
+        `null=${nullStats.median === null ? "missing" : `${nullStats.median.toFixed(6)} [${nullStats.ci95_lo.toFixed(6)},${nullStats.ci95_hi.toFixed(6)}]`} ` +
+        `bytes=${outputBytes}`,
     );
   }
 } finally {
   if (!browserless) killBrowser(browser);
 }
 
-if (failed) { log('one or more comparator renders failed'); process.exit(2); }
+if (failed) {
+  log("one or more comparator renders failed");
+  process.exit(2);
+}

@@ -16,46 +16,73 @@
 // C4 renders under NEITHER existing oracle: it has no head-to-head corpus item (so `equivalence.mjs`
 // has nothing to compare) and its renderer cannot run under jsdom (so `drawn_text_diff.mjs` reports
 // INCUMBENT-DNF). The db is the only oracle this family has.
-import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { JSDOM } from 'jsdom';
 
-const BUNDLE = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
-const FM_CLI = process.env.FM_CLI ?? 'target/local/debug/fm-cli';
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { JSDOM } from "jsdom";
+
+const BUNDLE = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
+const FM_CLI = process.env.FM_CLI ?? "target/local/debug/fm-cli";
 
 /** Every element macro mermaid's C4 grammar accepts, in the bundle's own declaration order. */
 const MACROS = [
-  'Person', 'Person_Ext',
-  'System', 'System_Ext', 'SystemDb', 'SystemDb_Ext', 'SystemQueue', 'SystemQueue_Ext',
-  'Container', 'Container_Ext', 'ContainerDb', 'ContainerDb_Ext', 'ContainerQueue', 'ContainerQueue_Ext',
-  'Component', 'Component_Ext', 'ComponentDb', 'ComponentDb_Ext', 'ComponentQueue', 'ComponentQueue_Ext',
+  "Person",
+  "Person_Ext",
+  "System",
+  "System_Ext",
+  "SystemDb",
+  "SystemDb_Ext",
+  "SystemQueue",
+  "SystemQueue_Ext",
+  "Container",
+  "Container_Ext",
+  "ContainerDb",
+  "ContainerDb_Ext",
+  "ContainerQueue",
+  "ContainerQueue_Ext",
+  "Component",
+  "Component_Ext",
+  "ComponentDb",
+  "ComponentDb_Ext",
+  "ComponentQueue",
+  "ComponentQueue_Ext",
 ];
 
 const diagram = (macro) => `C4Context\n    title T\n    ${macro}(a, "A", "d")\n`;
 
-const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', { runScripts: 'dangerously' });
+const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { runScripts: "dangerously" });
 const w = dom.window;
-for (const name of ['TextEncoder', 'TextDecoder', 'crypto', 'structuredClone']) {
+for (const name of ["TextEncoder", "TextDecoder", "crypto", "structuredClone"]) {
   if (!w[name] && globalThis[name]) w[name] = globalThis[name];
 }
-const script = w.document.createElement('script');
-script.textContent = fs.readFileSync(BUNDLE, 'utf8');
+const script = w.document.createElement("script");
+script.textContent = fs.readFileSync(BUNDLE, "utf8");
 w.document.head.appendChild(script);
 const mermaid = w.mermaid;
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 /** What we draw: the `<<…>>` runs in our own SVG for the same source. */
 function ours(text) {
   let svg;
   try {
-    svg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], { input: text, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    svg = execFileSync(FM_CLI, ["render", "-f", "svg", "-"], {
+      input: text,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
   } catch {
-    return '<FM-DNF>';
+    return "<FM-DNF>";
   }
   const runs = [...svg.matchAll(/<text[^>]*>(.*?)<\/text>/gs)]
-    .map((m) => m[1].replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim())
-    .filter((run) => run.startsWith('<<') && run.endsWith('>>'));
-  return runs[0] ?? '<none>';
+    .map((m) =>
+      m[1]
+        .replace(/<[^>]+>/g, "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .trim(),
+    )
+    .filter((run) => run.startsWith("<<") && run.endsWith(">>"));
+  return runs[0] ?? "<none>";
 }
 
 /// Every boundary macro, with the arity that decides whether a third argument means anything.
@@ -88,14 +115,24 @@ const boundaryDiagram = (declaration) =>
 function ourBoundaryRows(text) {
   let svg;
   try {
-    svg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], { input: text, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    svg = execFileSync(FM_CLI, ["render", "-f", "svg", "-"], {
+      input: text,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
   } catch {
-    return ['<FM-DNF>'];
+    return ["<FM-DNF>"];
   }
   return [...svg.matchAll(/<text([^>]*)>(.*?)<\/text>/gs)]
-    .filter((m) => m[1].includes('fm-cluster'))
-    .map((m) => m[2].replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim())
-    .filter((run) => run.startsWith('[') && run.endsWith(']'));
+    .filter((m) => m[1].includes("fm-cluster"))
+    .map((m) =>
+      m[2]
+        .replace(/<[^>]+>/g, "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .trim(),
+    )
+    .filter((run) => run.startsWith("[") && run.endsWith("]"));
 }
 const rows = [];
 for (const macro of MACROS) {
@@ -106,9 +143,9 @@ for (const macro of MACROS) {
     const parsed = await mermaid.mermaidAPI.getDiagramFromText(text);
     const db = parsed.db ?? parsed.getDB();
     const shape = db.getC4ShapeArray?.()?.[0];
-    theirs = shape ? `<<${shape.typeC4Shape?.text}>>` : '<no shape>';
+    theirs = shape ? `<<${shape.typeC4Shape?.text}>>` : "<no shape>";
   } catch (error) {
-    theirs = `<INCUMBENT-DNF: ${String(error?.message ?? error).split('\n')[0]}>`;
+    theirs = `<INCUMBENT-DNF: ${String(error?.message ?? error).split("\n")[0]}>`;
   }
   const mine = ours(text);
   rows.push({ macro, theirs, ours: mine, agree: theirs === mine });
@@ -122,19 +159,21 @@ for (const declaration of BOUNDARIES) {
     const parsed = await mermaid.mermaidAPI.getDiagramFromText(text);
     const db = parsed.db ?? parsed.getDB();
     // `global` is mermaid's implicit root boundary and is never drawn (`l.alias !== "global"`).
-    const boundaries = (db.getBoundarys?.() ?? []).filter((b) => b.alias !== 'global');
-    const type = boundaries[0]?.type?.text ?? '';
-    theirs = type === '' ? '<no type>' : `[${type}]`;
+    const boundaries = (db.getBoundarys?.() ?? []).filter((b) => b.alias !== "global");
+    const type = boundaries[0]?.type?.text ?? "";
+    theirs = type === "" ? "<no type>" : `[${type}]`;
   } catch (error) {
-    theirs = `<INCUMBENT-DNF: ${String(error?.message ?? error).split('\n')[0]}>`;
+    theirs = `<INCUMBENT-DNF: ${String(error?.message ?? error).split("\n")[0]}>`;
   }
-  const mine = ourBoundaryRows(text)[0] ?? '<none>';
+  const mine = ourBoundaryRows(text)[0] ?? "<none>";
   rows.push({ macro: declaration, theirs, ours: mine, agree: theirs === mine });
 }
 const width = Math.max(...rows.map((r) => r.macro.length));
 for (const row of rows) {
-  const mark = row.agree ? 'AGREE  ' : 'DIVERGE';
-  console.log(`${mark} ${row.macro.padEnd(width)}  incumbent=${row.theirs.padEnd(28)} ours=${row.ours}`);
+  const mark = row.agree ? "AGREE  " : "DIVERGE";
+  console.log(
+    `${mark} ${row.macro.padEnd(width)}  incumbent=${row.theirs.padEnd(28)} ours=${row.ours}`,
+  );
 }
 const diverged = rows.filter((r) => !r.agree);
 console.log(`\n${rows.length - diverged.length}/${rows.length} agree`);

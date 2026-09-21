@@ -17,35 +17,36 @@
 //   mermaid 11.15.0:  render median 3453.9 ms,  output 1,198,399 bytes
 //   frankenmermaid:   full pipeline 4.555 ms,    output 535,831 B (a11y) / 372,075 B (lean)
 //   => 758x faster, 2.24x (a11y) / 3.22x (lean) smaller output.
-import puppeteer from 'puppeteer';
-import { readFileSync, writeFileSync } from 'node:fs';
+
+import { readFileSync, writeFileSync } from "node:fs";
+import puppeteer from "puppeteer";
 
 const mmdPath = process.argv[2];
 const outPath = process.argv[3];
-const text = readFileSync(mmdPath, 'utf8');
-const mermaidJs = readFileSync('./node_modules/mermaid/dist/mermaid.min.js', 'utf8');
+const text = readFileSync(mmdPath, "utf8");
+const mermaidJs = readFileSync("./node_modules/mermaid/dist/mermaid.min.js", "utf8");
 
 const browser = await puppeteer.launch({
-  executablePath: '/usr/bin/chromium-browser',
-  headless: 'new',
-  args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+  executablePath: "/usr/bin/chromium-browser",
+  headless: "new",
+  args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
 });
 const page = await browser.newPage();
 await page.setContent('<!DOCTYPE html><html><body><div id="c"></div></body></html>');
 await page.addScriptTag({ content: mermaidJs });
 await page.evaluate(() => {
-  window.mermaid.initialize({ startOnLoad: false, maxEdges: 100000, securityLevel: 'loose' });
+  window.mermaid.initialize({ startOnLoad: false, maxEdges: 100000, securityLevel: "loose" });
 });
 
 const result = await page.evaluate(async (mmd) => {
   const m = window.mermaid;
-  await m.render('w0', mmd); // warmup
+  await m.render("w0", mmd); // warmup
   const N = 5;
   const times = [];
-  let svg = '';
+  let svg = "";
   for (let i = 0; i < N; i++) {
     const t0 = performance.now();
-    const r = await m.render('g' + i, mmd);
+    const r = await m.render("g" + i, mmd);
     times.push(performance.now() - t0);
     svg = r.svg;
   }
@@ -54,5 +55,11 @@ const result = await page.evaluate(async (mmd) => {
 }, text);
 
 writeFileSync(outPath, result.svg);
-console.log(JSON.stringify({ medianMs: result.medianMs, times: result.times.map((x) => Math.round(x)), bytes: result.bytes }));
+console.log(
+  JSON.stringify({
+    medianMs: result.medianMs,
+    times: result.times.map((x) => Math.round(x)),
+    bytes: result.bytes,
+  }),
+);
 await browser.close();

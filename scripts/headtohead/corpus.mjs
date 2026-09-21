@@ -9,18 +9,18 @@
 // and `gen_wide` byte for byte, so harness numbers stay comparable with every criterion
 // number recorded in evidence/ledger/mermaid-js-head-to-head.toml.
 
-import { createHash } from 'node:crypto';
+import { createHash } from "node:crypto";
 
 function flowchart(n) {
-  const lines = ['flowchart LR'];
+  const lines = ["flowchart LR"];
   for (let i = 0; i < n; i++) lines.push(`  N${i}[Node ${i}]`);
   for (let i = 0; i < n - 1; i++) lines.push(`  N${i}-->N${i + 1}`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 // Mirrors gen_wide(layers, width) in pipeline_bench.rs: layers*width nodes, 2*width*(layers-1) edges.
 function wide(layers, width) {
-  const lines = ['flowchart TD'];
+  const lines = ["flowchart TD"];
   for (let layer = 0; layer < layers; layer++) {
     for (let w = 0; w < width; w++) lines.push(`  N${layer}_${w}[L${layer} W${w}]`);
   }
@@ -30,13 +30,13 @@ function wide(layers, width) {
       lines.push(`  N${layer}_${w}-->N${layer + 1}_${(w + 1) % width}`);
     }
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 // Strongly-connected-component-heavy digraph: rings of `ring` nodes, each ring fully cyclic,
 // chained forward to the next ring. Exercises cycle removal + crossing minimization.
 function cyclic(n, ring = 5) {
-  const lines = ['flowchart TD'];
+  const lines = ["flowchart TD"];
   for (let i = 0; i < n; i++) lines.push(`  C${i}[C${i}]`);
   for (let i = 0; i < n; i++) {
     const ringStart = Math.floor(i / ring) * ring;
@@ -44,116 +44,112 @@ function cyclic(n, ring = 5) {
     if (next < n) lines.push(`  C${i}-->C${next}`);
     if (i + ring < n) lines.push(`  C${i}-->C${i + ring}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 // Dense DAG: every node points at the next `fanout` nodes. No cycles, high edge density.
 function denseDag(n, fanout = 4) {
-  const lines = ['flowchart LR'];
+  const lines = ["flowchart LR"];
   for (let i = 0; i < n; i++) lines.push(`  D${i}[D${i}]`);
   for (let i = 0; i < n; i++) {
     for (let k = 1; k <= fanout; k++) if (i + k < n) lines.push(`  D${i}-->D${i + k}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function sequence(n) {
-  const lines = ['sequenceDiagram'];
+  const lines = ["sequenceDiagram"];
   for (let i = 0; i < n; i++) lines.push(`  participant P${i}`);
   for (let i = 0; i < n - 1; i++) {
     lines.push(`  P${i}->>P${i + 1}: request ${i}`);
     lines.push(`  P${i + 1}-->>P${i}: response ${i}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function classDiagram(n) {
-  const lines = ['classDiagram'];
+  const lines = ["classDiagram"];
   for (let i = 0; i < n; i++) {
     lines.push(`  class C${i} {`);
     lines.push(`    +int field${i}`);
     lines.push(`    +method${i}() bool`);
-    lines.push('  }');
+    lines.push("  }");
   }
   for (let i = 0; i < n - 1; i++) lines.push(`  C${i} <|-- C${i + 1}`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function classEdgeId() {
   return [
-    'flowchart LR',
-    '  Animal e1@--> Dog',
-    '  classDef alert stroke:#ff0000,stroke-width:4px',
-    '  class e1 alert',
-  ].join('\n');
+    "flowchart LR",
+    "  Animal e1@--> Dog",
+    "  classDef alert stroke:#ff0000,stroke-width:4px",
+    "  class e1 alert",
+  ].join("\n");
 }
 
 // Minimal capability fixtures. Each exercises syntax whose output used to be silently dropped,
 // so they stay in the cross-engine corpus rather than relying only on a renderer-local assertion.
 function subgraphStyleDirective() {
   return [
-    'flowchart TD',
-    '  subgraph one[One]',
-    '    A[Node A] --> B[Node B]',
-    '  end',
-    '  style one fill:#ff0000,stroke:#00ff00,stroke-width:3px',
-  ].join('\n');
+    "flowchart TD",
+    "  subgraph one[One]",
+    "    A[Node A] --> B[Node B]",
+    "  end",
+    "  style one fill:#ff0000,stroke:#00ff00,stroke-width:3px",
+  ].join("\n");
 }
 
 function clickTooltip() {
   return [
-    'flowchart TD',
-    '  A[Node A] --> B[Node B]',
+    "flowchart TD",
+    "  A[Node A] --> B[Node B]",
     '  click A "https://example.com" "Go to example"',
-  ].join('\n');
+  ].join("\n");
 }
 
 function classLinkStyleDirective() {
   return [
-    'classDiagram',
-    '  class A',
-    '  class B',
-    '  A --> B',
-    '  linkStyle 0 stroke:#ff0000',
-  ].join('\n');
+    "classDiagram",
+    "  class A",
+    "  class B",
+    "  A --> B",
+    "  linkStyle 0 stroke:#ff0000",
+  ].join("\n");
 }
 
 function stateClassDirective() {
   return [
-    'stateDiagram-v2',
-    '  [*] --> A',
-    '  A --> B',
-    '  classDef bad fill:#ff0000',
-    '  class A bad',
-  ].join('\n');
+    "stateDiagram-v2",
+    "  [*] --> A",
+    "  A --> B",
+    "  classDef bad fill:#ff0000",
+    "  class A bad",
+  ].join("\n");
 }
 
 function erClassDirective() {
-  return [
-    'erDiagram',
-    '  CUSTOMER ||--o{ ORDER : places',
-    '  class CUSTOMER bad',
-  ].join('\n');
+  return ["erDiagram", "  CUSTOMER ||--o{ ORDER : places", "  class CUSTOMER bad"].join("\n");
 }
 
 function stateDiagram(n) {
-  const lines = ['stateDiagram-v2'];
-  lines.push('  [*] --> S0');
+  const lines = ["stateDiagram-v2"];
+  lines.push("  [*] --> S0");
   for (let i = 0; i < n - 1; i++) lines.push(`  S${i} --> S${i + 1}: event${i}`);
   lines.push(`  S${n - 1} --> [*]`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function erDiagram(n) {
-  const lines = ['erDiagram'];
+  const lines = ["erDiagram"];
   for (let i = 0; i < n - 1; i++) lines.push(`  E${i} ||--o{ E${i + 1} : has`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 // Mermaid 11.15.0 accepts a circle-only cardinality marker at each end. This small fixture is
 // intentionally not a performance workload: it is the cross-engine rendering witness for bd-5ir5r.
 function erBareOptionality() {
-  return 'erDiagram\n  CUSTOMER o--o ORDER';
+  return "erDiagram\n  CUSTOMER o--o ORDER";
 }
 
 // Small but complete Gantt fixture used to pin Mermaid 11.15's axis contract: it always emits the
@@ -161,12 +157,12 @@ function erBareOptionality() {
 function ganttTopAxis() {
   return [
     "%%{init: {'gantt': {'topAxis': true}} }%%",
-    'gantt',
-    '  dateFormat YYYY-MM-DD',
-    '  section Delivery',
-    '  Design :a1, 2026-01-01, 3d',
-    '  Build :a2, after a1, 4d',
-  ].join('\n');
+    "gantt",
+    "  dateFormat YYYY-MM-DD",
+    "  section Delivery",
+    "  Design :a1, 2026-01-01, 3d",
+    "  Build :a2, after a1, 4d",
+  ].join("\n");
 }
 
 /**
@@ -179,15 +175,15 @@ function ganttTopAxis() {
  * never produce. At thousands of nodes it is also the regime where mermaid-js stops finishing.
  */
 function architecture(groups, perGroup) {
-  const lines = ['flowchart TB'];
+  const lines = ["flowchart TB"];
   for (let g = 0; g < groups; g++) {
     lines.push(`  subgraph G${g}[Group ${g}]`);
     for (let i = 0; i < perGroup; i++) lines.push(`    G${g}N${i}[Svc ${g}.${i}]`);
     for (let i = 0; i < perGroup - 1; i++) lines.push(`    G${g}N${i}-->G${g}N${i + 1}`);
-    lines.push('  end');
+    lines.push("  end");
   }
   for (let g = 0; g < groups - 1; g++) lines.push(`  G${g}N${perGroup - 1}-->G${g + 1}N0`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /**
@@ -199,15 +195,15 @@ function architecture(groups, perGroup) {
  * profile, and the one an ER user actually pays.
  */
 function erSchema(entities, attrs) {
-  const lines = ['erDiagram'];
+  const lines = ["erDiagram"];
   for (let i = 0; i < entities - 1; i++) lines.push(`  E${i} ||--o{ E${i + 1} : has`);
   for (let i = 0; i < entities; i++) {
     lines.push(`  E${i} {`);
-    lines.push('    int id PK');
+    lines.push("    int id PK");
     for (let a = 0; a < attrs - 1; a++) lines.push(`    string field${a}`);
-    lines.push('  }');
+    lines.push("  }");
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /**
@@ -242,7 +238,7 @@ function editTrace(n, revisions) {
   const edges = [];
   for (let i = 0; i < n; i++) nodes.push(`  N${i}[Node ${i}]`);
   for (let i = 0; i < n - 1; i++) edges.push(`  N${i}-->N${i + 1}`);
-  const document = () => ['flowchart LR', ...nodes, ...edges].join('\n');
+  const document = () => ["flowchart LR", ...nodes, ...edges].join("\n");
 
   const texts = [document()];
   for (let r = 0; r < revisions; r++) {
@@ -301,12 +297,40 @@ function rng(seed) {
 // ampersand / apostrophe / angle-bracket / accented entries are deliberate and are ~25% of this pool:
 // they are the escaping realism the synthetic corpus lacks.
 const LABEL_WORDS = [
-  'User', 'Client', 'API Gateway', 'Auth Service', 'Session Store', 'Database', 'Read Replica',
-  'Cache', 'Message Queue', 'Worker', 'Scheduler', 'Load Balancer', 'CDN', 'Object Store',
-  'Validate input', 'Normalize payload', 'Check permissions', 'Emit audit event', 'Persist record',
-  'Rate limit (429)', 'Retry & backoff', 'Fan out', 'Aggregate results', 'Render response',
-  'Parse <config>', 'Diff & merge', 'Sign & upload', 'Rollback on failure',
-  'Café latency', 'naïve retry', 'Ingestion', 'Überprüfung', 'Résumé job', "User's session",
+  "User",
+  "Client",
+  "API Gateway",
+  "Auth Service",
+  "Session Store",
+  "Database",
+  "Read Replica",
+  "Cache",
+  "Message Queue",
+  "Worker",
+  "Scheduler",
+  "Load Balancer",
+  "CDN",
+  "Object Store",
+  "Validate input",
+  "Normalize payload",
+  "Check permissions",
+  "Emit audit event",
+  "Persist record",
+  "Rate limit (429)",
+  "Retry & backoff",
+  "Fan out",
+  "Aggregate results",
+  "Render response",
+  "Parse <config>",
+  "Diff & merge",
+  "Sign & upload",
+  "Rollback on failure",
+  "Café latency",
+  "naïve retry",
+  "Ingestion",
+  "Überprüfung",
+  "Résumé job",
+  "User's session",
 ];
 
 const pick = (r, xs) => xs[Math.floor(r() * xs.length) % xs.length];
@@ -324,7 +348,7 @@ function realisticLabel(r, i) {
 }
 
 function docFlowchart(r, n) {
-  const lines = [`flowchart ${pick(r, ['LR', 'TD', 'TB'])}`];
+  const lines = [`flowchart ${pick(r, ["LR", "TD", "TB"])}`];
   for (let i = 0; i < n; i++) lines.push(`  N${i}["${realisticLabel(r, i)}"]`);
   for (let i = 0; i < n - 1; i++) {
     // Real flowcharts branch; they are not one chain.
@@ -332,58 +356,60 @@ function docFlowchart(r, n) {
     if (r() < 0.22) lines.push(`  N${from}-->|"${pick(r, LABEL_WORDS)}"|N${i + 1}`);
     else lines.push(`  N${from}-->N${i + 1}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function docSequence(r, n) {
-  const lines = ['sequenceDiagram'];
+  const lines = ["sequenceDiagram"];
   const p = Math.max(2, Math.min(6, Math.ceil(n / 3)));
   for (let i = 0; i < p; i++) lines.push(`  participant P${i} as ${pick(r, LABEL_WORDS)}`);
   for (let i = 0; i < n; i++) {
     const a = i % p;
     const b = (i + 1 + Math.floor(r() * (p - 1))) % p;
-    lines.push(`  P${a}${r() < 0.25 ? '-->>' : '->>'}P${b}: ${realisticLabel(r, i)}`);
+    lines.push(`  P${a}${r() < 0.25 ? "-->>" : "->>"}P${b}: ${realisticLabel(r, i)}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function docClass(r, n) {
-  const lines = ['classDiagram'];
+  const lines = ["classDiagram"];
   for (let i = 0; i < n; i++) {
     lines.push(`  class C${i} {`);
     const fields = 1 + Math.floor(r() * 4);
     for (let f = 0; f < fields; f++) {
-      lines.push(`    +${pick(r, ['int', 'string', 'bool', 'float'])} field${f}`);
+      lines.push(`    +${pick(r, ["int", "string", "bool", "float"])} field${f}`);
     }
-    lines.push(`    +method${i}() ${pick(r, ['bool', 'void', 'string'])}`);
-    lines.push('  }');
+    lines.push(`    +method${i}() ${pick(r, ["bool", "void", "string"])}`);
+    lines.push("  }");
   }
   for (let i = 0; i < n - 1; i++) {
-    lines.push(`  C${i} ${pick(r, ['<|--', '*--', 'o--', '-->'])} C${i + 1}`);
+    lines.push(`  C${i} ${pick(r, ["<|--", "*--", "o--", "-->"])} C${i + 1}`);
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function docState(r, n) {
-  const lines = ['stateDiagram-v2', '  [*] --> S0'];
+  const lines = ["stateDiagram-v2", "  [*] --> S0"];
   for (let i = 0; i < n - 1; i++) lines.push(`  S${i} --> S${i + 1}: ${pick(r, LABEL_WORDS)}`);
   lines.push(`  S${n - 1} --> [*]`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 function docEr(r, n) {
-  const lines = ['erDiagram'];
+  const lines = ["erDiagram"];
   for (let i = 0; i < n - 1; i++) {
-    lines.push(`  E${i} ${pick(r, ['||--o{', '||--||', '}o--o{'])} E${i + 1} : ${pick(r, ['has', 'owns', 'refers'])}`);
+    lines.push(
+      `  E${i} ${pick(r, ["||--o{", "||--||", "}o--o{"])} E${i + 1} : ${pick(r, ["has", "owns", "refers"])}`,
+    );
   }
   for (let i = 0; i < n; i++) {
     lines.push(`  E${i} {`);
-    lines.push('    int id PK');
+    lines.push("    int id PK");
     const attrs = 1 + Math.floor(r() * 5);
     for (let a = 0; a < attrs; a++) lines.push(`    string field${a}`);
-    lines.push('  }');
+    lines.push("  }");
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /**
@@ -424,13 +450,13 @@ function equivalenceDecidableDocs(count, seed) {
   for (let d = 0; d < count; d++) {
     const r = rng(seed + d * 7919);
     const n = skewedSize(r, 4, 60);
-    const lines = ['flowchart LR'];
+    const lines = ["flowchart LR"];
     for (let i = 0; i < n; i++) lines.push(`  N${i}["${realisticLabel(r, i)}"]`);
     for (let i = 0; i < n - 1; i++) {
       if (r() < 0.22) lines.push(`  N${i}-->|"${pick(r, LABEL_WORDS)}"|N${i + 1}`);
       else lines.push(`  N${i}-->N${i + 1}`);
     }
-    out.push(lines.join('\n'));
+    out.push(lines.join("\n"));
   }
   return out;
 }
@@ -444,13 +470,13 @@ function equivalenceDecidableDocs(count, seed) {
  */
 function sharedSubgraphDocs(count, sharedNodes, seed, divergentBlocks = false) {
   const sharedRandom = rng(seed);
-  const prefix = ['flowchart LR', '  subgraph Shared["Shared ingestion platform"]'];
+  const prefix = ["flowchart LR", '  subgraph Shared["Shared ingestion platform"]'];
   for (let i = 0; i < sharedNodes; i++) {
     prefix.push(`    S${i}["${realisticLabel(sharedRandom, i)}"]`);
   }
   for (let i = 0; i < sharedNodes - 1; i++) prefix.push(`    S${i}-->S${i + 1}`);
-  prefix.push('  end');
-  const shared = prefix.join('\n');
+  prefix.push("  end");
+  const shared = prefix.join("\n");
 
   const out = [];
   for (let d = 0; d < count; d++) {
@@ -459,19 +485,19 @@ function sharedSubgraphDocs(count, sharedNodes, seed, divergentBlocks = false) {
     const suffix = [];
     if (divergentBlocks) suffix.push(`  subgraph Tenant${d}["Tenant ${d}"]`);
     for (let i = 0; i < uniqueNodes; i++) {
-      const indent = divergentBlocks ? '    ' : '  ';
+      const indent = divergentBlocks ? "    " : "  ";
       suffix.push(`${indent}D${i}["${realisticLabel(documentRandom, d * 16 + i)}"]`);
     }
     if (!divergentBlocks) suffix.push(`  S${sharedNodes - 1}-->D0`);
     for (let i = 0; i < uniqueNodes - 1; i++) {
-      const indent = divergentBlocks ? '    ' : '  ';
+      const indent = divergentBlocks ? "    " : "  ";
       suffix.push(`${indent}D${i}-->D${i + 1}`);
     }
     if (divergentBlocks) {
-      suffix.push('  end');
+      suffix.push("  end");
       suffix.push(`  S${sharedNodes - 1}-->D0`);
     }
-    out.push([shared, ...suffix].join('\n'));
+    out.push([shared, ...suffix].join("\n"));
   }
   return out;
 }
@@ -493,18 +519,27 @@ function typingTrace(baseNodes, phrase, seed) {
   const texts = [];
   for (let k = 1; k <= phrase.length; k++) {
     nodes[target] = `  N${target}["${phrase.slice(0, k)}"]`;
-    texts.push(['flowchart LR', ...nodes, ...edges].join('\n'));
+    texts.push(["flowchart LR", ...nodes, ...edges].join("\n"));
   }
   return texts;
 }
 
 const DOMAIN_NAMES = [
-  'Identity & Access', 'Customer Experience', 'Billing', 'Data Platform', 'Observability',
-  'Fulfillment', 'Search', 'Messaging', 'Developer Platform', 'Risk & Compliance',
-  'Analytics', 'Content Delivery',
+  "Identity & Access",
+  "Customer Experience",
+  "Billing",
+  "Data Platform",
+  "Observability",
+  "Fulfillment",
+  "Search",
+  "Messaging",
+  "Developer Platform",
+  "Risk & Compliance",
+  "Analytics",
+  "Content Delivery",
 ];
 
-const EDGE_LABELS = ['HTTPS', 'gRPC', 'events', 'reads', 'writes', 'publishes', 'subscribes'];
+const EDGE_LABELS = ["HTTPS", "gRPC", "events", "reads", "writes", "publishes", "subscribes"];
 
 /**
  * One monorepo service map exported for an architecture review.
@@ -518,17 +553,16 @@ function monorepoArchitecture(serviceCount, domainCount, seed) {
   const r = rng(seed);
   const domains = Array.from({ length: domainCount }, () => []);
   for (let i = 0; i < serviceCount; i++) {
-    const domain = i < domainCount
-      ? i
-      : Math.min(domainCount - 1, Math.floor(domainCount * r() ** 1.7));
+    const domain =
+      i < domainCount ? i : Math.min(domainCount - 1, Math.floor(domainCount * r() ** 1.7));
     domains[domain].push(i);
   }
 
-  const lines = ['flowchart LR'];
+  const lines = ["flowchart LR"];
   for (let d = 0; d < domains.length; d++) {
     lines.push(`  subgraph D${d}["${DOMAIN_NAMES[d % DOMAIN_NAMES.length]}"]`);
     for (const i of domains[d]) lines.push(`    S${i}["${realisticLabel(r, i)}"]`);
-    lines.push('  end');
+    lines.push("  end");
   }
 
   // Every non-root service depends on one earlier service, biased strongly toward a small set of
@@ -542,31 +576,45 @@ function monorepoArchitecture(serviceCount, domainCount, seed) {
     const to = Math.floor(serviceCount * r() ** 2.8);
     if (from !== to) lines.push(`  S${from} -.->|"${pick(r, EDGE_LABELS)}"| S${to}`);
   }
-  return [lines.join('\n')];
+  return [lines.join("\n")];
 }
 
 const FIELD_NAMES = [
-  'external_id', 'created_at', 'updated_at', 'display_name', 'status', 'owner_id',
-  'region', 'version', 'payload', 'checksum', 'expires_at', 'retry_count',
+  "external_id",
+  "created_at",
+  "updated_at",
+  "display_name",
+  "status",
+  "owner_id",
+  "region",
+  "version",
+  "payload",
+  "checksum",
+  "expires_at",
+  "retry_count",
 ];
 
 function catalogSchema(r, schemaIndex, entityCount) {
-  const lines = ['erDiagram'];
+  const lines = ["erDiagram"];
   const entity = (i) => `S${schemaIndex}_E${i}`;
   for (let i = 0; i < entityCount; i++) {
     lines.push(`  ${entity(i)} {`);
-    lines.push('    uuid id PK');
+    lines.push("    uuid id PK");
     const fields = 1 + Math.floor(r() ** 1.8 * 8);
     for (let f = 0; f < fields; f++) {
-      lines.push(`    ${pick(r, ['string', 'int', 'boolean', 'timestamp', 'json'])} ${pick(r, FIELD_NAMES)}_${f}`);
+      lines.push(
+        `    ${pick(r, ["string", "int", "boolean", "timestamp", "json"])} ${pick(r, FIELD_NAMES)}_${f}`,
+      );
     }
-    lines.push('  }');
+    lines.push("  }");
   }
   for (let i = 1; i < entityCount; i++) {
     const parent = Math.min(i - 1, Math.floor(i * r() ** 2.5));
-    lines.push(`  ${entity(parent)} ||--o{ ${entity(i)} : ${pick(r, ['contains', 'owns', 'references'])}`);
+    lines.push(
+      `  ${entity(parent)} ||--o{ ${entity(i)} : ${pick(r, ["contains", "owns", "references"])}`,
+    );
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /**
@@ -609,8 +657,7 @@ const GENERATORS = {
   docs_site: (p) => docsSite(p.count, p.seed),
   equivalence_decidable_docs: (p) => equivalenceDecidableDocs(p.count, p.seed),
   shared_subgraph_docs: (p) => sharedSubgraphDocs(p.count, p.shared_nodes, p.seed),
-  shared_subgraph_divergent_docs: (p) =>
-    sharedSubgraphDocs(p.count, p.shared_nodes, p.seed, true),
+  shared_subgraph_divergent_docs: (p) => sharedSubgraphDocs(p.count, p.shared_nodes, p.seed, true),
   typing_trace: (p) => typingTrace(p.nodes, p.phrase, p.seed),
   monorepo_architecture: (p) => monorepoArchitecture(p.services, p.domains, p.seed),
   schema_catalog: (p) => schemaCatalog(p.schemas, p.min_entities, p.max_entities, p.seed),
@@ -620,35 +667,203 @@ const GENERATORS = {
 };
 
 /** Separator used to hash a multi-revision trace as one input. Must match `headtohead.rs`. */
-export const REVISION_SEP = '\n%%--revision--%%\n';
+export const REVISION_SEP = "\n%%--revision--%%\n";
 
 // The fixed corpus. `reps_*` are per-engine iteration counts: mermaid is ~3 orders of
 // magnitude slower, so it gets fewer reps on the heavy items to keep a run under ~2 minutes.
 // `warmup_*` iterations are executed and discarded before timing starts.
 export const CORPUS = [
-  { id: 'flowchart_small_10',   gen: 'flowchart', params: { n: 10 },                 reps_js: 20, warmup_js: 3, reps_rs: 200, warmup_rs: 20 },
-  { id: 'flowchart_medium_100', gen: 'flowchart', params: { n: 100 },                reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
-  { id: 'flowchart_large_500',  gen: 'flowchart', params: { n: 500 },                reps_js: 7,  warmup_js: 2, reps_rs: 50,  warmup_rs: 5 },
-  { id: 'wide_8x16',            gen: 'wide',      params: { layers: 8, width: 16 },  reps_js: 12, warmup_js: 2, reps_rs: 80,  warmup_rs: 8 },
-  { id: 'wide_12x24',           gen: 'wide',      params: { layers: 12, width: 24 }, reps_js: 7,  warmup_js: 2, reps_rs: 50,  warmup_rs: 5 },
-  { id: 'wide_16x32',           gen: 'wide',      params: { layers: 16, width: 32 }, reps_js: 5,  warmup_js: 1, reps_rs: 30,  warmup_rs: 3 },
-  { id: 'dense_dag_200',        gen: 'dense_dag', params: { n: 200, fanout: 4 },     reps_js: 7,  warmup_js: 2, reps_rs: 50,  warmup_rs: 5 },
-  { id: 'cyclic_scc_100',       gen: 'cyclic',    params: { n: 100, ring: 5 },       reps_js: 12, warmup_js: 2, reps_rs: 80,  warmup_rs: 8 },
-  { id: 'sequence_20',          gen: 'sequence',  params: { n: 20 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
-  { id: 'class_50',             gen: 'class',     params: { n: 50 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
-  { id: 'class_edge_id',        gen: 'class_edge_id', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'subgraph_style_directive', gen: 'subgraph_style_directive', params: {},      reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'click_tooltip',        gen: 'click_tooltip', params: {},                     reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'class_linkstyle_directive', gen: 'class_linkstyle_directive', params: {},    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'state_class_directive', gen: 'state_class_directive', params: {},            reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'er_class_directive',   gen: 'er_class_directive', params: {},                reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
-  { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
-  { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
-  { id: 'er_bare_o',            gen: 'er_bare_o', params: {},                        reps_js: 1,  warmup_js: 0, reps_rs: 1,   warmup_rs: 0 },
-  { id: 'gantt_top_axis',       gen: 'gantt_top_axis', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
+  {
+    id: "flowchart_small_10",
+    gen: "flowchart",
+    params: { n: 10 },
+    reps_js: 20,
+    warmup_js: 3,
+    reps_rs: 200,
+    warmup_rs: 20,
+  },
+  {
+    id: "flowchart_medium_100",
+    gen: "flowchart",
+    params: { n: 100 },
+    reps_js: 15,
+    warmup_js: 3,
+    reps_rs: 100,
+    warmup_rs: 10,
+  },
+  {
+    id: "flowchart_large_500",
+    gen: "flowchart",
+    params: { n: 500 },
+    reps_js: 7,
+    warmup_js: 2,
+    reps_rs: 50,
+    warmup_rs: 5,
+  },
+  {
+    id: "wide_8x16",
+    gen: "wide",
+    params: { layers: 8, width: 16 },
+    reps_js: 12,
+    warmup_js: 2,
+    reps_rs: 80,
+    warmup_rs: 8,
+  },
+  {
+    id: "wide_12x24",
+    gen: "wide",
+    params: { layers: 12, width: 24 },
+    reps_js: 7,
+    warmup_js: 2,
+    reps_rs: 50,
+    warmup_rs: 5,
+  },
+  {
+    id: "wide_16x32",
+    gen: "wide",
+    params: { layers: 16, width: 32 },
+    reps_js: 5,
+    warmup_js: 1,
+    reps_rs: 30,
+    warmup_rs: 3,
+  },
+  {
+    id: "dense_dag_200",
+    gen: "dense_dag",
+    params: { n: 200, fanout: 4 },
+    reps_js: 7,
+    warmup_js: 2,
+    reps_rs: 50,
+    warmup_rs: 5,
+  },
+  {
+    id: "cyclic_scc_100",
+    gen: "cyclic",
+    params: { n: 100, ring: 5 },
+    reps_js: 12,
+    warmup_js: 2,
+    reps_rs: 80,
+    warmup_rs: 8,
+  },
+  {
+    id: "sequence_20",
+    gen: "sequence",
+    params: { n: 20 },
+    reps_js: 15,
+    warmup_js: 3,
+    reps_rs: 100,
+    warmup_rs: 10,
+  },
+  {
+    id: "class_50",
+    gen: "class",
+    params: { n: 50 },
+    reps_js: 15,
+    warmup_js: 3,
+    reps_rs: 100,
+    warmup_rs: 10,
+  },
+  {
+    id: "class_edge_id",
+    gen: "class_edge_id",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "subgraph_style_directive",
+    gen: "subgraph_style_directive",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "click_tooltip",
+    gen: "click_tooltip",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "class_linkstyle_directive",
+    gen: "class_linkstyle_directive",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "state_class_directive",
+    gen: "state_class_directive",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "er_class_directive",
+    gen: "er_class_directive",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
+  {
+    id: "state_40",
+    gen: "state",
+    params: { n: 40 },
+    reps_js: 15,
+    warmup_js: 3,
+    reps_rs: 100,
+    warmup_rs: 10,
+  },
+  {
+    id: "er_40",
+    gen: "er",
+    params: { n: 40 },
+    reps_js: 15,
+    warmup_js: 3,
+    reps_rs: 100,
+    warmup_rs: 10,
+  },
+  {
+    id: "er_bare_o",
+    gen: "er_bare_o",
+    params: {},
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 1,
+    warmup_rs: 0,
+  },
+  {
+    id: "gantt_top_axis",
+    gen: "gantt_top_axis",
+    params: {},
+    reps_js: 4,
+    warmup_js: 1,
+    reps_rs: 40,
+    warmup_rs: 4,
+  },
   // A live-preview editing session: 21 successive full documents. One "iteration" renders all 21,
   // which is what an editor does as the user types -- mermaid has no incremental path.
-  { id: 'edit_trace_60x20',     gen: 'edit_trace', params: { n: 60, revisions: 20 }, reps_js: 3,  warmup_js: 1, reps_rs: 30,  warmup_rs: 3 },
+  {
+    id: "edit_trace_60x20",
+    gen: "edit_trace",
+    params: { n: 60, revisions: 20 },
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 30,
+    warmup_rs: 3,
+  },
 
   // ---------------------------------------------------------------------------------------------
   // Workload classes the 13-item baseline never covered (bd-1buv, cc/STRUCTURAL lane).
@@ -671,10 +886,54 @@ export const CORPUS = [
   // `warmup_js: 0` on the heaviest items is deliberate: a warmup render doubles an item that may
   // already take minutes, and these samples are long enough that v8 is warm within the first few
   // renders of the timed sample itself.
-  { id: 'flowchart_xl_2000',    gen: 'flowchart',    params: { n: 2000 },                    class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
-  { id: 'flowchart_xl_5000',    gen: 'flowchart',    params: { n: 5000 },                    class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'arch_100x50',          gen: 'architecture', params: { groups: 100, per_group: 50 }, class: 'single',     reps_js: 2, warmup_js: 0, reps_rs: 12, warmup_rs: 2, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_schema_1000x6',     gen: 'er_schema',    params: { entities: 1000, attrs: 6 },   class: 'single',     reps_js: 3, warmup_js: 1, reps_rs: 20, warmup_rs: 3, js_budget_ms: 900_000, dnf_allowed: true },
+  {
+    id: "flowchart_xl_2000",
+    gen: "flowchart",
+    params: { n: 2000 },
+    class: "single",
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 20,
+    warmup_rs: 3,
+    js_budget_ms: 300_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "flowchart_xl_5000",
+    gen: "flowchart",
+    params: { n: 5000 },
+    class: "single",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 12,
+    warmup_rs: 2,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "arch_100x50",
+    gen: "architecture",
+    params: { groups: 100, per_group: 50 },
+    class: "single",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 12,
+    warmup_rs: 2,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "er_schema_1000x6",
+    gen: "er_schema",
+    params: { entities: 1000, attrs: 6 },
+    class: "single",
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 20,
+    warmup_rs: 3,
+    js_budget_ms: 900_000,
+    dnf_allowed: true,
+  },
   // The top of the range the campaign named (5-10k nodes). mermaid-js already fails at 2,000, so
   // these exist to characterise *our* scaling where the comparator has no curve left to measure --
   // and because every ledger self-time percentage is a claim about a workload, so the frontier at
@@ -684,24 +943,112 @@ export const CORPUS = [
   // bootstrap median CI for these one-sample-per-arm items. Historical MAD varied from 0.4% to
   // 16.4% across identical inputs; that dispersion is retained as provenance, never as a gate.
   // The workload, hash, and budget remain untouched, and 40 rounds costs roughly 0.4 s per arm.
-  { id: 'arch_200x50',          gen: 'architecture', params: { groups: 200, per_group: 50 }, class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_schema_2500x8',     gen: 'er_schema',    params: { entities: 2500, attrs: 8 },   class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  {
+    id: "arch_200x50",
+    gen: "architecture",
+    params: { groups: 200, per_group: 50 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "er_schema_2500x8",
+    gen: "er_schema",
+    params: { entities: 2500, attrs: 8 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
   // ER endpoints at the campaign's explicitly named 5k-10k *node* range. The 2,500-entity row
   // establishes the comparator's failure boundary; these two remain admitted-but-unmeasured until
   // Lane M grants a quiet window. Their purpose is to expose frankenmermaid's scaling after the
   // comparator curve has ended, without turning a construction-only Lane L turn into a timing claim.
-  { id: 'er_schema_5000x8',     gen: 'er_schema',    params: { entities: 5000, attrs: 8 },   class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_schema_10000x8',    gen: 'er_schema',    params: { entities: 10000, attrs: 8 },  class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 2400_000, dnf_allowed: true },
+  {
+    id: "er_schema_5000x8",
+    gen: "er_schema",
+    params: { entities: 5000, attrs: 8 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "er_schema_10000x8",
+    gen: "er_schema",
+    params: { entities: 10000, attrs: 8 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 2400_000,
+    dnf_allowed: true,
+  },
   // 201 successive documents: a real editing session, not a 21-keystroke sketch.
-  { id: 'edit_trace_200x200',   gen: 'edit_trace',   params: { n: 200, revisions: 200 },     class: 'edit_trace', reps_js: 2, warmup_js: 0, reps_rs: 10, warmup_rs: 2, js_budget_ms: 6000_000, dnf_allowed: true },
+  {
+    id: "edit_trace_200x200",
+    gen: "edit_trace",
+    params: { n: 200, revisions: 200 },
+    class: "edit_trace",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 10,
+    warmup_rs: 2,
+    js_budget_ms: 6000_000,
+    dnf_allowed: true,
+  },
   // A sustained live-preview session: 1,001 successive full documents. This is long enough to
   // surface cumulative allocator/cache behavior that a 21- or 201-document trace cannot expose.
-  { id: 'edit_trace_500x1000',  gen: 'edit_trace',   params: { n: 500, revisions: 1000 },    class: 'edit_trace', reps_js: 1, warmup_js: 0, reps_rs: 12, warmup_rs: 1, js_budget_ms: 600_000, dnf_allowed: true },
+  {
+    id: "edit_trace_500x1000",
+    gen: "edit_trace",
+    params: { n: 500, revisions: 1000 },
+    class: "edit_trace",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 12,
+    warmup_rs: 1,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
   // 40 diagrams across five types -- one docs page, or one CI batch job.
-  { id: 'doc_build_40',         gen: 'doc_build',    params: { copies: 8 },                  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 300_000, dnf_allowed: true },
+  {
+    id: "doc_build_40",
+    gen: "doc_build",
+    params: { copies: 8 },
+    class: "doc_build",
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 30,
+    warmup_rs: 3,
+    js_budget_ms: 300_000,
+    dnf_allowed: true,
+  },
   // A repository-scale CI render: 500 diagrams across the same five syntax families. It measures
   // one whole job, not a per-diagram microbenchmark, and remains unmeasured until a worker window.
-  { id: 'ci_batch_500',         gen: 'doc_build',    params: { copies: 100 },                class: 'doc_build',  reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+  {
+    id: "ci_batch_500",
+    gen: "doc_build",
+    params: { copies: 100 },
+    class: "doc_build",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 1500_000,
+    dnf_allowed: true,
+  },
 
   // ---------------------------------------------------------------------------------------------
   // XL tier for the SEVEN syntax families that never had one.
@@ -724,60 +1071,268 @@ export const CORPUS = [
   // been observed to stop, and to keep each family's own shape: `wide` stays layered, `cyclic`
   // stays SCC-heavy, `dense_dag` keeps fanout 4, `class` keeps its members, `er` keeps its chain.
   // Nothing here is a new generator or a new shape -- same runtime-selected generators, one tier up.
-  { id: 'wide_xl_50x50',        gen: 'wide',         params: { layers: 50, width: 50 },      class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'cyclic_scc_xl_2500',   gen: 'cyclic',       params: { n: 2500, ring: 5 },           class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'dense_dag_xl_2000',    gen: 'dense_dag',    params: { n: 2000, fanout: 4 },         class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'sequence_xl_2000',     gen: 'sequence',     params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'class_xl_2000',        gen: 'class',        params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'state_xl_2000',        gen: 'state',        params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
-  { id: 'er_xl_2000',           gen: 'er',           params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  {
+    id: "wide_xl_50x50",
+    gen: "wide",
+    params: { layers: 50, width: 50 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "cyclic_scc_xl_2500",
+    gen: "cyclic",
+    params: { n: 2500, ring: 5 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "dense_dag_xl_2000",
+    gen: "dense_dag",
+    params: { n: 2000, fanout: 4 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "sequence_xl_2000",
+    gen: "sequence",
+    params: { n: 2000 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "class_xl_2000",
+    gen: "class",
+    params: { n: 2000 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "state_xl_2000",
+    gen: "state",
+    params: { n: 2000 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "er_xl_2000",
+    gen: "er",
+    params: { n: 2000 },
+    class: "single",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 40,
+    warmup_rs: 3,
+    js_budget_ms: 600_000,
+    dnf_allowed: true,
+  },
 
   // ---------------------------------------------------------------------------------------------
   // PHASE 2 — whole jobs a real user runs, on realistic data. See the generator notes above: these
   // differ from `doc_build`/`edit_trace` in DISTRIBUTION, not just size — flowchart-dominated type
   // mix, right-skewed diagram sizes, and labels that actually contain `&`, `<`, `>`, apostrophes and
   // accented characters, which is the escaping cost a synthetic corpus never charges either engine.
-  { id: 'docs_site_50',         gen: 'docs_site',    params: { count: 50, seed: 20260728 },  class: 'doc_build',  reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 900_000,  dnf_allowed: true },
-  { id: 'docs_site_200',        gen: 'docs_site',    params: { count: 200, seed: 20260728 }, class: 'doc_build',  reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+  {
+    id: "docs_site_50",
+    gen: "docs_site",
+    params: { count: 50, seed: 20260728 },
+    class: "doc_build",
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 30,
+    warmup_rs: 3,
+    js_budget_ms: 900_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "docs_site_200",
+    gen: "docs_site",
+    params: { count: 200, seed: 20260728 },
+    class: "doc_build",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 1500_000,
+    dnf_allowed: true,
+  },
   // CI render-farm jobs over the same realistic, right-skewed distribution. These are deliberately
   // whole 2,000- and 5,000-diagram invocations rather than a small job multiplied after timing:
   // corpus traversal, output ownership, allocator pressure, and persistent-pool scheduling remain
   // inside the boundary a user pays. They are pinned now and require exclusive-trj certification.
-  { id: 'ci_docs_2000',         gen: 'docs_site',    params: { count: 2000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 3600_000, dnf_allowed: true },
-  { id: 'ci_docs_5000',         gen: 'docs_site',    params: { count: 5000, seed: 20260729 }, class: 'doc_build', reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 9000_000, dnf_allowed: true },
+  {
+    id: "ci_docs_2000",
+    gen: "docs_site",
+    params: { count: 2000, seed: 20260729 },
+    class: "doc_build",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 3600_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "ci_docs_5000",
+    gen: "docs_site",
+    params: { count: 5000, seed: 20260729 },
+    class: "doc_build",
+    reps_js: 1,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 9000_000,
+    dnf_allowed: true,
+  },
   // 512 independent diagrams in one job, not 512 divided timings. Every diagram belongs to a
   // family whose SVG equivalence can prove rendered edge topology against input ground truth.
   // Nine live incumbent samples make the cross-runtime bootstrap median-ratio CI decidable.
-  { id: 'ci_equiv_512',         gen: 'equivalence_decidable_docs', params: { count: 512, seed: 20260730 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
+  {
+    id: "ci_equiv_512",
+    gen: "equivalence_decidable_docs",
+    params: { count: 512, seed: 20260730 },
+    class: "doc_build",
+    reps_js: 9,
+    null_reps_js: 20,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 7200_000,
+    dnf_allowed: true,
+    effect_ci_required: true,
+  },
   // 384 distinct docs pages share one complete 48-node platform subgraph and attach independent
   // tails. The job exposes cross-diagram parser reuse while retaining one full render per page.
-  { id: 'ci_shared_subgraph_384', gen: 'shared_subgraph_docs', params: { count: 384, shared_nodes: 48, seed: 20260731 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
+  {
+    id: "ci_shared_subgraph_384",
+    gen: "shared_subgraph_docs",
+    params: { count: 384, shared_nodes: 48, seed: 20260731 },
+    class: "doc_build",
+    reps_js: 9,
+    null_reps_js: 20,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 7200_000,
+    dnf_allowed: true,
+    effect_ci_required: true,
+  },
   // The same platform block followed by a distinct complete tenant subgraph. The largest leading
   // prefix differs per document, so only the linear common-boundary planner can reuse the platform.
-  { id: 'ci_shared_subgraph_divergent_64', gen: 'shared_subgraph_divergent_docs', params: { count: 64, shared_nodes: 48, seed: 20260731 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true, effect_ci_required: true },
+  {
+    id: "ci_shared_subgraph_divergent_64",
+    gen: "shared_subgraph_divergent_docs",
+    params: { count: 64, shared_nodes: 48, seed: 20260731 },
+    class: "doc_build",
+    reps_js: 9,
+    null_reps_js: 20,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 900_000,
+    dnf_allowed: true,
+    effect_ci_required: true,
+  },
   // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
-  { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
+  {
+    id: "typing_trace_60",
+    gen: "typing_trace",
+    params: {
+      nodes: 40,
+      phrase: "Aggregate results from the upstream ingestion workers safely",
+      seed: 20260728,
+    },
+    class: "edit_trace",
+    reps_js: 2,
+    warmup_js: 1,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 900_000,
+    dnf_allowed: true,
+  },
   // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately
   // skewed; these are service maps, not regular layered grids.
-  { id: 'monorepo_arch_120',    gen: 'monorepo_architecture', params: { services: 120, domains: 8, seed: 20260728 }, class: 'single', reps_js: 3, warmup_js: 1, reps_rs: 30, warmup_rs: 3, js_budget_ms: 900_000, dnf_allowed: true },
-  { id: 'monorepo_arch_300',    gen: 'monorepo_architecture', params: { services: 300, domains: 12, seed: 20260728 }, class: 'single', reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1200_000, dnf_allowed: true },
+  {
+    id: "monorepo_arch_120",
+    gen: "monorepo_architecture",
+    params: { services: 120, domains: 8, seed: 20260728 },
+    class: "single",
+    reps_js: 3,
+    warmup_js: 1,
+    reps_rs: 30,
+    warmup_rs: 3,
+    js_budget_ms: 900_000,
+    dnf_allowed: true,
+  },
+  {
+    id: "monorepo_arch_300",
+    gen: "monorepo_architecture",
+    params: { services: 300, domains: 12, seed: 20260728 },
+    class: "single",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 1200_000,
+    dnf_allowed: true,
+  },
   // Twenty-five bounded-context ER diagrams rendered as one database-catalog publish.
-  { id: 'schema_catalog_25',    gen: 'schema_catalog', params: { schemas: 25, min_entities: 8, max_entities: 80, seed: 20260728 }, class: 'doc_build', reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
+  {
+    id: "schema_catalog_25",
+    gen: "schema_catalog",
+    params: { schemas: 25, min_entities: 8, max_entities: 80, seed: 20260728 },
+    class: "doc_build",
+    reps_js: 2,
+    warmup_js: 0,
+    reps_rs: 20,
+    warmup_rs: 2,
+    js_budget_ms: 1500_000,
+    dnf_allowed: true,
+  },
 ];
 
 /** Native-output sentinels for the seven incumbent-termination capability fixtures. */
 export const XL_CAPABILITY_SENTINELS = Object.freeze({
-  wide_xl_50x50: 'N49_49',
-  cyclic_scc_xl_2500: 'C2499',
-  dense_dag_xl_2000: 'D1999',
-  sequence_xl_2000: 'P1999',
-  class_xl_2000: 'C1999',
-  state_xl_2000: 'S1999',
-  er_xl_2000: 'E1999',
+  wide_xl_50x50: "N49_49",
+  cyclic_scc_xl_2500: "C2499",
+  dense_dag_xl_2000: "D1999",
+  sequence_xl_2000: "P1999",
+  class_xl_2000: "C1999",
+  state_xl_2000: "S1999",
+  er_xl_2000: "E1999",
 });
 
 export function sha256(text) {
-  return createHash('sha256').update(text, 'utf8').digest('hex');
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 /** All documents for a corpus item, in order. Single-shot items yield a one-element array. */
@@ -794,7 +1349,7 @@ export function generateAll() {
   for (const item of CORPUS) {
     const texts = generate(item);
     const joined = texts.join(REVISION_SEP);
-    out.set(item.id, { texts, sha256: sha256(joined), bytes: Buffer.byteLength(joined, 'utf8') });
+    out.set(item.id, { texts, sha256: sha256(joined), bytes: Buffer.byteLength(joined, "utf8") });
   }
   return out;
 }
@@ -802,28 +1357,41 @@ export function generateAll() {
 /** Keep the structural-capability tier complete: every formerly sub-XL family stays represented. */
 export function assertXlCapabilityFixtures() {
   const expected = new Set([
-    'wide_xl_50x50', 'cyclic_scc_xl_2500', 'dense_dag_xl_2000', 'sequence_xl_2000',
-    'class_xl_2000', 'state_xl_2000', 'er_xl_2000',
+    "wide_xl_50x50",
+    "cyclic_scc_xl_2500",
+    "dense_dag_xl_2000",
+    "sequence_xl_2000",
+    "class_xl_2000",
+    "state_xl_2000",
+    "er_xl_2000",
   ]);
   const headers = new Map([
-    ['wide_xl_50x50', 'flowchart'], ['cyclic_scc_xl_2500', 'flowchart'], ['dense_dag_xl_2000', 'flowchart'],
-    ['sequence_xl_2000', 'sequenceDiagram'], ['class_xl_2000', 'classDiagram'], ['state_xl_2000', 'stateDiagram'],
-    ['er_xl_2000', 'erDiagram'],
+    ["wide_xl_50x50", "flowchart"],
+    ["cyclic_scc_xl_2500", "flowchart"],
+    ["dense_dag_xl_2000", "flowchart"],
+    ["sequence_xl_2000", "sequenceDiagram"],
+    ["class_xl_2000", "classDiagram"],
+    ["state_xl_2000", "stateDiagram"],
+    ["er_xl_2000", "erDiagram"],
   ]);
   const actual = new Set(CORPUS.map((item) => item.id));
   if ([...expected].some((id) => !actual.has(id))) {
-    throw new Error(`XL capability fixtures changed: expected ${[...expected].join(', ')}`);
+    throw new Error(`XL capability fixtures changed: expected ${[...expected].join(", ")}`);
   }
   for (const item of CORPUS.filter((candidate) => expected.has(candidate.id))) {
     if (item.dnf_allowed !== true || item.js_budget_ms < 600_000) {
-      throw new Error(`XL capability fixture ${item.id} must preserve DNF admission and its 600s budget`);
+      throw new Error(
+        `XL capability fixture ${item.id} must preserve DNF admission and its 600s budget`,
+      );
     }
     const text = generate(item)[0];
     if (text.length < 50_000) {
       throw new Error(`XL capability fixture ${item.id} is no longer CI-scale`);
     }
     if (!text.startsWith(headers.get(item.id))) {
-      throw new Error(`XL capability fixture ${item.id} no longer generates its declared syntax family`);
+      throw new Error(
+        `XL capability fixture ${item.id} no longer generates its declared syntax family`,
+      );
     }
     if (!text.includes(XL_CAPABILITY_SENTINELS[item.id])) {
       throw new Error(`XL capability fixture ${item.id} lost its terminal native-output sentinel`);

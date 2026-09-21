@@ -1,9 +1,9 @@
-const root = document.getElementById('preview');
+const root = document.getElementById("preview");
 const { wasmModule, wasmBinary } = document.body.dataset;
 const vscode = acquireVsCodeApi();
 
 if (!root) {
-  throw new Error('FrankenMermaid preview root is missing');
+  throw new Error("FrankenMermaid preview root is missing");
 }
 
 let renderSvg;
@@ -17,10 +17,12 @@ async function start() {
     const wasm = await import(/* @vite-ignore */ `${wasmModule}`);
     await wasm.default(wasmBinary);
     renderSvg = wasm.renderSvg;
-    showText('Open a Mermaid document to render it here.');
-    vscode.postMessage({ type: 'ready' });
+    showText("Open a Mermaid document to render it here.");
+    vscode.postMessage({ type: "ready" });
   } catch (error) {
-    showText(`Unable to initialize FrankenMermaid: ${error instanceof Error ? error.message : String(error)}`);
+    showText(
+      `Unable to initialize FrankenMermaid: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -31,7 +33,7 @@ function render(message) {
   try {
     const svg = renderSvg(message.source);
     const parser = new DOMParser();
-    const doc = parser.parseFromString(svg, 'image/svg+xml');
+    const doc = parser.parseFromString(svg, "image/svg+xml");
     const svgElement = doc.documentElement;
     root.replaceChildren(svgElement);
   } catch (error) {
@@ -40,11 +42,13 @@ function render(message) {
 }
 
 function isRenderMessage(message) {
-  return message !== null
-    && typeof message === 'object'
-    && message.type === 'render'
-    && typeof message.source === 'string'
-    && typeof message.title === 'string';
+  return (
+    message !== null &&
+    typeof message === "object" &&
+    message.type === "render" &&
+    typeof message.source === "string" &&
+    typeof message.title === "string"
+  );
 }
 
 function onMessage(event) {
@@ -55,11 +59,11 @@ function onMessage(event) {
 }
 
 function dispose() {
-  window.removeEventListener('message', onMessage);
-  window.removeEventListener('pagehide', dispose);
+  window.removeEventListener("message", onMessage);
+  window.removeEventListener("pagehide", dispose);
 }
 
-window.addEventListener('message', onMessage);
-window.addEventListener('pagehide', dispose, { once: true });
+window.addEventListener("message", onMessage);
+window.addEventListener("pagehide", dispose, { once: true });
 
 void start();

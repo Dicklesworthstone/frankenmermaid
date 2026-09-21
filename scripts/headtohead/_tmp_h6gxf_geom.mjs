@@ -5,33 +5,47 @@
 // Height is not the interesting axis here: both of our arms produce IDENTICAL heights on this
 // family, so a height comparison would report agreement no matter which arm ran. Width is the whole
 // of the difference and is what the reader sees.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BUNDLE_PATH = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
-const PINS = JSON.parse(fs.readFileSync(path.join(HERE, 'pins.json'), 'utf8'));
+const BUNDLE_PATH = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
+const PINS = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 const CHROMIUM = process.env.FM_CHROMIUM_BIN ?? PINS.chromium.binary;
-const PROFILE_ROOT = path.join(os.homedir(), 'snap', 'chromium', 'common');
+const PROFILE_ROOT = path.join(os.homedir(), "snap", "chromium", "common");
 
 const corpusPath = process.argv[2];
 const revs = process.argv.slice(3).map(Number);
-const corpus = JSON.parse(fs.readFileSync(corpusPath, 'utf8'))[0];
+const corpus = JSON.parse(fs.readFileSync(corpusPath, "utf8"))[0];
 
 async function launchChromium() {
-  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, 'fm-h6gxf-'));
-  const proc = spawn(CHROMIUM, [
-    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-    '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run',
-    '--no-default-browser-check', '--disable-extensions', '--disable-background-networking',
-    '--disable-sync', '--mute-audio', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let stderr = '';
+  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, "fm-h6gxf-"));
+  const proc = spawn(
+    CHROMIUM,
+    [
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profile}`,
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-sync",
+      "--mute-audio",
+      "about:blank",
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let stderr = "";
   let port = null;
-  proc.stderr.on('data', (chunk) => {
+  proc.stderr.on("data", (chunk) => {
     stderr += String(chunk);
     const m = stderr.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/);
     if (m) port = Number(m[1]);
@@ -44,14 +58,16 @@ async function launchChromium() {
         if (res.ok) {
           const info = await res.json();
           const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-          const page = list.find((t) => t.type === 'page');
+          const page = list.find((t) => t.type === "page");
           if (page) return { proc, info, page };
         }
-      } catch { /* not up yet */ }
+      } catch {
+        /* not up yet */
+      }
     }
     await new Promise((r) => setTimeout(r, 120));
   }
-  proc.kill('SIGKILL');
+  proc.kill("SIGKILL");
   throw new Error(`chromium never exposed a devtools port; stderr tail: ${stderr.slice(-400)}`);
 }
 
@@ -61,25 +77,36 @@ function attach(page) {
   let id = 0;
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)(msg);
+      pending.delete(msg.id);
+    }
   };
-  const send = (method, params) => new Promise((resolve) => {
-    const n = ++id;
-    pending.set(n, resolve);
-    ws.send(JSON.stringify({ id: n, method, params }));
+  const send = (method, params) =>
+    new Promise((resolve) => {
+      const n = ++id;
+      pending.set(n, resolve);
+      ws.send(JSON.stringify({ id: n, method, params }));
+    });
+  const ready = new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
   });
-  const ready = new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   return { ws, send, ready };
 }
 
 const { proc, info, page } = await launchChromium();
 const { ws, send, ready } = attach(page);
 await ready;
-await send('Runtime.enable', {});
-await send('Runtime.evaluate', { expression: fs.readFileSync(BUNDLE_PATH, 'utf8') });
+await send("Runtime.enable", {});
+await send("Runtime.evaluate", { expression: fs.readFileSync(BUNDLE_PATH, "utf8") });
 
 const evaluate = async (expression) => {
-  const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  const res = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
   const value = res.result?.result?.value;
   if (value === undefined) return { ok: false, error: JSON.stringify(res).slice(0, 300) };
   return JSON.parse(value);
@@ -99,11 +126,13 @@ for (const rev of revs) {
     }
   })()`);
   if (!out.ok || !out.viewBox) {
-    console.log(`rev${String(rev).padStart(2, '0')}  INCUMBENT-DNF  ${out.error ?? 'no viewBox'}`);
+    console.log(`rev${String(rev).padStart(2, "0")}  INCUMBENT-DNF  ${out.error ?? "no viewBox"}`);
     continue;
   }
   const [, , w, h] = out.viewBox.split(/\s+/).map(Number);
-  console.log(`rev${String(rev).padStart(2, '0')}  incumbent_w=${w.toFixed(1)}  incumbent_h=${h.toFixed(1)}  bytes=${out.bytes}`);
+  console.log(
+    `rev${String(rev).padStart(2, "0")}  incumbent_w=${w.toFixed(1)}  incumbent_h=${h.toFixed(1)}  bytes=${out.bytes}`,
+  );
 }
 ws.close();
-proc.kill('SIGKILL');
+proc.kill("SIGKILL");

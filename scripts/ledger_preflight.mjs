@@ -25,31 +25,31 @@
 // source hashes, structural arguments, and unrelated "null" phases with actual evidence during the
 // resurrection audit. New rows must use one of the markers documented in AGENTS.md.
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NEGATIVE_LEDGER = {
-  path: 'docs/NEGATIVE_EVIDENCE.md',
-  heading: '### ',
+  path: "docs/NEGATIVE_EVIDENCE.md",
+  heading: "### ",
 };
 const PERFORMANCE_LEDGER = {
-  path: 'docs/PERF_LEDGER.md',
-  heading: '## ',
+  path: "docs/PERF_LEDGER.md",
+  heading: "## ",
 };
 const LEDGERS = [NEGATIVE_LEDGER, PERFORMANCE_LEDGER];
 
 // --- mandatory evidence markers ---------------------------------------------------------------
 
-const NULL_MARKER = '**A/A null control (same invocation):**';
-const COUNTED_MARKER = '**Counted mechanism:**';
-const ELF_MARKER = '**Executing ELF SHA-256 (self-reported by process):**';
-const RESULT_CLASS_MARKER = '**Campaign result class:**';
-const INCUMBENT_MARKER = '**Legacy incumbent arm (same invocation):**';
-const MAINTENANCE_SELF_SPEEDUP = 'maintenance-self-speedup';
-const INCUMBENT_WIN = 'incumbent-win';
+const NULL_MARKER = "**A/A null control (same invocation):**";
+const COUNTED_MARKER = "**Counted mechanism:**";
+const ELF_MARKER = "**Executing ELF SHA-256 (self-reported by process):**";
+const RESULT_CLASS_MARKER = "**Campaign result class:**";
+const INCUMBENT_MARKER = "**Legacy incumbent arm (same invocation):**";
+const MAINTENANCE_SELF_SPEEDUP = "maintenance-self-speedup";
+const INCUMBENT_WIN = "incumbent-win";
 // A result the previous two classes cannot express: the incumbent did not COMPLETE on the input, so
 // there is no comparator time and therefore no ratio. Before this class existed the only ways to
 // record such a result were to omit the classification entirely (leaving the strongest capability
@@ -59,7 +59,7 @@ const INCUMBENT_WIN = 'incumbent-win';
 // verified output -- and it FORBIDS a measured_ratio, so it can never be used to launder a
 // competitive number. A gate change that suddenly produces wins is a loosening; this one produces
 // no ratios at all.
-const INCUMBENT_DNF = 'incumbent-dnf';
+const INCUMBENT_DNF = "incumbent-dnf";
 // Where the arms actually ran. Adopted 2026-08-15 after a fleet-wide finding: frankenscipy measured
 // the SAME cubic splu cell on two different rch workers and got 1.2693x on one and 0.0093x on the
 // other -- a 13.6x swing -- with BOTH A/A nulls PASSING. The null only controls within-invocation
@@ -68,7 +68,7 @@ const INCUMBENT_DNF = 'incumbent-dnf';
 // not name its worker cannot be compared to any other row. Required on EVERY kept row, including
 // maintenance-self-speedup, because a self A/B is corrupted by split arms exactly as badly as a
 // competitive one.
-const HOST_MARKER = '**Measurement host (observed, both arms):**';
+const HOST_MARKER = "**Measurement host (observed, both arms):**";
 const HOST_THREADS = /\bthreads=\d+\b/i;
 const HOST_GOVERNOR = /\bgovernor=[a-z0-9][a-z0-9._-]*\b/i;
 const HOST_ISA = /\bisa=[a-z0-9][a-z0-9._+-]*\b/i;
@@ -96,7 +96,7 @@ const HOST_HARNESS = /\bharness=[a-z0-9][a-z0-9._/-]*\b/i;
 // Retro-flag for rows banked BEFORE the provenance gate existed. It does not excuse a row from
 // naming where it ran -- it removes the row from the comparable set, which is a strictly worse
 // outcome for the row and therefore not a way around the gate. See `measurementHostEvidence`.
-const SCOPED_MARKER = '**Measurement provenance:**';
+const SCOPED_MARKER = "**Measurement provenance:**";
 const SCOPED_VALUE = /\bWORKER-SCOPED\b/;
 const SCOPED_BACKLOG = /\bpre-gate-backlog\b/i;
 const SCOPED_AUDIT = /\bbd-[a-z0-9]+\b/i;
@@ -123,7 +123,7 @@ const KEEP_VERDICT =
 
 /** Split one ledger into its configured verdict-entry headings. */
 function entries(text, ledger = NEGATIVE_LEDGER) {
-  const lines = text.split('\n');
+  const lines = text.split("\n");
   const idx = lines
     .map((line, i) => (line.startsWith(ledger.heading) ? i : -1))
     .filter((i) => i >= 0);
@@ -133,7 +133,7 @@ function entries(text, ledger = NEGATIVE_LEDGER) {
       ledger: ledger.path,
       line: s + 1,
       title: lines[s].slice(ledger.heading.length).trim(),
-      body: lines.slice(s, e).join('\n'),
+      body: lines.slice(s, e).join("\n"),
     };
   });
 }
@@ -148,7 +148,7 @@ const isRejectRow = (e) =>
 
 function markerParagraph(body, marker) {
   const start = body.indexOf(marker);
-  if (start < 0) return '';
+  if (start < 0) return "";
   const rest = body.slice(start + marker.length);
   const end = rest.search(/\n\s*\n|\n-\s+\*\*[^*]+:\*\*/);
   return (end < 0 ? rest : rest.slice(0, end)).trim();
@@ -157,7 +157,7 @@ function markerParagraph(body, marker) {
 function rejectEvidence(body) {
   const nullEvidence = markerParagraph(body, NULL_MARKER);
   if (nullEvidence && NULL_VALUE.test(nullEvidence))
-    return { ok: true, why: 'same-invocation A/A null control recorded' };
+    return { ok: true, why: "same-invocation A/A null control recorded" };
 
   const countedEvidence = markerParagraph(body, COUNTED_MARKER);
   if (
@@ -165,7 +165,7 @@ function rejectEvidence(body) {
     COUNTED_METRIC.test(countedEvidence) &&
     MEASURED_VALUE.test(countedEvidence)
   )
-    return { ok: true, why: 'counted mechanism recorded' };
+    return { ok: true, why: "counted mechanism recorded" };
 
   return { ok: false, why: null };
 }
@@ -200,12 +200,12 @@ function measurementHostEvidence(body, classification = null) {
   if (SCOPED_VALUE.test(scoped)) {
     const missing = [];
     if (!SCOPED_BACKLOG.test(scoped)) {
-      missing.push('pre-gate-backlog (this form is for rows banked before the gate, nothing else)');
+      missing.push("pre-gate-backlog (this form is for rows banked before the gate, nothing else)");
     }
-    if (!SCOPED_AUDIT.test(scoped)) missing.push('the bead id of the audit that established it');
+    if (!SCOPED_AUDIT.test(scoped)) missing.push("the bead id of the audit that established it");
     if (classification === INCUMBENT_WIN) {
       missing.push(
-        'a competitive claim can never be worker-scoped; an incumbent-win row must name its host',
+        "a competitive claim can never be worker-scoped; an incumbent-win row must name its host",
       );
     }
     return { ok: missing.length === 0, missing, scoped: true };
@@ -218,25 +218,23 @@ function measurementHostEvidence(body, classification = null) {
     ...[...evidence.matchAll(HOST_SAME_ALL)].map((match) => match[1].toLowerCase()),
   ]);
   if (machines.size === 0) {
-    missing.push('worker=<rch worker id> or same_host=<hostname that ran both arms>');
+    missing.push("worker=<rch worker id> or same_host=<hostname that ran both arms>");
   }
-  if (!HOST_THREADS.test(evidence)) missing.push('threads=<observed thread count>');
-  if (!HOST_GOVERNOR.test(evidence)) missing.push('governor=<scaling governor>');
-  if (!HOST_ISA.test(evidence)) missing.push('isa=<ISA level the build targeted>');
-  if (!HOST_HARNESS.test(evidence)) missing.push('harness=<which harness produced the number>');
+  if (!HOST_THREADS.test(evidence)) missing.push("threads=<observed thread count>");
+  if (!HOST_GOVERNOR.test(evidence)) missing.push("governor=<scaling governor>");
+  if (!HOST_ISA.test(evidence)) missing.push("isa=<ISA level the build targeted>");
+  if (!HOST_HARNESS.test(evidence)) missing.push("harness=<which harness produced the number>");
 
   if (machines.size > 1) {
     missing.push(
-      `both arms must be measured on ONE machine in ONE invocation; this row names ${machines.size}: ${[...machines].join(', ')}`,
+      `both arms must be measured on ONE machine in ONE invocation; this row names ${machines.size}: ${[...machines].join(", ")}`,
     );
   }
   return { ok: missing.length === 0, missing, scoped: false };
 }
 
 function resultClass(body) {
-  const value = markerParagraph(body, RESULT_CLASS_MARKER)
-    .replaceAll('`', '')
-    .split(/\s/)[0];
+  const value = markerParagraph(body, RESULT_CLASS_MARKER).replaceAll("`", "").split(/\s/)[0];
   return value === MAINTENANCE_SELF_SPEEDUP || value === INCUMBENT_WIN || value === INCUMBENT_DNF
     ? value
     : null;
@@ -246,11 +244,11 @@ function incumbentEvidence(body) {
   const evidence = markerParagraph(body, INCUMBENT_MARKER);
   const nullEvidence = markerParagraph(body, NULL_MARKER);
   const missing = [];
-  if (!INCUMBENT_NAME.test(evidence)) missing.push('name=mermaid-js');
-  if (!INCUMBENT_VERSION.test(evidence)) missing.push('version=<pin>');
-  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push('artifact_sha256=<64 lowercase hex>');
-  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push('invocation_id=<shared invocation>');
-  if (!INCUMBENT_RATIO.test(evidence)) missing.push('measured_ratio=<number>x');
+  if (!INCUMBENT_NAME.test(evidence)) missing.push("name=mermaid-js");
+  if (!INCUMBENT_VERSION.test(evidence)) missing.push("version=<pin>");
+  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push("artifact_sha256=<64 lowercase hex>");
+  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push("invocation_id=<shared invocation>");
+  if (!INCUMBENT_RATIO.test(evidence)) missing.push("measured_ratio=<number>x");
   if (!NULL_VALUE.test(nullEvidence)) missing.push(NULL_MARKER);
   return { ok: missing.length === 0, missing };
 }
@@ -270,14 +268,14 @@ const INCUMBENT_FAILURE_CLASS = /\bfailure_class=[a-z0-9][a-z0-9._-]*\b/i;
 function incumbentDnfEvidence(body) {
   const evidence = markerParagraph(body, INCUMBENT_MARKER);
   const missing = [];
-  if (!INCUMBENT_NAME.test(evidence)) missing.push('name=mermaid-js');
-  if (!INCUMBENT_VERSION.test(evidence)) missing.push('version=<pin>');
-  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push('artifact_sha256=<64 lowercase hex>');
-  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push('invocation_id=<shared invocation>');
-  if (!INCUMBENT_OUTCOME.test(evidence)) missing.push('outcome=did_not_complete');
-  if (!INCUMBENT_FAILURE_CLASS.test(evidence)) missing.push('failure_class=<observed class>');
+  if (!INCUMBENT_NAME.test(evidence)) missing.push("name=mermaid-js");
+  if (!INCUMBENT_VERSION.test(evidence)) missing.push("version=<pin>");
+  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push("artifact_sha256=<64 lowercase hex>");
+  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push("invocation_id=<shared invocation>");
+  if (!INCUMBENT_OUTCOME.test(evidence)) missing.push("outcome=did_not_complete");
+  if (!INCUMBENT_FAILURE_CLASS.test(evidence)) missing.push("failure_class=<observed class>");
   if (INCUMBENT_RATIO.test(evidence)) {
-    missing.push('a did-not-complete row must NOT carry measured_ratio');
+    missing.push("a did-not-complete row must NOT carry measured_ratio");
   }
   return { ok: missing.length === 0, missing };
 }
@@ -292,7 +290,7 @@ function resultEvidence(body) {
   const host = measurementHostEvidence(body, classification);
   if (!host.ok) {
     const marker = host.scoped ? SCOPED_MARKER : HOST_MARKER;
-    return { ok: false, why: `incomplete ${marker} ${host.missing.join(', ')}` };
+    return { ok: false, why: `incomplete ${marker} ${host.missing.join(", ")}` };
   }
 
   if (!classification) {
@@ -305,27 +303,27 @@ function resultEvidence(body) {
     return {
       ok: true,
       why: host.scoped
-        ? 'maintenance self-speedup, WORKER-SCOPED (not comparable to any other row)'
-        : 'maintenance self-speedup (not campaign output)',
+        ? "maintenance self-speedup, WORKER-SCOPED (not comparable to any other row)"
+        : "maintenance self-speedup (not campaign output)",
     };
   }
 
   if (classification === INCUMBENT_DNF) {
     const dnf = incumbentDnfEvidence(body);
     if (!dnf.ok) {
-      return { ok: false, why: `incomplete ${INCUMBENT_MARKER} ${dnf.missing.join(', ')}` };
+      return { ok: false, why: `incomplete ${INCUMBENT_MARKER} ${dnf.missing.join(", ")}` };
     }
-    return { ok: true, why: 'same-invocation incumbent did-not-complete' };
+    return { ok: true, why: "same-invocation incumbent did-not-complete" };
   }
 
   const incumbent = incumbentEvidence(body);
   if (!incumbent.ok) {
     return {
       ok: false,
-      why: `incomplete ${INCUMBENT_MARKER} ${incumbent.missing.join(', ')}`,
+      why: `incomplete ${INCUMBENT_MARKER} ${incumbent.missing.join(", ")}`,
     };
   }
-  return { ok: true, why: 'same-invocation actual-incumbent win' };
+  return { ok: true, why: "same-invocation actual-incumbent win" };
 }
 
 function addedEntries(before, after, ledger = NEGATIVE_LEDGER) {
@@ -345,7 +343,7 @@ function addedEntries(before, after, ledger = NEGATIVE_LEDGER) {
 }
 
 function retryPredicate(body) {
-  const flat = body.replace(/\s+/g, ' ');
+  const flat = body.replace(/\s+/g, " ");
   const predicate = flat.match(
     /\b(?:if retried|retry (?:only )?(?:if|when|predicate|condition)?|do[- ]not[- ]retry|reopen only|unblock(?:ed)?(?: if| when)?)[^.!?]*(?:[.!?]|$)/i,
   );
@@ -360,15 +358,15 @@ const has = (n) => process.argv.includes(`--${n}`);
 
 const missingLedgers = LEDGERS.filter((ledger) => !existsSync(join(REPO, ledger.path)));
 if (missingLedgers.length > 0) {
-  console.error(`[preflight] missing ${missingLedgers.map((ledger) => ledger.path).join(', ')}`);
+  console.error(`[preflight] missing ${missingLedgers.map((ledger) => ledger.path).join(", ")}`);
   process.exit(3);
 }
 
 // ---------------------------------------------------------------- mode: --self-test
-if (has('self-test')) {
-  const hash = 'a'.repeat(64);
+if (has("self-test")) {
+  const hash = "a".repeat(64);
   const perfKeepWithoutElf = entries(
-    '## KEEP: parsed from the performance ledger\n\n**Verdict:** KEEP.\n',
+    "## KEEP: parsed from the performance ledger\n\n**Verdict:** KEEP.\n",
     PERFORMANCE_LEDGER,
   )[0];
   const perfKeepWithElf = entries(
@@ -398,59 +396,54 @@ ${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].
 
 ${INCUMBENT_MARKER} name=mermaid-js version=11.15.0 artifact_sha256=${hash} invocation_id=run-42 measured_ratio=871.0x`;
   const cases = [
-    ['structural prose is not counted evidence', !rejectEvidence('**Root cause:** no work.').ok],
-    ['ceiling prose is not counted evidence', !rejectEvidence('Amdahl ceiling: 1%.').ok],
+    ["structural prose is not counted evidence", !rejectEvidence("**Root cause:** no work.").ok],
+    ["ceiling prose is not counted evidence", !rejectEvidence("Amdahl ceiling: 1%.").ok],
     [
-      'retry-only A/A prose is not evidence',
-      !rejectEvidence('Retry only when same-invocation A/A ratio is below 1.01.').ok,
+      "retry-only A/A prose is not evidence",
+      !rejectEvidence("Retry only when same-invocation A/A ratio is below 1.01.").ok,
+    ],
+    ["empty A/A marker is rejected", !rejectEvidence(`${NULL_MARKER} required before retry.`).ok],
+    [
+      "measured A/A marker is accepted",
+      rejectEvidence(`${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].`).ok,
     ],
     [
-      'empty A/A marker is rejected',
-      !rejectEvidence(`${NULL_MARKER} required before retry.`).ok,
-    ],
-    [
-      'measured A/A marker is accepted',
-      rejectEvidence(
-        `${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].`,
-      ).ok,
-    ],
-    [
-      'counted marker is accepted',
+      "counted marker is accepted",
       rejectEvidence(`${COUNTED_MARKER} instructions 12,004 -> 12,004 (unchanged).`).ok,
     ],
-    ['source SHA is not an ELF self-report', !keepEvidence(`source SHA-256 ${hash}`)],
+    ["source SHA is not an ELF self-report", !keepEvidence(`source SHA-256 ${hash}`)],
     [
-      'uppercase SHA is rejected by the lowercase contract',
+      "uppercase SHA is rejected by the lowercase contract",
       !keepEvidence(`${ELF_MARKER} \`${hash.toUpperCase()}\``),
     ],
-    ['self-reported executing ELF is accepted', keepEvidence(`${ELF_MARKER} \`${hash}\``)],
+    ["self-reported executing ELF is accepted", keepEvidence(`${ELF_MARKER} \`${hash}\``)],
     [
-      'PERF_LEDGER KEEP headings are parsed as KEEP rows',
+      "PERF_LEDGER KEEP headings are parsed as KEEP rows",
       perfKeepWithoutElf?.ledger === PERFORMANCE_LEDGER.path && isKeepRow(perfKeepWithoutElf),
     ],
     [
-      'PERF_LEDGER KEEP without an ELF marker is rejected',
-      !keepEvidence(perfKeepWithoutElf?.body ?? ''),
+      "PERF_LEDGER KEEP without an ELF marker is rejected",
+      !keepEvidence(perfKeepWithoutElf?.body ?? ""),
     ],
     [
-      'PERF_LEDGER KEEP with an exact ELF marker is accepted',
+      "PERF_LEDGER KEEP with an exact ELF marker is accepted",
       isKeepRow(perfKeepWithElf) && keepEvidence(perfKeepWithElf.body),
     ],
     [
-      'a result without an explicit class is rejected',
+      "a result without an explicit class is rejected",
       !resultEvidence(`${ELF_MARKER} \`${hash}\``).ok,
     ],
     [
-      'a maintenance title cannot evade the result-class gate',
+      "a maintenance title cannot evade the result-class gate",
       isKeepRow(maintenanceWithoutClass) && !resultEvidence(maintenanceWithoutClass.body).ok,
     ],
     [
-      'a self-speedup is accepted only as maintenance',
+      "a self-speedup is accepted only as maintenance",
       resultEvidence(selfSpeedup).ok &&
-        resultEvidence(selfSpeedup).why === 'maintenance self-speedup (not campaign output)',
+        resultEvidence(selfSpeedup).why === "maintenance self-speedup (not campaign output)",
     ],
     [
-      'an incumbent-win without the actual incumbent arm is rejected',
+      "an incumbent-win without the actual incumbent arm is rejected",
       !resultEvidence(
         `${selfSpeedup.replace(MAINTENANCE_SELF_SPEEDUP, INCUMBENT_WIN)}
 
@@ -458,156 +451,141 @@ ${NULL_MARKER} baseline/null median ratio 1.0x, CI [0.99, 1.01].`,
       ).ok,
     ],
     [
-      'a self baseline cannot masquerade as the legacy incumbent',
-      !resultEvidence(
-        incumbentWin.replace('name=mermaid-js', 'name=self-baseline'),
-      ).ok,
+      "a self baseline cannot masquerade as the legacy incumbent",
+      !resultEvidence(incumbentWin.replace("name=mermaid-js", "name=self-baseline")).ok,
     ],
     [
-      'an incumbent-win without an A/A null is rejected',
+      "an incumbent-win without an A/A null is rejected",
       !resultEvidence(
         incumbentWin.replace(
           `${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].\n\n`,
-          '',
+          "",
         ),
       ).ok,
     ],
     [
-      'a pinned mermaid-js arm in the same invocation is accepted',
+      "a pinned mermaid-js arm in the same invocation is accepted",
       resultEvidence(incumbentWin).ok &&
-        resultEvidence(incumbentWin).why === 'same-invocation actual-incumbent win',
+        resultEvidence(incumbentWin).why === "same-invocation actual-incumbent win",
     ],
     [
-      'an incumbent-dnf with outcome and failure class is accepted',
+      "an incumbent-dnf with outcome and failure class is accepted",
       resultEvidence(incumbentDnf).ok &&
-        resultEvidence(incumbentDnf).why === 'same-invocation incumbent did-not-complete',
+        resultEvidence(incumbentDnf).why === "same-invocation incumbent did-not-complete",
     ],
     [
-      'an incumbent-dnf carrying a ratio is refused -- nothing completed to bound one',
+      "an incumbent-dnf carrying a ratio is refused -- nothing completed to bound one",
+      !resultEvidence(`${incumbentDnf} measured_ratio=401800000x`).ok,
+    ],
+    [
+      "an incumbent-dnf without a named failure class is refused",
+      !resultEvidence(incumbentDnf.replace(" failure_class=range_error", "")).ok,
+    ],
+    [
+      "an incumbent-dnf without the pinned comparator artifact is refused",
+      !resultEvidence(incumbentDnf.replace(`artifact_sha256=${hash}`, "artifact_sha256=unknown"))
+        .ok,
+    ],
+    [
+      "an incumbent-dnf still needs the process-self-reported ELF",
+      !resultEvidence(incumbentDnf.replace(`${ELF_MARKER} \`${hash}\`\n\n`, "")).ok,
+    ],
+    [
+      "a kept row without a measurement host is rejected",
+      !resultEvidence(selfSpeedup.replace(`${host}\n\n`, "")).ok,
+    ],
+    [
+      "a measurement host missing the observed thread count is rejected",
+      !resultEvidence(selfSpeedup.replace(" threads=64", "")).ok,
+    ],
+    [
+      "a measurement host missing the governor is rejected",
+      !resultEvidence(selfSpeedup.replace(" governor=performance", "")).ok,
+    ],
+    [
+      "a measurement host missing the ISA level is rejected",
+      !resultEvidence(selfSpeedup.replace(" isa=x86-64-v2", "")).ok,
+    ],
+    [
+      "arms named on two different workers are refused even with every other marker present",
       !resultEvidence(
-        `${incumbentDnf} measured_ratio=401800000x`,
+        incumbentWin.replace("worker=hz2 threads=64", "worker=hz2 worker=vmi1293453 threads=64"),
       ).ok,
     ],
     [
-      'an incumbent-dnf without a named failure class is refused',
-      !resultEvidence(incumbentDnf.replace(' failure_class=range_error', '')).ok,
-    ],
-    [
-      'an incumbent-dnf without the pinned comparator artifact is refused',
-      !resultEvidence(incumbentDnf.replace(`artifact_sha256=${hash}`, 'artifact_sha256=unknown')).ok,
-    ],
-    [
-      'an incumbent-dnf still needs the process-self-reported ELF',
-      !resultEvidence(incumbentDnf.replace(`${ELF_MARKER} \`${hash}\`\n\n`, '')).ok,
-    ],
-    [
-      'a kept row without a measurement host is rejected',
-      !resultEvidence(selfSpeedup.replace(`${host}\n\n`, '')).ok,
-    ],
-    [
-      'a measurement host missing the observed thread count is rejected',
-      !resultEvidence(selfSpeedup.replace(' threads=64', '')).ok,
-    ],
-    [
-      'a measurement host missing the governor is rejected',
-      !resultEvidence(selfSpeedup.replace(' governor=performance', '')).ok,
-    ],
-    [
-      'a measurement host missing the ISA level is rejected',
-      !resultEvidence(selfSpeedup.replace(' isa=x86-64-v2', '')).ok,
-    ],
-    [
-      'arms named on two different workers are refused even with every other marker present',
-      !resultEvidence(
-        incumbentWin.replace(
-          'worker=hz2 threads=64',
-          'worker=hz2 worker=vmi1293453 threads=64',
-        ),
-      ).ok,
-    ],
-    [
-      'a passing A/A null does not excuse a missing measurement host',
-      !resultEvidence(incumbentWin.replace(`${host}\n\n`, '')).ok,
+      "a passing A/A null does not excuse a missing measurement host",
+      !resultEvidence(incumbentWin.replace(`${host}\n\n`, "")).ok,
     ],
     // harness= (2026-08-15). frankenlibc got 5.9459x and 12.385414x for the same primitive on the
     // SAME worker through two sanctioned harnesses, both A/A nulls passing. Worker identity alone
     // does not make two rows comparable.
     [
-      'a measurement host missing the harness is rejected',
-      !resultEvidence(selfSpeedup.replace(' harness=headtohead/run.mjs', '')).ok,
+      "a measurement host missing the harness is rejected",
+      !resultEvidence(selfSpeedup.replace(" harness=headtohead/run.mjs", "")).ok,
     ],
-    [
-      'a row naming worker AND harness is admitted',
-      resultEvidence(selfSpeedup).ok,
-    ],
+    ["a row naming worker AND harness is admitted", resultEvidence(selfSpeedup).ok],
     // same_host= is the local-measurement spelling of "where", from frankenfs's form. Our
     // head-to-head runs both arms on this box, so it has no rch worker id to give; without this
     // spelling the honest local row is either blocked or tempted to invent a worker= value.
     [
-      'same_host= names the machine just as well as worker= for a locally measured row',
-      resultEvidence(selfSpeedup.replace('worker=hz2', 'same_host=csd')).ok,
+      "same_host= names the machine just as well as worker= for a locally measured row",
+      resultEvidence(selfSpeedup.replace("worker=hz2", "same_host=csd")).ok,
     ],
     [
-      'two different same_host values are refused exactly like two workers',
-      !resultEvidence(selfSpeedup.replace('worker=hz2', 'same_host=csd same_host=csd2')).ok,
+      "two different same_host values are refused exactly like two workers",
+      !resultEvidence(selfSpeedup.replace("worker=hz2", "same_host=csd same_host=csd2")).ok,
     ],
     [
-      'a worker and a different same_host in one row is still two machines',
-      !resultEvidence(selfSpeedup.replace('worker=hz2', 'worker=hz2 same_host=csd')).ok,
+      "a worker and a different same_host in one row is still two machines",
+      !resultEvidence(selfSpeedup.replace("worker=hz2", "worker=hz2 same_host=csd")).ok,
     ],
     [
-      'the same machine named twice in both spellings is not two machines',
-      resultEvidence(selfSpeedup.replace('worker=hz2', 'worker=hz2 same_host=hz2')).ok,
+      "the same machine named twice in both spellings is not two machines",
+      resultEvidence(selfSpeedup.replace("worker=hz2", "worker=hz2 same_host=hz2")).ok,
     ],
     // The WORKER-SCOPED backlog form. It must DEMOTE, never excuse.
     [
-      'a pre-gate backlog row may declare itself worker-scoped instead of naming a host',
+      "a pre-gate backlog row may declare itself worker-scoped instead of naming a host",
       resultEvidence(
-        selfSpeedup.replace(
-          host,
-          `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`,
-        ),
+        selfSpeedup.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`),
       ).ok,
     ],
     [
-      'a worker-scoped row that does not say which audit established it is refused',
+      "a worker-scoped row that does not say which audit established it is refused",
       !resultEvidence(
         selfSpeedup.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog)`),
       ).ok,
     ],
     [
-      'a worker-scoped row that does not declare itself backlog is refused',
+      "a worker-scoped row that does not declare itself backlog is refused",
       !resultEvidence(selfSpeedup.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (bd-kcy4)`)).ok,
     ],
     // THE TEETH. Without this the flag would be a way for a competitive claim to skip naming its
     // host, which is exactly the hole the gate exists to close.
     [
-      'an incumbent-win can NEVER be worker-scoped, however well formed the flag is',
+      "an incumbent-win can NEVER be worker-scoped, however well formed the flag is",
       !resultEvidence(
-        incumbentWin.replace(
-          host,
-          `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`,
-        ),
+        incumbentWin.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`),
       ).ok,
     ],
     [
-      'modified PERF_LEDGER KEEP appears in the lint delta',
+      "modified PERF_LEDGER KEEP appears in the lint delta",
       addedEntries(
-        '## KEEP: exact marker\n\nold body\n',
+        "## KEEP: exact marker\n\nold body\n",
         `## KEEP: exact marker\n\n${ELF_MARKER} \`${hash}\`\n`,
         PERFORMANCE_LEDGER,
       ).length === 1,
     ],
   ];
   const failed = cases.filter(([, ok]) => !ok);
-  for (const [name, ok] of cases) console.log(`[self-test] ${ok ? 'ok' : 'FAIL'}  ${name}`);
+  for (const [name, ok] of cases) console.log(`[self-test] ${ok ? "ok" : "FAIL"}  ${name}`);
   process.exit(failed.length === 0 ? 0 : 1);
 }
 
 // ---------------------------------------------------------------- mode: --lever
-if (has('lever')) {
-  const lever = arg('lever', '');
-  const surface = arg('surface', arg('frame'));
+if (has("lever")) {
+  const lever = arg("lever", "");
+  const surface = arg("surface", arg("frame"));
   if (!surface) {
     console.error('[preflight] --lever requires --surface "<target file/function/benchmark>"');
     process.exit(3);
@@ -616,16 +594,16 @@ if (has('lever')) {
     ...new Set(
       [surface, ...surface.split(/\s+/), ...lever.split(/\s+/).filter((w) => w.length >= 5)]
         .filter(Boolean)
-        .map((t) => t.toLowerCase().replace(/[^a-z0-9_:<>-]/g, ''))
+        .map((t) => t.toLowerCase().replace(/[^a-z0-9_:<>-]/g, ""))
         .filter(Boolean),
     ),
   ];
   if (terms.length === 0) {
-    console.error('[preflight] --lever and --surface need searchable descriptions');
+    console.error("[preflight] --lever and --surface need searchable descriptions");
     process.exit(3);
   }
   const rows = entries(
-    readFileSync(join(REPO, NEGATIVE_LEDGER.path), 'utf8'),
+    readFileSync(join(REPO, NEGATIVE_LEDGER.path), "utf8"),
     NEGATIVE_LEDGER,
   ).filter(isRejectRow);
   const ranked = rows
@@ -637,40 +615,45 @@ if (has('lever')) {
     })
     .sort((a, b) => b.score - a.score);
   const exactSurfaceHits = ranked.filter((h) => h.surfaceHit);
-  const hits = (exactSurfaceHits.length > 0
-    ? exactSurfaceHits
-    : ranked.filter((h) => h.matched.length >= 2)
+  const hits = (
+    exactSurfaceHits.length > 0 ? exactSurfaceHits : ranked.filter((h) => h.matched.length >= 2)
   ).slice(0, 8);
 
   if (hits.length === 0) {
-    console.log(`[preflight] OK — no prior REJECT row matches (${rows.length} reject rows scanned).`);
-    console.log('[preflight] Reminder: your own REJECT will need an A/A null or a counted mechanism.');
+    console.log(
+      `[preflight] OK — no prior REJECT row matches (${rows.length} reject rows scanned).`,
+    );
+    console.log(
+      "[preflight] Reminder: your own REJECT will need an A/A null or a counted mechanism.",
+    );
     process.exit(0);
   }
   console.error(`[preflight] BLOCKED — ${hits.length} prior REJECT row(s) cover this mechanism:\n`);
   for (const h of hits) {
     console.error(`  ${h.e.ledger}:${h.e.line}`);
     console.error(`    ${h.e.title}`);
-    console.error(`    matched: ${h.matched.join(', ')}`);
+    console.error(`    matched: ${h.matched.join(", ")}`);
     const retry = retryPredicate(h.e.body);
     if (retry) console.error(`    retry predicate: ${retry}`);
-    else console.error('    retry predicate: none recorded');
-    console.error('');
+    else console.error("    retry predicate: none recorded");
+    console.error("");
   }
-  console.error('[preflight] Satisfy the retry predicate and say so in your row, or pick another lever.');
+  console.error(
+    "[preflight] Satisfy the retry predicate and say so in your row, or pick another lever.",
+  );
   process.exit(2);
 }
 
 // ---------------------------------------------------------------- mode: --lint
-if (has('lint')) {
-  const staged = has('staged');
-  const base = arg('base', staged ? 'HEAD' : 'origin/main');
+if (has("lint")) {
+  const staged = has("staged");
+  const base = arg("base", staged ? "HEAD" : "origin/main");
   const added = [];
   for (const ledger of LEDGERS) {
-    let before = '';
+    let before = "";
     try {
-      before = execFileSync('git', ['-C', REPO, 'show', `${base}:${ledger.path}`], {
-        encoding: 'utf8',
+      before = execFileSync("git", ["-C", REPO, "show", `${base}:${ledger.path}`], {
+        encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
     } catch {
@@ -679,8 +662,8 @@ if (has('lint')) {
     let current;
     if (staged) {
       try {
-        current = execFileSync('git', ['-C', REPO, 'show', `:${ledger.path}`], {
-          encoding: 'utf8',
+        current = execFileSync("git", ["-C", REPO, "show", `:${ledger.path}`], {
+          encoding: "utf8",
           maxBuffer: 64 * 1024 * 1024,
         });
       } catch {
@@ -688,7 +671,7 @@ if (has('lint')) {
         process.exit(3);
       }
     } else {
-      current = readFileSync(join(REPO, ledger.path), 'utf8');
+      current = readFileSync(join(REPO, ledger.path), "utf8");
     }
     added.push(
       ...addedEntries(before, current, ledger).filter((e) => isRejectRow(e) || isKeepRow(e)),
@@ -697,7 +680,7 @@ if (has('lint')) {
 
   if (added.length === 0) {
     console.log(
-      `[preflight] OK — no REJECT or KEEP rows added across ${LEDGERS.map((ledger) => ledger.path).join(', ')} vs ${base}${staged ? ' in the index' : ''}.`,
+      `[preflight] OK — no REJECT or KEEP rows added across ${LEDGERS.map((ledger) => ledger.path).join(", ")} vs ${base}${staged ? " in the index" : ""}.`,
     );
     process.exit(0);
   }
@@ -709,7 +692,7 @@ if (has('lint')) {
         console.log(
           `[preflight] ok    ${e.ledger}:L${e.line}  ${evidence.why}; executing ELF SHA-256 self-report recorded\n              ${e.title.slice(0, 96)}`,
         );
-      else bad.push({ e, kind: 'RESULT', why: evidence.why });
+      else bad.push({ e, kind: "RESULT", why: evidence.why });
       continue;
     }
     const verdict = rejectEvidence(e.body);
@@ -720,24 +703,28 @@ if (has('lint')) {
     else
       bad.push({
         e,
-        kind: 'REJECT',
+        kind: "REJECT",
         why: `missing ${NULL_MARKER} or ${COUNTED_MARKER}`,
       });
   }
   if (bad.length === 0) {
-    console.log(`\n[preflight] OK — all ${added.length} new ledger verdict row(s) satisfy the contract.`);
+    console.log(
+      `\n[preflight] OK — all ${added.length} new ledger verdict row(s) satisfy the contract.`,
+    );
     process.exit(0);
   }
-  console.error(`\n[preflight] BLOCKED — ${bad.length} new ledger verdict row(s) violate the contract.\n`);
+  console.error(
+    `\n[preflight] BLOCKED — ${bad.length} new ledger verdict row(s) violate the contract.\n`,
+  );
   for (const { e, kind, why } of bad) {
     console.error(`  ${kind} at ${e.ledger}:${e.line}`);
     console.error(`    ${e.title}`);
     console.error(`    ${why}\n`);
   }
-  console.error('  REJECT rows need measured evidence under at least one of:');
+  console.error("  REJECT rows need measured evidence under at least one of:");
   console.error(`    ${NULL_MARKER}`);
   console.error(`    ${COUNTED_MARKER}`);
-  console.error('  Structural prose and ceilings do not satisfy this gate.');
+  console.error("  Structural prose and ceilings do not satisfy this gate.");
   console.error(`  Every kept result needs: ${ELF_MARKER} <64 lowercase hex characters>`);
   console.error(
     `  Every kept result needs: ${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}|${INCUMBENT_WIN}`,

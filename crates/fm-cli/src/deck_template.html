@@ -53,10 +53,10 @@
 esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</div>
 
 <script type="application/json" id="deck-manifest">{{MANIFEST_JSON}}</script>
-<script>{{RUNTIME_JS}}</script>
+<script>RUNTIME_JS</script>
 <script>
 "use strict";
-(function () {
+(() => {
   var stage = document.getElementById("deck-stage");
   var manifest = JSON.parse(document.getElementById("deck-manifest").textContent);
   var deck = window.FmDeckRuntime.mount({

@@ -26,25 +26,25 @@
  * See `svg_equivalence.mjs` for exactly which invariants are checked and which are not.
  */
 
-import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpus, loadavg, platform, release, tmpdir, totalmem } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { CORPUS, generateAll } from './corpus.mjs';
+import { CORPUS, generateAll } from "./corpus.mjs";
 import {
-  TIER2_FAMILIES,
   compareDiagram,
   summarize,
   summarizeFrankenmermaidValidation,
+  TIER2_FAMILIES,
   verifyFrankenmermaidAgainstSource,
-} from './svg_equivalence.mjs';
+} from "./svg_equivalence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO = resolve(HERE, '..', '..');
-const PINS = JSON.parse(readFileSync(join(HERE, 'pins.json'), 'utf8'));
+const REPO = resolve(HERE, "..", "..");
+const PINS = JSON.parse(readFileSync(join(HERE, "pins.json"), "utf8"));
 
 const EXIT_ENGINE_ERROR = 1;
 const EXIT_BAD_ARGS = 2;
@@ -56,28 +56,28 @@ function arg(name, fallback = null) {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
 }
 const has = (name) => process.argv.includes(`--${name}`);
-const log = (...a) => console.error('[equiv]', ...a);
-const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
+const log = (...a) => console.error("[equiv]", ...a);
+const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 // Do not concatenate a whole edit trace merely to hash it. The 1,001-revision trace's SVGs exceed
 // V8's maximum string length even though each revision is individually available for validation.
 function sha256Chunks(chunks) {
-  const hash = createHash('sha256');
-  for (const chunk of chunks) hash.update(chunk, 'utf8');
-  return hash.digest('hex');
+  const hash = createHash("sha256");
+  for (const chunk of chunks) hash.update(chunk, "utf8");
+  return hash.digest("hex");
 }
 
-if (has('self-test')) {
-  const chunks = ['flowchart LR\n', 'A-->B\n', 'emoji: \u{1F984}\n'];
-  if (sha256Chunks(chunks) !== sha256(chunks.join(''))) {
-    throw new Error('streamed SVG linkage hash differs from concatenated input');
+if (has("self-test")) {
+  const chunks = ["flowchart LR\n", "A-->B\n", "emoji: \u{1F984}\n"];
+  if (sha256Chunks(chunks) !== sha256(chunks.join(""))) {
+    throw new Error("streamed SVG linkage hash differs from concatenated input");
   }
-  console.log('equivalence hash self-test: PASS');
+  console.log("equivalence hash self-test: PASS");
   process.exit(0);
 }
 
 function sh(cmd, args) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8' });
-  return res.status === 0 ? (res.stdout ?? '').trim() : null;
+  const res = spawnSync(cmd, args, { encoding: "utf8" });
+  return res.status === 0 ? (res.stdout ?? "").trim() : null;
 }
 
 /**
@@ -86,48 +86,50 @@ function sh(cmd, args) {
  * guessed from the output -- an engine must not get to choose how strictly it is checked.
  */
 export function familyOf(source) {
-  const header = source.trimStart().split('\n', 1)[0].trim().toLowerCase();
-  if (/^(flowchart|graph)\b/.test(header)) return 'flowchart';
-  if (/^sequencediagram\b/.test(header)) return 'sequence';
-  if (/^classdiagram\b/.test(header)) return 'class';
-  if (/^statediagram/.test(header)) return 'state';
-  if (/^erdiagram\b/.test(header)) return 'er';
-  if (/^architecture/.test(header)) return 'architecture';
-  if (/^mindmap\b/.test(header)) return 'mindmap';
-  if (/^journey\b/.test(header)) return 'journey';
-  if (/^gantt\b/.test(header)) return 'gantt';
-  if (/^pie\b/.test(header)) return 'pie';
-  return 'unknown';
+  const header = source.trimStart().split("\n", 1)[0].trim().toLowerCase();
+  if (/^(flowchart|graph)\b/.test(header)) return "flowchart";
+  if (/^sequencediagram\b/.test(header)) return "sequence";
+  if (/^classdiagram\b/.test(header)) return "class";
+  if (/^statediagram/.test(header)) return "state";
+  if (/^erdiagram\b/.test(header)) return "er";
+  if (/^architecture/.test(header)) return "architecture";
+  if (/^mindmap\b/.test(header)) return "mindmap";
+  if (/^journey\b/.test(header)) return "journey";
+  if (/^gantt\b/.test(header)) return "gantt";
+  if (/^pie\b/.test(header)) return "pie";
+  return "unknown";
 }
 
 // ---------------------------------------------------------------- host provenance
 
 function readText(path) {
   try {
-    return readFileSync(path, 'utf8').trim();
+    return readFileSync(path, "utf8").trim();
   } catch {
     return null;
   }
 }
 
 function sortedUnique(values) {
-  return [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))].sort();
+  return [
+    ...new Set(values.filter((value) => typeof value === "string" && value.length > 0)),
+  ].sort();
 }
 
 function boostState() {
-  const cpufreqBoost = readText('/sys/devices/system/cpu/cpufreq/boost');
-  if (cpufreqBoost === '0' || cpufreqBoost === '1') {
+  const cpufreqBoost = readText("/sys/devices/system/cpu/cpufreq/boost");
+  if (cpufreqBoost === "0" || cpufreqBoost === "1") {
     return {
-      source: '/sys/devices/system/cpu/cpufreq/boost',
-      enabled: cpufreqBoost === '1',
+      source: "/sys/devices/system/cpu/cpufreq/boost",
+      enabled: cpufreqBoost === "1",
       raw: cpufreqBoost,
     };
   }
-  const intelNoTurbo = readText('/sys/devices/system/cpu/intel_pstate/no_turbo');
-  if (intelNoTurbo === '0' || intelNoTurbo === '1') {
+  const intelNoTurbo = readText("/sys/devices/system/cpu/intel_pstate/no_turbo");
+  if (intelNoTurbo === "0" || intelNoTurbo === "1") {
     return {
-      source: '/sys/devices/system/cpu/intel_pstate/no_turbo',
-      enabled: intelNoTurbo === '0',
+      source: "/sys/devices/system/cpu/intel_pstate/no_turbo",
+      enabled: intelNoTurbo === "0",
       raw: intelNoTurbo,
     };
   }
@@ -135,9 +137,9 @@ function boostState() {
 }
 
 function cpuPowerPolicy() {
-  if (platform() !== 'linux') {
+  if (platform() !== "linux") {
     return {
-      kind: 'unsupported',
+      kind: "unsupported",
       platform: platform(),
       complete: false,
       drivers: [],
@@ -148,7 +150,7 @@ function cpuPowerPolicy() {
     };
   }
 
-  const base = '/sys/devices/system/cpu/cpufreq';
+  const base = "/sys/devices/system/cpu/cpufreq";
   let policyNames = [];
   try {
     policyNames = readdirSync(base)
@@ -161,13 +163,12 @@ function cpuPowerPolicy() {
     const root = join(base, policy);
     return {
       policy,
-      affected_cpus: readText(join(root, 'affected_cpus'))
-        ?? readText(join(root, 'related_cpus')),
-      driver: readText(join(root, 'scaling_driver')),
-      governor: readText(join(root, 'scaling_governor')),
-      energy_performance_preference: readText(join(root, 'energy_performance_preference')),
-      scaling_min_khz: readText(join(root, 'scaling_min_freq')),
-      scaling_max_khz: readText(join(root, 'scaling_max_freq')),
+      affected_cpus: readText(join(root, "affected_cpus")) ?? readText(join(root, "related_cpus")),
+      driver: readText(join(root, "scaling_driver")),
+      governor: readText(join(root, "scaling_governor")),
+      energy_performance_preference: readText(join(root, "energy_performance_preference")),
+      scaling_min_khz: readText(join(root, "scaling_min_freq")),
+      scaling_max_khz: readText(join(root, "scaling_max_freq")),
     };
   });
   const drivers = sortedUnique(policies.map((policy) => policy.driver));
@@ -176,10 +177,11 @@ function cpuPowerPolicy() {
     policies.map((policy) => policy.energy_performance_preference),
   );
   return {
-    kind: 'linux_cpufreq',
-    platform: 'linux',
-    complete: policies.length > 0
-      && policies.every((policy) => policy.driver !== null && policy.governor !== null),
+    kind: "linux_cpufreq",
+    platform: "linux",
+    complete:
+      policies.length > 0 &&
+      policies.every((policy) => policy.driver !== null && policy.governor !== null),
     drivers,
     governors,
     energy_performance_preferences: energyPerformancePreferences,
@@ -190,31 +192,36 @@ function cpuPowerPolicy() {
 
 function cpuIsa() {
   const architecture = process.arch;
-  const machine = sh('uname', ['-m']) ?? architecture;
-  const featureLine = platform() === 'linux'
-    ? readText('/proc/cpuinfo')
-      ?.split('\n')
-      .find((line) => /^(?:flags|Features)\s*:/.test(line))
-    : null;
+  const machine = sh("uname", ["-m"]) ?? architecture;
+  const featureLine =
+    platform() === "linux"
+      ? readText("/proc/cpuinfo")
+          ?.split("\n")
+          .find((line) => /^(?:flags|Features)\s*:/.test(line))
+      : null;
   const flags = sortedUnique(
     featureLine
-      ? featureLine.slice(featureLine.indexOf(':') + 1).trim().toLowerCase().split(/\s+/)
+      ? featureLine
+          .slice(featureLine.indexOf(":") + 1)
+          .trim()
+          .toLowerCase()
+          .split(/\s+/)
       : [],
   );
   const featureSet = new Set(flags);
   return {
     architecture,
     machine,
-    source: platform() === 'linux' ? '/proc/cpuinfo' : null,
+    source: platform() === "linux" ? "/proc/cpuinfo" : null,
     complete: flags.length > 0,
     flags,
     capabilities: {
-      avx2: featureSet.has('avx2'),
-      fma: featureSet.has('fma'),
-      bmi2: featureSet.has('bmi2'),
-      vaes: featureSet.has('vaes'),
-      any_avx512: flags.some((flag) => flag.startsWith('avx512')),
-      neon_or_asimd: featureSet.has('neon') || featureSet.has('asimd'),
+      avx2: featureSet.has("avx2"),
+      fma: featureSet.has("fma"),
+      bmi2: featureSet.has("bmi2"),
+      vaes: featureSet.has("vaes"),
+      any_avx512: flags.some((flag) => flag.startsWith("avx512")),
+      neon_or_asimd: featureSet.has("neon") || featureSet.has("asimd"),
     },
   };
 }
@@ -224,11 +231,12 @@ function hostFingerprint() {
   const cpu = cpus();
   return {
     captured_at: new Date().toISOString(),
-    host_identity: sh('hostnamectl', ['--static']) ?? sh('hostname', []) ?? 'unknown',
-    git_rev: sh('git', ['-C', REPO, 'rev-parse', 'HEAD']),
-    git_dirty: (sh('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no']) ?? '').length > 0,
+    host_identity: sh("hostnamectl", ["--static"]) ?? sh("hostname", []) ?? "unknown",
+    git_rev: sh("git", ["-C", REPO, "rev-parse", "HEAD"]),
+    git_dirty:
+      (sh("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=no"]) ?? "").length > 0,
     kernel: release(),
-    cpu_model: cpu[0]?.model ?? 'unknown',
+    cpu_model: cpu[0]?.model ?? "unknown",
     logical_threads: cpu.length,
     total_mem_gb: Number((totalmem() / 2 ** 30).toFixed(1)),
     loadavg_1m: loadavg()[0],
@@ -243,17 +251,17 @@ function hostFingerprint() {
 
 // ---------------------------------------------------------------- arguments and corpus
 
-const fmBin = arg('fm-bin');
+const fmBin = arg("fm-bin");
 if (!fmBin) {
-  log('--fm-bin <path> is required (build strict-remote; see README)');
+  log("--fm-bin <path> is required (build strict-remote; see README)");
   process.exit(EXIT_BAD_ARGS);
 }
-const only = arg('only');
+const only = arg("only");
 if (!only) {
-  log('--only <corpus_id>[,<corpus_id>...] is required');
+  log("--only <corpus_id>[,<corpus_id>...] is required");
   process.exit(EXIT_BAD_ARGS);
 }
-const outDir = arg('out', join(REPO, '.benchmarks', 'headtohead', 'equivalence'));
+const outDir = arg("out", join(REPO, ".benchmarks", "headtohead", "equivalence"));
 mkdirSync(outDir, { recursive: true });
 
 const corpus = generateAll();
@@ -263,12 +271,12 @@ for (const [id, v] of corpus) {
   if (pinned[id] && pinned[id] !== v.sha256) drift.push(`${id}: pinned != generated`);
 }
 if (drift.length > 0) {
-  log('corpus drift detected -- an equivalence verdict about drifted input is meaningless:');
+  log("corpus drift detected -- an equivalence verdict about drifted input is meaningless:");
   for (const d of drift) log(`  ${d}`);
   process.exit(EXIT_CORPUS_DRIFT);
 }
 
-const onlyIds = new Set(only.split(',').map((s) => s.trim()));
+const onlyIds = new Set(only.split(",").map((s) => s.trim()));
 const items = CORPUS.filter((i) => onlyIds.has(i.id));
 if (items.length === 0) {
   log(`--only ${only} matched no corpus item`);
@@ -277,14 +285,18 @@ if (items.length === 0) {
 
 const env = hostFingerprint();
 if (!env.cpu_power_policy.complete || !env.isa.complete) {
-  log('host provenance incomplete: equivalence evidence requires observed governor and ISA data');
-  log(JSON.stringify({
-    cpu_power_policy: env.cpu_power_policy,
-    isa: env.isa,
-  }));
+  log("host provenance incomplete: equivalence evidence requires observed governor and ISA data");
+  log(
+    JSON.stringify({
+      cpu_power_policy: env.cpu_power_policy,
+      isa: env.isa,
+    }),
+  );
   process.exit(EXIT_ENGINE_ERROR);
 }
-log(`host=${env.host_identity} rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? '-dirty' : ''} load1=${env.loadavg_1m.toFixed(2)}`);
+log(
+  `host=${env.host_identity} rev=${env.git_rev?.slice(0, 8)}${env.git_dirty ? "-dirty" : ""} load1=${env.loadavg_1m.toFixed(2)}`,
+);
 
 // One render each is all this phase needs; reps are a timing device and this phase does not time.
 const corpusJson = items.map((i) => ({
@@ -296,37 +308,37 @@ const corpusJson = items.map((i) => ({
 const corpusPath = join(tmpdir(), `fm-h2h-equiv-corpus-${process.pid}.json`);
 writeFileSync(corpusPath, JSON.stringify(corpusJson));
 
-const dumpRoot = mkdtempSync(join(tmpdir(), 'fm-h2h-equiv-'));
-const fmDump = join(dumpRoot, 'fm');
-const jsDump = join(dumpRoot, 'js');
+const dumpRoot = mkdtempSync(join(tmpdir(), "fm-h2h-equiv-"));
+const fmDump = join(dumpRoot, "fm");
+const jsDump = join(dumpRoot, "js");
 mkdirSync(fmDump, { recursive: true });
 mkdirSync(jsDump, { recursive: true });
 
 function runJsonl(label, cmd, args, extraEnv = {}) {
-  log(`${label}: ${cmd} ${args.join(' ')}`);
+  log(`${label}: ${cmd} ${args.join(" ")}`);
   const res = spawnSync(cmd, args, {
-    encoding: 'utf8',
+    encoding: "utf8",
     maxBuffer: 512 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ["ignore", "pipe", "inherit"],
     env: { ...process.env, ...extraEnv },
   });
-  const records = (res.stdout ?? '')
-    .split('\n')
-    .filter((l) => l.trim().startsWith('{'))
+  const records = (res.stdout ?? "")
+    .split("\n")
+    .filter((l) => l.trim().startsWith("{"))
     .map((l) => JSON.parse(l));
   return { records, code: res.status ?? -1 };
 }
 
 // ---------------------------------------------------------------- render both engines
 
-const fmRun = runJsonl('frankenmermaid', fmBin, [corpusPath, fmDump], {
-  FM_H2H_DUMP_ALL: '1',
+const fmRun = runJsonl("frankenmermaid", fmBin, [corpusPath, fmDump], {
+  FM_H2H_DUMP_ALL: "1",
   // Scalar: this phase checks content, and the sweep already proves pooled output is byte-identical
   // to the scalar arm, so checking scalar transfers to every width.
-  FM_H2H_THREADS: '1',
+  FM_H2H_THREADS: "1",
   // Requested width is configuration, not evidence. Observe the caller threads that execute this
   // exact workload outside the measured samples so every equivalence row carries the actual count.
-  FM_H2H_THREAD_PROBE: '1',
+  FM_H2H_THREAD_PROBE: "1",
 });
 if (fmRun.code !== 0) {
   log(`frankenmermaid exited ${fmRun.code}`);
@@ -339,20 +351,25 @@ if (fmRun.code !== 0) {
 // effect/null samples.
 const equivalenceRepsScale = 1 / Math.max(...items.map((item) => item.reps_js));
 const jsArgs = [
-  '--only', [...onlyIds].join(','),
-  '--reps-scale', String(equivalenceRepsScale),
-  '--render-once',
-  '--dump-svg', jsDump,
-  '--dump-all-revisions',
+  "--only",
+  [...onlyIds].join(","),
+  "--reps-scale",
+  String(equivalenceRepsScale),
+  "--render-once",
+  "--dump-svg",
+  jsDump,
+  "--dump-all-revisions",
 ];
-const jsRun = runJsonl('mermaid-js', 'node', [join(HERE, 'mermaid_bench.mjs'), ...jsArgs]);
+const jsRun = runJsonl("mermaid-js", "node", [join(HERE, "mermaid_bench.mjs"), ...jsArgs]);
 if (jsRun.code !== 0) {
   log(`mermaid_bench exited ${jsRun.code}`);
   process.exit(EXIT_ENGINE_ERROR);
 }
 
-const binaryRecord = fmRun.records.find((r) => r.record === 'binary');
-const fmById = new Map(fmRun.records.filter((r) => r.id && r.record !== 'binary').map((r) => [r.id, r]));
+const binaryRecord = fmRun.records.find((r) => r.record === "binary");
+const fmById = new Map(
+  fmRun.records.filter((r) => r.id && r.record !== "binary").map((r) => [r.id, r]),
+);
 const jsById = new Map(jsRun.records.filter((r) => r.id).map((r) => [r.id, r]));
 
 // ---------------------------------------------------------------- compare
@@ -362,7 +379,7 @@ function readRevisions(dir, id, suffix) {
   const names = readdirSync(dir)
     .filter((n) => n.startsWith(prefix) && n.endsWith(suffix))
     .sort();
-  return names.map((n) => readFileSync(join(dir, n), 'utf8'));
+  return names.map((n) => readFileSync(join(dir, n), "utf8"));
 }
 
 const rows = [];
@@ -373,15 +390,15 @@ for (const item of items) {
   const fmRecord = fmById.get(item.id);
   const jsRecord = jsById.get(item.id);
 
-  if (!fmRecord || fmRecord.status !== 'ok') {
-    log(`FAIL ${item.id}: frankenmermaid status=${fmRecord?.status ?? 'missing'}`);
+  if (!fmRecord || fmRecord.status !== "ok") {
+    log(`FAIL ${item.id}: frankenmermaid status=${fmRecord?.status ?? "missing"}`);
     process.exit(EXIT_ENGINE_ERROR);
   }
   // A comparator that cannot render cannot be checked for equivalence. It is still not enough to
   // observe that our process returned SVG: prove the inspected native bytes preserve every
   // source-grounded invariant this family can decide before recording the structural outcome.
-  if (!jsRecord || jsRecord.status !== 'ok') {
-    const fmSvgs = readRevisions(fmDump, item.id, '.default.svg');
+  if (!jsRecord || jsRecord.status !== "ok") {
+    const fmSvgs = readRevisions(fmDump, item.id, ".default.svg");
     const linkage = {
       fm_revisions_dumped: fmSvgs.length,
       revisions_expected: texts.length,
@@ -395,33 +412,38 @@ for (const item of items) {
       log(`  ${JSON.stringify(linkage)}`);
       process.exit(EXIT_ENGINE_ERROR);
     }
-    const nativeResults = texts.map((source, index) => verifyFrankenmermaidAgainstSource({
-      index,
-      family: familyOf(source),
-      fmSvg: fmSvgs[index],
-      source,
-    }));
+    const nativeResults = texts.map((source, index) =>
+      verifyFrankenmermaidAgainstSource({
+        index,
+        family: familyOf(source),
+        fmSvg: fmSvgs[index],
+        source,
+      }),
+    );
     const nativeValidation = summarizeFrankenmermaidValidation(nativeResults);
-    if (nativeValidation.verdict !== 'pass') gateFailed = true;
+    if (nativeValidation.verdict !== "pass") gateFailed = true;
     rows.push({
       id: item.id,
-      status: 'incumbent_did_not_render',
+      status: "incumbent_did_not_render",
       revisions: texts.length,
       // These bind the native validation to the exact corpus revision measured by run.mjs.
       input_sha256: corpus.get(item.id).sha256,
       fm_input_sha256: fmRecord.input_sha256,
-      incumbent_status: jsRecord?.status ?? 'missing',
+      incumbent_status: jsRecord?.status ?? "missing",
       incumbent_detail: jsRecord?.dnf ?? jsRecord?.error ?? null,
       equivalence: null,
       linkage,
       native_output_validation: nativeValidation,
-      note: 'no cross-engine equivalence claim is possible for an item mermaid-js did not render; '
-        + 'native source-grounded validation is reported separately',
+      note:
+        "no cross-engine equivalence claim is possible for an item mermaid-js did not render; " +
+        "native source-grounded validation is reported separately",
     });
-    log(`${nativeValidation.verdict === 'pass' ? 'PASS' : 'FAIL'} ${item.id}: `
-      + `mermaid-js status=${jsRecord?.status ?? 'missing'}; native structural validation `
-      + `${nativeValidation.verified}/${nativeValidation.diagrams} verified, `
-      + `${nativeValidation.divergent} divergent, ${nativeValidation.unverified} unverified`);
+    log(
+      `${nativeValidation.verdict === "pass" ? "PASS" : "FAIL"} ${item.id}: ` +
+        `mermaid-js status=${jsRecord?.status ?? "missing"}; native structural validation ` +
+        `${nativeValidation.verified}/${nativeValidation.diagrams} verified, ` +
+        `${nativeValidation.divergent} divergent, ${nativeValidation.unverified} unverified`,
+    );
     continue;
   }
 
@@ -438,13 +460,14 @@ for (const item of items) {
     },
   };
   const threadProvenanceComplete = [execution.frankenmermaid, execution.mermaid_js].every(
-    (record) => Number.isSafeInteger(record.requested_worker_threads)
-      && record.requested_worker_threads > 0
-      && Number.isSafeInteger(record.actual_observed_worker_threads)
-      && record.actual_observed_worker_threads > 0
-      && record.actual_observed_worker_threads === record.requested_worker_threads
-      && typeof record.execution_model === 'string'
-      && record.execution_model.length > 0,
+    (record) =>
+      Number.isSafeInteger(record.requested_worker_threads) &&
+      record.requested_worker_threads > 0 &&
+      Number.isSafeInteger(record.actual_observed_worker_threads) &&
+      record.actual_observed_worker_threads > 0 &&
+      record.actual_observed_worker_threads === record.requested_worker_threads &&
+      typeof record.execution_model === "string" &&
+      record.execution_model.length > 0,
   );
   if (!threadProvenanceComplete) {
     log(`FAIL ${item.id}: actual observed worker-thread provenance is incomplete`);
@@ -452,8 +475,8 @@ for (const item of items) {
     process.exit(EXIT_ENGINE_ERROR);
   }
 
-  const fmSvgs = readRevisions(fmDump, item.id, '.default.svg');
-  const jsSvgs = readRevisions(jsDump, item.id, '.mermaid.svg');
+  const fmSvgs = readRevisions(fmDump, item.id, ".default.svg");
+  const jsSvgs = readRevisions(jsDump, item.id, ".mermaid.svg");
 
   // LINKAGE PROOF. Without this the phase would only show that *some* render agrees. Each engine
   // reports `output_sha256` over its timed rounds' concatenated revisions; the dumps must reproduce
@@ -462,9 +485,9 @@ for (const item of items) {
     fm_revisions_dumped: fmSvgs.length,
     js_revisions_dumped: jsSvgs.length,
     revisions_expected: texts.length,
-    fm_dump_sha256: sha256(fmSvgs.join('')),
+    fm_dump_sha256: sha256(fmSvgs.join("")),
     fm_reported_sha256: fmRecord.output_sha256,
-    js_dump_sha256: sha256(jsSvgs.join('')),
+    js_dump_sha256: sha256(jsSvgs.join("")),
     js_reported_sha256: jsRecord.output_sha256,
   };
   linkage.fm_matches_measured = linkage.fm_dump_sha256 === linkage.fm_reported_sha256;
@@ -479,20 +502,22 @@ for (const item of items) {
 
   const results = [];
   for (let i = 0; i < texts.length; i += 1) {
-    results.push(compareDiagram({
-      index: i,
-      family: familyOf(texts[i]),
-      fmSvg: fmSvgs[i],
-      jsSvg: jsSvgs[i],
-      source: texts[i],
-    }));
+    results.push(
+      compareDiagram({
+        index: i,
+        family: familyOf(texts[i]),
+        fmSvg: fmSvgs[i],
+        jsSvg: jsSvgs[i],
+        source: texts[i],
+      }),
+    );
   }
 
   const equivalence = summarize(results);
-  if (equivalence.verdict !== 'pass') gateFailed = true;
+  if (equivalence.verdict !== "pass") gateFailed = true;
   rows.push({
     id: item.id,
-    status: 'compared',
+    status: "compared",
     revisions: texts.length,
     input_sha256: corpus.get(item.id).sha256,
     // Both engines' agreement on the input hash is already gated by run.mjs; repeated here so this
@@ -507,48 +532,57 @@ for (const item of items) {
 
   const fams = Object.entries(equivalence.by_family)
     .map(([f, v]) => `${f}=${v.diagrams - v.divergent - v.unverified}/${v.diagrams}`)
-    .join(' ');
-  log(`${equivalence.verdict === 'pass' ? 'PASS' : 'FAIL'} ${item.id}: `
-    + `${equivalence.equivalent}/${equivalence.diagrams} equivalent, ${equivalence.divergent} divergent, `
-    + `${equivalence.unverified} unverified | ${fams}`);
+    .join(" ");
+  log(
+    `${equivalence.verdict === "pass" ? "PASS" : "FAIL"} ${item.id}: ` +
+      `${equivalence.equivalent}/${equivalence.diagrams} equivalent, ${equivalence.divergent} divergent, ` +
+      `${equivalence.unverified} unverified | ${fams}`,
+  );
 }
 
 // ---------------------------------------------------------------- artifact
 
 const stamp = Date.now();
-const rev = env.git_rev?.slice(0, 8) ?? 'nogit';
+const rev = env.git_rev?.slice(0, 8) ?? "nogit";
 const artifactPath = join(outDir, `equivalence-${rev}-${stamp}.json`);
 const artifact = {
-  schema: 'frankenmermaid.headtohead.equivalence.v1',
+  schema: "frankenmermaid.headtohead.equivalence.v1",
   env,
   method: {
-    kind: 'svg_structural',
+    kind: "svg_structural",
     rasterized_perceptual_diff: false,
-    why_not_raster: 'the engines use different fonts, paddings and stroke widths, so a pixel diff '
-      + 'would report a large distance for two correct renders -- it measures styling, not content',
-    why_not_byte_equality: 'the engines emit deliberately different SVG (HTML foreignObject labels '
-      + 'vs <text>, different class vocabularies, different layout engines)',
-    tier1: 'rendered-text token multiset, containment-gated: every token mermaid-js renders must be '
-      + 'present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, '
-      + 'not failed.',
-    tier2: 'rendered-path edge topology compared cross-engine AND against input-derived ground '
-      + 'truth for flowchart/state, plus class relationship kind and marker-owning endpoint '
-      + 'compared cross-engine AND against input-derived ground truth. Referenced marker bodies '
-      + 'must encode the right diamond geometry/fill, while inheritance additionally requires a '
-      + 'hollow triangle facing away from the path. Frankenmermaid endpoints are reconstructed '
-      + 'geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved '
-      + 'per-path data-id endpoints otherwise. '
-      + `Claimed for: ${[...TIER2_FAMILIES].join(', ')}.`,
-    incumbent_dnf: 'when mermaid-js does not render, no cross-engine equivalence or ratio is '
-      + 'claimed. The measured FrankenMermaid SVG revisions must instead pass a separate '
-      + 'source-grounded native-output validation before the DNF outcome is recorded.',
-    extractor: 'single shared implementation applied to both engines (svg_equivalence.mjs); a '
-      + 'per-engine extractor pair could agree by construction',
-    self_test: 'svg_equivalence.mjs --self-test: mutation controls (including dropped or '
-      + 'rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, '
-      + 'unknown markers, invalid diamond bodies, inward or filled inheritance triangles, and '
-      + 'cardinality/label drift), including source-grounded native DNF validation controls, '
-      + 'and 4 negative controls (including benign path ordering and extra content)',
+    why_not_raster:
+      "the engines use different fonts, paddings and stroke widths, so a pixel diff " +
+      "would report a large distance for two correct renders -- it measures styling, not content",
+    why_not_byte_equality:
+      "the engines emit deliberately different SVG (HTML foreignObject labels " +
+      "vs <text>, different class vocabularies, different layout engines)",
+    tier1:
+      "rendered-text token multiset, containment-gated: every token mermaid-js renders must be " +
+      "present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, " +
+      "not failed.",
+    tier2:
+      "rendered-path edge topology compared cross-engine AND against input-derived ground " +
+      "truth for flowchart/state, plus class relationship kind and marker-owning endpoint " +
+      "compared cross-engine AND against input-derived ground truth. Referenced marker bodies " +
+      "must encode the right diamond geometry/fill, while inheritance additionally requires a " +
+      "hollow triangle facing away from the path. Frankenmermaid endpoints are reconstructed " +
+      "geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved " +
+      "per-path data-id endpoints otherwise. " +
+      `Claimed for: ${[...TIER2_FAMILIES].join(", ")}.`,
+    incumbent_dnf:
+      "when mermaid-js does not render, no cross-engine equivalence or ratio is " +
+      "claimed. The measured FrankenMermaid SVG revisions must instead pass a separate " +
+      "source-grounded native-output validation before the DNF outcome is recorded.",
+    extractor:
+      "single shared implementation applied to both engines (svg_equivalence.mjs); a " +
+      "per-engine extractor pair could agree by construction",
+    self_test:
+      "svg_equivalence.mjs --self-test: mutation controls (including dropped or " +
+      "rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, " +
+      "unknown markers, invalid diamond bodies, inward or filled inheritance triangles, and " +
+      "cardinality/label drift), including source-grounded native DNF validation controls, " +
+      "and 4 negative controls (including benign path ordering and extra content)",
     undecidable_is_not_a_pass: true,
   },
   pins: { mermaid: PINS.mermaid.version, bundle_sha256: jsRun.records[0]?.bundle_sha256 ?? null },
@@ -561,55 +595,64 @@ const artifact = {
     mermaid_bundle_url: jsRun.records[0]?.bundle_url ?? null,
   },
   rows,
-  verdict: gateFailed ? 'fail' : 'pass',
+  verdict: gateFailed ? "fail" : "pass",
 };
 writeFileSync(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`);
 log(`artifact ${artifactPath}`);
 
-if (!has('keep-dumps')) rmSync(dumpRoot, { recursive: true, force: true });
+if (!has("keep-dumps")) rmSync(dumpRoot, { recursive: true, force: true });
 else log(`dumps kept at ${dumpRoot}`);
 
 // ---------------------------------------------------------------- report
 
-console.log('');
+console.log("");
 console.log(`equivalence  host=${env.host_identity}  mermaid@${PINS.mermaid.version}  rev=${rev}`);
-console.log('method: SVG structural (text-token containment + rendered-path topology + class relationship semantics). Not a pixel diff.');
-console.log('');
-console.log('item                  diagrams  equiv  diverg  unver  verdict');
+console.log(
+  "method: SVG structural (text-token containment + rendered-path topology + class relationship semantics). Not a pixel diff.",
+);
+console.log("");
+console.log("item                  diagrams  equiv  diverg  unver  verdict");
 for (const row of rows) {
-  if (row.status === 'incumbent_did_not_render') {
+  if (row.status === "incumbent_did_not_render") {
     const native = row.native_output_validation;
     console.log(
-      `${row.id.padEnd(21)} ${String(native.diagrams).padStart(8)}  ${'DNF'.padStart(5)}  `
-      + `${String(native.divergent).padStart(6)}  ${String(native.unverified).padStart(5)}  `
-      + `NATIVE-${native.verdict.toUpperCase()}`,
+      `${row.id.padEnd(21)} ${String(native.diagrams).padStart(8)}  ${"DNF".padStart(5)}  ` +
+        `${String(native.divergent).padStart(6)}  ${String(native.unverified).padStart(5)}  ` +
+        `NATIVE-${native.verdict.toUpperCase()}`,
     );
     continue;
   }
-  if (row.status !== 'compared') {
-    console.log(`${row.id.padEnd(21)} ${String(row.revisions ?? '-').padStart(8)}  ${'-'.padStart(5)}  ${'-'.padStart(6)}  ${'-'.padStart(5)}  ${row.status}`);
+  if (row.status !== "compared") {
+    console.log(
+      `${row.id.padEnd(21)} ${String(row.revisions ?? "-").padStart(8)}  ${"-".padStart(5)}  ${"-".padStart(6)}  ${"-".padStart(5)}  ${row.status}`,
+    );
     continue;
   }
   const e = row.equivalence;
   console.log(
-    `${row.id.padEnd(21)} ${String(e.diagrams).padStart(8)}  ${String(e.equivalent).padStart(5)}  `
-    + `${String(e.divergent).padStart(6)}  ${String(e.unverified).padStart(5)}  ${e.verdict.toUpperCase()}`,
+    `${row.id.padEnd(21)} ${String(e.diagrams).padStart(8)}  ${String(e.equivalent).padStart(5)}  ` +
+      `${String(e.divergent).padStart(6)}  ${String(e.unverified).padStart(5)}  ${e.verdict.toUpperCase()}`,
   );
   for (const [family, v] of Object.entries(e.by_family)) {
     const ok = v.diagrams - v.divergent - v.unverified;
-    console.log(`  ${family.padEnd(14)} ${String(ok).padStart(4)}/${String(v.diagrams).padEnd(4)} equivalent`
-      + `  tier2_decided=${v.tier2}`
-      + (v.divergent ? `  DIVERGENT=${v.divergent}` : '')
-      + (v.unverified ? `  UNVERIFIED=${v.unverified}` : ''));
+    console.log(
+      `  ${family.padEnd(14)} ${String(ok).padStart(4)}/${String(v.diagrams).padEnd(4)} equivalent` +
+        `  tier2_decided=${v.tier2}` +
+        (v.divergent ? `  DIVERGENT=${v.divergent}` : "") +
+        (v.unverified ? `  UNVERIFIED=${v.unverified}` : ""),
+    );
   }
   for (const sample of e.divergent_samples) {
-    const failing = sample.checks.filter((c) => c.pass === false && c.decided && c.gating !== false);
+    const failing = sample.checks.filter(
+      (c) => c.pass === false && c.decided && c.gating !== false,
+    );
     console.log(`  first divergence: revision ${sample.index} (${sample.family})`);
     for (const c of failing) {
       const d = c.detail ?? {};
-      const what = d.total_missing !== undefined
-        ? `${d.total_missing} tokens missing from our render (${d.distinct_missing} distinct)`
-        : `${d.difference_count} differences`;
+      const what =
+        d.total_missing !== undefined
+          ? `${d.total_missing} tokens missing from our render (${d.distinct_missing} distinct)`
+          : `${d.difference_count} differences`;
       console.log(`    ${c.invariant}: ${what}`);
       for (const m of (d.missing ?? d.differences ?? []).slice(0, 6)) {
         console.log(`      ${JSON.stringify(m)}`);
@@ -617,10 +660,10 @@ for (const row of rows) {
     }
   }
 }
-console.log('');
+console.log("");
 console.log(`verdict: ${artifact.verdict.toUpperCase()}`);
 if (gateFailed) {
-  console.log('a divergent or unverified row cannot support its corresponding performance outcome');
-  console.log('until the structural failure is explained or fixed.');
+  console.log("a divergent or unverified row cannot support its corresponding performance outcome");
+  console.log("until the structural failure is explained or fixed.");
 }
 process.exit(gateFailed ? EXIT_GATE_FAILED : 0);

@@ -1,6 +1,6 @@
-'use strict';
+"use strict";
 
-const MERMAID_LANGUAGE_IDS = new Set(['mermaid', 'mmd']);
+const MERMAID_LANGUAGE_IDS = new Set(["mermaid", "mmd"]);
 const DEFAULT_PREVIEW_DEBOUNCE_MS = 75;
 const MAX_PREVIEW_DEBOUNCE_MS = 1000;
 

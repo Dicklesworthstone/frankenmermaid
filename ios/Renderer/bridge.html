@@ -20,6 +20,7 @@
   <script src="./deck_runtime.js"></script>
   <script type="module">
     import init, { applyLensEdit, describeDiagram, detectType, diagramLens, parse, renderDeck } from './frankenmermaid.js';
+
     const bridge = window.webkit.messageHandlers.frankenBridge;
     const stage = document.querySelector('#stage');
     let latestRequest = 0;

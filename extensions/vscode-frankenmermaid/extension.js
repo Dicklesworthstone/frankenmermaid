@@ -1,35 +1,33 @@
-'use strict';
-
-const crypto = require('node:crypto');
-const vscode = require('vscode');
+const crypto = require("node:crypto");
+const vscode = require("vscode");
 const {
   buildPreviewHtml,
   DebouncedRenderScheduler,
   isMermaidDocument,
   normalizePreviewDebounceMs,
-} = require('./preview-contract.cjs');
+} = require("./preview-contract.cjs");
 
 const panels = new Map();
 
 function previewResources(context, panel) {
   const packageRoot = vscode.Uri.joinPath(
     context.extensionUri,
-    'node_modules',
-    '@frankenmermaid',
-    'core',
+    "node_modules",
+    "@frankenmermaid",
+    "core",
   );
-  const mediaRoot = vscode.Uri.joinPath(context.extensionUri, 'media');
+  const mediaRoot = vscode.Uri.joinPath(context.extensionUri, "media");
   return {
     localResourceRoots: [packageRoot, mediaRoot],
     html: buildPreviewHtml({
       cspSource: panel.webview.cspSource,
-      nonce: crypto.randomBytes(16).toString('base64'),
-      scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'preview.js')),
+      nonce: crypto.randomBytes(16).toString("base64"),
+      scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, "preview.js")),
       wasmModuleUri: panel.webview.asWebviewUri(
-        vscode.Uri.joinPath(packageRoot, 'frankenmermaid.js'),
+        vscode.Uri.joinPath(packageRoot, "frankenmermaid.js"),
       ),
       wasmBinaryUri: panel.webview.asWebviewUri(
-        vscode.Uri.joinPath(packageRoot, 'frankenmermaid_bg.wasm'),
+        vscode.Uri.joinPath(packageRoot, "frankenmermaid_bg.wasm"),
       ),
     }),
   };
@@ -40,7 +38,7 @@ function postRender(entry) {
     return;
   }
   void entry.panel.webview.postMessage({
-    type: 'render',
+    type: "render",
     source: entry.document.getText(),
     title: vscode.workspace.asRelativePath(entry.document.uri, false),
   });
@@ -52,13 +50,15 @@ function scheduleRender(entry) {
 
 function previewDebounceMs() {
   return normalizePreviewDebounceMs(
-    vscode.workspace.getConfiguration('frankenmermaid').get('previewDebounceMs'),
+    vscode.workspace.getConfiguration("frankenmermaid").get("previewDebounceMs"),
   );
 }
 
 function showPreview(context, document) {
   if (!isMermaidDocument(document)) {
-    void vscode.window.showWarningMessage('FrankenMermaid previews .mmd and Mermaid-language documents.');
+    void vscode.window.showWarningMessage(
+      "FrankenMermaid previews .mmd and Mermaid-language documents.",
+    );
     return;
   }
 
@@ -66,7 +66,7 @@ function showPreview(context, document) {
   let entry = panels.get(key);
   if (!entry) {
     const panel = vscode.window.createWebviewPanel(
-      'frankenmermaid.preview',
+      "frankenmermaid.preview",
       `FrankenMermaid: ${document.fileName.split(/[\\/]/u).pop()}`,
       vscode.ViewColumn.Beside,
       { enableScripts: true },
@@ -83,16 +83,24 @@ function showPreview(context, document) {
       ready: false,
       scheduler: new DebouncedRenderScheduler(previewDebounceMs()),
     };
-    panel.onDidDispose(() => {
-      entry.scheduler.dispose();
-      panels.delete(key);
-    }, undefined, context.subscriptions);
-    panel.webview.onDidReceiveMessage((message) => {
-      if (message?.type === 'ready') {
-        entry.ready = true;
-        postRender(entry);
-      }
-    }, undefined, context.subscriptions);
+    panel.onDidDispose(
+      () => {
+        entry.scheduler.dispose();
+        panels.delete(key);
+      },
+      undefined,
+      context.subscriptions,
+    );
+    panel.webview.onDidReceiveMessage(
+      (message) => {
+        if (message?.type === "ready") {
+          entry.ready = true;
+          postRender(entry);
+        }
+      },
+      undefined,
+      context.subscriptions,
+    );
     panels.set(key, entry);
   } else {
     entry.document = document;
@@ -104,7 +112,7 @@ function showPreview(context, document) {
 
 function activate(context) {
   context.subscriptions.push(
-    vscode.commands.registerCommand('frankenmermaid.showPreview', () => {
+    vscode.commands.registerCommand("frankenmermaid.showPreview", () => {
       const editor = vscode.window.activeTextEditor;
       if (editor) {
         showPreview(context, editor.document);
@@ -121,7 +129,7 @@ function activate(context) {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('frankenmermaid.previewDebounceMs')) {
+      if (event.affectsConfiguration("frankenmermaid.previewDebounceMs")) {
         const delayMs = previewDebounceMs();
         for (const entry of panels.values()) {
           entry.scheduler.setDelayMs(delayMs);

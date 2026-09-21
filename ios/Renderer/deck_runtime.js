@@ -24,9 +24,7 @@
  * single global is window.FmDeckRuntime. All deck-sourced text reaches the DOM via
  * textContent (deck text is untrusted; never innerHTML).
  */
-(function () {
-  "use strict";
-
+(() => {
   var CAMERA_LERP = 0.085; // per-frame approach factor, graphcon's feel
   var SNAP_EPSILON = 0.1; // px: snap-to-target threshold that lets the loop park
   var STAGGER_MS = 90; // per-element reveal interval within a step
@@ -50,7 +48,7 @@
     if (!value) return null;
     if (typeof Map === "function" && value instanceof Map) {
       var out = Object.create(null);
-      value.forEach(function (entry, key) {
+      value.forEach((entry, key) => {
         out[key] = entry;
       });
       return out;
@@ -61,8 +59,7 @@
   function reducedMotion() {
     try {
       return (
-        typeof matchMedia === "function" &&
-        matchMedia("(prefers-reduced-motion: reduce)").matches
+        typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches
       );
     } catch (_error) {
       return false;
@@ -73,7 +70,7 @@
     var stage = options.stage;
     var manifest = options.manifest;
     var ui = options.ui || {};
-    var onSlideChange = options.onSlideChange || function () {};
+    var onSlideChange = options.onSlideChange || (() => {});
     if (!stage || !manifest || !Array.isArray(manifest.slides)) {
       throw new Error("FmDeckRuntime.mount needs { stage, svg, manifest }");
     }
@@ -128,10 +125,7 @@
       "opacity:0;transition:opacity .18s ease;}" +
       ".fm-deck-tip.fm-deck-tip-show{opacity:.96;}";
     stage.appendChild(style);
-    stage.style.setProperty(
-      "--fm-deck-dim",
-      String(clamp(manifest.options.dimOpacity, 0, 1))
-    );
+    stage.style.setProperty("--fm-deck-dim", String(clamp(manifest.options.dimOpacity, 0, 1)));
 
     // A11y: the stage is a slideshow region; slide changes are announced politely.
     stage.setAttribute("role", "region");
@@ -157,15 +151,15 @@
     var wanted = Object.create(null); // elementId -> true
     var tooltipOf = Object.create(null); // elementId -> tip text
     var slideIndexOfId = asRecord(manifest.nodeSlideIndex) || {};
-    manifest.slides.forEach(function (slide) {
-      slide.nodes.forEach(function (node) {
+    manifest.slides.forEach((slide) => {
+      slide.nodes.forEach((node) => {
         wanted[node.elementId] = true;
         if (node.tooltip) tooltipOf[node.elementId] = node.tooltip;
       });
-      (slide.edges || []).forEach(function (edge) {
+      (slide.edges || []).forEach((edge) => {
         wanted[edge.elementId] = true;
       });
-      (slide.clusters || []).forEach(function (cluster) {
+      (slide.clusters || []).forEach((cluster) => {
         wanted[cluster.elementId] = true;
       });
     });
@@ -173,12 +167,12 @@
     var geometryOf = asRecord(manifest.nodeGeometry);
     var endpointsOf = asRecord(manifest.edgeEndpoints);
     if (geometryOf) {
-      Object.keys(geometryOf).forEach(function (id) {
+      Object.keys(geometryOf).forEach((id) => {
         wanted[id] = true;
       });
     }
     if (endpointsOf) {
-      Object.keys(endpointsOf).forEach(function (id) {
+      Object.keys(endpointsOf).forEach((id) => {
         wanted[id] = true;
       });
     }
@@ -212,10 +206,7 @@
     /* ── Morph model (graphcon parity, bd-tm1q7) ─────────────────── */
 
     var morphEnabled =
-      !reducedMotion() &&
-      !!geometryOf &&
-      !!endpointsOf &&
-      Object.keys(geometryOf).length > 0;
+      !reducedMotion() && !!geometryOf && !!endpointsOf && Object.keys(geometryOf).length > 0;
     var morphNodes = Object.create(null); // elementId -> node motion state
     var morphNodeIds = [];
     var liveEdges = [];
@@ -232,17 +223,13 @@
       if (!dx && !dy) return [node.fx, node.fy];
       var hw = node.hw + 4;
       var hh = node.hh + 4;
-      var scale = Math.min(
-        dx ? hw / Math.abs(dx) : Infinity,
-        dy ? hh / Math.abs(dy) : Infinity,
-        1
-      );
+      var scale = Math.min(dx ? hw / Math.abs(dx) : Infinity, dy ? hh / Math.abs(dy) : Infinity, 1);
       return [node.fx + dx * scale, node.fy + dy * scale];
     }
 
     if (morphEnabled) {
       viewport.classList.add("fm-deck-morphing");
-      Object.keys(geometryOf).forEach(function (id, index) {
+      Object.keys(geometryOf).forEach((id, index) => {
         var el = elements[id];
         var rect = geometryOf[id];
         if (!el || !rect) return;
@@ -274,7 +261,7 @@
       } else {
         svgRoot.appendChild(liveLayer);
       }
-      Object.keys(endpointsOf).forEach(function (id) {
+      Object.keys(endpointsOf).forEach((id) => {
         var group = elements[id];
         var ends = endpointsOf[id];
         var from = ends && morphNodes[ends.fromElementId];
@@ -288,12 +275,18 @@
           return;
         }
         // Engine edges are groups wrapping a path; hand-authored fixtures may use bare paths.
-        var enginePath =
-          group.tagName === "path" ? group : group.querySelector("path");
+        var enginePath = group.tagName === "path" ? group : group.querySelector("path");
         if (!enginePath) return;
         var live = document.createElementNS("http://www.w3.org/2000/svg", "path");
         // Inherit the engine path's look (theme classes, width, dash, arrow markers).
-        var carry = ["class", "stroke", "stroke-width", "stroke-dasharray", "marker-start", "marker-end"];
+        var carry = [
+          "class",
+          "stroke",
+          "stroke-width",
+          "stroke-dasharray",
+          "marker-start",
+          "marker-end",
+        ];
         for (var c = 0; c < carry.length; c += 1) {
           var value = enginePath.getAttribute(carry[c]);
           if (value !== null) live.setAttribute(carry[c], value);
@@ -381,7 +374,7 @@
       var scale = Math.min(
         size.w / (bounds.width + margin * 2),
         size.h / (bounds.height + margin * 2),
-        zoomMax
+        zoomMax,
       );
       return {
         x: bounds.x + bounds.width / 2,
@@ -402,7 +395,7 @@
       var x1 = -Infinity;
       var y1 = -Infinity;
       var any = false;
-      slide.nodes.forEach(function (node) {
+      slide.nodes.forEach((node) => {
         if (node.step > state.step) return;
         var rect = geometryOf[node.elementId];
         if (!rect) return;
@@ -497,17 +490,17 @@
       var slide = currentSlide();
       var inScene = Object.create(null); // elementId -> {step, half}
       if (overview) {
-        Object.keys(elements).forEach(function (id) {
+        Object.keys(elements).forEach((id) => {
           inScene[id] = { step: 0, half: false };
         });
       } else if (slide) {
-        slide.nodes.forEach(function (node) {
+        slide.nodes.forEach((node) => {
           inScene[node.elementId] = { step: node.step, half: false };
         });
-        (slide.edges || []).forEach(function (edge) {
+        (slide.edges || []).forEach((edge) => {
           inScene[edge.elementId] = { step: edge.step, half: !!edge.touching };
         });
-        (slide.clusters || []).forEach(function (cluster) {
+        (slide.clusters || []).forEach((cluster) => {
           inScene[cluster.elementId] = {
             step: cluster.step,
             half: !cluster.cameraContained,
@@ -519,7 +512,7 @@
       // gets pushed out past the camera window.
       pushMembers = Object.create(null);
       var freshlyRevealed = [];
-      Object.keys(elements).forEach(function (id) {
+      Object.keys(elements).forEach((id) => {
         var el = elements[id];
         var membership = inScene[id];
         if (!membership) {
@@ -551,9 +544,9 @@
         }
         var order = stepList || freshlyRevealed;
         var interval = reducedMotion() ? 0 : STAGGER_MS;
-        order.forEach(function (id, position) {
+        order.forEach((id, position) => {
           if (!elements[id]) return;
-          var timer = setTimeout(function () {
+          var timer = setTimeout(() => {
             classify(elements[id], "fm-deck-hidden", false);
           }, interval * position);
           state.staggerTimers.push(timer);
@@ -576,8 +569,8 @@
         var dot = document.createElement("i");
         dot.setAttribute("role", "button");
         dot.setAttribute("tabindex", "0");
-        (function (sceneIndex) {
-          dot.addEventListener("click", function () {
+        ((sceneIndex) => {
+          dot.addEventListener("click", () => {
             api.go(sceneIndex);
           });
         })(d);
@@ -592,8 +585,12 @@
 
     function updateChrome() {
       var slide = currentSlide();
-      var title = slide ? slide.title : (manifest.overview && manifest.overview.title) || "Overview";
-      var caption = slide ? slide.caption || "" : (manifest.overview && manifest.overview.caption) || "";
+      var title = slide
+        ? slide.title
+        : (manifest.overview && manifest.overview.title) || "Overview";
+      var caption = slide
+        ? slide.caption || ""
+        : (manifest.overview && manifest.overview.caption) || "";
       if (ui.title) ui.title.textContent = title;
       if (ui.caption) ui.caption.textContent = caption;
       if (ui.num) {
@@ -602,7 +599,7 @@
         if (max > 0) text += " · " + state.step + "/" + max;
         ui.num.textContent = text;
       }
-      dots.forEach(function (dot, index) {
+      dots.forEach((dot, index) => {
         if (index === state.scene) dot.setAttribute("data-active", "true");
         else dot.removeAttribute("data-active");
       });
@@ -634,10 +631,10 @@
         rect.setAttribute("rx", "10");
         rect.style.cursor = "pointer";
         rect.setAttribute("tabindex", "0");
-        rect.addEventListener("click", function () {
+        rect.addEventListener("click", () => {
           if (state.tour) api.go(state.tour.index);
         });
-        rect.addEventListener("keydown", function (event) {
+        rect.addEventListener("keydown", (event) => {
           if (event.key === "Enter" && state.tour) api.go(state.tour.index);
         });
         state.tourRect = rect;
@@ -655,7 +652,7 @@
     }
 
     function easeInOut(t) {
-      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
     }
 
     function tourStep(now) {
@@ -711,17 +708,17 @@
       var slide = manifest.slides[index];
       var member = Object.create(null);
       pushMembers = Object.create(null);
-      slide.nodes.forEach(function (node) {
+      slide.nodes.forEach((node) => {
         member[node.elementId] = true;
         if (morphNodes[node.elementId]) pushMembers[node.elementId] = true;
       });
-      (slide.edges || []).forEach(function (edge) {
+      (slide.edges || []).forEach((edge) => {
         member[edge.elementId] = true;
       });
-      (slide.clusters || []).forEach(function (cluster) {
+      (slide.clusters || []).forEach((cluster) => {
         member[cluster.elementId] = true;
       });
-      Object.keys(elements).forEach(function (id) {
+      Object.keys(elements).forEach((id) => {
         classify(elements[id], "fm-deck-dim", !member[id]);
         classify(elements[id], "fm-deck-half", false);
         classify(elements[id], "fm-deck-hidden", false);
@@ -760,7 +757,11 @@
           var loop = edge.from;
           edge.group.setAttribute(
             "transform",
-            "translate(" + (loop.fx - loop.hx).toFixed(2) + " " + (loop.fy - loop.hy).toFixed(2) + ")"
+            "translate(" +
+              (loop.fx - loop.hx).toFixed(2) +
+              " " +
+              (loop.fy - loop.hy).toFixed(2) +
+              ")",
           );
           continue;
         }
@@ -768,14 +769,21 @@
         var b = borderPoint(edge.to, edge.from.fx, edge.from.fy);
         edge.live.setAttribute(
           "d",
-          "M " + a[0].toFixed(2) + " " + a[1].toFixed(2) + " L " + b[0].toFixed(2) + " " + b[1].toFixed(2)
+          "M " +
+            a[0].toFixed(2) +
+            " " +
+            a[1].toFixed(2) +
+            " L " +
+            b[0].toFixed(2) +
+            " " +
+            b[1].toFixed(2),
         );
         // The label (still inside the parked engine group) rides to the live midpoint.
         var mx = (a[0] + b[0]) / 2;
         var my = (a[1] + b[1]) / 2;
         edge.group.setAttribute(
           "transform",
-          "translate(" + (mx - edge.mx0).toFixed(2) + " " + (my - edge.my0).toFixed(2) + ")"
+          "translate(" + (mx - edge.mx0).toFixed(2) + " " + (my - edge.my0).toFixed(2) + ")",
         );
       }
     }
@@ -844,7 +852,7 @@
     }
 
     var api = {
-      next: function () {
+      next: () => {
         if (state.step < maxStepOf(state.scene)) {
           state.step += 1;
           applyScene(true);
@@ -854,7 +862,7 @@
           enterScene(state.scene + 1, false);
         }
       },
-      prev: function () {
+      prev: () => {
         // graphcon back(): un-reveal first; only at step 0 change slide (landing at ITS
         // step 0 — slide entry always resets).
         if (state.step > 0) {
@@ -866,13 +874,13 @@
           enterScene(state.scene - 1, false);
         }
       },
-      go: function (index) {
+      go: (index) => {
         enterScene(index, false);
       },
-      overview: function () {
+      overview: () => {
         if (overviewEnabled) enterScene(manifest.slides.length, false);
       },
-      exitFreeCam: function () {
+      exitFreeCam: () => {
         state.freeCam = false;
         retarget();
       },
@@ -1131,7 +1139,7 @@
       if (autoAdvanceMs <= 0 || reducedMotion()) return;
       // A pending timer counts as activity only when it FIRES; the rAF loop still parks
       // between ticks.
-      state.autoplayTimer = setInterval(function () {
+      state.autoplayTimer = setInterval(() => {
         if (Date.now() < state.autoplayPausedUntil) return;
         if (state.step < maxStepOf(state.scene)) {
           state.step += 1;
@@ -1147,7 +1155,7 @@
 
     var resizeObserver = null;
     if (typeof ResizeObserver === "function") {
-      resizeObserver = new ResizeObserver(function () {
+      resizeObserver = new ResizeObserver(() => {
         if (!state.freeCam) retarget();
         else applyCamera();
       });
@@ -1158,7 +1166,7 @@
     // parked further down a page must not burn frames.
     var visibilityObserver = null;
     if (morphEnabled && typeof IntersectionObserver === "function") {
-      visibilityObserver = new IntersectionObserver(function (entries) {
+      visibilityObserver = new IntersectionObserver((entries) => {
         for (var v = 0; v < entries.length; v += 1) {
           stageOnScreen = entries[v].isIntersecting;
         }

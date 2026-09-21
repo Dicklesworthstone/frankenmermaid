@@ -24,48 +24,66 @@
 // ⚠️ AND CONNECT TO A **PAGE** TARGET, and inject the bundle over CDP rather than loading it from
 // disk — the pinned Chromium is snap-confined. Both traps are documented at length in
 // `chromium_text_diff.mjs`; this script follows it exactly.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+
+import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, '..', '..');
-const BUNDLE_PATH = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
-const PINS = JSON.parse(fs.readFileSync(path.join(HERE, 'pins.json'), 'utf8'));
+const REPO = path.resolve(HERE, "..", "..");
+const BUNDLE_PATH = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
+const PINS = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 const CHROMIUM = process.env.FM_CHROMIUM_BIN ?? PINS.chromium.binary;
-const FM_CLI = process.env.FM_CLI ?? path.join(REPO, 'target/local/debug/fm-cli');
-const PROFILE_ROOT = path.join(os.homedir(), 'snap', 'chromium', 'common');
+const FM_CLI = process.env.FM_CLI ?? path.join(REPO, "target/local/debug/fm-cli");
+const PROFILE_ROOT = path.join(os.homedir(), "snap", "chromium", "common");
 
 /// The battery. Each case pairs a styled diagram with the control that isolates what the style did:
 /// asserting only "the cluster is red" cannot tell a working style channel from a theme that happens
 /// to be red, which is the vacuity bd-xfmm's own filing warned about.
 const BATTERY = {
-  'style/fill': 'flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  style one fill:#ff0000\n',
-  'style/none (control)': 'flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n',
-  'style/fill+stroke': 'flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  style one fill:#ff0000,stroke:#00ff00,stroke-width:4px\n',
-  'classDef+class': 'flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  classDef hot fill:#ff0000\n  class one hot\n',
-  'style/nested inner': 'flowchart TD\n  subgraph outer[Outer]\n    subgraph inner[Inner]\n      a[A] --> b[B]\n    end\n  end\n  style inner fill:#ff0000\n',
+  "style/fill":
+    "flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  style one fill:#ff0000\n",
+  "style/none (control)": "flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n",
+  "style/fill+stroke":
+    "flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  style one fill:#ff0000,stroke:#00ff00,stroke-width:4px\n",
+  "classDef+class":
+    "flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n  classDef hot fill:#ff0000\n  class one hot\n",
+  "style/nested inner":
+    "flowchart TD\n  subgraph outer[Outer]\n    subgraph inner[Inner]\n      a[A] --> b[B]\n    end\n  end\n  style inner fill:#ff0000\n",
 };
 
-const argv = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const argv = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const cases = argv.length
-  ? Object.fromEntries(argv.map((f) => [path.basename(f), fs.readFileSync(f, 'utf8')]))
+  ? Object.fromEntries(argv.map((f) => [path.basename(f), fs.readFileSync(f, "utf8")]))
   : BATTERY;
 
 async function launchChromium() {
-  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, 'fm-paintdiff-'));
-  const proc = spawn(CHROMIUM, [
-    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-    '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-    '--disable-background-networking', '--disable-sync', '--mute-audio', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const profile = fs.mkdtempSync(path.join(PROFILE_ROOT, "fm-paintdiff-"));
+  const proc = spawn(
+    CHROMIUM,
+    [
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profile}`,
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-sync",
+      "--mute-audio",
+      "about:blank",
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
 
-  let stderr = '';
+  let stderr = "";
   let port = null;
-  proc.stderr.on('data', (chunk) => {
+  proc.stderr.on("data", (chunk) => {
     stderr += String(chunk);
     const m = stderr.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/);
     if (m) port = Number(m[1]);
@@ -79,14 +97,16 @@ async function launchChromium() {
         if (res.ok) {
           const info = await res.json();
           const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-          const page = list.find((t) => t.type === 'page');
+          const page = list.find((t) => t.type === "page");
           if (page) return { proc, info, page };
         }
-      } catch { /* not up yet */ }
+      } catch {
+        /* not up yet */
+      }
     }
     await new Promise((r) => setTimeout(r, 120));
   }
-  proc.kill('SIGKILL');
+  proc.kill("SIGKILL");
   throw new Error(`chromium never exposed a devtools port; stderr tail: ${stderr.slice(-400)}`);
 }
 
@@ -96,14 +116,21 @@ function attach(page) {
   let id = 0;
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)(msg);
+      pending.delete(msg.id);
+    }
   };
-  const send = (method, params) => new Promise((resolve) => {
-    const n = ++id;
-    pending.set(n, resolve);
-    ws.send(JSON.stringify({ id: n, method, params }));
+  const send = (method, params) =>
+    new Promise((resolve) => {
+      const n = ++id;
+      pending.set(n, resolve);
+      ws.send(JSON.stringify({ id: n, method, params }));
+    });
+  const ready = new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
   });
-  const ready = new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   return { ws, send, ready };
 }
 
@@ -137,17 +164,21 @@ function paintProbe(svg, selector) {
 /// mermaid's cluster rect is the unclassed `rect` directly inside `g.cluster`; ours is the rect
 /// classed `fm-cluster`. Selecting "every rect" would fold the NODE rects into the comparison and
 /// report agreement whenever the node theme agrees, whatever the cluster did.
-const MERMAID_CLUSTER_RECT = 'g.cluster > rect';
-const OUR_CLUSTER_RECT = 'rect.fm-cluster';
+const MERMAID_CLUSTER_RECT = "g.cluster > rect";
+const OUR_CLUSTER_RECT = "rect.fm-cluster";
 
 const { proc, info, page } = await launchChromium();
 const { ws, send, ready } = attach(page);
 await ready;
-await send('Runtime.enable', {});
-await send('Runtime.evaluate', { expression: fs.readFileSync(BUNDLE_PATH, 'utf8') });
+await send("Runtime.enable", {});
+await send("Runtime.evaluate", { expression: fs.readFileSync(BUNDLE_PATH, "utf8") });
 
 const evaluate = async (expression) => {
-  const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  const res = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
   const value = res.result?.result?.value;
   if (value === undefined) return { ok: false, error: JSON.stringify(res).slice(0, 300) };
   return JSON.parse(value);
@@ -155,7 +186,7 @@ const evaluate = async (expression) => {
 
 /// Each engine's UNSTYLED cluster fill, measured rather than hardcoded — a literal in this file
 /// would go stale the moment either theme moved and would then silently reclassify every case.
-const UNSTYLED = 'flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n';
+const UNSTYLED = "flowchart TD\n  subgraph one[One]\n    a[A] --> b[B]\n  end\n";
 
 async function measureDefaults() {
   const rendered = await evaluate(`(async () => {
@@ -164,12 +195,14 @@ async function measureDefaults() {
     return JSON.stringify({ ok: true, svg });
   })()`);
   const theirs = await evaluate(paintProbe(rendered.svg, MERMAID_CLUSTER_RECT));
-  const ourSvg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], {
-    input: UNSTYLED, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+  const ourSvg = execFileSync(FM_CLI, ["render", "-f", "svg", "-"], {
+    input: UNSTYLED,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "ignore"],
   });
   const ours = await evaluate(paintProbe(ourSvg, OUR_CLUSTER_RECT));
   if (!theirs.rects?.length || !ours.rects?.length) {
-    throw new Error('could not measure an unstyled cluster fill in one of the engines');
+    throw new Error("could not measure an unstyled cluster fill in one of the engines");
   }
   return { theirs: theirs.rects[0].fill, ours: ours.rects[0].fill };
 }
@@ -177,10 +210,12 @@ async function measureDefaults() {
 const defaults = await measureDefaults();
 console.log(`unstyled cluster fill — incumbent ${defaults.theirs} | ours ${defaults.ours}`);
 if (defaults.theirs === defaults.ours) {
-  console.log('⚠️  the two themes agree on the default, so this run cannot distinguish '
-    + '"the declared colour propagated" from "nothing happened".');
+  console.log(
+    "⚠️  the two themes agree on the default, so this run cannot distinguish " +
+      '"the declared colour propagated" from "nothing happened".',
+  );
 }
-console.log('');
+console.log("");
 
 let agree = 0;
 let diverge = 0;
@@ -205,11 +240,13 @@ for (const [name, source] of Object.entries(cases)) {
 
   let ourSvg;
   try {
-    ourSvg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], {
-      input: source, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+    ourSvg = execFileSync(FM_CLI, ["render", "-f", "svg", "-"], {
+      input: source,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
     });
   } catch (error) {
-    console.log(`OURS-DNF       ${name.padEnd(24)} ${String(error.message).split('\n')[0]}`);
+    console.log(`OURS-DNF       ${name.padEnd(24)} ${String(error.message).split("\n")[0]}`);
     dnf += 1;
     continue;
   }
@@ -235,10 +272,10 @@ for (const [name, source] of Object.entries(cases)) {
   //   - incumbent painted anything else -> the author declared it; ours must match EXACTLY.
   const verdicts = theirs.rects.map((their, index) => {
     const our = ours.rects[index];
-    if (!our) return { ok: false, why: 'we draw no cluster rect here' };
+    if (!our) return { ok: false, why: "we draw no cluster rect here" };
     if (their.fill === defaults.theirs) {
       return our.fill === defaults.ours
-        ? { ok: true, why: 'unstyled in both' }
+        ? { ok: true, why: "unstyled in both" }
         : { ok: false, why: `incumbent left it default but we painted ${our.fill}` };
     }
     return our.fill === their.fill
@@ -247,15 +284,20 @@ for (const [name, source] of Object.entries(cases)) {
   });
   const same = theirs.rects.length === ours.rects.length && verdicts.every((v) => v.ok);
 
-  console.log(`${same ? 'AGREE  ' : 'DIVERGE'}        ${name.padEnd(24)} ${verdicts.map((v) => v.why).join('; ')}`);
+  console.log(
+    `${same ? "AGREE  " : "DIVERGE"}        ${name.padEnd(24)} ${verdicts.map((v) => v.why).join("; ")}`,
+  );
   if (!same) {
     console.log(`    incumbent: ${JSON.stringify(theirs.rects)}`);
     console.log(`    ours     : ${JSON.stringify(ours.rects)}`);
   }
-  if (same) agree += 1; else diverge += 1;
+  if (same) agree += 1;
+  else diverge += 1;
 }
 
-console.log(`\n${agree} agree, ${diverge} diverge, ${dnf} DNF  (chromium ${info.Browser}, bundle mermaid@11.15.0)`);
+console.log(
+  `\n${agree} agree, ${diverge} diverge, ${dnf} DNF  (chromium ${info.Browser}, bundle mermaid@11.15.0)`,
+);
 ws.close();
-proc.kill('SIGKILL');
+proc.kill("SIGKILL");
 process.exit(diverge === 0 ? 0 : 1);

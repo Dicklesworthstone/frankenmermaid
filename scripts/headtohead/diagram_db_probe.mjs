@@ -18,43 +18,47 @@
 //
 // The bundle must be loaded through a <script> element with `runScripts: 'dangerously'`.
 // `window.eval` does NOT work — the bundle's namespace global never appears.
-import fs from 'node:fs';
-import { JSDOM } from 'jsdom';
+import fs from "node:fs";
+import { JSDOM } from "jsdom";
 
-const BUNDLE = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
+const BUNDLE = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
 
 const argv = process.argv.slice(2);
 if (argv.length === 0) {
   console.error("usage: diagram_db_probe.mjs <diagram text with \\n escapes> | --file <path>");
   process.exit(2);
 }
-const text = argv[0] === '--file' ? fs.readFileSync(argv[1], 'utf8') : argv.join(' ').replace(/\\n/g, '\n');
+const text =
+  argv[0] === "--file" ? fs.readFileSync(argv[1], "utf8") : argv.join(" ").replace(/\\n/g, "\n");
 
 const dom = new JSDOM('<!DOCTYPE html><html><body><div id="c"></div></body></html>', {
-  runScripts: 'dangerously',
+  runScripts: "dangerously",
 });
 const w = dom.window;
 // jsdom's window lacks a few Node platform globals the bundle reaches for (gitGraph's id hashing
 // wants TextEncoder). Lend it ours rather than let a family fail as a spurious RUNTIME ERROR.
-for (const name of ['TextEncoder', 'TextDecoder', 'crypto', 'structuredClone']) {
+for (const name of ["TextEncoder", "TextDecoder", "crypto", "structuredClone"]) {
   if (!w[name] && globalThis[name]) w[name] = globalThis[name];
 }
-const script = w.document.createElement('script');
-script.textContent = fs.readFileSync(BUNDLE, 'utf8');
+const script = w.document.createElement("script");
+script.textContent = fs.readFileSync(BUNDLE, "utf8");
 w.document.head.appendChild(script);
 const mermaid = w.mermaid;
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 /** Maps, Sets and class instances all have to survive JSON.stringify or the dump lies by omission. */
 function plain(value, depth = 0) {
-  if (depth > 6) return '<deep>';
-  if (value === null || typeof value !== 'object') {
-    return typeof value === 'function' ? undefined : value;
+  if (depth > 6) return "<deep>";
+  if (value === null || typeof value !== "object") {
+    return typeof value === "function" ? undefined : value;
   }
   if (value instanceof w.Map || value instanceof Map) {
-    return Object.fromEntries([...value.entries()].map(([k, v]) => [String(k), plain(v, depth + 1)]));
+    return Object.fromEntries(
+      [...value.entries()].map(([k, v]) => [String(k), plain(v, depth + 1)]),
+    );
   }
-  if (value instanceof w.Set || value instanceof Set) return [...value].map((v) => plain(v, depth + 1));
+  if (value instanceof w.Set || value instanceof Set)
+    return [...value].map((v) => plain(v, depth + 1));
   if (Array.isArray(value)) return value.map((v) => plain(v, depth + 1));
   const out = {};
   for (const key of Object.keys(value)) {
@@ -67,9 +71,17 @@ function plain(value, depth = 0) {
 try {
   await mermaid.parse(text);
 } catch (error) {
-  const message = String(error?.message ?? error).split('\n').slice(0, 4).join('\n');
-  const syntax = /Parse error|Expecting |Lexical error|Unrecognized text|No diagram type detected/i.test(message);
-  console.log(JSON.stringify({ verdict: syntax ? 'SYNTAX ERROR' : 'RUNTIME ERROR', message }, null, 2));
+  const message = String(error?.message ?? error)
+    .split("\n")
+    .slice(0, 4)
+    .join("\n");
+  const syntax =
+    /Parse error|Expecting |Lexical error|Unrecognized text|No diagram type detected/i.test(
+      message,
+    );
+  console.log(
+    JSON.stringify({ verdict: syntax ? "SYNTAX ERROR" : "RUNTIME ERROR", message }, null, 2),
+  );
   process.exit(1);
 }
 
@@ -85,16 +97,16 @@ for (let proto = db; proto && proto !== Object.prototype; proto = Object.getProt
     if (seen.has(key) || !/^get[A-Z]/.test(key)) continue;
     seen.add(key);
     const fn = db[key];
-    if (typeof fn !== 'function' || fn.length !== 0) continue;
+    if (typeof fn !== "function" || fn.length !== 0) continue;
     try {
       dump[key] = plain(fn.call(db));
     } catch (error) {
-      dump[key] = `<threw: ${String(error?.message ?? error).split('\n')[0]}>`;
+      dump[key] = `<threw: ${String(error?.message ?? error).split("\n")[0]}>`;
     }
   }
 }
 for (const key of Object.keys(db)) {
-  if (seen.has(key) || typeof db[key] === 'function') continue;
+  if (seen.has(key) || typeof db[key] === "function") continue;
   dump[`field:${key}`] = plain(db[key]);
 }
-console.log(JSON.stringify({ verdict: 'PARSED', db: dump }, null, 2));
+console.log(JSON.stringify({ verdict: "PARSED", db: dump }, null, 2));

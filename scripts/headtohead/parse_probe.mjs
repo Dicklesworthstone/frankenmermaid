@@ -34,20 +34,18 @@
 //
 // None of the three says anything about RENDERING. A diagram can parse and still draw nothing;
 // geometry and output bytes need the render harness.
-import fs from 'node:fs';
-import vm from 'node:vm';
+import fs from "node:fs";
+import vm from "node:vm";
 
-const BUNDLE = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
+const BUNDLE = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
 
 const argv = process.argv.slice(2);
 if (argv.length === 0) {
-  console.error('usage: parse_probe.mjs <diagram text with \\n escapes> | --file <path>');
+  console.error("usage: parse_probe.mjs <diagram text with \\n escapes> | --file <path>");
   process.exit(2);
 }
 const text =
-  argv[0] === '--file'
-    ? fs.readFileSync(argv[1], 'utf8')
-    : argv.join(' ').replace(/\\n/g, '\n');
+  argv[0] === "--file" ? fs.readFileSync(argv[1], "utf8") : argv.join(" ").replace(/\\n/g, "\n");
 
 // The bundle is an IIFE that hangs itself off a namespace global, so a bare vm context with the
 // handful of globals esbuild's runtime touches is enough. No jsdom, nothing installed.
@@ -56,23 +54,26 @@ ctx.globalThis = ctx;
 ctx.self = ctx;
 ctx.window = ctx;
 vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(BUNDLE, 'utf8'), ctx);
-const mermaid = ctx.__esbuild_esm_mermaid_nm.mermaid.default ?? ctx.__esbuild_esm_mermaid_nm.mermaid;
+vm.runInContext(fs.readFileSync(BUNDLE, "utf8"), ctx);
+const mermaid =
+  ctx.__esbuild_esm_mermaid_nm.mermaid.default ?? ctx.__esbuild_esm_mermaid_nm.mermaid;
 
 try {
   await mermaid.parse(text);
-  console.log('PARSED');
+  console.log("PARSED");
 } catch (err) {
   const message = String(err?.message ?? err);
   // jison's own rejection text. These strings are data in the bundle, so they survive minification
   // intact — unlike any identifier we might have tried to match on.
-  const syntax = /Parse error|Expecting |Lexical error|Unrecognized text|No diagram type detected/i
-    .test(message);
+  const syntax =
+    /Parse error|Expecting |Lexical error|Unrecognized text|No diagram type detected/i.test(
+      message,
+    );
   console.log(
     syntax
-      ? 'SYNTAX ERROR (grammar rejected the input)'
-      : 'RUNTIME ERROR (grammar ACCEPTED the input; execution threw — read the message)'
+      ? "SYNTAX ERROR (grammar rejected the input)"
+      : "RUNTIME ERROR (grammar ACCEPTED the input; execution threw — read the message)",
   );
-  console.log(message.split('\n').slice(0, 4).join('\n'));
+  console.log(message.split("\n").slice(0, 4).join("\n"));
   process.exit(1);
 }

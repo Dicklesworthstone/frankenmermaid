@@ -2,62 +2,102 @@
 /* eslint-disable */
 
 /** A rectangle in SVG viewBox space (deck manifest schema 1.0.0). */
-export interface DeckRect { x: number; y: number; width: number; height: number; }
+export interface DeckRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export interface DeckManifestOptions {
-    fitMargin: number; zoomMax: number; dimOpacity: number; autoAdvanceMs: number;
+  fitMargin: number;
+  zoomMax: number;
+  dimOpacity: number;
+  autoAdvanceMs: number;
 }
 
 export interface DeckManifestNode {
-    index: number; sourceId: string; elementId: string; step: number; tooltip?: string;
+  index: number;
+  sourceId: string;
+  elementId: string;
+  step: number;
+  tooltip?: string;
 }
 
 export interface DeckManifestEdge {
-    index: number; elementId: string; step: number; touching: boolean;
+  index: number;
+  elementId: string;
+  step: number;
+  touching: boolean;
 }
 
 export interface DeckManifestCluster {
-    index: number; elementId: string; step: number; cameraContained: boolean;
+  index: number;
+  elementId: string;
+  step: number;
+  cameraContained: boolean;
 }
 
-export interface DeckManifestStep { step: number; elementIds: string[]; }
+export interface DeckManifestStep {
+  step: number;
+  elementIds: string[];
+}
 
 export interface DeckManifestSlide {
-    id: string; title: string; caption?: string; bounds: DeckRect;
-    fitMargin: number; zoomMax: number;
-    nodes: DeckManifestNode[]; edges?: DeckManifestEdge[]; clusters?: DeckManifestCluster[];
-    maxStep: number; steps?: DeckManifestStep[];
+  id: string;
+  title: string;
+  caption?: string;
+  bounds: DeckRect;
+  fitMargin: number;
+  zoomMax: number;
+  nodes: DeckManifestNode[];
+  edges?: DeckManifestEdge[];
+  clusters?: DeckManifestCluster[];
+  maxStep: number;
+  steps?: DeckManifestStep[];
 }
 
 export interface DeckManifestOverview {
-    enabled: boolean; title: string; caption?: string; tour: boolean;
+  enabled: boolean;
+  title: string;
+  caption?: string;
+  tour: boolean;
 }
 
 /** One edge's endpoint node element ids — the live-edge join for morphing runtimes (1.1.0). */
-export interface DeckEdgeEndpoints { fromElementId: string; toElementId: string; }
+export interface DeckEdgeEndpoints {
+  fromElementId: string;
+  toElementId: string;
+}
 
 /** The renderer-agnostic presentation contract; additive-only within 1.x. */
 export interface DeckManifest {
-    schemaVersion: string; generator: string; diagramType: string; title?: string;
-    viewBox: DeckRect; options: DeckManifestOptions; slides: DeckManifestSlide[];
-    overview: DeckManifestOverview; nodeSlideIndex?: Record<string, string[]>;
-    /** Home rect per laid-out node (viewBox space), whole diagram (1.1.0). */
-    nodeGeometry?: Record<string, DeckRect>;
-    /** Edge elementId -> endpoint node element ids (1.1.0). */
-    edgeEndpoints?: Record<string, DeckEdgeEndpoints>;
+  schemaVersion: string;
+  generator: string;
+  diagramType: string;
+  title?: string;
+  viewBox: DeckRect;
+  options: DeckManifestOptions;
+  slides: DeckManifestSlide[];
+  overview: DeckManifestOverview;
+  nodeSlideIndex?: Record<string, string[]>;
+  /** Home rect per laid-out node (viewBox space), whole diagram (1.1.0). */
+  nodeGeometry?: Record<string, DeckRect>;
+  /** Edge elementId -> endpoint node element ids (1.1.0). */
+  edgeEndpoints?: Record<string, DeckEdgeEndpoints>;
 }
 
 /** renderDeck() result: svg + manifest (null when no deck) + structured deck diagnostics. */
 export interface WasmDeckOutput {
-    svg: string; manifest?: DeckManifest; warnings: unknown[];
+  svg: string;
+  manifest?: DeckManifest;
+  warnings: unknown[];
 }
-
-
 
 /** Strict initialization-config validation result (schema 1.0.0). */
 export interface MermaidConfigValidation {
-    schemaVersion: "1.0.0";
-    errors: Array<{ field: string; value: string; message: string }>;
+  schemaVersion: "1.0.0";
+  errors: Array<{ field: string; value: string; message: string }>;
 }
 
 /** Return the JSON Schema used by validateConfig. */
@@ -67,41 +107,39 @@ export function validateConfig(configJson: string): string;
 /** Validate Mermaid init/constraints directives and return MermaidConfigValidation encoded as JSON. */
 export function validateInitDirectives(source: string): string;
 
-
-
 export class Diagram {
-    free(): void;
-    [Symbol.dispose](): void;
-    destroy(): void;
-    /**
-     * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
-     *
-     * The offscreen 2D context implements the same CanvasRenderingContext2D
-     * method surface used by `Canvas2dContext`; it is stored structurally so
-     * the renderer can share the normal Canvas2D path without main-thread DOM
-     * access. Event registration remains unavailable because an offscreen
-     * canvas is not an `EventTarget`.
-     */
-    static fromOffscreenCanvas(canvas: OffscreenCanvas, config?: any | null): Diagram;
-    /**
-     * Return the nearest rendered edge index within a canvas-space tolerance.
-     *
-     * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
-     * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
-     */
-    hitTestEdge(x: number, y: number, max_distance: number): number | undefined;
-    /**
-     * Return the laid-out node below a canvas-space pointer, if any.
-     *
-     * The query uses CGA rectangle containment against the latest render's layout, so it never
-     * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
-     * return `None`.
-     */
-    hitTestNode(x: number, y: number): string | undefined;
-    constructor(canvas: HTMLCanvasElement, config?: any | null);
-    on(event: string, callback: Function): void;
-    render(input: string, config?: any | null): any;
-    setTheme(theme: string): void;
+  free(): void;
+  [Symbol.dispose](): void;
+  destroy(): void;
+  /**
+   * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
+   *
+   * The offscreen 2D context implements the same CanvasRenderingContext2D
+   * method surface used by `Canvas2dContext`; it is stored structurally so
+   * the renderer can share the normal Canvas2D path without main-thread DOM
+   * access. Event registration remains unavailable because an offscreen
+   * canvas is not an `EventTarget`.
+   */
+  static fromOffscreenCanvas(canvas: OffscreenCanvas, config?: any | null): Diagram;
+  /**
+   * Return the nearest rendered edge index within a canvas-space tolerance.
+   *
+   * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
+   * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+   */
+  hitTestEdge(x: number, y: number, max_distance: number): number | undefined;
+  /**
+   * Return the laid-out node below a canvas-space pointer, if any.
+   *
+   * The query uses CGA rectangle containment against the latest render's layout, so it never
+   * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
+   * return `None`.
+   */
+  hitTestNode(x: number, y: number): string | undefined;
+  constructor(canvas: HTMLCanvasElement, config?: any | null);
+  on(event: string, callback: Function): void;
+  render(input: string, config?: any | null): any;
+  setTheme(theme: string): void;
 }
 
 /**
@@ -233,41 +271,65 @@ export function workerHandleMessage(message_json: string): string | undefined;
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
-    readonly __wbg_diagram_free: (a: number, b: number) => void;
-    readonly acquireWebGpuCanvasContext: (a: number, b: number) => void;
-    readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly chooseCanvasTarget: (a: number, b: number, c: number) => void;
-    readonly configSchema: (a: number) => void;
-    readonly describeDiagram: (a: number, b: number, c: number) => void;
-    readonly detectType: (a: number, b: number, c: number) => void;
-    readonly diagramLens: (a: number, b: number, c: number) => void;
-    readonly diagram_destroy: (a: number) => void;
-    readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
-    readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
-    readonly diagram_new: (a: number, b: number, c: number) => void;
-    readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
-    readonly hitRegions: (a: number, b: number, c: number, d: number) => void;
-    readonly init: (a: number, b: number) => void;
-    readonly parse: (a: number, b: number, c: number) => void;
-    readonly parseLens: (a: number, b: number, c: number) => void;
-    readonly planWebGpu: (a: number, b: number, c: number, d: number) => void;
-    readonly renderDeck: (a: number, b: number, c: number, d: number) => void;
-    readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
-    readonly validateConfig: (a: number, b: number, c: number) => void;
-    readonly validateInitDirectives: (a: number, b: number, c: number) => void;
-    readonly workerHandleMessage: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_export: (a: number, b: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_export3: (a: number) => void;
-    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+  readonly memory: WebAssembly.Memory;
+  readonly __wbg_diagram_free: (a: number, b: number) => void;
+  readonly acquireWebGpuCanvasContext: (a: number, b: number) => void;
+  readonly applyLensEdit: (
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+    g: number,
+  ) => void;
+  readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly applyParseLensEdit: (
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+    g: number,
+  ) => void;
+  readonly applyParseLensInsertLineAfter: (
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+    g: number,
+  ) => void;
+  readonly chooseCanvasTarget: (a: number, b: number, c: number) => void;
+  readonly configSchema: (a: number) => void;
+  readonly describeDiagram: (a: number, b: number, c: number) => void;
+  readonly detectType: (a: number, b: number, c: number) => void;
+  readonly diagramLens: (a: number, b: number, c: number) => void;
+  readonly diagram_destroy: (a: number) => void;
+  readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
+  readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
+  readonly diagram_new: (a: number, b: number, c: number) => void;
+  readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
+  readonly hitRegions: (a: number, b: number, c: number, d: number) => void;
+  readonly init: (a: number, b: number) => void;
+  readonly parse: (a: number, b: number, c: number) => void;
+  readonly parseLens: (a: number, b: number, c: number) => void;
+  readonly planWebGpu: (a: number, b: number, c: number, d: number) => void;
+  readonly renderDeck: (a: number, b: number, c: number, d: number) => void;
+  readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
+  readonly validateConfig: (a: number, b: number, c: number) => void;
+  readonly validateInitDirectives: (a: number, b: number, c: number) => void;
+  readonly workerHandleMessage: (a: number, b: number, c: number) => void;
+  readonly __wbindgen_export: (a: number, b: number) => number;
+  readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+  readonly __wbindgen_export3: (a: number) => void;
+  readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
+  readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
@@ -290,7 +352,12 @@ export function initSync(module: { module: SyncInitInput } | SyncInitInput): Ini
  *
  * @returns {Promise<InitOutput>}
  */
-export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+export default function __wbg_init(
+  module_or_path?:
+    | { module_or_path: InitInput | Promise<InitInput> }
+    | InitInput
+    | Promise<InitInput>,
+): Promise<InitOutput>;
 
 export function sourceSpans(input: string): any[];
 /**

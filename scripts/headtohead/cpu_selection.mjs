@@ -19,7 +19,7 @@
 /// `records` are `{cpu, busy, mhz}`, `busy` a fraction in [0,1], `mhz` a number or null.
 export function selectPinnedCpu(records) {
   if (!Array.isArray(records) || records.length === 0) {
-    throw new Error('selectPinnedCpu requires at least one cpu record');
+    throw new Error("selectPinnedCpu requires at least one cpu record");
   }
   const busy = [...records].sort((a, b) => a.busy - b.busy);
   const quietest = busy[0].busy;
@@ -27,14 +27,14 @@ export function selectPinnedCpu(records) {
   // this can never start preferring a loaded core on a busy host: if every core sits at 40%, the band
   // is 40–45% and the run is refused by the quiescence gate regardless of which member is picked.
   const band = busy.filter((record) => record.busy <= quietest + 0.05);
-  const withMhz = band.filter((record) => typeof record.mhz === 'number' && record.mhz > 0);
+  const withMhz = band.filter((record) => typeof record.mhz === "number" && record.mhz > 0);
   if (withMhz.length === 0) {
     // No cpufreq: behave exactly as before rather than failing, so a host without per-core DVFS is
     // unaffected by this change.
-    return { chosen: busy[0], band_size: band.length, rule: 'least_busy_no_cpufreq' };
+    return { chosen: busy[0], band_size: band.length, rule: "least_busy_no_cpufreq" };
   }
   const chosen = withMhz.reduce((best, record) => (record.mhz > best.mhz ? record : best));
-  return { chosen, band_size: band.length, rule: 'fastest_clock_among_idle' };
+  return { chosen, band_size: band.length, rule: "fastest_clock_among_idle" };
 }
 
 /// Cores to give the INCUMBENT arm, as a set.
@@ -66,20 +66,21 @@ export function selectPinnedCpu(records) {
 ///
 export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
   if (!Array.isArray(records) || records.length === 0) {
-    throw new Error('selectPinnedCpuSet requires at least one cpu record');
+    throw new Error("selectPinnedCpuSet requires at least one cpu record");
   }
   if (!Number.isInteger(size) || size < 1) {
-    throw new Error('selectPinnedCpuSet size must be a positive integer');
+    throw new Error("selectPinnedCpuSet size must be a positive integer");
   }
   const busy = [...records].sort((a, b) => a.busy - b.busy);
   const quietest = busy[0].busy;
   const band = busy.filter((record) => record.busy <= quietest + 0.05);
-  const clocked = band.every((record) => typeof record.mhz === 'number' && record.mhz > 0);
+  const clocked = band.every((record) => typeof record.mhz === "number" && record.mhz > 0);
   let ranked = band;
   if (clocked) {
-    ranked = typeof targetMhz === 'number' && targetMhz > 0
-      ? [...band].sort((a, b) => Math.abs(a.mhz - targetMhz) - Math.abs(b.mhz - targetMhz))
-      : [...band].sort((a, b) => b.mhz - a.mhz);
+    ranked =
+      typeof targetMhz === "number" && targetMhz > 0
+        ? [...band].sort((a, b) => Math.abs(a.mhz - targetMhz) - Math.abs(b.mhz - targetMhz))
+        : [...band].sort((a, b) => b.mhz - a.mhz);
   }
   const chosen = ranked.slice(0, Math.min(size, ranked.length));
   return {
@@ -89,28 +90,33 @@ export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
     // Recorded so a row states plainly whether the incumbent got the cores it asked for. A short set
     // is the case that would bias in our favour, and it must be visible rather than inferred.
     starved: chosen.length < size,
-    min_mhz: chosen.length > 0 && typeof chosen[0].mhz === 'number'
-      ? Math.min(...chosen.map((record) => record.mhz))
-      : null,
+    min_mhz:
+      chosen.length > 0 && typeof chosen[0].mhz === "number"
+        ? Math.min(...chosen.map((record) => record.mhz))
+        : null,
     // The set's MEAN clock, which is what a comparability check has to use: the incumbent runs
     // across all of these cores, so its effective clock is not the slowest one. Comparing our single
     // pinned core against `min_mhz` overstates the gap; against the mean it does not.
-    mean_mhz: chosen.length > 0 && clocked
-      ? Math.round(chosen.reduce((total, record) => total + record.mhz, 0) / chosen.length)
-      : null,
+    mean_mhz:
+      chosen.length > 0 && clocked
+        ? Math.round(chosen.reduce((total, record) => total + record.mhz, 0) / chosen.length)
+        : null,
     // The widest clock gap inside the chosen set, so a row states how comparable its incumbent
     // cores actually were instead of leaving it to be inferred from the rule name.
-    spread: chosen.length > 0 && clocked
-      ? Number(
-          (Math.max(...chosen.map((r) => r.mhz)) / Math.max(1, Math.min(...chosen.map((r) => r.mhz))))
-            .toFixed(3),
-        )
-      : null,
+    spread:
+      chosen.length > 0 && clocked
+        ? Number(
+            (
+              Math.max(...chosen.map((r) => r.mhz)) /
+              Math.max(1, Math.min(...chosen.map((r) => r.mhz)))
+            ).toFixed(3),
+          )
+        : null,
     rule: !clocked
-      ? 'idle_band_no_cpufreq'
-      : typeof targetMhz === 'number' && targetMhz > 0
-        ? 'clocks_closest_to_measured_arm'
-        : 'fastest_clocks_in_idle_band',
+      ? "idle_band_no_cpufreq"
+      : typeof targetMhz === "number" && targetMhz > 0
+        ? "clocks_closest_to_measured_arm"
+        : "fastest_clocks_in_idle_band",
   };
 }
 
@@ -132,12 +138,12 @@ export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
 /// case where the caveat can honestly be omitted from a row.
 export function clockHeadroom(chosenMhz, hostMaxMhz) {
   if (
-    typeof chosenMhz !== 'number' ||
-    typeof hostMaxMhz !== 'number' ||
+    typeof chosenMhz !== "number" ||
+    typeof hostMaxMhz !== "number" ||
     chosenMhz <= 0 ||
     hostMaxMhz <= 0
   ) {
-    return { ratio: null, at_peak: null, note: 'cpufreq unavailable, clock headroom unknown' };
+    return { ratio: null, at_peak: null, note: "cpufreq unavailable, clock headroom unknown" };
   }
   const ratio = Number((chosenMhz / hostMaxMhz).toFixed(3));
   const at_peak = ratio >= 0.98;
@@ -145,7 +151,7 @@ export function clockHeadroom(chosenMhz, hostMaxMhz) {
     ratio,
     at_peak,
     note: at_peak
-      ? 'measured arm ran at the host peak clock'
+      ? "measured arm ran at the host peak clock"
       : `measured arm ran at ${Math.round(ratio * 100)}% of the host peak (${chosenMhz} of ${hostMaxMhz} MHz); the ratio understates this engine`,
   };
 }

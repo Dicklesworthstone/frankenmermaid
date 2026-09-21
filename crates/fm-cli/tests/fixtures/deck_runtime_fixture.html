@@ -149,11 +149,11 @@ var deck = window.FmDeckRuntime.mount({
     nextBtn: document.getElementById("next"),
     overviewBtn: document.getElementById("ov")
   },
-  onSlideChange: function (index, slide) {
+  onSlideChange: (index, slide) => {
     console.log("scene", index, slide ? slide.id : "(overview)");
   }
 });
-document.getElementById("kill").addEventListener("click", function () {
+document.getElementById("kill").addEventListener("click", () => {
   deck.destroy();
   console.log("destroyed — verify no rAF/listeners remain in the performance panel");
 });

@@ -1,30 +1,30 @@
-'use strict';
+"use strict";
 
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const test = require('node:test');
-const vm = require('node:vm');
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+const vm = require("node:vm");
 const {
   buildPreviewHtml,
   DebouncedRenderScheduler,
   isMermaidDocument,
   normalizePreviewDebounceMs,
-} = require('../preview-contract.cjs');
+} = require("../preview-contract.cjs");
 
-test('recognizes Mermaid documents by language or .mmd extension', () => {
-  assert.equal(isMermaidDocument({ languageId: 'mermaid', fileName: '/work/diagram.txt' }), true);
-  assert.equal(isMermaidDocument({ languageId: 'plaintext', fileName: '/work/diagram.mmd' }), true);
-  assert.equal(isMermaidDocument({ languageId: 'plaintext', fileName: '/work/readme.md' }), false);
+test("recognizes Mermaid documents by language or .mmd extension", () => {
+  assert.equal(isMermaidDocument({ languageId: "mermaid", fileName: "/work/diagram.txt" }), true);
+  assert.equal(isMermaidDocument({ languageId: "plaintext", fileName: "/work/diagram.mmd" }), true);
+  assert.equal(isMermaidDocument({ languageId: "plaintext", fileName: "/work/readme.md" }), false);
 });
 
-test('webview HTML loads only nonce-authorized local resources', () => {
+test("webview HTML loads only nonce-authorized local resources", () => {
   const html = buildPreviewHtml({
-    cspSource: 'vscode-webview-resource:',
-    nonce: 'test-nonce',
-    scriptUri: 'vscode-webview-resource:/media/preview.js',
-    wasmModuleUri: 'vscode-webview-resource:/pkg/frankenmermaid.js',
-    wasmBinaryUri: 'vscode-webview-resource:/pkg/frankenmermaid_bg.wasm',
+    cspSource: "vscode-webview-resource:",
+    nonce: "test-nonce",
+    scriptUri: "vscode-webview-resource:/media/preview.js",
+    wasmModuleUri: "vscode-webview-resource:/pkg/frankenmermaid.js",
+    wasmBinaryUri: "vscode-webview-resource:/pkg/frankenmermaid_bg.wasm",
   });
 
   assert.match(html, /default-src 'none'/u);
@@ -33,7 +33,7 @@ test('webview HTML loads only nonce-authorized local resources', () => {
   assert.doesNotMatch(html, /unsafe-inline/u);
 });
 
-test('render scheduler keeps only the latest edit and cancels disposal work', () => {
+test("render scheduler keeps only the latest edit and cancels disposal work", () => {
   let nextTimer = 0;
   const timers = new Map();
   const cleared = [];
@@ -48,20 +48,20 @@ test('render scheduler keeps only the latest edit and cancels disposal work', ()
   );
   const renders = [];
 
-  scheduler.schedule(() => renders.push('stale'));
-  scheduler.schedule(() => renders.push('latest'));
+  scheduler.schedule(() => renders.push("stale"));
+  scheduler.schedule(() => renders.push("latest"));
 
   assert.deepEqual(cleared, [1]);
   assert.equal(timers.get(2).delayMs, 75);
   timers.get(2).callback();
-  assert.deepEqual(renders, ['latest']);
+  assert.deepEqual(renders, ["latest"]);
 
-  scheduler.schedule(() => renders.push('disposed'));
+  scheduler.schedule(() => renders.push("disposed"));
   scheduler.dispose();
   assert.deepEqual(cleared, [1, 3]);
 });
 
-test('render scheduler validates and applies later debounce settings', () => {
+test("render scheduler validates and applies later debounce settings", () => {
   const scheduler = new DebouncedRenderScheduler(-1);
   assert.equal(scheduler.delayMs, 75);
   assert.equal(normalizePreviewDebounceMs(0), 0);
@@ -73,45 +73,45 @@ test('render scheduler validates and applies later debounce settings', () => {
   assert.equal(scheduler.delayMs, 0);
 });
 
-test('webview renders typed extension messages regardless of browser event metadata', () => {
-  const previewPath = path.join(__dirname, '..', 'media', 'preview.js');
-  let previewSource = fs.readFileSync(previewPath, 'utf8');
-  assert.equal(previewSource.includes('void start();'), true);
-  previewSource = previewSource.replace('void start();', '');
-  assert.equal(previewSource.includes('let renderSvg;'), true);
+test("webview renders typed extension messages regardless of browser event metadata", () => {
+  const previewPath = path.join(__dirname, "..", "media", "preview.js");
+  let previewSource = fs.readFileSync(previewPath, "utf8");
+  assert.equal(previewSource.includes("void start();"), true);
+  previewSource = previewSource.replace("void start();", "");
+  assert.equal(previewSource.includes("let renderSvg;"), true);
   previewSource = previewSource.replace(
-    'let renderSvg;',
+    "let renderSvg;",
     "let renderSvg = (source) => { globalThis.renderedSource = source; return '<svg></svg>'; };",
   );
 
   const listeners = new Map();
-  const root = { replaceChildren: () => {}, textContent: '' };
+  const root = { replaceChildren: () => {}, textContent: "" };
   const context = {
     Blob: class Blob {},
     Image: class Image {},
-    URL: { createObjectURL: () => 'blob:preview', revokeObjectURL: () => {} },
+    URL: { createObjectURL: () => "blob:preview", revokeObjectURL: () => {} },
     acquireVsCodeApi: () => ({ postMessage: () => {} }),
     document: {
-      body: { dataset: { wasmBinary: 'wasm', wasmModule: 'module' } },
+      body: { dataset: { wasmBinary: "wasm", wasmModule: "module" } },
       getElementById: () => root,
     },
     window: {
       addEventListener: (type, listener) => listeners.set(type, listener),
-      location: { origin: 'https://not-the-extension-host.invalid' },
+      location: { origin: "https://not-the-extension-host.invalid" },
       removeEventListener: () => {},
     },
   };
   context.globalThis = context;
   vm.runInNewContext(previewSource, context, { filename: previewPath });
 
-  const onMessage = listeners.get('message');
+  const onMessage = listeners.get("message");
   onMessage({
-    data: { type: 'render', source: 'flowchart LR\nA-->B', title: 'diagram.mmd' },
-    origin: 'vscode-webview://opaque-origin',
+    data: { type: "render", source: "flowchart LR\nA-->B", title: "diagram.mmd" },
+    origin: "vscode-webview://opaque-origin",
     source: null,
   });
-  assert.equal(context.renderedSource, 'flowchart LR\nA-->B');
+  assert.equal(context.renderedSource, "flowchart LR\nA-->B");
 
-  onMessage({ data: { type: 'render', source: 42, title: 'diagram.mmd' } });
-  assert.equal(context.renderedSource, 'flowchart LR\nA-->B');
+  onMessage({ data: { type: "render", source: 42, title: "diagram.mmd" } });
+  assert.equal(context.renderedSource, "flowchart LR\nA-->B");
 });

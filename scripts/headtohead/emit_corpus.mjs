@@ -8,8 +8,9 @@
 // Shape must stay `{id, texts, reps, warmup}` — `texts`, plural. An earlier session lost hours to a
 // corpus whose container field had moved from `text` to `texts` while the payload hash was
 // unchanged, so the input preflight passed on a corpus the binary could not read.
-import { generateAll } from './corpus.mjs';
-import fs from 'node:fs';
+
+import fs from "node:fs";
+import { generateAll } from "./corpus.mjs";
 
 const id = process.argv[2];
 const reps = Number(process.argv[3] ?? 20);

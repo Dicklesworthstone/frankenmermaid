@@ -12,25 +12,26 @@
 // an engine defect three times (gitGraph/TextEncoder, pie/structuredClone).
 //
 // A run that cannot render in the incumbent reports INCUMBENT-DNF and is NOT counted as agreement.
-import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { JSDOM } from 'jsdom';
 
-const BUNDLE = '/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js';
-const FM_CLI = 'target/local/debug/fm-cli';
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { JSDOM } from "jsdom";
+
+const BUNDLE = "/home/ubuntu/.cache/fm-headtohead/mermaid-11.15.0.min.js";
+const FM_CLI = "target/local/debug/fm-cli";
 
 const files = process.argv.slice(2);
 if (files.length === 0) {
-  console.error('usage: drawn_text_diff.mjs <file.mmd> [...]');
+  console.error("usage: drawn_text_diff.mjs <file.mmd> [...]");
   process.exit(2);
 }
 
 const dom = new JSDOM('<!DOCTYPE html><html><body><div id="c"></div></body></html>', {
-  runScripts: 'dangerously',
+  runScripts: "dangerously",
   pretendToBeVisual: true,
 });
 const w = dom.window;
-for (const name of ['TextEncoder', 'TextDecoder', 'crypto', 'structuredClone', 'DOMRect']) {
+for (const name of ["TextEncoder", "TextDecoder", "crypto", "structuredClone", "DOMRect"]) {
   if (!w[name] && globalThis[name]) w[name] = globalThis[name];
 }
 // ⚠️ GEOMETRY STUBS, AND THEY ARE A REAL LIMITATION OF THIS PROBE. jsdom implements no SVG layout,
@@ -48,23 +49,23 @@ for (const proto of [w.SVGElement.prototype, w.Element.prototype]) {
   if (!proto.getScreenCTM) proto.getScreenCTM = () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
 }
 
-const script = w.document.createElement('script');
-script.textContent = fs.readFileSync(BUNDLE, 'utf8');
+const script = w.document.createElement("script");
+script.textContent = fs.readFileSync(BUNDLE, "utf8");
 w.document.head.appendChild(script);
 const mermaid = w.mermaid;
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 /** Every `<text>` leaf, escapes undone, blanks dropped. */
 function textRuns(svg) {
   const runs = [];
   let rest = svg;
   while (true) {
-    const start = rest.indexOf('<text');
+    const start = rest.indexOf("<text");
     if (start < 0) break;
     rest = rest.slice(start);
-    const open = rest.indexOf('>');
+    const open = rest.indexOf(">");
     if (open < 0) break;
-    const close = rest.indexOf('</text>');
+    const close = rest.indexOf("</text>");
     if (close < 0) break;
     const inner = rest.slice(open + 1, close);
     // ⚠️ A MULTI-LINE LABEL IS ONE `<text>` HOLDING A `<tspan>` PER LINE, so the tspan boundary IS a
@@ -72,34 +73,36 @@ function textRuns(svg) {
     // reports a false divergence against mermaid's `A\n10` — which it did, on every sankey node,
     // until this line existed.
     const plain = inner
-      .replace(/<\/tspan>\s*<tspan[^>]*>/g, '\n')
-      .replace(/<[^>]*>/g, '')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
+      .replace(/<\/tspan>\s*<tspan[^>]*>/g, "\n")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
-      .replace(/&amp;/g, '&')
+      .replace(/&amp;/g, "&")
       .trim();
     if (plain) runs.push(plain);
-    rest = rest.slice(close + '</text>'.length);
+    rest = rest.slice(close + "</text>".length);
   }
   return runs;
 }
 
 let divergent = 0;
 for (const file of files) {
-  const text = fs.readFileSync(file, 'utf8');
+  const text = fs.readFileSync(file, "utf8");
   let theirs = null;
-  let note = '';
+  let note = "";
   try {
     const id = `d${Math.abs([...file].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7))}`;
     const { svg } = await mermaid.render(id, text);
     theirs = textRuns(svg);
   } catch (error) {
-    note = String(error?.message ?? error).split('\n')[0].slice(0, 90);
+    note = String(error?.message ?? error)
+      .split("\n")[0]
+      .slice(0, 90);
   }
 
-  const ours = textRuns(execFileSync(FM_CLI, ['render', '-f', 'svg', file], { encoding: 'utf8' }));
+  const ours = textRuns(execFileSync(FM_CLI, ["render", "-f", "svg", file], { encoding: "utf8" }));
 
   if (theirs === null) {
     console.log(`INCUMBENT-DNF  ${file}  -- ${note}`);
@@ -122,7 +125,7 @@ for (const file of files) {
   //
   // They are reported separately so nobody files them as parity bugs. `equivalence.mjs` drives
   // Chromium and is the tool that can actually decide them.
-  const squash = (run) => run.replace(/\s+/g, ' ').trim();
+  const squash = (run) => run.replace(/\s+/g, " ").trim();
   const extraBySquash = new Map(extra.map((run) => [squash(run), run]));
   const whitespaceOnly = [];
   for (const run of [...missing]) {
@@ -141,13 +144,17 @@ for (const file of files) {
   }
   if (missing.length === 0 && extra.length === 0) {
     console.log(`WHITESPACE     ${file}  ${JSON.stringify(whitespaceOnly.slice(0, 4))}`);
-    console.log('  undecidable from this probe: the stubs change mermaid word-wrap. Use equivalence.mjs.');
+    console.log(
+      "  undecidable from this probe: the stubs change mermaid word-wrap. Use equivalence.mjs.",
+    );
     continue;
   }
   divergent += 1;
   console.log(`DIVERGE        ${file}`);
   if (whitespaceOnly.length > 0) {
-    console.log(`  whitespace-only, UNDECIDABLE here: ${JSON.stringify(whitespaceOnly.slice(0, 3))}`);
+    console.log(
+      `  whitespace-only, UNDECIDABLE here: ${JSON.stringify(whitespaceOnly.slice(0, 3))}`,
+    );
   }
   if (missing.length > 0) console.log(`  mermaid draws, we do NOT: ${JSON.stringify(missing)}`);
   if (extra.length > 0) console.log(`  we draw, mermaid does NOT: ${JSON.stringify(extra)}`);

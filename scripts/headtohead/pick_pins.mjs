@@ -7,12 +7,12 @@
 // our arm was pinned to the 1429 MHz floor while the incumbent ran unpinned on boosted cores.
 //
 // Reads nothing but /proc/stat and cpufreq, runs no benchmark, and prints one JSON object.
-import { readFileSync } from 'node:fs';
-import { clockHeadroom, selectPinnedCpu, selectPinnedCpuSet } from './cpu_selection.mjs';
+import { readFileSync } from "node:fs";
+import { clockHeadroom, selectPinnedCpu, selectPinnedCpuSet } from "./cpu_selection.mjs";
 
 function snapshot() {
   const out = new Map();
-  for (const line of readFileSync('/proc/stat', 'utf8').split('\n')) {
+  for (const line of readFileSync("/proc/stat", "utf8").split("\n")) {
     if (!/^cpu\d/.test(line)) continue;
     const fields = line.trim().split(/\s+/);
     const cpu = Number(fields[0].slice(3));
@@ -25,7 +25,7 @@ function snapshot() {
 function mhz(cpu) {
   try {
     const khz = Number.parseInt(
-      readFileSync(`/sys/devices/system/cpu/cpu${cpu}/cpufreq/scaling_cur_freq`, 'utf8'),
+      readFileSync(`/sys/devices/system/cpu/cpu${cpu}/cpufreq/scaling_cur_freq`, "utf8"),
       10,
     );
     return Number.isFinite(khz) ? Math.round(khz / 1000) : null;
@@ -63,7 +63,7 @@ const set = selectPinnedCpuSet(
   Number.isInteger(size) && size > 0 ? size : 8,
   single.chosen.mhz ?? null,
 );
-const clocks = records.map((r) => r.mhz).filter((m) => typeof m === 'number');
+const clocks = records.map((r) => r.mhz).filter((m) => typeof m === "number");
 
 console.log(
   JSON.stringify({
@@ -79,7 +79,9 @@ console.log(
     band_size: single.band_size,
     host_min_mhz: clocks.length ? Math.min(...clocks) : null,
     host_max_mhz: clocks.length ? Math.max(...clocks) : null,
-    host_spread: clocks.length ? Number((Math.max(...clocks) / Math.min(...clocks)).toFixed(3)) : null,
+    host_spread: clocks.length
+      ? Number((Math.max(...clocks) / Math.min(...clocks)).toFixed(3))
+      : null,
     // How far below the host peak the MEASURED arm ran. Recorded because it is the direction in which
     // every ratio we quote is conservative, and it appeared in no row before.
     clock_headroom: clockHeadroom(

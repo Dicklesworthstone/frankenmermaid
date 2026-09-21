@@ -3,10 +3,34 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_diagram_free: (a: number, b: number) => void;
 export const acquireWebGpuCanvasContext: (a: number, b: number) => void;
-export const applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const applyLensEdit: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+  g: number,
+) => void;
 export const applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
-export const applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-export const applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const applyParseLensEdit: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+  g: number,
+) => void;
+export const applyParseLensInsertLineAfter: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+  g: number,
+) => void;
 export const chooseCanvasTarget: (a: number, b: number, c: number) => void;
 export const configSchema: (a: number) => void;
 export const describeDiagram: (a: number, b: number, c: number) => void;

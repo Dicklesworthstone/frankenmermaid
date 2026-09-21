@@ -26,26 +26,41 @@
 // default hashers are unrelated, and Rust's is not stable across versions or targets, so a
 // "cross-target golden" built on either would differ for reasons that have nothing to do with
 // floating point.
-import * as fm from '../pkg/frankenmermaid.js';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import * as fm from "../pkg/frankenmermaid.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-fm.initSync({ module: readFileSync(join(here, '..', 'pkg', 'frankenmermaid_bg.wasm')) });
+fm.initSync({ module: readFileSync(join(here, "..", "pkg", "frankenmermaid_bg.wasm")) });
 
 // Assembled rather than written literally so the source of this file contains no bare arrow
 // sequences: the fleet's command guard reads `--` followed by `>` in a shell argument as a
 // redirect, which has blocked commands that merely quoted a diagram.
-const ARROW = '-' + '-' + '>';
+const ARROW = "-" + "-" + ">";
 
 // The same four fixtures as crates/fm-cli/tests/layout_fp_determinism.rs, so a divergence found
 // here can be traced with the coordinate digests that file already pins.
 const DIAGRAMS = [
-  ['flowchart', `flowchart TD\n  a[Alpha] ${ARROW} b[Beta]\n  b ${ARROW} c[Gamma]\n  c -.${ARROW} a\n  b ${ARROW} d[Delta]\n`],
-  ['sequence', 'sequenceDiagram\n  participant A\n  participant B\n  A-' + '>>B: hello\n  B--' + '>>A: reply\n'],
-  ['class', 'classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n'],
-  ['state', `stateDiagram-v2\n  [*] ${ARROW} Idle\n  Idle ${ARROW} Busy: start\n  Busy ${ARROW} Idle: done\n`],
+  [
+    "flowchart",
+    `flowchart TD\n  a[Alpha] ${ARROW} b[Beta]\n  b ${ARROW} c[Gamma]\n  c -.${ARROW} a\n  b ${ARROW} d[Delta]\n`,
+  ],
+  [
+    "sequence",
+    "sequenceDiagram\n  participant A\n  participant B\n  A-" +
+      ">>B: hello\n  B--" +
+      ">>A: reply\n",
+  ],
+  [
+    "class",
+    "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
+  ],
+  [
+    "state",
+    `stateDiagram-v2\n  [*] ${ARROW} Idle\n  Idle ${ARROW} Busy: start\n  Busy ${ARROW} Idle: done\n`,
+  ],
 ];
 
 const FNV_OFFSET = 0xcbf29ce484222325n;
@@ -62,19 +77,19 @@ function fnv1a(bytes, initial = FNV_OFFSET) {
 }
 
 const PACKAGE_ARTIFACTS = [
-  'pkg/frankenmermaid_bg.wasm',
-  'pkg/frankenmermaid.js',
-  'pkg/frankenmermaid.d.ts',
-  'pkg/frankenmermaid_bg.wasm.d.ts',
-  'pkg/package.json',
+  "pkg/frankenmermaid_bg.wasm",
+  "pkg/frankenmermaid.js",
+  "pkg/frankenmermaid.d.ts",
+  "pkg/frankenmermaid_bg.wasm.d.ts",
+  "pkg/package.json",
 ];
 let packageDigest = FNV_OFFSET;
 for (const artifact of PACKAGE_ARTIFACTS) {
-  packageDigest = fnv1a(readFileSync(join(here, '..', artifact)), packageDigest);
+  packageDigest = fnv1a(readFileSync(join(here, "..", artifact)), packageDigest);
 }
 console.log(
   `package artifacts=${PACKAGE_ARTIFACTS.length} ` +
-  `digest=0x${packageDigest.toString(16).padStart(16, '0')}`,
+    `digest=0x${packageDigest.toString(16).padStart(16, "0")}`,
 );
 
 let vacuous = false;
@@ -84,9 +99,13 @@ for (const [name, source] of DIAGRAMS) {
   // A bundle that renders nothing would agree with a Rust side that also rendered nothing, and the
   // comparison would pass while proving neither target does anything.
   if (bytes.length < 1000) {
-    console.error(`${name}: rendered only ${bytes.length} bytes -- the comparison would be vacuous`);
+    console.error(
+      `${name}: rendered only ${bytes.length} bytes -- the comparison would be vacuous`,
+    );
     vacuous = true;
   }
-  console.log(`${name} bytes=${bytes.length} digest=0x${fnv1a(bytes).toString(16).padStart(16, '0')}`);
+  console.log(
+    `${name} bytes=${bytes.length} digest=0x${fnv1a(bytes).toString(16).padStart(16, "0")}`,
+  );
 }
 process.exit(vacuous ? 1 : 0);

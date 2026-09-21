@@ -25,8 +25,8 @@
 // Exit 0 = all good; non-zero prints every failed check.
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -63,29 +63,26 @@ for (const file of htmlFiles) {
   check(
     `${file}: inline runtime is byte-identical to crates/fm-cli/src/deck_runtime.js`,
     runtimeBlock === canonical.replace(/\n$/, "") + "\n" || runtimeBlock === canonical,
-    `inline ${runtimeBlock.length} bytes vs canonical ${canonical.length}`
+    `inline ${runtimeBlock.length} bytes vs canonical ${canonical.length}`,
   );
 
   const demoBlock = fenced(html, ">>> deck-demo-source:start", ">>> deck-demo-source:end", file);
   demoSources.push(demoBlock);
 }
 
-check(
-  "DECK_DEMO_SOURCE identical across both html files",
-  demoSources[0] === demoSources[1]
-);
+check("DECK_DEMO_SOURCE identical across both html files", demoSources[0] === demoSources[1]);
 
 // Load-bearing code paths in the canonical runtime (cheap tripwires for the two bugs a
 // refactor would most plausibly reintroduce).
 check(
   "runtime pins the SVG to viewBox pixels at mount",
   canonical.includes('svgRoot.style.width = worldWidth + "px"'),
-  "the coordinate contract: 1 SVG user unit == 1 CSS px at scale 1"
+  "the coordinate contract: 1 SVG user unit == 1 CSS px at scale 1",
 );
 check(
   "runtime keyboard handler stays stage-scoped",
   canonical.includes("event.stopPropagation()"),
-  "the showcase's window keydown claims bare arrows for the spotlight"
+  "the showcase's window keydown claims bare arrows for the spotlight",
 );
 
 // Render the demo deck through the SHIPPED WASM.
@@ -97,16 +94,19 @@ if (demoMatch) {
   const wasmBytes = readFileSync(join(repo, "pkg/frankenmermaid_bg.wasm"));
   await wasm.default({ module_or_path: wasmBytes });
   const output = wasm.renderDeck(source, { theme: "dark" });
-  check("renderDeck returns an SVG", typeof output.svg === "string" && output.svg.startsWith("<svg"));
+  check(
+    "renderDeck returns an SVG",
+    typeof output.svg === "string" && output.svg.startsWith("<svg"),
+  );
   check(
     "demo deck manifest has slides",
     Boolean(output.manifest) && output.manifest.slides.length >= 1,
-    output.manifest ? `${output.manifest.slides.length} slides` : "manifest null"
+    output.manifest ? `${output.manifest.slides.length} slides` : "manifest null",
   );
   check(
     "demo deck renders with zero deck warnings",
     Array.isArray(output.warnings) && output.warnings.length === 0,
-    JSON.stringify(output.warnings ?? null).slice(0, 300)
+    JSON.stringify(output.warnings ?? null).slice(0, 300),
   );
 }
 

@@ -32,8 +32,8 @@
 // scripts/node_modules install; CI and pre-release runs should NOT pass it.
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -63,10 +63,30 @@ try {
 //    `sequence` is the single Partial family; everything else is Supported. The demo `category`
 //    keys are the showcase's names for these families.
 const EXPECTED_FAMILIES = [
-  "flowchart", "sequence", "class", "state", "er", "gantt", "journey", "timeline",
-  "pie", "gitGraph", "mindmap", "requirement", "quadrantChart", "sankey", "xyChart",
-  "blockBeta", "packetBeta", "architectureBeta", "c4Context", "c4Container",
-  "c4Component", "c4Dynamic", "c4Deployment", "kanban",
+  "flowchart",
+  "sequence",
+  "class",
+  "state",
+  "er",
+  "gantt",
+  "journey",
+  "timeline",
+  "pie",
+  "gitGraph",
+  "mindmap",
+  "requirement",
+  "quadrantChart",
+  "sankey",
+  "xyChart",
+  "blockBeta",
+  "packetBeta",
+  "architectureBeta",
+  "c4Context",
+  "c4Container",
+  "c4Component",
+  "c4Dynamic",
+  "c4Deployment",
+  "kanban",
 ];
 
 const seen = new Map();
@@ -130,7 +150,10 @@ if (process.argv.includes("--wasm-only")) {
     try {
       await mermaid.parse(entry.code);
     } catch (error) {
-      const detail = String(error?.message ?? error).split("\n").slice(0, 3).join(" | ");
+      const detail = String(error?.message ?? error)
+        .split("\n")
+        .slice(0, 3)
+        .join(" | ");
       baselineProblems.push(
         `${entry.category} (${entry.label}) REJECTED by mermaid.js baseline: ${detail.slice(0, 200)}`,
       );
@@ -147,5 +170,5 @@ if (all.length > 0) {
 console.log(
   `demo sample verification OK: ${DIAGRAM_SAMPLES.length} examples, ` +
     `${EXPECTED_FAMILIES.length} supported families, each rendered once through the WASM build` +
-    (process.argv.includes("--wasm-only") ? "." : " and parsed by the mermaid.js baseline.")
+    (process.argv.includes("--wasm-only") ? "." : " and parsed by the mermaid.js baseline."),
 );
