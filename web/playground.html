@@ -19,6 +19,12 @@
   #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
   .warn { color: #fbbf24; }
   .err { color: #f87171; }
+  #editor-toolbar, #source-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
+  #source-editor { max-height: 40vh; overflow: auto; }
+  #source-editor label, #source-editor select, #source-editor textarea { display: block; width: 100%; box-sizing: border-box; }
+  #source-editor textarea { border: 1px solid #cbd5e1; }
+  #out [data-source-editable] { cursor: pointer; }
+  #out [data-source-selected], #out [data-source-editable]:focus { outline: 3px solid #2563eb; outline-offset: 3px; }
 </style>
 
 <textarea id="src" spellcheck="false">flowchart TD
@@ -28,6 +34,8 @@
 
 <div id="right">
   <div id="status" role="status">starting…</div>
+  <div id="editor-toolbar"><button id="edit-source" type="button">Edit diagram source (SVG)</button></div>
+  <section id="source-editor" aria-label="Diagram source editor" hidden></section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
@@ -51,6 +59,7 @@
   let nextRequestId = 1;
   let liveRequestId = 0;
   let startedAt = 0;
+  let sourceEditor = null;
 
   function log(text, cls) {
     const line = document.createElement("div");
@@ -140,7 +149,9 @@
     const requestId = nextRequestId++;
     liveRequestId = requestId;
     startedAt = performance.now();
-    if (mainThread) {
+    if (sourceEditor) {
+      void sourceEditor.render(srcEl.value);
+    } else if (mainThread) {
       void renderOnMain(requestId, srcEl.value);
     } else if (workerReady) {
       try {
@@ -225,9 +236,35 @@
 
   // No debounce: this sample exercises supersession rather than hiding it behind a timer.
   srcEl.addEventListener("input", render);
+  document.getElementById("edit-source")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const { mountSourceEditor } = await import("./fm-source-editor.js");
+      if (disposed) return;
+      sourceEditor = mountSourceEditor({
+        sourceEl: srcEl, outEl, panelEl: document.getElementById("source-editor"),
+        loadModule: ensureMainModule, onChange: render,
+      });
+      // This is an explicit mode change, not a worker failure. Editing needs addressable SVG.
+      const previousWorker = worker;
+      worker = null;
+      workerReady = false;
+      clearTimeout(initTimer);
+      if (previousWorker) previousWorker.terminate();
+      mainThread = true;
+      canvasEl.remove();
+      statusEl.textContent = "SVG source editor — rendering and source edits run on the main thread";
+      render();
+    } catch (error) {
+      button.disabled = false;
+      log(`source editor unavailable: ${error.message || error}`, "err");
+    }
+  });
   globalThis.addEventListener("pagehide", (event) => {
     if (event.persisted) return; // A back/forward-cache restore resumes this instance.
     disposed = true;
+    sourceEditor?.dispose();
     clearTimeout(initTimer);
     if (worker) worker.terminate();
     worker = null;
