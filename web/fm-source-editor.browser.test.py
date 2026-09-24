@@ -79,11 +79,16 @@ class SourceEditorBrowserTests(unittest.TestCase):
           };
           globalThis.editorModule = await load(host);
           globalThis.fixtureApi = await load(fixture);
+          globalThis.savedFiles = [];
           document.querySelector('#edit-source').addEventListener('click', () => {
             const sourceEl = document.querySelector('#src');
             globalThis.editor = editorModule.mountSourceEditor({ sourceEl,
               outEl: document.querySelector('#out'), panelEl: document.querySelector('#source-editor'),
-              loadModule: async () => fixtureApi, onChange: () => editor.render(sourceEl.value) });
+              loadModule: async () => fixtureApi, onChange: () => editor.render(sourceEl.value),
+              saveFile: artifact => {
+                if (globalThis.failSave) return Promise.reject(new Error('fixture save failed'));
+                savedFiles.push(artifact);
+              } });
             sourceEl.addEventListener('input', () => editor.render(sourceEl.value));
             editor.render(sourceEl.value);
           });
@@ -175,7 +180,88 @@ class SourceEditorBrowserTests(unittest.TestCase):
           editor.dispose();
           await pending;
           if (outEl.textContent !== '[Latest]') throw new Error('render committed after dispose');
+          await editor.render(sourceEl.value);
+          if (outEl.getAttribute('aria-busy') !== 'false') throw new Error('disposed editor became busy');
         }""")
+
+    def test_applied_edits_and_typing_share_reversible_source_history(self):
+        original = "%% comment\nflowchart TD\n a[Alpha]\n"
+        self.enter_editor(original)
+        self.page.locator("#fm-node-0 rect").click()
+        self.page.locator("#source-editor-snippet").fill("[Changed]")
+        self.page.locator("#source-editor-apply").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Changed]'")
+        self.page.locator("#source-editor-undo").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Alpha]'")
+        self.assertEqual(self.page.locator("#src").input_value(), original)
+        self.page.locator("#source-editor-redo").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Changed]'")
+        self.page.locator("#src").fill("flowchart TD\n a[Typed]")
+        self.page.keyboard.press("Control+z")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Changed]'")
+        self.assertEqual(self.page.locator("#src").input_value(), original.replace("Alpha", "Changed"))
+        self.page.keyboard.press("Control+Shift+z")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Typed]'")
+
+    def test_undo_recovers_from_parser_failure_and_new_edits_clear_redo(self):
+        original = "flowchart TD\n a[Good]"
+        self.enter_editor(original)
+        self.page.locator("#src").fill("PARSER_FAIL")
+        self.page.wait_for_function("document.querySelector('#source-editor-message').textContent.includes('fixture parser failed')")
+        self.assertFalse(self.page.locator("#source-editor-undo").is_disabled())
+        self.page.locator("#source-editor-undo").click()
+        self.page.wait_for_function("document.querySelector('#source-editor-elements').disabled === false")
+        self.assertEqual(self.page.locator("#src").input_value(), original)
+        self.assertFalse(self.page.locator("#source-editor-redo").is_disabled())
+        self.page.locator("#src").fill("flowchart TD\n a[Different]")
+        self.assertTrue(self.page.locator("#source-editor-redo").is_disabled())
+
+    def test_source_and_svg_export_preserve_engine_bytes_not_selection_markup(self):
+        source = "%% 😀\nflowchart TD\n a[Export me]\n"
+        self.enter_editor(source)
+        self.page.locator("#fm-node-0 rect").click()
+        self.assertEqual(self.page.locator("#fm-node-0").get_attribute("data-source-selected"), "true")
+        self.page.locator("#source-editor-save-source").click()
+        self.page.locator("#source-editor-save-svg").click()
+        saved = self.page.evaluate("savedFiles")
+        self.assertEqual(saved[0], {"text": source, "filename": "diagram.mmd", "mime": "text/plain;charset=utf-8"})
+        self.assertEqual(saved[1]["text"], self.page.evaluate("fixtureApi.renderSvg(src.value)"))
+        self.assertEqual(saved[1]["filename"], "diagram.svg")
+        self.assertNotIn("data-source-selected", saved[1]["text"])
+        self.assertNotIn("data-source-editable", saved[1]["text"])
+        self.assertNotIn("tabindex", saved[1]["text"])
+
+    def test_stale_and_failed_previews_cannot_be_exported_as_current_svg(self):
+        self.enter_editor("flowchart TD\n a[Good]")
+        self.page.evaluate("src.value = 'flowchart TD\\n a[Newer]'; document.querySelector('#source-editor-save-svg').click()")
+        self.assertEqual(self.page.evaluate("savedFiles.length"), 0)
+        self.assertIn("current source", self.page.locator("#source-editor-message").text_content())
+        self.page.locator("#src").fill("PARSER_FAIL")
+        self.page.wait_for_function("document.querySelector('#source-editor-message').textContent.includes('fixture parser failed')")
+        self.assertTrue(self.page.locator("#source-editor-save-svg").is_disabled())
+        self.page.locator("#source-editor-save-source").click()
+        self.assertEqual(self.page.evaluate("savedFiles[0].text"), "PARSER_FAIL")
+
+    def test_asynchronous_save_failure_is_reported_without_losing_source(self):
+        source = "flowchart TD\n a[Safe]"
+        self.enter_editor(source)
+        self.page.evaluate("globalThis.failSave = true")
+        self.page.locator("#source-editor-save-source").click()
+        self.page.wait_for_function("document.querySelector('#source-editor-message').textContent.includes('fixture save failed')")
+        self.assertEqual(self.page.locator("#src").input_value(), source)
+
+    def test_draft_undo_remains_native_and_does_not_change_committed_source(self):
+        source = "flowchart TD\n a[Original]"
+        self.enter_editor(source)
+        self.page.locator("#fm-node-0 rect").click()
+        draft = self.page.locator("#source-editor-snippet")
+        draft.focus()
+        self.page.keyboard.press("End")
+        self.page.keyboard.type(" draft")
+        self.page.keyboard.press("Control+z")
+        self.assertEqual(self.page.locator("#src").input_value(), source)
+        self.assertEqual(self.page.evaluate("globalThis.mutationCalls || 0"), 0)
+        self.assertTrue(self.page.locator("#source-editor-undo").is_disabled())
 
 
 if __name__ == "__main__":

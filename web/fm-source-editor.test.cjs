@@ -204,3 +204,92 @@ test("missing WASM APIs and invalid replacement text are actionable failures", a
   assert.throws(() => edit.replace(selected, null), /must be text/);
   assert.equal(api.calls.length, 0);
 });
+
+test("history restores exact source, including invalid Mermaid and mixed line endings", async () => {
+  const { SourceHistory } = await loaded;
+  const first = "%% café 🐉\r\nflowchart TD\r\n a[A]\n";
+  const second = "flowchart TD\n a[B]\n";
+  const broken = "flowchart TD\n a[";
+  const history = new SourceHistory(first);
+  history.record(second);
+  history.record(broken);
+  assert.equal(history.undo(), second);
+  assert.equal(history.undo(), first);
+  assert.equal(history.undo(), first);
+  assert.equal(history.redo(), second);
+  assert.equal(history.redo(), broken);
+  assert.equal(history.redo(), broken);
+});
+
+test("unchanged renders preserve redo, while new edits discard the abandoned future", async () => {
+  const { SourceHistory } = await loaded;
+  const history = new SourceHistory("A");
+  history.record("B");
+  history.record("C");
+  assert.equal(history.undo(), "B");
+  history.record("B");
+  assert.equal(history.canRedo, true);
+  assert.equal(history.redo(), "C");
+  history.undo();
+  history.record("D");
+  assert.equal(history.canRedo, false);
+  assert.equal(history.redo(), "D");
+  assert.equal(history.undo(), "B");
+  assert.equal(history.undo(), "A");
+});
+
+test("history enforces the entry limit without truncating the current source", async () => {
+  const { SourceHistory } = await loaded;
+  const history = new SourceHistory("A", { maxEntries: 3 });
+  for (const source of ["B", "C", "D", "E"]) history.record(source);
+  assert.equal(history.undo(), "D");
+  assert.equal(history.undo(), "C");
+  assert.equal(history.canUndo, false);
+  assert.equal(history.redo(), "D");
+  assert.equal(history.redo(), "E");
+});
+
+test("history enforces its text budget and retains an oversized document intact", async () => {
+  const { SourceHistory } = await loaded;
+  const history = new SourceHistory("AAA", { maxCodeUnits: 8 });
+  history.record("BBB");
+  history.record("CCC");
+  assert.equal(history.undo(), "BBB");
+  assert.equal(history.canUndo, false);
+  history.redo();
+  const oversized = "😀".repeat(100);
+  history.record(oversized);
+  assert.equal(history.source, oversized);
+  assert.equal(history.canUndo, false);
+  history.record("D");
+  assert.equal(history.source, "D");
+  assert.equal(history.canUndo, false);
+});
+
+test("history budgets remain correct after undo, branching, and eviction", async () => {
+  const { SourceHistory } = await loaded;
+  const history = new SourceHistory("11", { maxCodeUnits: 6 });
+  history.record("22");
+  history.record("33");
+  history.undo();
+  history.record("44"); // Discard 33; it must not count against the memory budget.
+  assert.equal(history.undo(), "22");
+  assert.equal(history.undo(), "11");
+  history.redo();
+  history.redo();
+  history.record("55");
+  assert.equal(history.undo(), "44");
+  assert.equal(history.undo(), "22");
+  assert.equal(history.canUndo, false);
+});
+
+test("history rejects invalid limits and non-text updates without changing its state", async () => {
+  const { SourceHistory } = await loaded;
+  for (const options of [{ maxEntries: 0 }, { maxEntries: 1.5 }, { maxCodeUnits: -1 }, { maxCodeUnits: Infinity }]) {
+    assert.throws(() => new SourceHistory("a", options), /limits/);
+  }
+  const history = new SourceHistory("a");
+  assert.throws(() => history.record(null), /must be text/);
+  assert.equal(history.source, "a");
+  assert.equal(history.canUndo, false);
+});

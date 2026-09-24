@@ -1,6 +1,7 @@
 // Browser adapter for the Rust ParseLens (bd-1t7l.1). This edits SOURCE SPANS, not semantic
 // nodes: a node's binding may cover a whole statement, including an edge and another node.
-// Parsing and all source mutations stay in WASM. The host owns selection and revision safety.
+// Parsing and source-span replacements stay in WASM. The host owns revision safety,
+// selection, exact-source history, and export.
 
 function byteOffsets(source) {
   const offsets = new Map([[0, 0]]);
@@ -115,16 +116,89 @@ export class SourceEditSession {
   }
 }
 
+// History owns exact SOURCE snapshots, independent of parsing/rendering success. Undo must
+// still work when the last edit introduced invalid Mermaid or the renderer is unavailable.
+export class SourceHistory {
+  #entries;
+  #index = 0;
+  #units;
+  #maxEntries;
+  #maxCodeUnits;
+
+  constructor(source, { maxEntries = 100, maxCodeUnits = 2 * 1024 * 1024 } = {}) {
+    if (typeof source !== "string") throw new TypeError("Source must be text.");
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 ||
+        !Number.isSafeInteger(maxCodeUnits) || maxCodeUnits < 1) {
+      throw new RangeError("History limits must be positive safe integers.");
+    }
+    this.#entries = [source];
+    this.#units = source.length;
+    this.#maxEntries = maxEntries;
+    this.#maxCodeUnits = maxCodeUnits;
+  }
+
+  get source() { return this.#entries[this.#index]; }
+  get canUndo() { return this.#index > 0; }
+  get canRedo() { return this.#index + 1 < this.#entries.length; }
+
+  record(source) {
+    if (typeof source !== "string") throw new TypeError("Source must be text.");
+    if (source === this.source) return;
+    for (const discarded of this.#entries.splice(this.#index + 1)) this.#units -= discarded.length;
+    this.#entries.push(source);
+    this.#index += 1;
+    this.#units += source.length;
+    // Retain the current document even when it alone exceeds the budget. Never truncate text.
+    while (this.#entries.length > 1 &&
+           (this.#entries.length > this.#maxEntries || this.#units > this.#maxCodeUnits)) {
+      this.#units -= this.#entries.shift().length;
+      this.#index -= 1;
+    }
+  }
+
+  undo() {
+    if (this.canUndo) this.#index -= 1;
+    return this.source;
+  }
+
+  redo() {
+    if (this.canRedo) this.#index += 1;
+    return this.source;
+  }
+}
+
 /** Mount an opt-in SVG/source editor. loadModule must resolve the initialized WASM exports. */
-export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChange }) {
+export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChange, saveFile }) {
   const document = panelEl.ownerDocument;
   const listeners = [];
+  const history = new SourceHistory(sourceEl.value);
+  const downloads = new Map();
   let epoch = 0;
   let disposed = false;
   let session = null;
   let selection = null;
   let displayedSource = null;
+  let renderedSvg = null;
   let elements = new Map();
+  let originalTabIndices = new Map();
+
+  function download(artifact) {
+    const host = document.defaultView;
+    const url = host.URL.createObjectURL(new host.Blob([artifact.text], { type: artifact.mime }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = artifact.filename;
+    document.body.append(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      downloads.set(url, host.setTimeout(() => {
+        host.URL.revokeObjectURL(url);
+        downloads.delete(url);
+      }, 0));
+    }
+  }
 
   function make(tag, text, id) {
     const element = document.createElement(tag);
@@ -138,6 +212,11 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     listeners.push(() => element.removeEventListener(event, handler, options));
   }
   make("p", "Select a diagram element or source text. Edit the exact source span below; it may include a whole statement, not just a label.");
+  const undo = make("button", "Undo source change", "source-editor-undo");
+  const redo = make("button", "Redo source change", "source-editor-redo");
+  const saveSource = make("button", "Save source (.mmd)", "source-editor-save-source");
+  const saveSvg = make("button", "Save SVG", "source-editor-save-svg");
+  for (const button of [undo, redo, saveSource, saveSvg]) button.type = "button";
   const label = make("label", "Source element", "source-editor-label");
   const chooser = make("select", "", "source-editor-elements");
   label.htmlFor = chooser.id;
@@ -152,6 +231,13 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   message.setAttribute("role", "status");
   panelEl.hidden = false;
 
+  function syncControls() {
+    undo.disabled = disposed || !history.canUndo;
+    redo.disabled = disposed || !history.canRedo;
+    saveSource.disabled = disposed;
+    saveSvg.disabled = !current() || renderedSvg === null;
+  }
+
   function clearSelection() {
     for (const element of elements.values()) element.removeAttribute("data-source-selected");
     selection = null;
@@ -163,10 +249,18 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   function invalidate() {
     epoch += 1;
     displayedSource = null;
+    renderedSvg = null;
     clearSelection();
     chooser.replaceChildren();
     chooser.disabled = true;
+    for (const [element, tabindex] of originalTabIndices) {
+      element.removeAttribute("data-source-editable");
+      if (tabindex === null) element.removeAttribute("tabindex");
+      else element.setAttribute("tabindex", tabindex);
+    }
+    originalTabIndices = new Map();
     elements = new Map();
+    syncControls();
   }
   function current() {
     return !disposed && displayedSource !== null && sourceEl.value === displayedSource;
@@ -194,6 +288,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     return null;
   }
   listen(outEl, "click", (event) => {
+    // The old SVG may remain visible after a failed render. Its links must not navigate away
+    // from unsaved edits just because that stale preview no longer has live source bindings.
+    if (event.target.closest?.("a")) event.preventDefault();
     const id = elementFor(event.target);
     if (!id || !current()) return;
     event.preventDefault(); // In edit mode a node link selects source instead of navigating away.
@@ -228,10 +325,54 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
       message.textContent = String(error.message || error);
     }
   });
+  function restore(direction) {
+    if (disposed) return;
+    // Catch programmatic changes too: an undo must never silently discard an unseen document.
+    history.record(sourceEl.value);
+    sourceEl.value = direction === "undo" ? history.undo() : history.redo();
+    invalidate();
+    onChange();
+  }
+  listen(undo, "click", () => restore("undo"));
+  listen(redo, "click", () => restore("redo"));
+  function historyKey(event) {
+    if (disposed || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    const direction = key === "z" ? (event.shiftKey ? "redo" : "undo") : key === "y" ? "redo" : null;
+    if (!direction) return;
+    event.preventDefault();
+    restore(direction);
+  }
+  // Leave the replacement textarea's native undo stack alone: it is an uncommitted draft.
+  listen(sourceEl, "keydown", historyKey);
+  listen(outEl, "keydown", historyKey);
+  function exportSource() {
+    if (disposed) throw new Error("The source editor is closed.");
+    byteOffsets(sourceEl.value); // A Blob must not silently replace malformed UTF-16 on export.
+    return { text: sourceEl.value, filename: "diagram.mmd", mime: "text/plain;charset=utf-8" };
+  }
+  function exportSvg() {
+    if (!current() || renderedSvg === null) throw new Error("Wait for a successful render of the current source before saving SVG.");
+    // Preserve the engine's exact bytes, not DOM serialization with editor-only attributes.
+    return { text: renderedSvg, filename: "diagram.svg", mime: "image/svg+xml;charset=utf-8" };
+  }
+  for (const [button, artifact] of [[saveSource, exportSource], [saveSvg, exportSvg]]) {
+    listen(button, "click", async () => {
+      try { await (saveFile || download)(artifact()); }
+      catch (error) {
+        if (!disposed) message.textContent = `Save failed: ${error.message || error}`;
+      }
+    });
+  }
   invalidate();
 
   return {
+    exportSource,
+    exportSvg,
     async render(source) {
+      if (disposed || source !== sourceEl.value) return;
+      // Record edits before any asynchronous work: rapid typing and failed renders are undoable.
+      history.record(source);
       invalidate();
       const version = epoch;
       message.textContent = "Building SVG and source map on the main thread…";
@@ -251,6 +392,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
         for (const element of outEl.querySelectorAll("[id]")) {
           if (!bindings.has(element.id)) continue;
           elements.set(element.id, element);
+          originalTabIndices.set(element, element.getAttribute("tabindex"));
           element.setAttribute("tabindex", "0");
           element.setAttribute("data-source-editable", "true");
         }
@@ -265,7 +407,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
           chooser.append(option);
         }
         displayedSource = source;
+        renderedSvg = svg;
         chooser.disabled = bindings.size === 0;
+        syncControls();
         const warnings = snapshot.parsed?.warnings || [];
         message.textContent = `${bindings.size} editable source spans. ${warnings.join(" ")}`;
       } catch (error) {
@@ -278,6 +422,12 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
       disposed = true;
       invalidate();
       for (const remove of listeners) remove();
+      const host = document.defaultView;
+      for (const [url, timer] of downloads) {
+        host.clearTimeout(timer);
+        host.URL.revokeObjectURL(url);
+      }
+      downloads.clear();
       outEl.setAttribute("aria-busy", "false");
     },
   };
