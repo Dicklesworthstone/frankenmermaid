@@ -219,7 +219,7 @@ test("failed WASM initialization rejects all waiters and permits a clean retry",
   ]);
 
   await initializeOffscreenWorker(worker);
-  assert.equal(initializations, 2, "a rejected initializer must not poison the module cache");
+  assert.equal(initializations, 2);
   assert.equal(worker.imports.length, 2);
   assert.equal(worker.messages.at(-1).kind, "ready");
 });
@@ -271,4 +271,245 @@ test("SVG responses preserve Rust diagnostics and timings", async () => {
   worker.timers.shift()();
   await render;
   assert.deepEqual(plain(worker.messages.at(-1)), response);
+});
+
+// Run the shipped integration, replacing only browser I/O and the WASM module transport.
+function loadPlayground(options = {}) {
+  const html = fs.readFileSync(path.join(__dirname, "playground.html"), "utf8");
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
+    .replaceAll("import.meta.url", JSON.stringify("https://example.invalid/web/playground.html"))
+    .replaceAll("import(", "globalThis.__import(");
+  const elements = {};
+  function element() {
+    return {
+      textContent: "", innerHTML: "", value: "flowchart LR\nA --> B",
+      children: [], listeners: {}, removed: false,
+      get childElementCount() { return this.children.length; },
+      get firstElementChild() { return this.children[0]; },
+      append(child) { this.children.push(child); child.parent = this; },
+      remove() {
+        this.removed = true;
+        if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1);
+      },
+      addEventListener(name, fn) { this.listeners[name] = fn; },
+    };
+  }
+  for (const id of ["src", "out", "log", "status", "canvas"]) elements[id] = element();
+  if (options.transfer) elements.canvas.transferControlToOffscreen = options.transfer;
+  const timers = new Map();
+  let timerId = 0;
+  const listeners = {};
+  const workers = [];
+  const inputs = [];
+  const imports = [];
+  let initializations = 0;
+  const module = {
+    default: async () => {
+      initializations += 1;
+      if (options.initialize) await options.initialize(initializations);
+    },
+    workerHandleMessage: (json) => {
+      const request = JSON.parse(json);
+      inputs.push(request.input);
+      return JSON.stringify({ kind: "completed", requestId: request.requestId, svg: `<svg>${request.input}</svg>` });
+    },
+  };
+  class MockWorker {
+    constructor() {
+      if (options.constructorError) throw new Error(options.constructorError);
+      this.messages = [];
+      this.terminated = false;
+      workers.push(this);
+    }
+    postMessage(message, transfer) {
+      if (options.postError && options.postError(message)) throw new Error("postMessage failed");
+      this.messages.push({ ...message, transfer });
+    }
+    terminate() { this.terminated = true; }
+    emit(data) { this.onmessage({ data }); }
+  }
+  const context = {
+    URL, JSON, Promise,
+    performance: { now: () => 0 },
+    document: { getElementById: (id) => elements[id], createElement: element },
+    setTimeout: (callback, delay) => {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout: (id) => timers.delete(id),
+    addEventListener: (name, fn) => { listeners[name] = fn; },
+    __import: async (url) => {
+      imports.push(url);
+      if (options.importModule) return options.importModule(module);
+      return module;
+    },
+  };
+  if (!options.noWorker) context.Worker = MockWorker;
+  if (options.transfer) context.OffscreenCanvas = class {};
+  context.globalThis = context;
+  vm.runInNewContext(script, context, { filename: "playground.html" });
+  return {
+    elements, workers, inputs, imports, timers, listeners,
+    initializations: () => initializations,
+    edit(input) { elements.src.value = input; elements.src.listeners.input(); },
+    ready() { workers[0].emit({ kind: "ready", requested: "svgInWorker", target: "svgInWorker" }); },
+    runTimers(delay) {
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay === delay) { timers.delete(id); timer.callback(); }
+      }
+    },
+  };
+}
+
+async function finishMainRender(page) {
+  await flushMicrotasks();
+  page.runTimers(0);
+  await flushMicrotasks();
+}
+
+test("playground renders SVG without Worker support and reuses initialized WASM", async () => {
+  const page = loadPlayground({ noWorker: true });
+  await finishMainRender(page);
+  assert.equal(page.inputs.length, 1);
+  assert.match(page.elements.out.innerHTML, /<svg>/);
+  assert.match(page.elements.status.textContent, /main-thread SVG/);
+  page.edit("new diagram");
+  await finishMainRender(page);
+  assert.equal(page.elements.out.innerHTML, "<svg>new diagram</svg>");
+  assert.equal(page.imports.length, 1);
+  assert.equal(page.initializations(), 1);
+});
+
+test("playground recovers from blocked constructors and initialization transport failures", async () => {
+  for (const options of [
+    { constructorError: "CSP blocked worker" },
+    { postError: (message) => message.kind === "init" },
+  ]) {
+    const page = loadPlayground(options);
+    await finishMainRender(page);
+    assert.equal(page.inputs.length, 1);
+    assert.equal(page.timers.size, 0);
+    if (page.workers.length) assert.equal(page.workers[0].terminated, true);
+  }
+});
+
+test("playground handles init failure without requestId, crashes, decode errors and timeouts", async () => {
+  const fail = [
+    (page) => page.workers[0].emit({ kind: "failed", reason: "WASM unavailable" }),
+    (page) => page.workers[0].onerror({ message: "worker crashed" }),
+    (page) => page.workers[0].onmessageerror(),
+    (page) => page.runTimers(10000),
+  ];
+  for (const trigger of fail) {
+    const page = loadPlayground();
+    trigger(page);
+    await finishMainRender(page);
+    assert.equal(page.inputs.length, 1);
+    assert.equal(page.workers[0].terminated, true);
+    assert.equal(page.timers.size, 0);
+  }
+});
+
+test("playground waits for worker readiness and sends only current source", () => {
+  const page = loadPlayground();
+  page.edit("obsolete");
+  page.edit("latest");
+  assert.deepEqual(page.workers[0].messages.map((msg) => msg.kind), ["init"]);
+  page.ready();
+  const renders = page.workers[0].messages.filter((msg) => msg.kind === "render");
+  assert.equal(renders.length, 1);
+  assert.equal(renders[0].input, "latest");
+  assert.equal(page.imports.length, 0);
+  assert.equal(page.timers.size, 0);
+});
+
+test("playground discards stale responses and cancels the previous request on edit", () => {
+  const page = loadPlayground();
+  page.ready();
+  const first = page.workers[0].messages.at(-1);
+  page.edit("latest");
+  const second = page.workers[0].messages.at(-1);
+  assert.equal(page.workers[0].messages.at(-2).kind, "cancel");
+  assert.equal(page.workers[0].messages.at(-2).requestId, first.requestId);
+  page.workers[0].emit({ kind: "completed", requestId: second.requestId, svg: "<svg>latest</svg>" });
+  page.workers[0].emit({ kind: "completed", requestId: first.requestId, svg: "<svg>obsolete</svg>" });
+  assert.equal(page.elements.out.innerHTML, "<svg>latest</svg>");
+  page.workers[0].emit({ kind: "completed", requestId: second.requestId, svg: "" });
+  assert.equal(page.elements.out.innerHTML, "");
+});
+
+test("playground recovers latest source after a worker crash and ignores its late events", async () => {
+  const page = loadPlayground();
+  page.ready();
+  page.edit("latest input");
+  const requestId = page.workers[0].messages.at(-1).requestId;
+  page.workers[0].onerror({ message: "worker crashed" });
+  await finishMainRender(page);
+  page.workers[0].emit({ kind: "completed", requestId, svg: "stale worker SVG" });
+  page.workers[0].onerror({ message: "late error" });
+  assert.deepEqual(page.inputs, ["latest input"]);
+  assert.equal(page.elements.out.innerHTML, "<svg>latest input</svg>");
+  assert.equal(page.imports.length, 1);
+});
+
+test("playground coalesces edits during main WASM startup and retries failed initialization", async () => {
+  const initialized = deferred();
+  const page = loadPlayground({ noWorker: true, initialize: () => initialized.promise });
+  page.edit("obsolete");
+  page.edit("latest");
+  await flushMicrotasks();
+  assert.equal(page.initializations(), 1);
+  assert.deepEqual(page.inputs, []);
+  initialized.resolve();
+  await finishMainRender(page);
+  assert.deepEqual(page.inputs, ["latest"]);
+
+  const retry = loadPlayground({ noWorker: true, initialize: (attempt) => {
+    if (attempt === 1) throw new Error("WASM download interrupted");
+  } });
+  await finishMainRender(retry);
+  assert.match(retry.elements.status.textContent, /retry/);
+  retry.edit("retry input");
+  await finishMainRender(retry);
+  assert.deepEqual(retry.inputs, ["retry input"]);
+  assert.equal(retry.initializations(), 2);
+});
+
+test("playground retains worker SVG rendering when canvas transfer fails", () => {
+  const page = loadPlayground({ transfer: () => { throw new Error("transfer refused"); } });
+  const init = page.workers[0].messages[0];
+  assert.equal(init.capabilities.canvasTransferred, false);
+  assert.equal(init.transfer.length, 0);
+  page.ready();
+  assert.equal(page.workers[0].terminated, false);
+  assert.equal(page.imports.length, 0);
+  assert.equal(page.elements.canvas.removed, true);
+});
+
+test("playground reports diagram errors without changing a healthy rendering transport", () => {
+  const page = loadPlayground();
+  page.ready();
+  const requestId = page.workers[0].messages.at(-1).requestId;
+  page.workers[0].emit({ kind: "failed", requestId, reason: "diagram parse failed" });
+  assert.match(page.elements.log.children.at(-1).textContent, /diagram parse failed/);
+  assert.equal(page.imports.length, 0);
+  assert.equal(page.workers[0].terminated, false);
+});
+
+test("playground teardown stops the worker and discards queued fallback work", async () => {
+  const page = loadPlayground();
+  page.listeners.pagehide({ persisted: true });
+  assert.equal(page.workers[0].terminated, false);
+  page.listeners.pagehide({ persisted: false });
+  page.ready();
+  assert.equal(page.workers[0].terminated, true);
+  assert.equal(page.workers[0].messages.length, 1);
+  assert.equal(page.timers.size, 0);
+
+  const fallback = loadPlayground({ noWorker: true });
+  await flushMicrotasks();
+  fallback.listeners.pagehide({ persisted: false });
+  await finishMainRender(fallback);
+  assert.deepEqual(fallback.inputs, []);
 });

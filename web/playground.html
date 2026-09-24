@@ -4,16 +4,11 @@
 <!--
   Sample integration for bd-2u0.6 scope item 5.
 
-  It exists to demonstrate the three things the worker path is FOR, so each is visible rather than
-  described:
+  Worker requests use the Rust coordinator's protocol, with diagnostics and timings forwarded
+  unchanged. The page reports its actual rendering target and falls back to main-thread SVG when
+  workers cannot run. Main-thread rendering is synchronous; it is not an off-thread measurement.
 
-    1. Typing does not block. Every keystroke posts a new request; the Rust coordinator supersedes
-       the in-flight one, and the log shows the superseded ids being dropped instead of rendered.
-    2. The target is chosen, not assumed. The capability probe below feeds the same decision the
-       Rust `choose_canvas_target` makes, and the chosen target is displayed.
-    3. Diagnostics and timings come back verbatim from the module, not re-derived in JS.
-
-  Serve this directory over HTTP; ES module workers and wasm do not load from file:// URLs.
+  Serve the repository root over HTTP; ES module workers and wasm do not load from file:// URLs.
 -->
 <style>
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
@@ -32,7 +27,7 @@
   c -.-> a</textarea>
 
 <div id="right">
-  <div id="status">starting…</div>
+  <div id="status" role="status">starting…</div>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
@@ -42,89 +37,46 @@
   const outEl = document.getElementById("out");
   const logEl = document.getElementById("log");
   const statusEl = document.getElementById("status");
+  const canvasEl = document.getElementById("canvas");
 
   // This page lives in `web/`, while the shipped wasm-bindgen package is rooted at `pkg/`.
-  // Keep the URL browser-relative: workers receive an absolute URL, so they must not guess a
-  // second package location relative to their own script.
   const MODULE_URL = new URL("../pkg/frankenmermaid.js", import.meta.url).href;
+  const INIT_TIMEOUT_MS = 10000;
+  let worker = null;
+  let workerReady = false;
+  let initTimer = null;
+  let mainThread = false;
+  let mainModulePromise = null;
+  let disposed = false;
+  let nextRequestId = 1;
+  let liveRequestId = 0;
+  let startedAt = 0;
 
   function log(text, cls) {
     const line = document.createElement("div");
     if (cls) line.className = cls;
     line.textContent = text;
     logEl.append(line);
+    while (logEl.childElementCount > 200) logEl.firstElementChild.remove();
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // The same inputs `HostCapabilities` carries in Rust. Probed, never assumed: a browser can expose
-  // OffscreenCanvas and still refuse the transfer, and a canvas may be transferred only once.
-  const capabilities = {
-    offscreenCanvas: typeof OffscreenCanvas !== "undefined",
-    worker: typeof Worker !== "undefined",
-    canvasTransferred: false,
-  };
-
-  // ATTEMPT the transfer rather than inferring it from feature detection. `transferControlToOffscreen`
-  // can exist and still throw, and a canvas may be transferred only ONCE per element — so whether
-  // the transfer HAPPENED is a different fact from whether the API is present, and it is the fact
-  // the Rust decision actually consumes.
-  const canvasEl = document.getElementById("canvas");
-  let transferred = null;
-  if (capabilities.offscreenCanvas && typeof canvasEl.transferControlToOffscreen === "function") {
-    try {
-      transferred = canvasEl.transferControlToOffscreen();
-      capabilities.canvasTransferred = true;
-    } catch (error) {
-      // Not fatal: the worker still runs parse and layout, which is most of the win.
-      log(`transferControlToOffscreen failed, falling back to SVG in worker: ${error}`, "warn");
-    }
-  }
-
-  if (!capabilities.worker) {
-    // Deliberately explicit rather than a silent main-thread render: the whole point of the page is
-    // to show which path ran, and a quiet fallback would misrepresent the measurement.
-    statusEl.textContent = "no Worker support — this page cannot demonstrate the off-main-thread path";
-    log("Worker unavailable; a real app would fall back to a main-thread render here.", "warn");
-    throw new Error("worker unavailable");
-  }
-
-  const worker = new Worker(new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
-
-  let nextRequestId = 1;
-  const started = new Map();
-
-  worker.onmessage = (event) => {
-    const msg = event.data;
-
-    if (msg.kind === "ready") {
-      statusEl.textContent =
-        `worker ready — chose ${msg.requested}, running ${msg.target}` +
-        (msg.requested === msg.target ? "" : " (the transfer did not match the decision)");
-      // Once the canvas is transferred the page may no longer touch it, so the SVG sink is removed
-      // rather than left to be overwritten — writing innerHTML over a transferred canvas throws.
-      if (msg.target !== "offscreenInWorker") canvasEl.remove();
-      render();
-      return;
-    }
-
-    const startedAt = started.get(msg.requestId);
-    const roundTrip = startedAt === undefined ? null : Math.round(performance.now() - startedAt);
-    started.delete(msg.requestId);
-
+  function receive(msg) {
+    // The Rust coordinator owns render scheduling. This is the UI commit boundary: a response
+    // already in transit must not replace the preview after a newer edit, even before it renders.
+    if (disposed || msg.requestId !== liveRequestId) return;
+    const roundTrip = Math.round(performance.now() - startedAt);
     switch (msg.kind) {
       case "completed":
-        // Only the SVG path writes into the page; the offscreen path has already drawn itself.
-        if (msg.svg) outEl.innerHTML = msg.svg;
+        if (typeof msg.svg === "string") outEl.innerHTML = msg.svg;
         log(
           `#${msg.requestId} completed in ${roundTrip}ms` +
             (msg.timings ? ` (parse ${msg.timings.parseMs}ms, layout ${msg.timings.layoutMs}ms, render ${msg.timings.renderMs}ms)` : "") +
             (msg.nodeCount !== undefined ? ` — ${msg.nodeCount} nodes, ${msg.edgeCount} edges` : ""),
         );
-        // Verbatim from the module: same severities, messages and spans the CLI prints.
         for (const d of msg.diagnostics || []) log(`  ${d.severity}: ${d.message}`, "warn");
         break;
       case "noReply":
-        // The coordinator dropped it — superseded by a newer keystroke, or already cancelled.
         log(`#${msg.requestId} superseded`, "warn");
         break;
       case "failed":
@@ -133,24 +85,152 @@
       default:
         log(`unexpected message: ${JSON.stringify(msg)}`, "err");
     }
-  };
-
-  worker.onerror = (event) => log(`worker error: ${event.message}`, "err");
-
-  // The canvas is a TRANSFERABLE: it must be listed in the second argument or it is structured-
-  // cloned instead of moved, and the worker would draw into a copy nobody can see.
-  worker.postMessage(
-    { kind: "init", moduleUrl: MODULE_URL, capabilities, canvas: transferred },
-    transferred ? [transferred] : [],
-  );
-
-  function render() {
-    const requestId = nextRequestId++;
-    started.set(requestId, performance.now());
-    // No debounce, on purpose: superseding IS the feature, so the page exercises it rather than
-    // hiding it behind a timer. A production integration would still debounce.
-    worker.postMessage({ kind: "render", requestId, input: srcEl.value });
   }
 
+  function ensureMainModule() {
+    if (!mainModulePromise) {
+      mainModulePromise = (async () => {
+        const module = await import("../pkg/frankenmermaid.js");
+        if (module.default) await module.default();
+        return module;
+      })().catch((error) => {
+        mainModulePromise = null;
+        throw error;
+      });
+    }
+    return mainModulePromise;
+  }
+
+  async function renderOnMain(requestId, input) {
+    try {
+      const module = await ensureMainModule();
+      if (disposed || requestId !== liveRequestId) return;
+      // Allow input/paint events before the synchronous fallback. This cannot interrupt WASM
+      // once rendering starts; queued obsolete inputs are discarded before they enter it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (disposed || requestId !== liveRequestId) return;
+      statusEl.textContent = "main-thread SVG fallback — rendering is synchronous";
+      const response = module.workerHandleMessage(JSON.stringify({ kind: "render", requestId, input }));
+      receive(response == null ? { kind: "noReply", requestId } : JSON.parse(response));
+    } catch (error) {
+      if (disposed || requestId !== liveRequestId) return;
+      statusEl.textContent = "render unavailable — edit the source to retry";
+      receive({ kind: "failed", requestId, reason: String(error.message || error) });
+    }
+  }
+
+  function fallBack(reason) {
+    if (disposed || mainThread) return;
+    const failedWorker = worker;
+    worker = null; // Ignore late events before terminating or starting the alternate renderer.
+    workerReady = false;
+    clearTimeout(initTimer);
+    initTimer = null;
+    if (failedWorker) failedWorker.terminate();
+    mainThread = true;
+    canvasEl.remove();
+    statusEl.textContent = "starting main-thread SVG fallback…";
+    log(`worker unavailable; using main-thread SVG: ${reason}`, "warn");
+    render();
+  }
+
+  function render() {
+    if (disposed) return;
+    const previousId = liveRequestId;
+    const requestId = nextRequestId++;
+    liveRequestId = requestId;
+    startedAt = performance.now();
+    if (mainThread) {
+      void renderOnMain(requestId, srcEl.value);
+    } else if (workerReady) {
+      try {
+        if (previousId) worker.postMessage({ kind: "cancel", requestId: previousId });
+        worker.postMessage({ kind: "render", requestId, input: srcEl.value });
+      } catch (error) {
+        fallBack(error.message || error);
+      }
+    }
+    // Before readiness, remember only the latest edit. The ready handler reads the current text.
+  }
+
+  function startWorker() {
+    if (typeof Worker === "undefined") {
+      fallBack("Worker API not supported");
+      return;
+    }
+    try {
+      const instance = new Worker(new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
+      worker = instance;
+      instance.onmessage = (event) => {
+        if (disposed || worker !== instance) return;
+        const msg = event.data;
+        if (!msg || typeof msg !== "object") {
+          fallBack("invalid worker response");
+          return;
+        }
+        if (msg.kind === "ready") {
+          if (workerReady) return;
+          if (msg.target !== "offscreenInWorker" && msg.target !== "svgInWorker") {
+            fallBack(`unsupported worker target: ${msg.target}`);
+            return;
+          }
+          clearTimeout(initTimer);
+          initTimer = null;
+          workerReady = true;
+          statusEl.textContent = `worker ready — chose ${msg.requested}, running ${msg.target}`;
+          if (msg.target !== "offscreenInWorker") canvasEl.remove();
+          if (msg.fallbackReason) log(msg.fallbackReason, "warn");
+          render();
+          return;
+        }
+        // Initialization errors have no render requestId and must be handled before stale checks.
+        if (msg.kind === "failed" && (!workerReady || msg.requestId == null)) {
+          fallBack(msg.reason || "initialization failed");
+          return;
+        }
+        receive(msg);
+      };
+      instance.onerror = (event) => {
+        if (worker === instance) fallBack(event.message || "worker crashed");
+      };
+      instance.onmessageerror = () => {
+        if (worker === instance) fallBack("worker response could not be decoded");
+      };
+
+      const capabilities = {
+        offscreenCanvas: typeof OffscreenCanvas !== "undefined",
+        worker: true,
+        canvasTransferred: false,
+      };
+      let transferred = null;
+      if (capabilities.offscreenCanvas && typeof canvasEl.transferControlToOffscreen === "function") {
+        try {
+          transferred = canvasEl.transferControlToOffscreen();
+          capabilities.canvasTransferred = true;
+        } catch (error) {
+          log(`transferControlToOffscreen failed, falling back to SVG in worker: ${error}`, "warn");
+        }
+      }
+      initTimer = setTimeout(() => {
+        if (worker === instance && !workerReady) fallBack("worker initialization timed out");
+      }, INIT_TIMEOUT_MS);
+      instance.postMessage(
+        { kind: "init", moduleUrl: MODULE_URL, capabilities, canvas: transferred },
+        transferred ? [transferred] : [],
+      );
+    } catch (error) {
+      fallBack(error.message || error);
+    }
+  }
+
+  // No debounce: this sample exercises supersession rather than hiding it behind a timer.
   srcEl.addEventListener("input", render);
+  globalThis.addEventListener("pagehide", (event) => {
+    if (event.persisted) return; // A back/forward-cache restore resumes this instance.
+    disposed = true;
+    clearTimeout(initTimer);
+    if (worker) worker.terminate();
+    worker = null;
+  });
+  startWorker();
 </script>
