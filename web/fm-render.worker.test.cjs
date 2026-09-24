@@ -219,7 +219,7 @@ test("failed WASM initialization rejects all waiters and permits a clean retry",
   ]);
 
   await initializeOffscreenWorker(worker);
-  assert.equal(initializations, 2);
+  assert.equal(initializations, 2, "a rejected initializer must not poison the module cache");
   assert.equal(worker.imports.length, 2);
   assert.equal(worker.messages.at(-1).kind, "ready");
 });
@@ -512,4 +512,128 @@ test("playground teardown stops the worker and discards queued fallback work", a
   fallback.listeners.pagehide({ persisted: false });
   await finishMainRender(fallback);
   assert.deepEqual(fallback.inputs, []);
+});
+
+test("canvas setup failure retains worker SVG rendering and initialization config", async () => {
+  const requests = [];
+  const worker = loadWorker(null, {
+    module: {
+      Diagram: { fromOffscreenCanvas: () => { throw new Error("2D context unavailable"); } },
+      workerHandleMessage: (json) => {
+        const request = JSON.parse(json);
+        requests.push(request);
+        return JSON.stringify({ kind: "completed", requestId: request.requestId, svg: "<svg/>" });
+      },
+    },
+  });
+  await worker.onMessage({ data: {
+    kind: "init", canvas: {}, config: { theme: "dark" },
+    capabilities: { offscreenCanvas: true, worker: true, canvasTransferred: true },
+  } });
+  assert.equal(worker.messages.at(-1).kind, "ready");
+  assert.equal(worker.messages.at(-1).target, "svgInWorker");
+  assert.match(worker.messages.at(-1).fallbackReason, /2D context unavailable/);
+
+  for (const message of [
+    { kind: "render", requestId: 1, input: "default config" },
+    { kind: "render", requestId: 2, input: "override config", configJson: "{}" },
+  ]) {
+    const render = worker.onMessage({ data: message });
+    await flushMicrotasks();
+    worker.timers.shift()();
+    await render;
+    assert.equal(worker.messages.at(-1).kind, "completed");
+  }
+  assert.deepEqual(JSON.parse(requests[0].configJson), { theme: "dark" });
+  assert.equal(requests[1].configJson, "{}");
+});
+
+test("canvas cancellation cannot revive a queued render when an ID is reused", async () => {
+  const inputs = [];
+  const worker = loadWorker({ render: (input) => inputs.push(input) });
+  await initializeOffscreenWorker(worker);
+  const first = worker.onMessage({ data: { kind: "render", requestId: 8, input: "cancelled" } });
+  await flushMicrotasks();
+  await worker.onMessage({ data: { kind: "cancel", requestId: 8 } });
+  const second = worker.onMessage({ data: { kind: "render", requestId: 8, input: "replacement" } });
+  await flushMicrotasks();
+  worker.timers.shift()();
+  await flushMicrotasks();
+  worker.timers.shift()();
+  await Promise.all([first, second]);
+  assert.deepEqual(inputs, ["replacement"]);
+  assert.deepEqual(worker.messages.map((msg) => msg.kind), ["ready", "noReply", "completed"]);
+});
+
+test("canvas reinitialization releases old renderers and invalidates queued draws", async () => {
+  const inputs = [];
+  const freed = [];
+  let created = 0;
+  const worker = loadWorker(null, {
+    module: {
+      chooseCanvasTarget: (json) => JSON.stringify({
+        target: JSON.parse(json).canvasTransferred ? "offscreenInWorker" : "svgInWorker",
+      }),
+      Diagram: { fromOffscreenCanvas: () => {
+        const id = ++created;
+        return { free: () => freed.push(id), render: (input) => inputs.push({ id, input }) };
+      } },
+      workerHandleMessage: () => JSON.stringify({ kind: "completed", requestId: 11, svg: "<svg/>" }),
+    },
+  });
+  await initializeOffscreenWorker(worker);
+  const old = worker.onMessage({ data: { kind: "render", requestId: 9, input: "obsolete canvas" } });
+  await flushMicrotasks();
+  await initializeOffscreenWorker(worker);
+  worker.timers.shift()();
+  await old;
+  assert.deepEqual(inputs, []);
+  assert.deepEqual(freed, [1]);
+  assert.equal(worker.messages.at(-1).kind, "noReply");
+
+  const fresh = worker.onMessage({ data: { kind: "render", requestId: 10, input: "new canvas" } });
+  await flushMicrotasks();
+  worker.timers.shift()();
+  await fresh;
+  assert.deepEqual(inputs, [{ id: 2, input: "new canvas" }]);
+  await worker.onMessage({ data: { kind: "init" } });
+  assert.deepEqual(freed, [1, 2]);
+  assert.equal(worker.messages.at(-1).target, "svgInWorker");
+  const svg = worker.onMessage({ data: { kind: "render", requestId: 11, input: "SVG mode" } });
+  await flushMicrotasks();
+  worker.timers.shift()();
+  await svg;
+  assert.equal(worker.messages.at(-1).svg, "<svg/>");
+});
+
+test("canvas rejects negative request IDs without scheduling a draw", async () => {
+  const inputs = [];
+  const worker = loadWorker({ render: (input) => inputs.push(input) });
+  await initializeOffscreenWorker(worker);
+  // Do not await an invalid request before checking timers: the regression wrongly schedules it.
+  const result = worker.onMessage({ data: { kind: "render", requestId: -1, input: "invalid" } });
+  await flushMicrotasks();
+  assert.equal(worker.timers.length, 0);
+  await result;
+  assert.equal(worker.messages.at(-1).kind, "failed");
+  assert.deepEqual(inputs, []);
+});
+
+test("canvas drawing failure does not poison the next render", async () => {
+  const inputs = [];
+  const worker = loadWorker({ render: (input) => {
+    inputs.push(input);
+    if (input === "fail") throw new Error("draw failed");
+    return { ok: true };
+  } });
+  await initializeOffscreenWorker(worker);
+  for (const [requestId, input] of [[12, "fail"], [13, "recover"]]) {
+    const result = worker.onMessage({ data: { kind: "render", requestId, input } });
+    await flushMicrotasks();
+    worker.timers.shift()();
+    await result;
+  }
+  assert.deepEqual(inputs, ["fail", "recover"]);
+  assert.equal(worker.messages.at(-2).kind, "failed");
+  assert.equal(worker.messages.at(-1).kind, "completed");
 });

@@ -15,8 +15,8 @@
 let wasm = null;
 let modulePromise = null;
 let offscreenDiagram = null;
-let pendingOffscreenRequestId = null;
-const cancelledOffscreenRequestIds = new Set();
+let pendingOffscreenRender = null;
+let initConfigJson;
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
@@ -50,34 +50,37 @@ function isOffscreenRenderRequest(message) {
   return (
     message.kind === "render" &&
     Number.isSafeInteger(message.requestId) &&
+    message.requestId >= 0 &&
     typeof message.input === "string"
   );
 }
 
 async function renderOffscreenIfStillLive(message) {
   const { requestId } = message;
-  pendingOffscreenRequestId = requestId;
+  // Use operation identity, not just a caller's id. Reusing an id after cancellation must not
+  // revive the old input, and reinitializing must not draw old work into a replacement canvas.
+  const pending = { requestId, cancelled: false, diagram: offscreenDiagram };
+  pendingOffscreenRender = pending;
 
   // `Diagram.render` is synchronous, so once it starts a later postMessage cannot interrupt it.
   // Yielding BEFORE that call is still load-bearing: rapid typing can replace or cancel this queued
   // request before it draws stale pixels into the transferred canvas.
   await yieldToMessages();
-  if (pendingOffscreenRequestId !== requestId) {
-    if (cancelledOffscreenRequestIds.delete(requestId)) return;
+  if (pendingOffscreenRender !== pending) {
+    if (pending.cancelled) return;
     self.postMessage({ kind: "noReply", requestId });
     return;
   }
 
-  const stats = offscreenDiagram.render(
-    message.input,
-    message.configJson ? JSON.parse(message.configJson) : undefined,
-  );
-  if (pendingOffscreenRequestId !== requestId) {
-    self.postMessage({ kind: "noReply", requestId });
-    return;
+  try {
+    const stats = pending.diagram.render(
+      message.input,
+      message.configJson ? JSON.parse(message.configJson) : undefined,
+    );
+    self.postMessage({ kind: "completed", requestId, target: "offscreenInWorker", stats });
+  } finally {
+    if (pendingOffscreenRender === pending) pendingOffscreenRender = null;
   }
-  pendingOffscreenRequestId = null;
-  self.postMessage({ kind: "completed", requestId, target: "offscreenInWorker", stats });
 }
 
 self.onmessage = async (event) => {
@@ -86,6 +89,11 @@ self.onmessage = async (event) => {
   try {
     if (message.kind === "init") {
       await ensureModule(message.moduleUrl);
+      initConfigJson = message.config == null ? undefined : JSON.stringify(message.config);
+      pendingOffscreenRender = null;
+      const previousDiagram = offscreenDiagram;
+      offscreenDiagram = null;
+      if (previousDiagram) previousDiagram.free();
 
       // THE DECISION IS MADE IN RUST, not here. `chooseCanvasTarget` is the same function the
       // native tests cover; re-deriving the ladder in JavaScript would drift from it, and the drift
@@ -97,9 +105,16 @@ self.onmessage = async (event) => {
       };
       const decision = JSON.parse(wasm.chooseCanvasTarget(JSON.stringify(capabilities)));
 
+      let fallbackReason;
       if (decision.target === "offscreenInWorker" && message.canvas) {
         // The canvas was transferred by the page, so pixels never cross postMessage again.
-        offscreenDiagram = wasm.Diagram.fromOffscreenCanvas(message.canvas, message.config);
+        try {
+          offscreenDiagram = wasm.Diagram.fromOffscreenCanvas(message.canvas, message.config);
+        } catch (error) {
+          // A transferable canvas does not guarantee an available 2D context. Keep parse/layout
+          // off the UI thread when only canvas setup failed; the initialized SVG engine is usable.
+          fallbackReason = `offscreen canvas initialization failed: ${String((error && error.message) || error)}`;
+        }
       }
 
       // Report what was actually set up, not what was asked for: if the transfer arrived but the
@@ -109,6 +124,7 @@ self.onmessage = async (event) => {
         kind: "ready",
         requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
+        ...(fallbackReason ? { fallbackReason } : {}),
       });
       return;
     }
@@ -117,9 +133,9 @@ self.onmessage = async (event) => {
 
     if (offscreenDiagram) {
       if (message.kind === "cancel") {
-        if (pendingOffscreenRequestId === message.requestId) {
-          pendingOffscreenRequestId = null;
-          cancelledOffscreenRequestIds.add(message.requestId);
+        if (pendingOffscreenRender && pendingOffscreenRender.requestId === message.requestId) {
+          pendingOffscreenRender.cancelled = true;
+          pendingOffscreenRender = null;
         }
         self.postMessage({ kind: "noReply", requestId: message.requestId });
         return;
@@ -128,7 +144,7 @@ self.onmessage = async (event) => {
         self.postMessage({
           kind: "failed",
           requestId: message.requestId,
-          reason: "offscreen render requires an integer requestId and string input",
+          reason: "offscreen render requires a non-negative safe integer requestId and string input",
         });
         return;
       }
@@ -143,7 +159,12 @@ self.onmessage = async (event) => {
 
     // `null` means the module decided this message needs no reply — a cancel, or a superseded id.
     // Forwarding a synthetic response here would tell the UI a render finished when none did.
-    const responseJson = wasm.workerHandleMessage(JSON.stringify(message));
+    // Preserve initialization configuration on SVG fallback, while explicit per-render config
+    // remains authoritative. Do not rewrite cancel messages or parse the Rust response in JS.
+    const request = message.kind === "render" && message.configJson == null && initConfigJson !== undefined
+      ? { ...message, configJson: initConfigJson }
+      : message;
+    const responseJson = wasm.workerHandleMessage(JSON.stringify(request));
     if (responseJson === null || responseJson === undefined) {
       self.postMessage({ kind: "noReply", requestId: message.requestId });
       return;
