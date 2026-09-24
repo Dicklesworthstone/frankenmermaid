@@ -11,12 +11,75 @@
 //
 // JSON text on both sides is what lets the same payload be used from the main thread, from this
 // worker, and from a native Rust test.
+//
+// Source authoring has two additional host messages (bd-1t7l.1): `sourceRender` returns
+// SVG plus its matching ParseLens bindings; `sourceEdit` returns a Rust-applied source edit.
+// These use the existing WASM exports, not a second parser. Their pre-execution queue is
+// separate from the Rust render protocol, which has no source-map/edit response variant.
 
 let wasm = null;
 let modulePromise = null;
 let offscreenDiagram = null;
 let pendingOffscreenRender = null;
 let initConfigJson;
+let pendingSourceOperation = null;
+
+function releaseSourceOperation() {
+  if (!pendingSourceOperation) return;
+  const { requestId } = pendingSourceOperation;
+  pendingSourceOperation = null;
+  self.postMessage({ kind: "noReply", requestId });
+}
+
+// The editor needs bindings and warnings, not a second copy of the entire IR across the
+// worker boundary. Preserve the Rust-computed ranges and snippets verbatim.
+function sourceSnapshot(snapshot) {
+  if (!Array.isArray(snapshot?.bindings)) throw new Error("ParseLens did not return source bindings");
+  return { bindings: snapshot.bindings, parsed: { warnings: snapshot.parsed?.warnings || [] } };
+}
+
+async function handleSourceOperation(message) {
+  const { kind, requestId, input } = message;
+  if (!Number.isSafeInteger(requestId) || requestId < 0 || typeof input !== "string" ||
+      (kind === "sourceEdit" &&
+       (typeof message.elementId !== "string" || !message.elementId || typeof message.replacement !== "string"))) {
+    throw new Error("source operations require a non-negative safe integer requestId, string input, and an elementId/replacement for edits");
+  }
+  // Claim at message arrival, BEFORE module loading yields. A burst during a cold import
+  // retains just the newest operation. Object identity also handles cancellation + ID reuse.
+  releaseSourceOperation();
+  const operation = { requestId };
+  pendingSourceOperation = operation;
+  try {
+    await ensureModule(message.moduleUrl);
+    if (pendingSourceOperation !== operation) return;
+    await yieldToMessages();
+    if (pendingSourceOperation !== operation) return;
+
+    if (kind === "sourceRender") {
+      const configJson = message.configJson ?? initConfigJson;
+      const config = configJson == null ? undefined : JSON.parse(configJson);
+      const snapshot = sourceSnapshot(wasm.parseLens(input));
+      const svg = wasm.renderSvg(input, config);
+      if (typeof svg !== "string") throw new Error("The renderer did not return SVG");
+      self.postMessage({ kind: "sourceRendered", requestId, svg, snapshot });
+    } else {
+      const response = wasm.applyParseLensEdit(input, message.elementId, message.replacement);
+      if (typeof response?.result?.updatedSource !== "string") {
+        throw new Error("ParseLens did not return an edited source");
+      }
+      self.postMessage({
+        kind: "sourceEdited", requestId,
+        response: { result: response.result, snapshot: sourceSnapshot(response.snapshot) },
+      });
+    }
+  } catch (error) {
+    // Superseded import failures must not create a second terminal reply for an old request.
+    if (pendingSourceOperation === operation) throw error;
+  } finally {
+    if (pendingSourceOperation === operation) pendingSourceOperation = null;
+  }
+}
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
@@ -87,7 +150,16 @@ self.onmessage = async (event) => {
   const message = event.data || {};
 
   try {
+    if (message.kind === "sourceRender" || message.kind === "sourceEdit") {
+      await handleSourceOperation(message);
+      return;
+    }
+    if (message.kind === "cancel" && pendingSourceOperation?.requestId === message.requestId) {
+      releaseSourceOperation();
+      return;
+    }
     if (message.kind === "init") {
+      releaseSourceOperation();
       await ensureModule(message.moduleUrl);
       initConfigJson = message.config == null ? undefined : JSON.stringify(message.config);
       pendingOffscreenRender = null;
@@ -124,6 +196,7 @@ self.onmessage = async (event) => {
         kind: "ready",
         requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
+        sourceEditing: ["parseLens", "renderSvg", "applyParseLensEdit"].every((name) => typeof wasm[name] === "function"),
         ...(fallbackReason ? { fallbackReason } : {}),
       });
       return;
