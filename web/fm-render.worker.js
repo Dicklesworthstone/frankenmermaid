@@ -13,23 +13,30 @@
 // worker, and from a native Rust test.
 
 let wasm = null;
+let modulePromise = null;
 let offscreenDiagram = null;
 let pendingOffscreenRequestId = null;
 const cancelledOffscreenRequestIds = new Set();
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
-  if (
-    !moduleUrl ||
-    moduleUrl === "../pkg/frankenmermaid.js" ||
-    moduleUrl.endsWith("frankenmermaid.js")
-  ) {
-    wasm = await import("../pkg/frankenmermaid.js");
-  } else {
-    wasm = await import(/* @vite-ignore */ `${moduleUrl}`);
+  // onmessage handlers overlap while imports and WASM initialization await I/O. Share the
+  // entire operation, not just the imported namespace: its exports are unusable until default()
+  // completes. Publish only a ready module, and let a failed attempt be retried.
+  if (!modulePromise) {
+    modulePromise = (async () => {
+      const module = !moduleUrl || moduleUrl === "../pkg/frankenmermaid.js"
+        ? await import("../pkg/frankenmermaid.js")
+        : await import(/* @vite-ignore */ `${moduleUrl}`);
+      if (module.default) await module.default();
+      wasm = module;
+      return module;
+    })().catch((error) => {
+      modulePromise = null;
+      throw error;
+    });
   }
-  if (wasm.default) await wasm.default();
-  return wasm;
+  return modulePromise;
 }
 
 // A render is scheduled as a macrotask so a `cancel` posted mid-render is actually delivered.
