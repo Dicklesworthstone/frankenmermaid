@@ -2,10 +2,12 @@
 
 Run: python web/fm-source-editor.browser.test.py
 Requires Playwright and Chromium (PLAYWRIGHT_CHROMIUM_EXECUTABLE may override its path).
-Tests mountSourceEditor with real browser events, not worker startup or real WASM.
-No navigation, network, Rust compilation, or fake files under pkg/ are used.
+Tests real DOM events with explicit WASM, download, and worker-transport fixtures.
+Real cross-thread execution of the production worker is tested separately by the Node
+suite. No external network, Rust compilation, or fake files under pkg/ are used.
 """
 import os
+import json
 from pathlib import Path
 import shutil
 import unittest
@@ -262,6 +264,167 @@ class SourceEditorBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator("#src").input_value(), source)
         self.assertEqual(self.page.evaluate("globalThis.mutationCalls || 0"), 0)
         self.assertTrue(self.page.locator("#source-editor-undo").is_disabled())
+
+    def open_worker_editor(self, *, playground=False, blocked=False):
+        # Real DOM and production client; the worker transport and WASM are explicit fixtures.
+        # Delayed replies are deliberately delivered after cancellation to exercise the UI
+        # commit boundary, independently of the worker queue tests in the Node suite.
+        self.page.evaluate("globalThis.editor?.dispose()")
+        self.page.evaluate(r'''() => {
+          globalThis.mainModuleLoads = 0;
+          globalThis.savedFiles = [];
+          globalThis.delayedKind = null;
+          globalThis.transportCalls = [];
+          class FixtureWorker {
+            constructor() { globalThis.authoringWorker = this; this.terminated = false; }
+            terminate() { this.terminated = true; }
+            postMessage(message) {
+              transportCalls.push(message);
+              if (message.kind === 'cancel') return; // A response may already be in transit.
+              const delayed = (message.replacement || message.input || '').includes('DELAY_');
+              if (delayed) globalThis.delayedKind = message.kind;
+              setTimeout(() => {
+                if (this.terminated) return;
+                let data;
+                try {
+                  if (message.kind === 'init') {
+                    data = {kind: 'ready', target: 'svgInWorker', requested: 'svgInWorker', sourceEditing: true};
+                  } else if (message.kind === 'sourceRender') {
+                    data = {kind: 'sourceRendered', requestId: message.requestId,
+                      snapshot: fixtureApi.parseLens(message.input), svg: fixtureApi.renderSvg(message.input)};
+                  } else if (message.kind === 'sourceEdit') {
+                    const response = fixtureApi.applyParseLensEdit(message.input, message.elementId, message.replacement);
+                    if (message.replacement.includes('CORRUPT')) response.result.updatedSource += 'outside selected span';
+                    data = {kind: 'sourceEdited', requestId: message.requestId, response};
+                  } else {
+                    data = JSON.parse(fixtureApi.workerHandleMessage(JSON.stringify(message)));
+                  }
+                } catch (error) { data = {kind: 'failed', requestId: message.requestId, reason: error.message}; }
+                this.onmessage?.({data});
+              }, delayed ? 250 : 0);
+            }
+          }
+          globalThis.FixtureWorker = FixtureWorker;
+        }''')
+        if playground:
+            # Exercise the actual page script. Only browser/WASM transport URLs are changed.
+            urls = self.page.evaluate("""({host, fixture}) => {
+              const blob = text => URL.createObjectURL(new Blob([text], {type: 'text/javascript'}));
+              return {host: blob(host), wasm: blob(fixture)};
+            }""", {"host": (ROOT / "web/fm-source-editor.js").read_text(), "fixture": WASM_FIXTURE})
+            self.page.evaluate("globalThis.Worker = FixtureWorker; globalThis.OffscreenCanvas = undefined")
+            entry = (ROOT / "web/playground.html").read_text()
+            entry = entry.replace('import.meta.url', json.dumps("https://example.invalid/web/playground.html"))
+            entry = entry.replace('import("../pkg/frankenmermaid.js")', f'import({json.dumps(urls["wasm"])})')
+            entry = entry.replace('import("./fm-source-editor.js")', f'import({json.dumps(urls["host"])})')
+            entry = entry.replace('workerOptions: { moduleUrl: MODULE_URL }',
+                                  'workerOptions: { moduleUrl: MODULE_URL, workerUrl: "https://example.invalid/worker.js" }')
+            self.page.set_content(entry)
+            self.page.locator("#edit-source").click()
+        else:
+            self.page.set_content('''<textarea id="src">flowchart TD
+ a[Alpha] --> b[Beta]</textarea><section id="source-editor"></section><div id="out" style="width:400px"></div>''')
+            self.page.evaluate("""blocked => {
+              const sourceEl = document.querySelector('#src');
+              globalThis.editor = editorModule.mountSourceEditor({sourceEl,
+                outEl: document.querySelector('#out'), panelEl: document.querySelector('#source-editor'),
+                workerOptions: {WorkerClass: blocked ? null : FixtureWorker, workerUrl: 'https://example.invalid/worker.js'},
+                loadModule: async () => { mainModuleLoads++; return fixtureApi; },
+                onChange: () => editor.render(sourceEl.value), saveFile: artifact => savedFiles.push(artifact)});
+              sourceEl.addEventListener('input', () => editor.render(sourceEl.value));
+              editor.render(sourceEl.value);
+            }""", blocked)
+        self.page.wait_for_function("document.querySelector('#source-editor-elements')?.disabled === false")
+
+    def test_worker_transport_edit_history_and_export_without_fallback(self):
+        self.open_worker_editor()
+        original = self.page.locator("#src").input_value()
+        self.assertNotIn("fallback", self.page.locator("#source-editor-message").text_content())
+        self.page.locator("#fm-node-0 rect").click()
+        self.page.locator("#source-editor-snippet").fill("[雪 🦀]")
+        self.page.locator("#source-editor-apply").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[雪 🦀]'")
+        self.assertEqual(self.page.locator("#src").input_value(), original.replace("[Alpha]", "[雪 🦀]"))
+        self.page.locator("#source-editor-save-svg").click()
+        self.assertIn("[雪 🦀]", self.page.evaluate("savedFiles[0].text"))
+        self.assertNotIn("data-source-editable", self.page.evaluate("savedFiles[0].text"))
+        self.page.locator("#source-editor-undo").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Alpha]'")
+        self.page.locator("#source-editor-redo").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[雪 🦀]'")
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 0)
+
+    def test_late_worker_preview_cannot_replace_newer_source(self):
+        self.open_worker_editor()
+        self.page.locator("#src").fill("a[DELAY_RENDER]")
+        self.page.wait_for_function("delayedKind === 'sourceRender'")
+        self.page.locator("#src").fill("a[Latest]")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Latest]'")
+        self.page.wait_for_timeout(300) # The cancelled response is still delivered by the fixture.
+        self.assertEqual(self.page.locator("#fm-node-0 text").text_content(), "[Latest]")
+        self.assertEqual(self.page.locator("#src").input_value(), "a[Latest]")
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 0)
+
+    def test_late_worker_edit_cannot_overwrite_typing_or_enter_undo_history(self):
+        self.open_worker_editor()
+        original = self.page.locator("#src").input_value()
+        self.page.locator("#fm-node-0 rect").click()
+        self.page.locator("#source-editor-snippet").fill("[DELAY_EDIT]")
+        self.page.locator("#source-editor-apply").click()
+        self.page.wait_for_function("delayedKind === 'sourceEdit'")
+        self.assertTrue(self.page.locator("#source-editor-apply").is_disabled())
+        self.page.locator("#src").fill("a[Typed while editing]")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Typed while editing]'")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.page.locator("#src").input_value(), "a[Typed while editing]")
+        self.page.locator("#source-editor-undo").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Alpha]'")
+        self.assertEqual(self.page.locator("#src").input_value(), original)
+
+    def test_worker_errors_preserve_source_and_do_not_silently_switch_to_main(self):
+        self.open_worker_editor()
+        original = self.page.locator("#src").input_value()
+        self.page.locator("#fm-node-0 rect").click()
+        self.page.locator("#source-editor-snippet").fill("[CORRUPT]")
+        self.page.locator("#source-editor-apply").click()
+        self.page.wait_for_function("document.querySelector('#source-editor-message').textContent.includes('outside')")
+        self.assertEqual(self.page.locator("#src").input_value(), original)
+        self.page.locator("#src").fill("PARSER_FAIL")
+        self.page.wait_for_function("document.querySelector('#source-editor-message').textContent.includes('fixture parser failed')")
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 0)
+        self.assertTrue(self.page.locator("#source-editor-save-svg").is_disabled())
+        self.page.locator("#source-editor-undo").click()
+        self.page.wait_for_function("document.querySelector('#source-editor-elements').disabled === false")
+        self.assertEqual(self.page.locator("#src").input_value(), original)
+
+    def test_worker_unavailable_and_runtime_transport_failure_recover_current_source(self):
+        self.open_worker_editor(blocked=True)
+        self.assertIn("main-thread SVG fallback", self.page.locator("#source-editor-message").text_content())
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 1)
+        self.page.locator("#src").fill("a[Still works]")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Still works]'")
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 1)
+        self.open_worker_editor()
+        self.page.evaluate("authoringWorker.onerror({message: 'simulated transport crash'})")
+        self.page.locator("#src").fill("a[Recovered]")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Recovered]'")
+        self.assertIn("main-thread SVG fallback", self.page.locator("#source-editor-message").text_content())
+        self.assertIn("simulated transport crash", self.page.locator("#source-editor-message").text_content())
+        self.assertEqual(self.page.evaluate("mainModuleLoads"), 1)
+
+    def test_actual_playground_uses_worker_authoring_messages(self):
+        self.open_worker_editor(playground=True)
+        self.assertIn("source worker", self.page.locator("#source-editor-message").text_content())
+        self.assertNotIn("fallback", self.page.locator("#source-editor-message").text_content())
+        self.assertIn("worker-first", self.page.locator("#status").text_content())
+        self.assertGreater(self.page.evaluate("transportCalls.filter(m => m.kind === 'sourceRender').length"), 0)
+        self.page.locator("#src").fill("a[From playground]")
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[From playground]'")
+        self.page.locator("#fm-node-0 rect").click()
+        self.page.locator("#source-editor-snippet").fill("[Edited in playground]")
+        self.page.locator("#source-editor-apply").click()
+        self.page.wait_for_function("document.querySelector('#fm-node-0 text')?.textContent === '[Edited in playground]'")
+        self.assertEqual(self.page.evaluate("transportCalls.filter(m => m.kind === 'sourceEdit').length"), 1)
 
 
 if __name__ == "__main__":

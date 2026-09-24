@@ -245,6 +245,7 @@
       sourceEditor = mountSourceEditor({
         sourceEl: srcEl, outEl, panelEl: document.getElementById("source-editor"),
         loadModule: ensureMainModule, onChange: render,
+        workerOptions: { moduleUrl: MODULE_URL },
       });
       // This is an explicit mode change, not a worker failure. Editing needs addressable SVG.
       const previousWorker = worker;
@@ -254,7 +255,7 @@
       if (previousWorker) previousWorker.terminate();
       mainThread = true;
       canvasEl.remove();
-      statusEl.textContent = "SVG source editor — rendering and source edits run on the main thread";
+      statusEl.textContent = "SVG source editor — worker-first; actual rendering target is reported below";
       render();
     } catch (error) {
       button.disabled = false;

@@ -59,8 +59,8 @@ export class SourceEditSession {
   #selection = null;
   #revision = 0;
 
-  constructor(api) {
-    if (typeof api?.parseLens !== "function" || typeof api.applyParseLensEdit !== "function") {
+  constructor(api = null) {
+    if (api !== null && (typeof api?.parseLens !== "function" || typeof api.applyParseLensEdit !== "function")) {
       throw new Error("This WASM build lacks source-editing APIs; rebuild the shipped package.");
     }
     this.#api = api;
@@ -69,7 +69,7 @@ export class SourceEditSession {
   get source() { return this.#source; }
   get bindings() { return [...this.#bindings.values()]; }
 
-  setSource(source) {
+  #reset(source) {
     if (typeof source !== "string") throw new TypeError("Source must be text.");
     // Invalidate BEFORE parsing: a failed parse must never leave the previous document editable.
     this.#revision += 1;
@@ -77,7 +77,18 @@ export class SourceEditSession {
     this.#bindings = new Map();
     this.#source = source;
     byteOffsets(source); // Reject strings WASM's UTF-8 encoder would silently change.
+  }
+
+  setSource(source) {
+    this.#reset(source);
     const snapshot = this.#api.parseLens(source);
+    this.#bindings = checkedBindings(source, snapshot);
+    return snapshot;
+  }
+
+  // Adopt a worker-produced snapshot through the SAME UTF-8/source validation as a local parse.
+  setSnapshot(source, snapshot) {
+    this.#reset(source);
     this.#bindings = checkedBindings(source, snapshot);
     return snapshot;
   }
@@ -96,13 +107,24 @@ export class SourceEditSession {
       .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0] || null;
   }
 
-  replace(selection, replacement) {
+  #checkReplacement(selection, replacement) {
     if (!selection || selection !== this.#selection || selection.revision !== this.#revision) {
       throw new Error("The selection is stale; select the element again before applying an edit.");
     }
     if (typeof replacement !== "string") throw new TypeError("Replacement must be text.");
     byteOffsets(replacement);
+  }
+
+  replace(selection, replacement) {
+    this.#checkReplacement(selection, replacement);
     const response = this.#api.applyParseLensEdit(this.#source, selection.elementId, replacement);
+    return this.replaceWithResponse(selection, replacement, response);
+  }
+
+  // A remote edit is not trusted merely because its request finished. Recheck the selection
+  // and exact splice at the commit boundary, after any intervening typing/selection changes.
+  replaceWithResponse(selection, replacement, response) {
+    this.#checkReplacement(selection, replacement);
     const updated = response?.result?.updatedSource;
     const expected = this.#source.slice(0, selection.start) + replacement + this.#source.slice(selection.end);
     if (updated !== expected) throw new Error("The edit response changed text outside the selected span.");
@@ -114,6 +136,187 @@ export class SourceEditSession {
     this.#revision += 1;
     return updated;
   }
+}
+
+class SourceWorkerUnavailable extends Error {
+  name = "SourceWorkerUnavailable";
+}
+function cancelledOperation() {
+  const error = new Error("Source operation superseded or editor closed.");
+  error.name = "AbortError";
+  return error;
+}
+
+/** A bounded, latest-request-only client for fm-render.worker.js source authoring. */
+export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, workerUrl, moduleUrl,
+  config, initTimeoutMs = 10000, requestTimeoutMs = 60000 } = {}) {
+  if (![initTimeoutMs, requestTimeoutMs].every((value) => Number.isSafeInteger(value) && value > 0)) {
+    throw new RangeError("Worker timeouts must be positive safe integers.");
+  }
+  let worker;
+  try {
+    if (typeof WorkerClass !== "function") throw new Error("Worker API not supported");
+    worker = new WorkerClass(workerUrl || new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
+  } catch (error) { throw new SourceWorkerUnavailable(String(error.message || error)); }
+  let ready = false;
+  let closed = false;
+  let failure = null;
+  let pending = null;
+  let nextId = 1;
+  let initTimer;
+
+  function settle(error, value) {
+    if (!pending) return;
+    const operation = pending;
+    pending = null;
+    clearTimeout(operation.timer);
+    if (error) operation.reject(error);
+    else operation.resolve(value);
+  }
+  function fail(reason) {
+    if (closed || failure) return;
+    failure = new SourceWorkerUnavailable(String(reason));
+    clearTimeout(initTimer);
+    settle(failure);
+    worker.terminate();
+  }
+  function sendPending() {
+    if (!ready || !pending || pending.sent || closed || failure) return;
+    pending.sent = true;
+    pending.timer = setTimeout(() => fail("source worker request timed out"), requestTimeoutMs);
+    try { worker.postMessage(pending.message); }
+    catch (error) { fail(error.message || error); }
+  }
+  function cancel() {
+    if (!pending) return;
+    const operation = pending;
+    settle(cancelledOperation());
+    if (operation.sent && !closed && !failure) {
+      try { worker.postMessage({ kind: "cancel", requestId: operation.message.requestId }); }
+      catch (error) { fail(error.message || error); }
+    }
+  }
+  worker.onmessage = ({ data: message }) => {
+    if (closed || failure) return;
+    if (!message || typeof message !== "object") { fail("invalid source worker response"); return; }
+    if (message.kind === "ready") {
+      if (ready) return;
+      if (message.sourceEditing !== true) { fail("worker package lacks source-editing support"); return; }
+      clearTimeout(initTimer);
+      ready = true;
+      sendPending();
+      return;
+    }
+    if (message.kind === "failed" && (!ready || message.requestId == null)) {
+      fail(message.reason || "source worker initialization failed");
+      return;
+    }
+    if (!pending || message.requestId !== pending.message.requestId) return;
+    if (message.kind === "noReply") { settle(cancelledOperation()); return; }
+    // Engine errors do not trigger synchronous fallback: retrying malformed input on the UI
+    // thread would do the same failing work again and defeat isolation.
+    if (message.kind === "failed") { settle(new Error(message.reason || "source operation failed")); return; }
+    const rendering = pending.message.kind === "sourceRender";
+    const valid = rendering
+      ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
+      : message.kind === "sourceEdited" && typeof message.response?.result?.updatedSource === "string" &&
+        Array.isArray(message.response?.snapshot?.bindings);
+    if (!valid) { fail("mismatched source worker response"); return; }
+    settle(null, rendering ? { svg: message.svg, snapshot: message.snapshot } : message.response);
+  };
+  worker.onerror = (event) => fail(event.message || "source worker crashed");
+  worker.onmessageerror = () => fail("source worker response could not be decoded");
+  initTimer = setTimeout(() => fail("source worker initialization timed out"), initTimeoutMs);
+  try {
+    worker.postMessage({ kind: "init", moduleUrl, config,
+      capabilities: { worker: true, offscreenCanvas: false, canvasTransferred: false } });
+  } catch (error) { fail(error.message || error); }
+
+  function request(kind, input, extra = {}) {
+    if (closed) return Promise.reject(cancelledOperation());
+    if (failure) return Promise.reject(failure);
+    cancel();
+    if (failure) return Promise.reject(failure);
+    if (!Number.isSafeInteger(nextId)) return Promise.reject(new Error("Worker request IDs exhausted; reopen the editor."));
+    return new Promise((resolve, reject) => {
+      pending = { resolve, reject, sent: false, message: { kind, requestId: nextId++, input, ...extra } };
+      sendPending();
+    });
+  }
+  return {
+    renderSource: (input) => request("sourceRender", input),
+    editSource: (input, elementId, replacement) => request("sourceEdit", input, { elementId, replacement }),
+    cancel,
+    dispose() {
+      if (closed) return;
+      closed = true;
+      clearTimeout(initTimer);
+      settle(cancelledOperation());
+      worker.terminate();
+    },
+  };
+}
+
+/** Worker-first authoring, with explicit synchronous fallback only for transport failures. */
+export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
+  let client = null;
+  let localModule = null;
+  let generation = 0;
+  let disposed = false;
+  let fallbackReason = "";
+  let target = "source worker";
+  try { client = createSourceWorkerClient(workerOptions); }
+  catch (error) {
+    if (!(error instanceof SourceWorkerUnavailable)) throw error;
+    fallbackReason = error.message;
+    target = "main-thread SVG fallback (synchronous)";
+  }
+  function ensureLocalModule() {
+    if (!localModule) {
+      localModule = Promise.resolve().then(loadModule).catch((error) => { localModule = null; throw error; });
+    }
+    return localModule;
+  }
+  async function execute(kind, input, elementId, replacement) {
+    if (disposed) throw cancelledOperation();
+    const version = ++generation;
+    client?.cancel();
+    const live = () => !disposed && version === generation;
+    if (typeof input !== "string") throw new TypeError("Source must be text.");
+    byteOffsets(input);
+    if (kind === "edit") {
+      if (typeof replacement !== "string") throw new TypeError("Replacement must be text.");
+      byteOffsets(replacement);
+    }
+    if (client) {
+      try {
+        const result = await (kind === "render" ? client.renderSource(input) : client.editSource(input, elementId, replacement));
+        if (!live()) throw cancelledOperation();
+        return result;
+      } catch (error) {
+        if (!live()) throw cancelledOperation();
+        if (!(error instanceof SourceWorkerUnavailable)) throw error;
+        fallbackReason = error.message;
+        client.dispose();
+        client = null;
+        target = "main-thread SVG fallback (synchronous)";
+      }
+    }
+    const api = await ensureLocalModule();
+    if (!live()) throw cancelledOperation();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!live()) throw cancelledOperation();
+    if (kind === "edit") return api.applyParseLensEdit(input, elementId, replacement);
+    return { snapshot: api.parseLens(input), svg: api.renderSvg(input, workerOptions.config) };
+  }
+  return {
+    get target() { return target; },
+    get fallbackReason() { return fallbackReason; },
+    renderSource: (input) => execute("render", input),
+    editSource: (input, elementId, replacement) => execute("edit", input, elementId, replacement),
+    cancel() { generation += 1; client?.cancel(); },
+    dispose() { disposed = true; generation += 1; client?.dispose(); },
+  };
 }
 
 // History owns exact SOURCE snapshots, independent of parsing/rendering success. Undo must
@@ -167,16 +370,18 @@ export class SourceHistory {
   }
 }
 
-/** Mount an opt-in SVG/source editor. loadModule must resolve the initialized WASM exports. */
-export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChange, saveFile }) {
+/** Mount a worker-first SVG/source editor. loadModule initializes the fallback WASM only. */
+export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChange, saveFile, workerOptions = {} }) {
   const document = panelEl.ownerDocument;
   const listeners = [];
   const history = new SourceHistory(sourceEl.value);
   const downloads = new Map();
+  const backend = createSourceEditorBackend({ loadModule, ...workerOptions });
   let epoch = 0;
   let disposed = false;
   let session = null;
   let selection = null;
+  let activeEdit = null;
   let displayedSource = null;
   let renderedSvg = null;
   let elements = new Map();
@@ -239,6 +444,11 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
 
   function clearSelection() {
+    if (activeEdit) {
+      activeEdit = null;
+      backend.cancel();
+      outEl.setAttribute("aria-busy", "false");
+    }
     for (const element of elements.values()) element.removeAttribute("data-source-selected");
     selection = null;
     chooser.value = "";
@@ -248,6 +458,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
   function invalidate() {
     epoch += 1;
+    backend.cancel();
     displayedSource = null;
     renderedSvg = null;
     clearSelection();
@@ -315,14 +526,34 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     if (binding) select(binding.elementId, false);
     else clearSelection();
   });
-  listen(apply, "click", () => {
+  listen(apply, "click", async () => {
+    if (!current() || !selection) {
+      if (!disposed) message.textContent = "Source changed; select an element from the new preview.";
+      return;
+    }
+    if (activeEdit) return;
+    const operation = { version: epoch, source: sourceEl.value, selection, replacement: snippet.value };
+    const live = () => !disposed && operation.version === epoch && operation.source === sourceEl.value &&
+      operation.selection === selection && activeEdit === operation;
     try {
-      if (!current()) throw new Error("Source changed; select an element from the new preview.");
-      sourceEl.value = session.replace(selection, snippet.value);
+      activeEdit = operation;
+      apply.disabled = true;
+      snippet.disabled = true;
+      outEl.setAttribute("aria-busy", "true");
+      const response = await backend.editSource(operation.source, selection.elementId, operation.replacement);
+      if (!live()) return;
+      sourceEl.value = session.replaceWithResponse(operation.selection, operation.replacement, response);
+      history.record(sourceEl.value);
       invalidate();
       onChange();
     } catch (error) {
-      message.textContent = String(error.message || error);
+      if (live()) message.textContent = String(error.message || error);
+    } finally {
+      if (activeEdit === operation) {
+        activeEdit = null;
+        if (current() && selection) { apply.disabled = false; snippet.disabled = false; }
+        outEl.setAttribute("aria-busy", "false");
+      }
     }
   });
   function restore(direction) {
@@ -375,18 +606,16 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
       history.record(source);
       invalidate();
       const version = epoch;
-      message.textContent = "Building SVG and source map on the main thread…";
+      message.textContent = `Building SVG and source map — ${backend.target}…`;
       outEl.setAttribute("aria-busy", "true");
       const live = () => !disposed && version === epoch && sourceEl.value === source;
       try {
-        const api = await loadModule();
+        const { snapshot, svg } = await backend.renderSource(source);
         if (!live()) return;
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        if (!live()) return;
-        if (!session) session = new SourceEditSession(api);
-        const snapshot = session.setSource(source);
-        const svg = api.renderSvg(source);
         if (typeof svg !== "string") throw new Error("The renderer did not return SVG.");
+        const candidate = new SourceEditSession();
+        candidate.setSnapshot(source, snapshot);
+        session = candidate;
         outEl.innerHTML = svg; // Only the renderer's sanitized SVG, never source or snippets.
         const bindings = new Map(session.bindings.map((binding) => [binding.elementId, binding]));
         for (const element of outEl.querySelectorAll("[id]")) {
@@ -411,7 +640,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
         chooser.disabled = bindings.size === 0;
         syncControls();
         const warnings = snapshot.parsed?.warnings || [];
-        message.textContent = `${bindings.size} editable source spans. ${warnings.join(" ")}`;
+        message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
+          (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
       } catch (error) {
         if (live()) message.textContent = `Source editor unavailable: ${error.message || error}`;
       } finally {
@@ -421,6 +651,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     dispose() {
       disposed = true;
       invalidate();
+      backend.dispose();
       for (const remove of listeners) remove();
       const host = document.defaultView;
       for (const [url, timer] of downloads) {
