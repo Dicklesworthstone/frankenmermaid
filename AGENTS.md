@@ -78,6 +78,9 @@ cp web/index.html dist/site/web/
 cp web_react/index.html dist/site/web_react/
 cp pkg/* dist/site/pkg/
 cp frankenmermaid_illustration.webp dist/site/
+# og:image / twitter:image named by index.html and the showcase. Omitting it makes the path
+# serve HTML and breaks every link preview (X, Slack, GitHub profile tiles).
+cp gh_og_share_image.png dist/site/
 # Graph-deck runtime (bd-z7g6k): the canonical copy ships beside the site so external users
 # can hotlink the exact runtime version matching the deployed WASM.
 cp crates/fm-cli/src/deck_runtime.js dist/site/web/fm-deck-runtime.js
@@ -89,6 +92,11 @@ wrangler pages deploy dist/site --project-name frankenmermaid --branch main
 - **Project Name:** `frankenmermaid`
 - **Live URL:** `https://frankenmermaid.pages.dev/`
 - Always verify the deployment with `curl -sI https://frankenmermaid.pages.dev/` after deploying.
+- Also confirm the share image is a real PNG, not the HTML fallback:
+  `curl -s -o /dev/null -w '%{content_type}\n' https://frankenmermaid.com/gh_og_share_image.png` must print `image/png`.
+- `scripts/cloudflare_pages_ops.py` (`REQUIRED_BUNDLE_FILES`, `RENAMED_BUNDLE_FILES`) lists the same files as the
+  recipe above; when you add a file to one, add it to the other. Its route-integrity report fails if the root page
+  or the share image is missing.
 
 ---
 

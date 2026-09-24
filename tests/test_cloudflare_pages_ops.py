@@ -53,6 +53,16 @@ class CloudflarePagesOpsTests(unittest.TestCase):
             self.assertTrue((output_dir / "frankenmermaid_demo_showcase.html").exists())
             self.assertTrue((output_dir / "web" / "index.html").exists())
             self.assertTrue((output_dir / "_headers").exists())
+            self.assertTrue((output_dir / "index.html").exists())
+            self.assertTrue((output_dir / "frankenmermaid_illustration.webp").exists())
+            self.assertEqual(
+                (output_dir / "gh_og_share_image.png").read_bytes(),
+                (repo_root / "gh_og_share_image.png").read_bytes(),
+            )
+            self.assertEqual(
+                (output_dir / "web" / "fm-deck-runtime.js").read_bytes(),
+                (repo_root / "crates" / "fm-cli" / "src" / "deck_runtime.js").read_bytes(),
+            )
             self.assertEqual(payload["redirect_strategy"]["kind"], "cloudflare-redirect-rules")
 
     def test_stage_bundle_rejects_unexpected_existing_files(self):
@@ -71,11 +81,13 @@ class CloudflarePagesOpsTests(unittest.TestCase):
             payload = OPS.stage_bundle(repo_root=repo_root, output_dir=output_dir)
             report = OPS.build_route_integrity_report(payload)
             self.assertTrue(report["ok"])
-            self.assertEqual(len(report["checks"]), 8)
+            self.assertEqual(len(report["checks"]), 10)
 
     def test_build_route_integrity_report_rejects_missing_redirect_rules(self):
         payload = {
             "copied_files": [
+                {"destination": "index.html"},
+                {"destination": "gh_og_share_image.png"},
                 {"destination": "web/index.html"},
                 {"destination": "web_react/index.html"},
                 {"destination": "frankenmermaid_demo_showcase.html"},
@@ -91,6 +103,18 @@ class CloudflarePagesOpsTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         failing = [check["name"] for check in report["checks"] if not check["ok"]]
         self.assertEqual(failing, ["redirect rules"])
+
+    def test_build_route_integrity_report_rejects_missing_share_image(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        with TemporaryDirectory() as tempdir:
+            payload = OPS.stage_bundle(repo_root=repo_root, output_dir=Path(tempdir) / "bundle")
+        payload["copied_files"] = [
+            item for item in payload["copied_files"] if item["destination"] != "gh_og_share_image.png"
+        ]
+        report = OPS.build_route_integrity_report(payload)
+        self.assertFalse(report["ok"])
+        failing = [check["name"] for check in report["checks"] if not check["ok"]]
+        self.assertEqual(failing, ["share image"])
 
     def test_build_pages_project_create_command_matches_wranger_surface(self):
         command = OPS.build_pages_project_create_command(

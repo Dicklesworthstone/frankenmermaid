@@ -56,6 +56,11 @@ HEADER_ROUTE_ORDER = (
     "/evidence/*",
 )
 REQUIRED_BUNDLE_FILES = (
+    "index.html",
+    "frankenmermaid_illustration.webp",
+    # og:image / twitter:image target named by index.html and the showcase; without it the
+    # site serves HTML at this path and every link preview breaks (happened in the Sep 2026 deploy).
+    "gh_og_share_image.png",
     "frankenmermaid_demo_showcase.html",
     "web/index.html",
     "web_react/index.html",
@@ -66,6 +71,12 @@ REQUIRED_BUNDLE_FILES = (
     "pkg/package.json",
     "evidence/capability_scenario_matrix.json",
 )
+# Files published under a different path than their source (source -> bundle destination).
+# The graph-deck runtime ships beside the site so external users can hotlink the exact
+# runtime version matching the deployed WASM (bd-z7g6k).
+RENAMED_BUNDLE_FILES = {
+    "crates/fm-cli/src/deck_runtime.js": "web/fm-deck-runtime.js",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -156,6 +167,8 @@ def build_bundle_file_map(repo_root: Path) -> dict[Path, Path]:
     for relative in REQUIRED_BUNDLE_FILES:
         rel_path = Path(relative)
         mapping[repo_root / rel_path] = rel_path
+    for source, destination in RENAMED_BUNDLE_FILES.items():
+        mapping[repo_root / source] = Path(destination)
     return mapping
 
 
@@ -439,6 +452,16 @@ def build_route_integrity_report(stage_payload: dict[str, object]) -> dict[str, 
         return {"name": name, "ok": ok, "detail": detail}
 
     checks = [
+        record(
+            "root entry",
+            "index.html" in copied_destinations,
+            "staged bundle contains the root landing page served at /",
+        ),
+        record(
+            "share image",
+            "gh_og_share_image.png" in copied_destinations,
+            "staged bundle contains the og:image/twitter:image PNG that the root page and showcase name",
+        ),
         record(
             "static entry",
             "web/index.html" in copied_destinations,
