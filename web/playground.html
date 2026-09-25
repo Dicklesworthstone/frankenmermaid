@@ -19,7 +19,9 @@
   #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
   .warn { color: #fbbf24; }
   .err { color: #f87171; }
-  #editor-toolbar, #source-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
+  #document-toolbar, #editor-toolbar, #source-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
+  #document-toolbar { flex-shrink: 0; }
+  #document-name { display: block; overflow-wrap: anywhere; }
   #source-editor { max-height: 40vh; overflow: auto; }
   #source-editor label, #source-editor select, #source-editor textarea { display: block; width: 100%; box-sizing: border-box; }
   #source-editor textarea { border: 1px solid #cbd5e1; }
@@ -37,6 +39,7 @@
 
 <div id="right">
   <div id="status" role="status">starting…</div>
+  <section id="document-toolbar" aria-label="Source files and recovery"></section>
   <div id="editor-toolbar">
     <button id="edit-source" type="button">Edit diagram source (SVG)</button>
     <button id="edit-deck" type="button">Present / export graph deck</button>
@@ -53,6 +56,7 @@
   const logEl = document.getElementById("log");
   const statusEl = document.getElementById("status");
   const canvasEl = document.getElementById("canvas");
+  const initialSource = srcEl.value;
 
   // This page lives in `web/`, while the shipped wasm-bindgen package is rooted at `pkg/`.
   const MODULE_URL = new URL("../pkg/frankenmermaid.js", import.meta.url).href;
@@ -68,6 +72,17 @@
   let startedAt = 0;
   let sourceEditor = null;
   let deckEditor = null;
+  let documentWorkspace = null;
+  let sourceEditorFactory = null;
+
+  function mountSourceEditorInstance() {
+    return sourceEditorFactory({
+      sourceEl: srcEl, outEl, panelEl: document.getElementById("source-editor"),
+      loadModule: ensureMainModule, onChange: render,
+      workerOptions: { moduleUrl: MODULE_URL },
+      saveFile: documentWorkspace ? (artifact) => documentWorkspace.saveArtifact(artifact) : undefined,
+    });
+  }
 
   function log(text, cls) {
     const line = document.createElement("div");
@@ -154,6 +169,7 @@
   function render() {
     if (disposed) return;
     // Source edits and undo/redo can change the textarea without dispatching an input event.
+    documentWorkspace?.sourceChanged();
     deckEditor?.sourceChanged();
     const previousId = liveRequestId;
     const requestId = nextRequestId++;
@@ -252,11 +268,8 @@
     try {
       const { mountSourceEditor } = await import("./fm-source-editor.js");
       if (disposed) return;
-      sourceEditor = mountSourceEditor({
-        sourceEl: srcEl, outEl, panelEl: document.getElementById("source-editor"),
-        loadModule: ensureMainModule, onChange: render,
-        workerOptions: { moduleUrl: MODULE_URL },
-      });
+      sourceEditorFactory = mountSourceEditor;
+      sourceEditor = mountSourceEditorInstance();
       // This is an explicit mode change, not a worker failure. Editing needs addressable SVG.
       const previousWorker = worker;
       worker = null;
@@ -298,9 +311,26 @@
     disposed = true;
     sourceEditor?.dispose();
     deckEditor?.dispose();
+    documentWorkspace?.dispose();
     clearTimeout(initTimer);
     if (worker) worker.terminate();
     worker = null;
   });
+  // File controls do not load WASM or depend on a working renderer. Mount against the latest
+  // textarea value if typing started while this module was loading.
+  import("./fm-document.js").then(({ mountDocumentWorkspace }) => {
+    if (disposed) return;
+    documentWorkspace = mountDocumentWorkspace({
+      sourceEl: srcEl, initialSource, panelEl: document.getElementById("document-toolbar"), onChange: render,
+      onDocumentChange: () => {
+        if (sourceEditor) {
+          sourceEditor.dispose();
+          document.getElementById("source-editor").replaceChildren();
+          sourceEditor = mountSourceEditorInstance();
+        }
+        deckEditor?.sourceChanged();
+      },
+    });
+  }).catch((error) => { if (!disposed) log(`file controls unavailable: ${error.message || error}`, "err"); });
   startWorker();
 </script>
