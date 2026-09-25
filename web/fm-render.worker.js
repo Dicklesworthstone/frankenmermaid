@@ -15,6 +15,8 @@
 //
 // Source authoring has additional host messages (bd-1t7l.1): `sourceRender` returns
 // SVG plus its matching ParseLens bindings; `sourceEdit` returns a Rust-applied source edit.
+// `sourceDelete` and `sourceInsert` use Rust's formatting-preserving structural edit APIs;
+// their replies carry the actual changed range AND the newly parsed source bindings.
 // `sourceDeck` returns the SVG and deck manifest from ONE renderDeck invocation (bd-z7g6k).
 // These use the existing WASM exports, not a second parser. Their pre-execution queue is
 // separate from the Rust render protocol, which has no source-map/edit response variant.
@@ -46,10 +48,12 @@ function sourceSnapshot(snapshot) {
 
 async function handleSourceOperation(message) {
   const { kind, requestId, input } = message;
+  const editing = kind === "sourceEdit" || kind === "sourceDelete" || kind === "sourceInsert";
   if (!Number.isSafeInteger(requestId) || requestId < 0 || typeof input !== "string" ||
-      (kind === "sourceEdit" &&
-       (typeof message.elementId !== "string" || !message.elementId || typeof message.replacement !== "string"))) {
-    throw new Error("source operations require a non-negative safe integer requestId, string input, and an elementId/replacement for edits");
+      (editing && (typeof message.elementId !== "string" || !message.elementId)) ||
+      (kind === "sourceEdit" && typeof message.replacement !== "string") ||
+      (kind === "sourceInsert" && typeof message.text !== "string")) {
+    throw new Error("source operations require a non-negative safe integer requestId, string input, an elementId for edits, and string replacement/text for replacement/insertion");
   }
   // Claim at message arrival, BEFORE module loading yields. A burst during a cold import
   // retains just the newest operation. Object identity also handles cancellation + ID reuse.
@@ -85,12 +89,18 @@ async function handleSourceOperation(message) {
       if (typeof svg !== "string") throw new Error("The renderer did not return SVG");
       self.postMessage({ kind: "sourceRendered", requestId, svg, snapshot });
     } else {
-      const response = wasm.applyParseLensEdit(input, message.elementId, message.replacement);
+      const exportName = kind === "sourceDelete" ? "applyParseLensDelete" :
+        kind === "sourceInsert" ? "applyParseLensInsertLineAfter" : "applyParseLensEdit";
+      if (typeof wasm[exportName] !== "function") {
+        throw new Error(`This WASM build lacks ${exportName}; rebuild the shipped package.`);
+      }
+      const response = kind === "sourceDelete" ? wasm[exportName](input, message.elementId) :
+        wasm[exportName](input, message.elementId, kind === "sourceInsert" ? message.text : message.replacement);
       if (typeof response?.result?.updatedSource !== "string") {
         throw new Error("ParseLens did not return an edited source");
       }
       self.postMessage({
-        kind: "sourceEdited", requestId,
+        kind: kind === "sourceDelete" ? "sourceDeleted" : kind === "sourceInsert" ? "sourceInserted" : "sourceEdited", requestId,
         response: { result: response.result, snapshot: sourceSnapshot(response.snapshot) },
       });
     }
@@ -218,7 +228,7 @@ self.onmessage = async (event) => {
   const validRender = isRenderRequest(message);
 
   try {
-    if (message.kind === "sourceRender" || message.kind === "sourceEdit" || message.kind === "sourceDeck") {
+    if (["sourceRender", "sourceEdit", "sourceDelete", "sourceInsert", "sourceDeck"].includes(message.kind)) {
       await handleSourceOperation(message);
       return;
     }
@@ -267,6 +277,8 @@ self.onmessage = async (event) => {
         requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
         sourceEditing: ["parseLens", "renderSvg", "applyParseLensEdit"].every((name) => typeof wasm[name] === "function"),
+        sourceDeletion: typeof wasm.applyParseLensDelete === "function",
+        sourceInsertion: typeof wasm.applyParseLensInsertLineAfter === "function",
         deckRendering: typeof wasm.renderDeck === "function",
         ...(fallbackReason ? { fallbackReason } : {}),
       });

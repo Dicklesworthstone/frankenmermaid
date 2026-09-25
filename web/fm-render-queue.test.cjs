@@ -520,3 +520,136 @@ test("a cancel without an ID cannot accidentally match an absent pending operati
   assert.deepEqual(worker.requests, [{ kind: "cancel" }], "Rust must receive malformed protocol messages");
   assert.deepEqual(worker.messages.at(-1), { kind: "noReply" });
 });
+
+// Structural editing uses the Rust transaction verbatim: the host does not invent indentation,
+// delete boundaries, or a new source map. These tests fixture that API boundary explicitly.
+function structuralApi(overrides = {}) {
+  const calls = [];
+  const response = {
+    result: { elementId: "fm-node-a-0", replacedRange: { startByte: 18, endByte: 18 },
+      previousSnippet: "", replacement: "\tB[β]\r\n", updatedSource: "flowchart TD\r\n\tA\r\n\tB[β]\r\n" },
+    snapshot: { bindings: [{ elementId: "fm-node-b-1", textRange: { startByte: 19, endByte: 24 }, snippet: "B[β]" }],
+      parsed: { warnings: ["new source warning"], ir: { deliberatelyNotTransferred: true } } },
+  };
+  return {
+    calls, response,
+    module: {
+      parseLens: () => ({ bindings: [], parsed: { warnings: [] } }),
+      renderSvg: () => "<svg/>",
+      applyParseLensEdit: () => response,
+      applyParseLensDelete: (...args) => { calls.push(["delete", ...args]); return response; },
+      applyParseLensInsertLineAfter: (...args) => { calls.push(["insert", ...args]); return response; },
+      ...overrides,
+    },
+  };
+}
+
+test("structural worker capabilities reflect the exports actually loaded", async () => {
+  for (const missing of [null, "applyParseLensDelete", "applyParseLensInsertLineAfter"]) {
+    const api = structuralApi(missing ? { [missing]: undefined } : {});
+    const worker = host({ module: api.module });
+    await worker.init();
+    const ready = worker.messages.at(-1);
+    assert.equal(ready.sourceEditing, true);
+    assert.equal(ready.sourceDeletion, missing !== "applyParseLensDelete");
+    assert.equal(ready.sourceInsertion, missing !== "applyParseLensInsertLineAfter");
+  }
+});
+
+test("insert and delete dispatch to their Rust APIs and preserve exact transactions", async () => {
+  const api = structuralApi();
+  const worker = host({ module: api.module });
+  await worker.init();
+  const input = "flowchart TD\r\n\tA\r\n";
+  await complete(worker, { kind: "sourceInsert", requestId: 1, input, elementId: "fm-node-a-0", text: "B[β]" });
+  await complete(worker, { kind: "sourceDelete", requestId: 2, input, elementId: "fm-node-a-0" });
+  assert.deepEqual(api.calls, [["insert", input, "fm-node-a-0", "B[β]"], ["delete", input, "fm-node-a-0"]]);
+  for (const [id, kind] of [[1, "sourceInserted"], [2, "sourceDeleted"]]) {
+    assert.deepEqual(worker.replies(id), [{ kind, requestId: id, response: {
+      result: api.response.result,
+      snapshot: { bindings: api.response.snapshot.bindings, parsed: { warnings: ["new source warning"] } },
+    } }]);
+  }
+  assert.deepEqual(worker.requests, [], "structural edits must not enter the SVG protocol or renderer");
+});
+
+test("unavailable structural exports fail explicitly without falling back to replacement", async () => {
+  for (const [kind, exportName] of [["sourceDelete", "applyParseLensDelete"], ["sourceInsert", "applyParseLensInsertLineAfter"]]) {
+    const api = structuralApi({ [exportName]: undefined, applyParseLensEdit: () => assert.fail("not a replacement") });
+    const worker = host({ module: api.module });
+    await worker.init();
+    await complete(worker, { kind, requestId: 1, input: "source", elementId: "a", text: "new node" });
+    assert.equal(worker.replies(1).length, 1);
+    assert.equal(worker.replies(1)[0].kind, "failed");
+    assert.match(worker.replies(1)[0].reason, new RegExp(exportName));
+    assert.deepEqual(api.calls, []);
+  }
+});
+
+test("invalid structural requests cannot displace a valid queued edit", async () => {
+  const api = structuralApi();
+  const worker = host({ module: api.module });
+  await worker.init();
+  const pending = worker.send({ kind: "sourceInsert", requestId: 1, input: "source", elementId: "a", text: "B" });
+  const invalid = [
+    { kind: "sourceDelete", requestId: 2, input: "source", elementId: "" },
+    { kind: "sourceDelete", requestId: 3, input: 123, elementId: "a" },
+    { kind: "sourceInsert", requestId: 4, input: "source", elementId: "a", text: null },
+    { kind: "sourceInsert", requestId: 5, input: "source", elementId: 1, text: "B" },
+    { kind: "sourceDelete", requestId: -1, input: "source", elementId: "a" },
+  ];
+  for (const message of invalid) await worker.send(message);
+  await worker.drain();
+  await pending;
+  assert.deepEqual(api.calls, [["insert", "source", "a", "B"]]);
+  assert.equal(worker.replies(1)[0].kind, "sourceInserted");
+  for (const message of invalid) assert.equal(worker.replies(message.requestId)[0].kind, "failed");
+});
+
+test("cold-start structural requests share the latest-only source operation queue", async () => {
+  const imported = deferred();
+  const api = structuralApi();
+  const worker = host({ module: api.module, importModule: async (module) => { await imported.promise; return module; } });
+  const deleted = worker.send({ kind: "sourceDelete", requestId: 1, input: "obsolete", elementId: "a" });
+  const inserted = worker.send({ kind: "sourceInsert", requestId: 2, input: "latest", elementId: "b", text: "C" });
+  imported.resolve();
+  await worker.drain();
+  await Promise.all([deleted, inserted]);
+  assert.deepEqual(api.calls, [["insert", "latest", "b", "C"]]);
+  assert.deepEqual(worker.replies(1), [{ kind: "noReply", requestId: 1 }]);
+  assert.equal(worker.replies(2)[0].kind, "sourceInserted");
+  assert.equal(worker.imports(), 1);
+});
+
+test("cancel and reinitialization prevent queued structural mutations from executing", async () => {
+  for (const cancel of [true, false]) {
+    const api = structuralApi();
+    const worker = host({ module: api.module });
+    await worker.init();
+    const pending = worker.send({ kind: "sourceDelete", requestId: 1, input: "obsolete", elementId: "a" });
+    await microtasks();
+    if (cancel) await worker.send({ kind: "cancel", requestId: 1 });
+    else await worker.init();
+    await worker.drain();
+    await pending;
+    assert.deepEqual(api.calls, []);
+    assert.deepEqual(worker.replies(1), [{ kind: "noReply", requestId: 1 }]);
+  }
+});
+
+test("structural API errors and malformed snapshots fail once and leave the worker usable", async () => {
+  for (const fail of [
+    () => { throw new Error("source element was not found"); },
+    () => ({ result: { updatedSource: 42 }, snapshot: { bindings: [] } }),
+    () => ({ result: { updatedSource: "new source" }, snapshot: {} }),
+  ]) {
+    const api = structuralApi({ applyParseLensDelete: fail });
+    const worker = host({ module: api.module });
+    await worker.init();
+    await complete(worker, { kind: "sourceDelete", requestId: 1, input: "source", elementId: "a" });
+    assert.equal(worker.replies(1).length, 1);
+    assert.equal(worker.replies(1)[0].kind, "failed");
+    await complete(worker, { kind: "sourceInsert", requestId: 2, input: "source", elementId: "a", text: "B" });
+    assert.equal(worker.replies(2)[0].kind, "sourceInserted");
+  }
+});
