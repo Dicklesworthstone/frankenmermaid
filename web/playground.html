@@ -19,8 +19,9 @@
   #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
   .warn { color: #fbbf24; }
   .err { color: #f87171; }
-  #document-toolbar, #editor-toolbar, #source-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
-  #document-toolbar { flex-shrink: 0; }
+  #document-toolbar, #editor-toolbar, #source-editor, #image-export { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
+  #document-toolbar, #image-export { flex-shrink: 0; }
+  #image-export input { max-width: 12em; }
   #document-name { display: block; overflow-wrap: anywhere; }
   #source-editor { max-height: 40vh; overflow: auto; }
   #source-editor label, #source-editor select, #source-editor textarea { display: block; width: 100%; box-sizing: border-box; }
@@ -44,6 +45,7 @@
     <button id="edit-source" type="button">Edit diagram source (SVG)</button>
     <button id="edit-deck" type="button">Present / export graph deck</button>
   </div>
+  <section id="image-export" aria-label="Diagram image export"></section>
   <section id="source-editor" aria-label="Diagram source editor" hidden></section>
   <section id="deck-editor" aria-label="Graph deck authoring" hidden></section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
@@ -72,6 +74,7 @@
   let startedAt = 0;
   let sourceEditor = null;
   let deckEditor = null;
+  let imageExport = null;
   let documentWorkspace = null;
   let sourceEditorFactory = null;
 
@@ -170,6 +173,7 @@
     if (disposed) return;
     // Source edits and undo/redo can change the textarea without dispatching an input event.
     documentWorkspace?.sourceChanged();
+    imageExport?.sourceChanged();
     deckEditor?.sourceChanged();
     const previousId = liveRequestId;
     const requestId = nextRequestId++;
@@ -311,6 +315,7 @@
     disposed = true;
     sourceEditor?.dispose();
     deckEditor?.dispose();
+    imageExport?.dispose();
     documentWorkspace?.dispose();
     clearTimeout(initTimer);
     if (worker) worker.terminate();
@@ -332,5 +337,25 @@
       },
     });
   }).catch((error) => { if (!disposed) log(`file controls unavailable: ${error.message || error}`, "err"); });
+  // Export owns a separate SVG worker: a canvas preview cannot supply a full vector document.
+  // Loading controls does not initialize another WASM instance until the first export request.
+  Promise.all([import("./fm-image-export.js"), import("./fm-source-editor.js")]).then(
+    ([{ mountImageExport }, { createSourceEditorBackend }]) => {
+      if (disposed) return;
+      let backend = null;
+      imageExport = mountImageExport({
+        sourceEl: srcEl, panelEl: document.getElementById("image-export"),
+        backend: {
+          get target() { return backend?.target || "SVG worker"; },
+          renderSource(source) {
+            backend ||= createSourceEditorBackend({ loadModule: ensureMainModule, moduleUrl: MODULE_URL });
+            return backend.renderSource(source);
+          },
+          cancel() { backend?.cancel(); },
+          dispose() { backend?.dispose(); },
+        },
+      });
+    },
+  ).catch((error) => { if (!disposed) log(`image export unavailable: ${error.message || error}`, "err"); });
   startWorker();
 </script>
