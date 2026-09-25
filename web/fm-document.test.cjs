@@ -106,3 +106,110 @@ test("filename paths/control characters are removed without treating names as ma
   doc.open("", "<img>.mmd");
   assert.equal(doc.name, "<img>.mmd");
 });
+
+class StorageFixture {
+  values = new Map();
+  failWrites = false;
+  get length() { return this.values.size; }
+  key(index) { return [...this.values.keys()][index] ?? null; }
+  getItem(key) { return this.values.get(key) ?? null; }
+  setItem(key, value) {
+    if (this.failWrites) throw new Error("QuotaExceededError fixture");
+    this.values.set(key, String(value));
+  }
+}
+function repositoryOptions(storage) {
+  let count = 0;
+  return { getStorage: () => storage, newId: () => String(++count).padStart(32, "0"), now: () => 1000 };
+}
+test("recovery restores exact source, encoding complement, and dirty baseline", async () => {
+  const { SourceDocument } = await loaded;
+  const first = new SourceDocument("\uFEFFA\r\nB\n", "flow.mmd");
+  first.edit("A\nC\n");
+  const snapshot = JSON.parse(JSON.stringify(first.snapshot()));
+  const restored = new SourceDocument("other");
+  const unrelatedSave = restored.prepareExport();
+  restored.restore(snapshot);
+  assert.equal(restored.source, "\uFEFFA\r\nC\n");
+  assert.equal(restored.view, "A\nC\n");
+  assert.equal(restored.dirty, true);
+  assert.equal(restored.exported(unrelatedSave), false);
+  restored.edit("A\nB\n");
+  assert.equal(restored.source, "\uFEFFA\r\nB\n");
+  assert.equal(restored.dirty, false);
+});
+test("separate writers and restored forks cannot overwrite other recovery records", async () => {
+  const { DraftRepository, SourceDocument } = await loaded;
+  const storage = new StorageFixture(), options = repositoryOptions(storage);
+  const one = new DraftRepository(options), two = new DraftRepository(options);
+  const key1 = one.createKey(), key2 = two.createKey();
+  one.write(key1, new SourceDocument("one").snapshot());
+  two.write(key2, new SourceDocument("two").snapshot());
+  assert.notEqual(key1, key2);
+  assert.throws(() => two.write(key1, new SourceDocument("damaged").snapshot()), /another document/);
+  const original = storage.getItem(key1);
+  const recovered = new SourceDocument(""); recovered.restore(two.read(key1)); recovered.edit("fork");
+  const forkKey = two.createKey(); two.write(forkKey, recovered.snapshot());
+  assert.equal(storage.getItem(key1), original);
+  assert.equal(one.list().drafts.length, 3);
+  assert.equal(two.read(key2).source, "two");
+  assert.equal(two.read(forkKey).source, "fork");
+});
+test("quota and record-size failures retain the last successfully stored source", async () => {
+  const { DraftRepository, SourceDocument } = await loaded;
+  const storage = new StorageFixture();
+  const repo = new DraftRepository({ ...repositoryOptions(storage), maxRecordUnits: 400 });
+  const key = repo.createKey(), doc = new SourceDocument("safe");
+  repo.write(key, doc.snapshot()); const before = storage.getItem(key);
+  doc.edit("x".repeat(500));
+  assert.throws(() => repo.write(key, doc.snapshot()), /record limit/);
+  assert.equal(storage.getItem(key), before);
+  doc.edit("latest"); storage.failWrites = true;
+  assert.throws(() => repo.write(key, doc.snapshot()), /QuotaExceeded/);
+  assert.equal(storage.getItem(key), before);
+  assert.equal(doc.source, "latest");
+  storage.failWrites = false; repo.write(key, doc.snapshot());
+  assert.equal(repo.read(key).source, "latest");
+});
+test("damaged and future-version records are retained, while valid copies remain recoverable", async () => {
+  const { DraftRepository, SourceDocument } = await loaded;
+  const storage = new StorageFixture(), repo = new DraftRepository(repositoryOptions(storage));
+  const key = repo.createKey(); repo.write(key, new SourceDocument("good").snapshot());
+  const prefix = "fm.playground.recovery.v1.";
+  for (const [id, encoded] of [["broken", "not-json"], ["null", "null"],
+    ["future", '{"schemaVersion":2}'], ["bad", '{"schemaVersion":1,"updatedAt":1}']]) storage.setItem(prefix + id, encoded);
+  storage.setItem("unrelated-app", "keep me");
+  const before = [...storage.values];
+  const result = repo.list();
+  assert.equal(result.drafts.length, 1); assert.equal(result.unreadable.length, 4);
+  assert.equal(result.drafts[0].source, "good");
+  assert.deepEqual([...storage.values], before, "listing must never repair, clear, or evict user records");
+  assert.throws(() => repo.read("unrelated-app"), /Unknown recovery key/);
+  assert.throws(() => repo.read(prefix + "missing"), /no longer available/);
+});
+test("unavailable storage and identity collisions fail without overwriting an existing record", async () => {
+  const { DraftRepository, SourceDocument } = await loaded;
+  const denied = new DraftRepository({ getStorage: () => { throw new Error("SecurityError fixture"); } });
+  assert.throws(() => denied.list(), /SecurityError/);
+  const storage = new StorageFixture();
+  const options = { getStorage: () => storage, newId: () => "same-id-0000000000000" };
+  const first = new DraftRepository(options), second = new DraftRepository(options);
+  const key = first.createKey(); first.write(key, new SourceDocument("retained").snapshot());
+  assert.throws(() => second.createKey(), /independent recovery copy/);
+  assert.equal(first.read(key).source, "retained");
+});
+test("invalid restoration is atomic and malformed UTF-16 drafts remain repairable", async () => {
+  const { DraftRepository, SourceDocument } = await loaded;
+  const doc = new SourceDocument("current");
+  for (const invalid of [null, {}, { ...doc.snapshot(), hasBom: true }, { ...doc.snapshot(), newline: "x" }]) {
+    assert.throws(() => doc.restore(invalid), /Invalid source recovery snapshot/);
+    assert.equal(doc.source, "current");
+  }
+  doc.edit("unfinished \ud800");
+  const repo = new DraftRepository(repositoryOptions(new StorageFixture()));
+  const key = repo.createKey(); repo.write(key, doc.snapshot());
+  const restored = new SourceDocument(""); restored.restore(repo.read(key));
+  assert.equal(restored.source, "unfinished \ud800");
+  assert.throws(() => restored.prepareExport(), /surrogate/);
+  restored.edit("repaired 😀"); assert.equal(restored.prepareExport().text, "repaired 😀");
+});

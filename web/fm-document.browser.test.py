@@ -222,6 +222,159 @@ class DocumentBrowserTests(unittest.TestCase):
         self.assertEqual(Path(pending.value.path()).read_bytes(), b"b[New file]")
         self.assertEqual(pending.value.suggested_filename, "another.mmd")
 
+    def mount_recovery_fixture(self):
+        # Navigation/localStorage access is denied on this harness's opaque about:blank origin.
+        # This fixture models only the Storage boundary; production serialization, scheduling,
+        # restoration, source complements, UI and downloads all run unchanged.
+        self.page.evaluate("""() => {
+          workspace.dispose(); panel.replaceChildren();
+          globalThis.recoveryValues = new Map(); globalThis.rejectStorage = false;
+          globalThis.storage = {
+            get length() { return recoveryValues.size; },
+            key: index => [...recoveryValues.keys()][index] ?? null,
+            getItem: key => recoveryValues.get(key) ?? null,
+            setItem: (key, value) => {
+              if (rejectStorage) throw Error('QuotaExceededError fixture');
+              recoveryValues.set(key, String(value));
+            }
+          };
+          globalThis.recoveryOptions = {...options, getStorage: () => storage};
+          workspace = docModule.mountDocumentWorkspace(recoveryOptions);
+          globalThis.remount = () => {
+            workspace.dispose(); panel.replaceChildren();
+            sourceEl.value = 'flowchart TD\\n a[Initial]\\n';
+            workspace = docModule.mountDocumentWorkspace(recoveryOptions);
+          };
+        }""")
+
+    def test_pagehide_checkpoints_exact_source_and_recovery_restores_dirty_baseline(self):
+        self.mount_recovery_fixture()
+        raw = '\ufeffflowchart TD\r\n A[One]\n B[Two]\r\n'
+        self.upload(raw.encode(), "recover.mmd")
+        self.page.locator("#source").fill(raw[1:].replace("\r\n", "\n").replace("One", "Broken["))
+        self.page.evaluate("dispatchEvent(new PageTransitionEvent('pagehide', {persisted:true}))")
+        self.assertEqual(self.page.evaluate("JSON.parse([...recoveryValues.values()][0]).source"), raw.replace("One", "Broken["))
+        self.page.evaluate("remount()")
+        self.assertIn("Initial", self.page.locator("#source").input_value(), "recovery must not overwrite current source automatically")
+        key = self.page.evaluate("[...recoveryValues.keys()][0]")
+        self.page.locator("#document-recovery").select_option(key)
+        self.page.locator("#document-restore").click()
+        self.page.wait_for_function("sourceEl.value.includes('Broken[')")
+        self.assertIn("unexported changes", self.page.locator("#document-name").text_content())
+        self.assertEqual(self.page.evaluate("recoveryValues.size"), 2, "restoration must fork, not adopt the old writer key")
+        with self.page.expect_download() as pending:
+            self.page.locator("#document-save").click()
+        self.assertEqual(Path(pending.value.path()).read_bytes(), raw.replace("One", "Broken[").encode())
+
+    def test_automatic_checkpoint_keeps_latest_text_without_a_parse(self):
+        self.mount_recovery_fixture()
+        self.page.locator("#source").fill("first")
+        self.page.locator("#source").fill("unfinished a[世界")
+        self.page.wait_for_function("[...recoveryValues.values()].some(value => JSON.parse(value).source === 'unfinished a[世界')")
+        self.assertIn("saved in this browser", self.page.locator("#document-recovery-status").text_content())
+        self.assertEqual(self.page.evaluate("renders.length"), 0, "recovery must not depend on or invoke rendering")
+
+    def test_storage_failure_preserves_previous_checkpoint_and_retry_saves_latest(self):
+        self.mount_recovery_fixture()
+        self.page.locator("#source").fill("last stored")
+        self.assertTrue(self.page.evaluate("workspace.flushRecovery()"))
+        self.page.evaluate("rejectStorage = true")
+        self.page.locator("#source").fill("not yet stored")
+        self.assertFalse(self.page.evaluate("workspace.flushRecovery()"))
+        self.assertEqual(self.page.evaluate("JSON.parse([...recoveryValues.values()][0]).source"), "last stored")
+        self.assertIn("Recovery save failed", self.page.locator("#document-recovery-status").text_content())
+        self.assertEqual(self.page.locator("#source").input_value(), "not yet stored")
+        self.page.evaluate("rejectStorage = false")
+        self.page.locator("#document-retry-recovery").click()
+        self.assertEqual(self.page.evaluate("JSON.parse([...recoveryValues.values()][0]).source"), "not yet stored")
+
+    def test_opening_another_file_retains_outgoing_recovery_and_download_does_not_switch(self):
+        self.mount_recovery_fixture()
+        self.page.locator("#source").fill("unsaved outgoing")
+        self.upload(b"incoming", "next.mmd")
+        self.assertEqual(self.page.evaluate("recoveryValues.size"), 2)
+        key = self.page.evaluate("[...recoveryValues].find(([,value]) => JSON.parse(value).source === 'unsaved outgoing')[0]")
+        self.page.locator("#source").fill("current unexported")
+        self.page.locator("#document-recovery").select_option(key)
+        with self.page.expect_download() as pending:
+            self.page.locator("#document-save-recovery").click()
+        self.assertEqual(Path(pending.value.path()).read_bytes(), b"unsaved outgoing")
+        self.assertEqual(self.page.locator("#source").input_value(), "current unexported")
+        self.assertIn("unexported changes", self.page.locator("#document-name").text_content())
+
+    def test_damaged_recovery_and_cross_tab_storage_events_do_not_replace_current_source(self):
+        self.mount_recovery_fixture()
+        self.page.locator("#source").fill("safe copy")
+        self.page.evaluate("workspace.flushRecovery(); remount()")
+        key = self.page.evaluate("[...recoveryValues.keys()][0]")
+        self.page.locator("#document-recovery").select_option(key)
+        self.page.evaluate("key => recoveryValues.set(key, 'not-json')", key)
+        self.page.locator("#document-restore").click()
+        self.page.wait_for_function("document.querySelector('#document-message').textContent.includes('Open failed')")
+        self.assertIn("Initial", self.page.locator("#source").input_value())
+        self.page.evaluate("key => dispatchEvent(new StorageEvent('storage', {key}))", key)
+        self.assertIn("unreadable", self.page.locator("#document-recovery-status").text_content())
+        self.assertEqual(self.page.evaluate("key => recoveryValues.get(key)", key), "not-json")
+        self.assertTrue(self.page.locator("#document-restore").is_disabled())
+
+    def test_two_independent_editors_write_separate_drafts_and_never_apply_storage_events(self):
+        self.mount_recovery_fixture()
+        self.page.locator("#source").fill("editor one")
+        self.page.evaluate("""() => {
+          workspace.flushRecovery();
+          globalThis.secondSource = document.createElement('textarea');
+          globalThis.secondPanel = document.createElement('section'); document.body.append(secondSource, secondPanel);
+          globalThis.second = docModule.mountDocumentWorkspace({...recoveryOptions,
+            sourceEl:secondSource, panelEl:secondPanel, onChange() {}, onDocumentChange() {}});
+          secondSource.value = 'editor two'; second.sourceChanged(); second.flushRecovery();
+          dispatchEvent(new StorageEvent('storage', {key:[...recoveryValues.keys()][1]}));
+        }""")
+        self.assertEqual(self.page.evaluate("recoveryValues.size"), 2)
+        self.assertEqual(self.page.locator("#source").input_value(), "editor one")
+        self.assertEqual(self.page.evaluate("secondSource.value"), "editor two")
+        self.assertEqual(sorted(self.page.evaluate("[...recoveryValues.values()].map(value => JSON.parse(value).source)")), ["editor one", "editor two"])
+        self.page.evaluate("second.dispose()")
+
+    def test_edits_before_module_mount_and_programmatic_changes_are_recoverable(self):
+        self.mount_recovery_fixture()
+        self.page.evaluate("""() => {
+          workspace.dispose(); panel.replaceChildren();
+          sourceEl.value = 'typed before file module loaded';
+          workspace = docModule.mountDocumentWorkspace({...recoveryOptions, initialSource:'original sample'});
+          workspace.flushRecovery();
+          sourceEl.value = 'changed by ParseLens without input event'; workspace.sourceChanged(); workspace.dispose();
+        }""")
+        record = self.page.evaluate("JSON.parse([...recoveryValues.values()][0])")
+        self.assertEqual(record["source"], "changed by ParseLens without input event")
+        self.assertEqual(record["baseline"], "original sample")
+
+    def test_storage_denial_never_disables_source_downloads(self):
+        self.page.evaluate("""() => {
+          workspace.dispose(); panel.replaceChildren();
+          workspace = docModule.mountDocumentWorkspace({...options,
+            getStorage: () => {throw Error('SecurityError fixture');}});
+        }""")
+        self.page.locator("#source").fill("keep me despite storage denial")
+        self.assertFalse(self.page.evaluate("workspace.flushRecovery()"))
+        with self.page.expect_download() as pending:
+            self.page.locator("#document-save").click()
+        self.assertEqual(Path(pending.value.path()).read_bytes(), b"keep me despite storage denial")
+
+    def test_preview_callback_failure_does_not_report_a_successful_open_as_failed(self):
+        self.page.evaluate("""() => {
+          workspace.dispose(); panel.replaceChildren();
+          workspace = docModule.mountDocumentWorkspace({...options,
+            onDocumentChange: () => {throw Error('editor reset fixture failed');}});
+        }""")
+        self.upload(b"flowchart TD\n b[Retained]\n", "retained.mmd")
+        self.assertEqual(self.page.locator("#source").input_value(), "flowchart TD\n b[Retained]\n")
+        self.assertEqual(self.page.evaluate("renders.at(-1)"), "flowchart TD\n b[Retained]\n")
+        self.assertIn("Opened retained.mmd", self.page.locator("#document-message").text_content())
+        self.assertIn("Preview update failed", self.page.locator("#document-message").text_content())
+        with self.page.expect_download() as pending:
+            self.page.locator("#document-save").click()
+        self.assertEqual(Path(pending.value.path()).read_bytes(), b"flowchart TD\n b[Retained]\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
