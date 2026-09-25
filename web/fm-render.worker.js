@@ -4,10 +4,11 @@
 // `WorkerRenderMessage` as JSON text and returns a `WorkerRenderResponse` as JSON text, or null when
 // the message needs no reply — a cancel, or a stale request id that is no longer the live one.
 //
-// THIS HOST IS DELIBERATELY A PIPE. An earlier draft of this file tracked "is a render running" in
-// JS and called a separate scheduler; that would be a second state machine beside the Rust
-// coordinator, and the two would disagree precisely under fast typing, which is the case the feature
-// exists for. Supersession, cancellation and staleness are decided in one place, and it is not here.
+// Rust owns the render protocol and execution state. The host only coalesces requests that
+// have NOT entered synchronous WASM yet. Yielding alone is insufficient: several queued messages
+// can each resume and do expensive parse/layout/render work before Rust has seen the newer ID.
+// The pre-execution gates below discard obsolete work; they do not run a second Rust scheduler,
+// synthesize completed renders, or claim to interrupt a render once synchronous WASM has started.
 //
 // JSON text on both sides is what lets the same payload be used from the main thread, from this
 // worker, and from a native Rust test.
@@ -22,6 +23,7 @@ let wasm = null;
 let modulePromise = null;
 let offscreenDiagram = null;
 let pendingOffscreenRender = null;
+let pendingSvgRender = null;
 let initConfigJson;
 let pendingSourceOperation = null;
 
@@ -118,14 +120,13 @@ async function ensureModule(moduleUrl) {
   return modulePromise;
 }
 
-// A render is scheduled as a macrotask so a `cancel` posted mid-render is actually delivered.
-// Without the yield the worker sits inside one synchronous render and only observes the
-// cancellation after the work it was meant to abandon has already finished.
+// Yield BEFORE synchronous WASM so already-queued edits/cancels can invalidate this request.
+// A message arriving after synchronous rendering begins cannot interrupt that render.
 function yieldToMessages() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function isOffscreenRenderRequest(message) {
+function isRenderRequest(message) {
   return (
     message.kind === "render" &&
     Number.isSafeInteger(message.requestId) &&
@@ -159,6 +160,52 @@ async function renderOffscreenIfStillLive(message) {
     self.postMessage({ kind: "completed", requestId, target: "offscreenInWorker", stats });
   } finally {
     if (pendingOffscreenRender === pending) pendingOffscreenRender = null;
+  }
+}
+
+function forwardSvgMessage(message) {
+  // `null` means the module decided this message needs no reply — a cancel, or a superseded id.
+  // Forwarding a synthetic response here would tell the UI a render finished when none did.
+  // Preserve initialization configuration on SVG fallback, while explicit per-render config
+  // remains authoritative. Do not rewrite cancel messages or parse the Rust response in JS.
+  const request = message.kind === "render" && message.configJson == null && initConfigJson !== undefined
+    ? { ...message, configJson: initConfigJson }
+    : message;
+  const responseJson = wasm.workerHandleMessage(JSON.stringify(request));
+  if (responseJson === null || responseJson === undefined) {
+    self.postMessage({ kind: "noReply", requestId: message.requestId });
+    return;
+  }
+
+  // Forwarded verbatim: the response already carries timings and the parse diagnostics the CLI
+  // shows (scope item 4), and re-deriving any of it here would only lose fidelity.
+  self.postMessage(JSON.parse(responseJson));
+}
+
+function releaseSvgRender() {
+  if (!pendingSvgRender) return;
+  const { requestId } = pendingSvgRender;
+  pendingSvgRender = null;
+  self.postMessage({ kind: "noReply", requestId });
+}
+
+async function renderSvgIfStillLive(message) {
+  const { requestId } = message;
+  // Preserve monotonic request ordering among queued renders without replacing Rust's own
+  // stale-ID checks for requests that have already executed. Equal IDs use operation identity.
+  if (pendingSvgRender && requestId < pendingSvgRender.requestId) {
+    self.postMessage({ kind: "noReply", requestId });
+    return;
+  }
+  releaseSvgRender();
+  const pending = { requestId };
+  pendingSvgRender = pending;
+  try {
+    await yieldToMessages();
+    if (pendingSvgRender !== pending) return;
+    forwardSvgMessage(message);
+  } finally {
+    if (pendingSvgRender === pending) pendingSvgRender = null;
   }
 }
 
@@ -230,7 +277,7 @@ self.onmessage = async (event) => {
         self.postMessage({ kind: "noReply", requestId: message.requestId });
         return;
       }
-      if (!isOffscreenRenderRequest(message)) {
+      if (!isRenderRequest(message)) {
         self.postMessage({
           kind: "failed",
           requestId: message.requestId,
@@ -245,24 +292,19 @@ self.onmessage = async (event) => {
       return;
     }
 
-    await yieldToMessages();
-
-    // `null` means the module decided this message needs no reply — a cancel, or a superseded id.
-    // Forwarding a synthetic response here would tell the UI a render finished when none did.
-    // Preserve initialization configuration on SVG fallback, while explicit per-render config
-    // remains authoritative. Do not rewrite cancel messages or parse the Rust response in JS.
-    const request = message.kind === "render" && message.configJson == null && initConfigJson !== undefined
-      ? { ...message, configJson: initConfigJson }
-      : message;
-    const responseJson = wasm.workerHandleMessage(JSON.stringify(request));
-    if (responseJson === null || responseJson === undefined) {
-      self.postMessage({ kind: "noReply", requestId: message.requestId });
+    if (message.kind === "cancel" && pendingSvgRender?.requestId === message.requestId) {
+      releaseSvgRender();
+      return;
+    }
+    if (isRenderRequest(message)) {
+      await renderSvgIfStillLive(message);
       return;
     }
 
-    // Forwarded verbatim: the response already carries timings and the parse diagnostics the CLI
-    // shows (scope item 4), and re-deriving any of it here would only lose fidelity.
-    self.postMessage(JSON.parse(responseJson));
+    // Leave invalid/unknown messages and unmatched cancels to Rust's protocol validation.
+    // In particular, a malformed render must not evict an otherwise valid queued render.
+    await yieldToMessages();
+    forwardSvgMessage(message);
   } catch (error) {
     // Never fail silently: from the UI a dead worker is indistinguishable from a slow one.
     self.postMessage({
