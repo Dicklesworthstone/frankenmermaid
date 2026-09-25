@@ -58,6 +58,7 @@ export class SourceEditSession {
   #bindings = new Map();
   #selection = null;
   #revision = 0;
+  #prepared = null;
 
   constructor(api = null) {
     if (api !== null && (typeof api?.parseLens !== "function" || typeof api.applyParseLensEdit !== "function")) {
@@ -74,6 +75,7 @@ export class SourceEditSession {
     // Invalidate BEFORE parsing: a failed parse must never leave the previous document editable.
     this.#revision += 1;
     this.#selection = null;
+    this.#prepared = null;
     this.#bindings = new Map();
     this.#source = source;
     byteOffsets(source); // Reject strings WASM's UTF-8 encoder would silently change.
@@ -96,6 +98,7 @@ export class SourceEditSession {
   select(elementId) {
     const binding = this.#bindings.get(elementId);
     if (!binding) throw new Error("This diagram element has no editable source span.");
+    this.#prepared = null;
     this.#selection = Object.freeze({ ...binding, revision: this.#revision });
     return this.#selection;
   }
@@ -133,8 +136,77 @@ export class SourceEditSession {
     this.#source = updated;
     this.#bindings = bindings;
     this.#selection = null;
+    this.#prepared = null;
     this.#revision += 1;
     return updated;
+  }
+
+  // Rust chooses the actual splice (including indentation/line terminators). Validate its
+  // locality and UTF-8 boundaries, never regenerate Mermaid or infer semantic node deletion.
+  // Preparation is read-only; a private, single-use token binds confirmation to this selection.
+  prepareStructural(selection, kind, text, response) {
+    this.#prepared = null;
+    this.#checkReplacement(selection, text);
+    if (kind !== "delete" && kind !== "insert") throw new Error("Unknown source operation.");
+    const result = response?.result;
+    const offsets = byteOffsets(this.#source);
+    const { startByte, endByte } = result?.replacedRange || {};
+    const start = offsets.get(startByte);
+    const end = offsets.get(endByte);
+    if (result?.elementId !== selection.elementId || !Number.isSafeInteger(startByte) ||
+        !Number.isSafeInteger(endByte) || start === undefined || end === undefined || start > end ||
+        typeof result.replacement !== "string" || typeof result.updatedSource !== "string" ||
+        result.previousSnippet !== this.#source.slice(start, end)) {
+      throw new Error("The structural edit returned an invalid source transaction.");
+    }
+    byteOffsets(result.replacement);
+    const lineStart = this.#source.slice(0, selection.start).lastIndexOf("\n") + 1;
+    const newline = this.#source.indexOf("\n", selection.end);
+    const lineEnd = newline === -1 ? this.#source.length : newline + 1;
+    if (kind === "delete") {
+      const exactSpan = start === selection.start && end === selection.end;
+      const wholeLine = start === lineStart && end === lineEnd &&
+        /^\p{White_Space}*$/u.test(this.#source.slice(start, selection.start)) &&
+        /^\p{White_Space}*$/u.test(this.#source.slice(selection.end, end));
+      if (result.replacement !== "" || (!exactSpan && !wholeLine)) {
+        throw new Error("Deletion changed text outside the selected span and its empty line.");
+      }
+    } else {
+      // Only the submitted text plus line framing may be inserted. Rust remains responsible
+      // for choosing indentation and LF/CRLF; the exact result is shown before confirmation.
+      const framing = newline === -1 ? /^\r?\n[ \t]*$/ : /^[ \t]*$/;
+      const framed = ["\r\n", "\n"].some((ending) => {
+        if (!result.replacement.endsWith(ending)) return false;
+        const body = result.replacement.slice(0, -ending.length);
+        return body.endsWith(text) && framing.test(body.slice(0, body.length - text.length));
+      });
+      if (start !== lineEnd || end !== start || !framed) {
+        throw new Error("Insertion did not preserve the requested text at the selected line boundary.");
+      }
+    }
+    const expected = this.#source.slice(0, start) + result.replacement + this.#source.slice(end);
+    if (result.updatedSource !== expected) throw new Error("The structural edit changed unrelated source text.");
+    const bindings = checkedBindings(expected, response.snapshot);
+    const preview = Object.freeze({ kind, startByte, endByte,
+      previousSnippet: result.previousSnippet, replacement: result.replacement, updatedSource: expected,
+      warnings: Object.freeze([...(response.snapshot.parsed?.warnings || [])].map(String)),
+    });
+    this.#prepared = { preview, selection, bindings };
+    return preview;
+  }
+
+  cancelStructural() { this.#prepared = null; }
+
+  commitStructural(preview) {
+    const prepared = this.#prepared;
+    if (!prepared || preview !== prepared.preview) throw new Error("Preview is stale; prepare the change again.");
+    this.#checkReplacement(prepared.selection, "");
+    this.#source = preview.updatedSource;
+    this.#bindings = prepared.bindings;
+    this.#selection = null;
+    this.#prepared = null;
+    this.#revision += 1;
+    return this.#source;
   }
 }
 
@@ -160,6 +232,8 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
   } catch (error) { throw new SourceWorkerUnavailable(String(error.message || error)); }
   let ready = false;
   let deckRendering = false;
+  let sourceDeletion = false;
+  let sourceInsertion = false;
   let closed = false;
   let failure = null;
   let pending = null;
@@ -187,6 +261,11 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
       settle(new Error("The worker package lacks graph-deck rendering; update the worker and WASM package."));
       return;
     }
+    if ((pending.message.kind === "sourceDelete" && !sourceDeletion) ||
+        (pending.message.kind === "sourceInsert" && !sourceInsertion)) {
+      settle(new Error("The worker package lacks this structural edit; update the worker and WASM package."));
+      return;
+    }
     pending.sent = true;
     pending.timer = setTimeout(() => fail("source worker request timed out"), requestTimeoutMs);
     try { worker.postMessage(pending.message); }
@@ -210,6 +289,8 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
       clearTimeout(initTimer);
       ready = true;
       deckRendering = message.deckRendering === true;
+      sourceDeletion = message.sourceDeletion === true;
+      sourceInsertion = message.sourceInsertion === true;
       sendPending();
       return;
     }
@@ -233,9 +314,11 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
       return;
     }
     const rendering = pending.message.kind === "sourceRender";
+    const editReply = pending.message.kind === "sourceDelete" ? "sourceDeleted" :
+      pending.message.kind === "sourceInsert" ? "sourceInserted" : "sourceEdited";
     const valid = rendering
       ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
-      : message.kind === "sourceEdited" && typeof message.response?.result?.updatedSource === "string" &&
+      : message.kind === editReply && typeof message.response?.result?.updatedSource === "string" &&
         Array.isArray(message.response?.snapshot?.bindings);
     if (!valid) { fail("mismatched source worker response"); return; }
     settle(null, rendering ? { svg: message.svg, snapshot: message.snapshot } : message.response);
@@ -263,6 +346,8 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     renderSource: (input) => request("sourceRender", input),
     renderDeck: (input) => request("sourceDeck", input),
     editSource: (input, elementId, replacement) => request("sourceEdit", input, { elementId, replacement }),
+    deleteSource: (input, elementId) => request("sourceDelete", input, { elementId }),
+    insertSource: (input, elementId, text) => request("sourceInsert", input, { elementId, text }),
     cancel,
     dispose() {
       if (closed) return;
@@ -301,13 +386,18 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     const live = () => !disposed && version === generation;
     if (typeof input !== "string") throw new TypeError("Source must be text.");
     byteOffsets(input);
-    if (kind === "edit") {
+    if (["edit", "delete", "insert"].includes(kind) && (typeof elementId !== "string" || !elementId)) {
+      throw new TypeError("An element ID is required for source edits.");
+    }
+    if (kind === "edit" || kind === "insert") {
       if (typeof replacement !== "string") throw new TypeError("Replacement must be text.");
       byteOffsets(replacement);
     }
     if (client) {
       try {
         const result = await (kind === "deck" ? client.renderDeck(input) :
+          kind === "delete" ? client.deleteSource(input, elementId) :
+          kind === "insert" ? client.insertSource(input, elementId, replacement) :
           kind === "render" ? client.renderSource(input) : client.editSource(input, elementId, replacement));
         if (!live()) throw cancelledOperation();
         return result;
@@ -325,6 +415,11 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (!live()) throw cancelledOperation();
     if (kind === "edit") return api.applyParseLensEdit(input, elementId, replacement);
+    if (kind === "delete" || kind === "insert") {
+      const name = kind === "delete" ? "applyParseLensDelete" : "applyParseLensInsertLineAfter";
+      if (typeof api[name] !== "function") throw new Error(`This WASM build lacks ${name}; rebuild the shipped package.`);
+      return kind === "delete" ? api[name](input, elementId) : api[name](input, elementId, replacement);
+    }
     if (kind === "deck") {
       if (typeof api.renderDeck !== "function") throw new Error("This WASM build lacks graph-deck rendering; rebuild the shipped package.");
       return api.renderDeck(input, workerOptions.config);
@@ -337,6 +432,8 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     renderSource: (input) => execute("render", input),
     renderDeck: (input) => execute("deck", input),
     editSource: (input, elementId, replacement) => execute("edit", input, elementId, replacement),
+    deleteSource: (input, elementId) => execute("delete", input, elementId),
+    insertSource: (input, elementId, text) => execute("insert", input, elementId, text),
     cancel() { generation += 1; client?.cancel(); },
     dispose() { disposed = true; generation += 1; client?.dispose(); },
   };
@@ -405,6 +502,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   let session = null;
   let selection = null;
   let activeEdit = null;
+  let preparedEdit = null;
   let displayedSource = null;
   let renderedSvg = null;
   let elements = new Map();
@@ -455,6 +553,21 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   snippet.spellcheck = false;
   const apply = make("button", "Apply source edit", "source-editor-apply");
   apply.type = "button";
+  make("p", "Insert source after the selected span's line, or remove that span. A shared statement may contain several nodes and edges; deletion does not remove other references. Review the exact change before applying it.");
+  const insertLabel = make("label", "Source to insert (Rust preserves line framing)", "source-editor-insert-label");
+  const insertText = make("textarea", "", "source-editor-insert-text");
+  insertLabel.htmlFor = insertText.id;
+  insertText.rows = 3;
+  insertText.spellcheck = false;
+  const insert = make("button", "Preview insertion after selected line", "source-editor-insert");
+  const remove = make("button", "Preview deletion of selected span", "source-editor-delete");
+  const preview = make("pre", "", "source-editor-structural-preview");
+  preview.style.whiteSpace = "pre-wrap";
+  preview.style.overflowWrap = "anywhere";
+  preview.setAttribute("aria-live", "polite");
+  const confirm = make("button", "Apply previewed source change", "source-editor-confirm");
+  const cancel = make("button", "Discard preview", "source-editor-cancel");
+  for (const button of [insert, remove, confirm, cancel]) button.type = "button";
   const message = make("p", "", "source-editor-message");
   message.setAttribute("role", "status");
   panelEl.hidden = false;
@@ -464,9 +577,24 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     redo.disabled = disposed || !history.canRedo;
     saveSource.disabled = disposed;
     saveSvg.disabled = !current() || renderedSvg === null;
+    const editable = current() && selection !== null && activeEdit === null;
+    for (const control of [apply, snippet, insert, remove, insertText]) control.disabled = !editable;
+    confirm.disabled = !editable || preparedEdit === null;
+    cancel.disabled = disposed;
+  }
+
+  function clearStructural() {
+    preparedEdit = null;
+    session?.cancelStructural();
+    preview.textContent = "";
+    preview.hidden = true;
+    confirm.hidden = true;
+    cancel.hidden = true;
+    confirm.disabled = true;
   }
 
   function clearSelection() {
+    clearStructural();
     if (activeEdit) {
       activeEdit = null;
       backend.cancel();
@@ -478,6 +606,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     snippet.value = "";
     snippet.disabled = true;
     apply.disabled = true;
+    syncControls();
   }
   function invalidate() {
     epoch += 1;
@@ -508,6 +637,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     snippet.value = selection.snippet;
     snippet.disabled = false;
     apply.disabled = false;
+    syncControls();
     elements.get(elementId)?.setAttribute("data-source-selected", "true");
     if (selectText) {
       sourceEl.focus({ preventScroll: true });
@@ -549,17 +679,103 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     if (binding) select(binding.elementId, false);
     else clearSelection();
   });
+  listen(sourceEl, "input", () => {
+    history.record(sourceEl.value);
+    // Hosts normally call render on input. Also invalidate when this editor is mounted alone;
+    // do not cancel a render the host already started (its displayedSource is already null).
+    if (displayedSource !== null && sourceEl.value !== displayedSource) {
+      invalidate();
+      outEl.setAttribute("aria-busy", "false");
+      message.textContent = "Source changed; render again before editing a span.";
+    }
+  });
+  function discardPreview() {
+    if (activeEdit?.kind) {
+      activeEdit = null;
+      backend.cancel();
+      outEl.setAttribute("aria-busy", "false");
+    }
+    clearStructural();
+    syncControls();
+  }
+  listen(insertText, "input", discardPreview);
+  listen(snippet, "input", discardPreview);
+  listen(cancel, "click", () => {
+    discardPreview();
+    message.textContent = "Preview discarded. Source is unchanged.";
+  });
+  async function prepareStructural(kind) {
+    if (!current() || !selection || activeEdit) return;
+    clearStructural();
+    const operation = { kind, version: epoch, source: sourceEl.value, selection,
+      text: kind === "insert" ? insertText.value : "" };
+    const live = () => current() && operation.version === epoch && operation.source === sourceEl.value &&
+      operation.selection === selection && activeEdit === operation &&
+      (kind !== "insert" || operation.text === insertText.value);
+    try {
+      activeEdit = operation;
+      syncControls();
+      outEl.setAttribute("aria-busy", "true");
+      message.textContent = `Preparing ${kind === "insert" ? "insertion" : "deletion"} — ${backend.target}…`;
+      const response = kind === "insert"
+        ? await backend.insertSource(operation.source, selection.elementId, operation.text)
+        : await backend.deleteSource(operation.source, selection.elementId);
+      if (!live()) return;
+      const change = session.prepareStructural(selection, kind, operation.text, response);
+      preparedEdit = { operation, change };
+      // JSON escaping makes CRLF, tabs and trailing newlines visible, and never injects HTML.
+      preview.textContent = `UTF-8 bytes ${change.startByte}..${change.endByte}\n` +
+        `Remove: ${JSON.stringify(change.previousSnippet)}\nInsert: ${JSON.stringify(change.replacement)}` +
+        (change.warnings.length ? `\nParser warnings: ${change.warnings.join(" ")}` : "");
+      preview.hidden = false;
+      confirm.hidden = false;
+      cancel.hidden = false;
+      message.textContent = "Review the exact source change, then apply or discard it. Source is unchanged.";
+    } catch (error) {
+      if (live()) message.textContent = `Cannot prepare source change: ${error.message || error}`;
+    } finally {
+      if (activeEdit === operation) {
+        activeEdit = null;
+        outEl.setAttribute("aria-busy", "false");
+        syncControls();
+      }
+    }
+  }
+  listen(insert, "click", () => prepareStructural("insert"));
+  listen(remove, "click", () => prepareStructural("delete"));
+  listen(confirm, "click", () => {
+    const prepared = preparedEdit;
+    const operation = prepared?.operation;
+    if (!prepared || !current() || activeEdit || operation.version !== epoch ||
+        operation.selection !== selection || operation.source !== sourceEl.value ||
+        (operation.kind === "insert" && operation.text !== insertText.value)) {
+      discardPreview();
+      if (!disposed) message.textContent = "Preview is stale; prepare the change again.";
+      return;
+    }
+    try {
+      sourceEl.value = session.commitStructural(prepared.change);
+      history.record(sourceEl.value);
+      invalidate();
+      message.textContent = "Source change applied. Undo restores the previous source exactly.";
+      onChange();
+    } catch (error) {
+      if (!disposed) message.textContent = String(error.message || error);
+    }
+  });
   listen(apply, "click", async () => {
     if (!current() || !selection) {
       if (!disposed) message.textContent = "Source changed; select an element from the new preview.";
       return;
     }
     if (activeEdit) return;
+    clearStructural();
     const operation = { version: epoch, source: sourceEl.value, selection, replacement: snippet.value };
     const live = () => !disposed && operation.version === epoch && operation.source === sourceEl.value &&
-      operation.selection === selection && activeEdit === operation;
+      operation.selection === selection && activeEdit === operation && snippet.value === operation.replacement;
     try {
       activeEdit = operation;
+      syncControls();
       apply.disabled = true;
       snippet.disabled = true;
       outEl.setAttribute("aria-busy", "true");
@@ -574,7 +790,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     } finally {
       if (activeEdit === operation) {
         activeEdit = null;
-        if (current() && selection) { apply.disabled = false; snippet.disabled = false; }
+        syncControls();
         outEl.setAttribute("aria-busy", "false");
       }
     }
