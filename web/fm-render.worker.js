@@ -12,8 +12,9 @@
 // JSON text on both sides is what lets the same payload be used from the main thread, from this
 // worker, and from a native Rust test.
 //
-// Source authoring has two additional host messages (bd-1t7l.1): `sourceRender` returns
+// Source authoring has additional host messages (bd-1t7l.1): `sourceRender` returns
 // SVG plus its matching ParseLens bindings; `sourceEdit` returns a Rust-applied source edit.
+// `sourceDeck` returns the SVG and deck manifest from ONE renderDeck invocation (bd-z7g6k).
 // These use the existing WASM exports, not a second parser. Their pre-execution queue is
 // separate from the Rust render protocol, which has no source-map/edit response variant.
 
@@ -56,7 +57,22 @@ async function handleSourceOperation(message) {
     await yieldToMessages();
     if (pendingSourceOperation !== operation) return;
 
-    if (kind === "sourceRender") {
+    if (kind === "sourceDeck") {
+      if (typeof wasm.renderDeck !== "function") {
+        throw new Error("This WASM build lacks graph-deck rendering; rebuild the shipped package.");
+      }
+      const configJson = message.configJson ?? initConfigJson;
+      const config = configJson == null ? undefined : JSON.parse(configJson);
+      // Do not independently call renderSvg or build a manifest from ParseLens bindings: the
+      // deck's element IDs and camera geometry belong to the layout that produced THIS SVG.
+      const deck = wasm.renderDeck(input, config);
+      if (typeof deck?.svg !== "string" || !Array.isArray(deck.warnings) ||
+          (deck.manifest != null && (typeof deck.manifest !== "object" || Array.isArray(deck.manifest)))) {
+        throw new Error("The renderer did not return a graph-deck result");
+      }
+      self.postMessage({ kind: "sourceDeckRendered", requestId,
+        svg: deck.svg, manifest: deck.manifest ?? null, warnings: deck.warnings });
+    } else if (kind === "sourceRender") {
       const configJson = message.configJson ?? initConfigJson;
       const config = configJson == null ? undefined : JSON.parse(configJson);
       const snapshot = sourceSnapshot(wasm.parseLens(input));
@@ -150,7 +166,7 @@ self.onmessage = async (event) => {
   const message = event.data || {};
 
   try {
-    if (message.kind === "sourceRender" || message.kind === "sourceEdit") {
+    if (message.kind === "sourceRender" || message.kind === "sourceEdit" || message.kind === "sourceDeck") {
       await handleSourceOperation(message);
       return;
     }
@@ -197,6 +213,7 @@ self.onmessage = async (event) => {
         requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
         sourceEditing: ["parseLens", "renderSvg", "applyParseLensEdit"].every((name) => typeof wasm[name] === "function"),
+        deckRendering: typeof wasm.renderDeck === "function",
         ...(fallbackReason ? { fallbackReason } : {}),
       });
       return;

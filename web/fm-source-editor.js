@@ -159,6 +159,7 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     worker = new WorkerClass(workerUrl || new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
   } catch (error) { throw new SourceWorkerUnavailable(String(error.message || error)); }
   let ready = false;
+  let deckRendering = false;
   let closed = false;
   let failure = null;
   let pending = null;
@@ -182,6 +183,10 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
   }
   function sendPending() {
     if (!ready || !pending || pending.sent || closed || failure) return;
+    if (pending.message.kind === "sourceDeck" && !deckRendering) {
+      settle(new Error("The worker package lacks graph-deck rendering; update the worker and WASM package."));
+      return;
+    }
     pending.sent = true;
     pending.timer = setTimeout(() => fail("source worker request timed out"), requestTimeoutMs);
     try { worker.postMessage(pending.message); }
@@ -204,6 +209,7 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
       if (message.sourceEditing !== true) { fail("worker package lacks source-editing support"); return; }
       clearTimeout(initTimer);
       ready = true;
+      deckRendering = message.deckRendering === true;
       sendPending();
       return;
     }
@@ -216,6 +222,16 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     // Engine errors do not trigger synchronous fallback: retrying malformed input on the UI
     // thread would do the same failing work again and defeat isolation.
     if (message.kind === "failed") { settle(new Error(message.reason || "source operation failed")); return; }
+    if (pending.message.kind === "sourceDeck") {
+      if (message.kind !== "sourceDeckRendered" || typeof message.svg !== "string" ||
+          !Array.isArray(message.warnings) ||
+          (message.manifest != null && (typeof message.manifest !== "object" || Array.isArray(message.manifest)))) {
+        fail("mismatched graph-deck worker response");
+        return;
+      }
+      settle(null, { svg: message.svg, manifest: message.manifest ?? null, warnings: message.warnings });
+      return;
+    }
     const rendering = pending.message.kind === "sourceRender";
     const valid = rendering
       ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
@@ -245,6 +261,7 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
   }
   return {
     renderSource: (input) => request("sourceRender", input),
+    renderDeck: (input) => request("sourceDeck", input),
     editSource: (input, elementId, replacement) => request("sourceEdit", input, { elementId, replacement }),
     cancel,
     dispose() {
@@ -290,7 +307,8 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     }
     if (client) {
       try {
-        const result = await (kind === "render" ? client.renderSource(input) : client.editSource(input, elementId, replacement));
+        const result = await (kind === "deck" ? client.renderDeck(input) :
+          kind === "render" ? client.renderSource(input) : client.editSource(input, elementId, replacement));
         if (!live()) throw cancelledOperation();
         return result;
       } catch (error) {
@@ -307,12 +325,17 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (!live()) throw cancelledOperation();
     if (kind === "edit") return api.applyParseLensEdit(input, elementId, replacement);
+    if (kind === "deck") {
+      if (typeof api.renderDeck !== "function") throw new Error("This WASM build lacks graph-deck rendering; rebuild the shipped package.");
+      return api.renderDeck(input, workerOptions.config);
+    }
     return { snapshot: api.parseLens(input), svg: api.renderSvg(input, workerOptions.config) };
   }
   return {
     get target() { return target; },
     get fallbackReason() { return fallbackReason; },
     renderSource: (input) => execute("render", input),
+    renderDeck: (input) => execute("deck", input),
     editSource: (input, elementId, replacement) => execute("edit", input, elementId, replacement),
     cancel() { generation += 1; client?.cancel(); },
     dispose() { disposed = true; generation += 1; client?.dispose(); },
