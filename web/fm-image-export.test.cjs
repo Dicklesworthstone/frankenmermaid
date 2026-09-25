@@ -110,3 +110,35 @@ test('filenames are Unicode-safe leaf names with a controlled extension', async 
   assert.equal(imageFilename('😀'.repeat(181), 'svg'), '😀'.repeat(180) + '.svg');
   assert.throws(() => imageFilename('test', 'html'), /Unsupported/);
 });
+
+test('PNG dimensions use explicit resolution, round up, and enforce exact allocation bounds', async () => {
+  const { pngDimensions, imageFilename } = await modulePromise;
+  assert.deepEqual(pngDimensions(10.1, 20.2, 3), { width: 31, height: 61 });
+  assert.deepEqual(pngDimensions(8000, 4000, 1), { width: 8000, height: 4000 });
+  assert.deepEqual(pngDimensions(16384, 1, 1), { width: 16384, height: 1 });
+  assert.throws(() => pngDimensions(8001, 4000, 1), /allocation limit/);
+  assert.throws(() => pngDimensions(16385, 1, 1), /allocation limit/);
+  assert.throws(() => pngDimensions(Number.MAX_VALUE, 1, 4), /allocation limit/);
+  assert.equal(imageFilename('diagram.mermaid', 'png'), 'diagram.png');
+});
+test('PNG dimensions reject invalid sizes and unsupported scale values before allocation', async () => {
+  const { pngDimensions } = await modulePromise;
+  for (const value of [NaN, Infinity, -1, 0, '10', null]) {
+    assert.throws(() => pngDimensions(value, 10, 1), /positive finite/);
+    assert.throws(() => pngDimensions(10, value, 1), /positive finite/);
+  }
+  for (const scale of [0, -1, 1.5, 5, '2', Infinity, NaN]) {
+    assert.throws(() => pngDimensions(10, 10, scale), /scale/);
+  }
+});
+test('pre-aborted PNG operations do not touch any browser resource', async () => {
+  const { pngArtifact } = await modulePromise;
+  const controller = new AbortController();
+  controller.abort();
+  const forbidden = new Proxy({}, { get() { throw new Error('resource accessed after cancellation'); } });
+  await assert.rejects(pngArtifact('<svg/>', {}, forbidden, controller.signal), { name: 'AbortError' });
+});
+test('image format dispatch rejects unknown output types', async () => {
+  const { imageArtifact } = await modulePromise;
+  assert.throws(() => imageArtifact('<svg/>', { format: 'html' }), /Unsupported image format/);
+});
