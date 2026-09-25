@@ -24,6 +24,9 @@ let modulePromise = null;
 let offscreenDiagram = null;
 let pendingOffscreenRender = null;
 let pendingSvgRender = null;
+// Identity, not a numeric counter: an init creates a new rendering session even while the
+// shared module import is pending. Work from an earlier session must not acquire the new target.
+let renderSession = {};
 let initConfigJson;
 let pendingSourceOperation = null;
 
@@ -211,17 +214,21 @@ async function renderSvgIfStillLive(message) {
 
 self.onmessage = async (event) => {
   const message = event.data || {};
+  const sessionAtArrival = renderSession;
+  const validRender = isRenderRequest(message);
 
   try {
     if (message.kind === "sourceRender" || message.kind === "sourceEdit" || message.kind === "sourceDeck") {
       await handleSourceOperation(message);
       return;
     }
-    if (message.kind === "cancel" && pendingSourceOperation?.requestId === message.requestId) {
+    if (message.kind === "cancel" && pendingSourceOperation && pendingSourceOperation.requestId === message.requestId) {
       releaseSourceOperation();
       return;
     }
     if (message.kind === "init") {
+      renderSession = {};
+      releaseSvgRender();
       releaseSourceOperation();
       await ensureModule(message.moduleUrl);
       initConfigJson = message.config == null ? undefined : JSON.stringify(message.config);
@@ -267,6 +274,12 @@ self.onmessage = async (event) => {
     }
 
     await ensureModule(message.moduleUrl);
+    // Capture at message arrival, not after import: an old request can otherwise resume
+    // alongside a newer init and render its source into that init's replacement canvas/config.
+    if (validRender && sessionAtArrival !== renderSession) {
+      self.postMessage({ kind: "noReply", requestId: message.requestId });
+      return;
+    }
 
     if (offscreenDiagram) {
       if (message.kind === "cancel") {
@@ -292,7 +305,7 @@ self.onmessage = async (event) => {
       return;
     }
 
-    if (message.kind === "cancel" && pendingSvgRender?.requestId === message.requestId) {
+    if (message.kind === "cancel" && pendingSvgRender && pendingSvgRender.requestId === message.requestId) {
       releaseSvgRender();
       return;
     }
@@ -306,6 +319,12 @@ self.onmessage = async (event) => {
     await yieldToMessages();
     forwardSvgMessage(message);
   } catch (error) {
+    if (validRender && sessionAtArrival !== renderSession) {
+      // A rejected shared import still settles work invalidated by a newer init as obsolete.
+      // The init/current-session request reports the actual failure and can be retried.
+      self.postMessage({ kind: "noReply", requestId: message.requestId });
+      return;
+    }
     // Never fail silently: from the UI a dead worker is indistinguishable from a slow one.
     self.postMessage({
       kind: "failed",
