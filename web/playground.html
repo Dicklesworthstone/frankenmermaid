@@ -23,6 +23,9 @@
   #source-editor { max-height: 40vh; overflow: auto; }
   #source-editor label, #source-editor select, #source-editor textarea { display: block; width: 100%; box-sizing: border-box; }
   #source-editor textarea { border: 1px solid #cbd5e1; }
+  #deck-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; flex-shrink: 0; }
+  #deck-editor-preview iframe { display: block; box-sizing: border-box; }
+  #deck-editor pre { overflow: auto; }
   #out [data-source-editable] { cursor: pointer; }
   #out [data-source-selected], #out [data-source-editable]:focus { outline: 3px solid #2563eb; outline-offset: 3px; }
 </style>
@@ -34,8 +37,12 @@
 
 <div id="right">
   <div id="status" role="status">starting…</div>
-  <div id="editor-toolbar"><button id="edit-source" type="button">Edit diagram source (SVG)</button></div>
+  <div id="editor-toolbar">
+    <button id="edit-source" type="button">Edit diagram source (SVG)</button>
+    <button id="edit-deck" type="button">Present / export graph deck</button>
+  </div>
   <section id="source-editor" aria-label="Diagram source editor" hidden></section>
+  <section id="deck-editor" aria-label="Graph deck authoring" hidden></section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
@@ -60,6 +67,7 @@
   let liveRequestId = 0;
   let startedAt = 0;
   let sourceEditor = null;
+  let deckEditor = null;
 
   function log(text, cls) {
     const line = document.createElement("div");
@@ -145,6 +153,8 @@
 
   function render() {
     if (disposed) return;
+    // Source edits and undo/redo can change the textarea without dispatching an input event.
+    deckEditor?.sourceChanged();
     const previousId = liveRequestId;
     const requestId = nextRequestId++;
     liveRequestId = requestId;
@@ -262,10 +272,32 @@
       log(`source editor unavailable: ${error.message || error}`, "err");
     }
   });
+  document.getElementById("edit-deck")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      if (!deckEditor) {
+        const { mountDeckEditor } = await import("./fm-deck-editor.js");
+        if (disposed) return;
+        deckEditor = mountDeckEditor({
+          sourceEl: srcEl, panelEl: document.getElementById("deck-editor"),
+          loadModule: ensureMainModule, workerOptions: { moduleUrl: MODULE_URL },
+        });
+      }
+      // Keep the normal diagram/source preview alive; the presentation has its own worker
+      // and sandboxed frame, but both remain tied to this one authoritative source.
+      await deckEditor.open();
+    } catch (error) {
+      if (!disposed) log(`presentation unavailable: ${error.message || error}`, "err");
+    } finally {
+      if (!disposed) button.disabled = false;
+    }
+  });
   globalThis.addEventListener("pagehide", (event) => {
     if (event.persisted) return; // A back/forward-cache restore resumes this instance.
     disposed = true;
     sourceEditor?.dispose();
+    deckEditor?.dispose();
     clearTimeout(initTimer);
     if (worker) worker.terminate();
     worker = null;

@@ -185,3 +185,121 @@ test("closing the editor settles active deck work and rejects future renders", a
   assert.equal(fixture.instances[0].terminated, true);
   await assert.rejects(api.renderDeck("after closing"), { name: "AbortError" });
 });
+
+const deckEditor = import(pathToFileURL(path.join(__dirname, "fm-deck-editor.js")));
+const assets = {
+  runtime: fs.readFileSync(path.join(__dirname, "../crates/fm-cli/src/deck_runtime.js"), "utf8"),
+  template: fs.readFileSync(path.join(__dirname, "../crates/fm-cli/src/deck_template.html"), "utf8"),
+};
+const nonce = "ab".repeat(24);
+function validDeck() {
+  const bounds = { x: 0, y: 0, width: 400, height: 200 };
+  return { svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200"><g id="fm-node-a-0"/></svg>', warnings: [], manifest: {
+    schemaVersion: "1.1.0", generator: "frankenmermaid", diagramType: "Flowchart", title: "Example",
+    viewBox: bounds, options: { fitMargin: 20, zoomMax: 2, dimOpacity: 0.1, autoAdvanceMs: 0 },
+    slides: [{ id: "first", title: "First", bounds, fitMargin: 20, zoomMax: 2, maxStep: 0,
+      nodes: [{ index: 0, elementId: "fm-node-a-0", sourceId: "A", step: 0 }] }],
+    overview: { enabled: true, title: "Overview", tour: false },
+  } };
+}
+
+test("portable deck preserves Map-backed WASM records, including prototype-shaped keys", async () => {
+  const { checkedDeck, deckJson } = await deckEditor;
+  const deck = validDeck();
+  deck.manifest.nodeGeometry = new Map([["fm-node-a-0", deck.manifest.viewBox]]);
+  deck.manifest.nodeSlideIndex = new Map([["fm-node-a-0", ["first"]], ["__proto__", ["first"]]]);
+  const normalized = checkedDeck(deck);
+  assert.deepEqual(normalized.manifest.nodeGeometry["fm-node-a-0"], deck.manifest.viewBox);
+  assert.deepEqual(normalized.manifest.nodeSlideIndex.__proto__, ["first"]);
+  assert.equal(Object.getPrototypeOf(normalized.manifest.nodeSlideIndex), Object.prototype);
+  assert.throws(() => deckJson(new Map([[1, "invalid"]])), /keys must be strings/);
+});
+
+test("deck validation rejects empty slides, duplicate IDs, unsupported versions and invalid geometry", async () => {
+  const { checkedDeck } = await deckEditor;
+  for (const mutate of [
+    (d) => { d.manifest = null; },
+    (d) => { d.manifest.schemaVersion = "2.0.0"; },
+    (d) => { d.manifest.slides = []; },
+    (d) => { d.manifest.slides.push(d.manifest.slides[0]); },
+    (d) => { d.manifest.viewBox.width = 0; },
+    (d) => { d.manifest.viewBox.x = NaN; },
+    (d) => { d.manifest.options.zoomMax = Infinity; },
+    (d) => { d.manifest.slides[0].nodes[0].step = 1; },
+    (d) => { d.manifest.slides[0].steps = [{ step: -1, elementIds: ["fm-node-a-0"] }]; },
+  ]) {
+    const deck = validDeck();
+    mutate(deck);
+    assert.throws(() => checkedDeck(deck));
+  }
+});
+
+test("HTML export embeds the exact canonical runtime and paired SVG without recursive template expansion", async () => {
+  const { buildDeckHtml } = await deckEditor;
+  const deck = validDeck();
+  const hostile = '</script><script>globalThis.pwned=1</script> {{BG}} RUNTIME_JS \u2028 \u2029 & <b>literal</b>';
+  deck.manifest.title = hostile;
+  deck.manifest.slides[0].caption = hostile;
+  deck.svg = deck.svg.replace("</svg>", `<text>${hostile}</text></svg>`);
+  const built = buildDeckHtml(deck, assets, { nonce });
+  assert.ok(built.html.includes(assets.runtime), "do not ship a second browser presentation runtime");
+  const payload = built.html.match(/<script type="application\/json" id="deck-manifest">([\s\S]*?)<\/script>/)[1];
+  assert.equal(JSON.parse(payload).title, hostile);
+  assert.ok(!payload.includes("<"));
+  assert.ok(!payload.includes("\u2028"));
+  const encodedSvg = built.html.match(/\n    svg: (.*),\n/)[1];
+  assert.equal(JSON.parse(encodedSvg), deck.svg);
+  assert.equal((built.html.match(/<script nonce=/g) || []).length, 4);
+  assert.ok(built.html.includes(`script-src 'nonce-${nonce}'`));
+  assert.ok(!built.html.includes("<script>globalThis.pwned"));
+  assert.match(built.html, /&lt;\/script&gt;/);
+  assert.ok(built.html.includes("{{BG}} RUNTIME_JS"), "authored tokens must remain literal");
+});
+
+test("HTML export uses fresh nonces but is deterministic with an explicit nonce", async () => {
+  const { buildDeckHtml } = await deckEditor;
+  const deck = validDeck();
+  assert.equal(buildDeckHtml(deck, assets, { nonce }).html, buildDeckHtml(deck, assets, { nonce }).html);
+  assert.notEqual(buildDeckHtml(deck, assets).nonce, buildDeckHtml(deck, assets).nonce);
+  for (const options of [{ nonce: "unsafe\"" }, { background: 'red; background:url(https://evil.invalid)' }, { foreground: "red" }]) {
+    assert.throws(() => buildDeckHtml(deck, assets, options));
+  }
+});
+
+test("missing template sentinels and an unsafe runtime cannot produce an export", async () => {
+  const { buildDeckHtml } = await deckEditor;
+  for (const broken of [
+    { ...assets, runtime: "<html>fallback page</html>" },
+    { ...assets, runtime: `${assets.runtime}\n// </script>` },
+    { ...assets, template: assets.template.replace("{{TITLE}}", "") },
+    { ...assets, template: assets.template + "RUNTIME_JS" },
+  ]) assert.throws(() => buildDeckHtml(validDeck(), broken, { nonce }));
+});
+
+test("asset loading shares initialization and falls back from HTML route shells to tracked sources", async () => {
+  const { createDeckAssetLoader } = await deckEditor;
+  const requests = [];
+  const load = createDeckAssetLoader(async (url) => {
+    requests.push(url.pathname);
+    return { ok: true, text: async () => url.pathname.includes("/crates/")
+      ? (url.pathname.endsWith(".js") ? assets.runtime : assets.template) : "<html>fallback shell</html>" };
+  });
+  const [one, two] = await Promise.all([load(), load()]);
+  assert.equal(one, two);
+  assert.deepEqual(one, assets);
+  assert.equal(requests.length, 4);
+  await load();
+  assert.equal(requests.length, 4);
+});
+
+test("failed asset downloads remain retryable instead of caching a broken export", async () => {
+  const { createDeckAssetLoader } = await deckEditor;
+  let available = false;
+  const load = createDeckAssetLoader(async (url) => {
+    if (!available) throw new Error("offline");
+    return { ok: true, text: async () => url.pathname.endsWith(".js") ? assets.runtime : assets.template };
+  });
+  await assert.rejects(load(), /assets unavailable/);
+  available = true;
+  assert.deepEqual(await load(), assets);
+});
