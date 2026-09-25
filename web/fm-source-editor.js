@@ -490,6 +490,55 @@ export class SourceHistory {
   }
 }
 
+function searchText(value) {
+  return String(value ?? "").normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+}
+
+/** Literal, Unicode-normalized search over engine bindings, not another source parser. */
+export function searchSourceBindings(bindings, query, kind = "all", labels = new Map()) {
+  const words = searchText(query).split(" ").filter(Boolean);
+  return bindings.filter((binding) => {
+    if (kind !== "all" && String(binding.kind).toLowerCase() !== kind) return false;
+    const text = searchText([binding.sourceId, binding.elementId, binding.snippet,
+      labels.get(binding.elementId)].join(" "));
+    return words.every((word) => text.includes(word));
+  });
+}
+
+/** Pick a visual neighbor, with aligned boxes before diagonals and stable input-order ties.
+ * Rectangles are in screen space, so SVG nesting, orientation and zoom need no special cases.
+ * This is spatial navigation, NOT graph connectivity (source spans do not encode adjacency).
+ */
+export function directionalSourceBinding(items, fromId, direction) {
+  const vector = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[direction];
+  const valid = (rect) => rect && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) &&
+    rect.width >= 0 && rect.height >= 0 && (rect.width > 0 || rect.height > 0);
+  const origin = items.find((item) => item.elementId === fromId);
+  if (!vector || !origin || !valid(origin.rect)) return null;
+  const a = origin.rect;
+  const horizontal = vector[0] !== 0;
+  let best = null;
+  let bestScore = null;
+  for (const item of items) {
+    if (item.elementId === fromId || !valid(item.rect)) continue;
+    const b = item.rect;
+    const dx = b.x + b.width / 2 - a.x - a.width / 2;
+    const dy = b.y + b.height / 2 - a.y - a.height / 2;
+    const forward = dx * vector[0] + dy * vector[1];
+    if (forward <= 0) continue;
+    const cross = Math.abs(horizontal ? dy : dx);
+    const overlap = horizontal
+      ? Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+      : Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+    const score = [overlap >= 0 ? 0 : 1, Math.hypot(forward, cross) + 2 * cross];
+    if (!bestScore || score[0] < bestScore[0] || (score[0] === bestScore[0] && score[1] < bestScore[1])) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return best?.elementId ?? null;
+}
+
 /** Mount a worker-first SVG/source editor. loadModule initializes the fallback WASM only. */
 export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChange, saveFile, workerOptions = {} }) {
   const document = panelEl.ownerDocument;
@@ -507,6 +556,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   let renderedSvg = null;
   let elements = new Map();
   let originalTabIndices = new Map();
+  let matchedBindings = [];
+  let renderedLabels = new Map();
 
   function download(artifact) {
     const host = document.defaultView;
@@ -543,6 +594,25 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   const saveSource = make("button", "Save source (.mmd)", "source-editor-save-source");
   const saveSvg = make("button", "Save SVG", "source-editor-save-svg");
   for (const button of [undo, redo, saveSource, saveSvg]) button.type = "button";
+  const searchLabel = make("label", "Find diagram elements (ID, label or source)", "source-editor-search-label");
+  const search = make("input", "", "source-editor-search");
+  search.type = "search";
+  searchLabel.htmlFor = search.id;
+  const kindLabel = make("label", "Element kind", "source-editor-kind-label");
+  const kindFilter = make("select", "", "source-editor-kind");
+  kindLabel.htmlFor = kindFilter.id;
+  for (const [value, title] of [["all", "All elements"], ["node", "Nodes"], ["edge", "Edges"], ["cluster", "Clusters"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = title;
+    kindFilter.append(option);
+  }
+  const previousMatch = make("button", "Previous match", "source-editor-previous");
+  const nextMatch = make("button", "Next match", "source-editor-next");
+  for (const button of [previousMatch, nextMatch]) button.type = "button";
+  const searchStatus = make("p", "", "source-editor-search-status");
+  searchStatus.setAttribute("role", "status");
+  make("p", "Enter in search selects the next match; Shift+Enter goes back. On the diagram, arrow keys move to a matching element of the same kind by visual position; Home/End go to the first/last. Enter edits its source. Tab leaves the diagram.");
   const label = make("label", "Source element", "source-editor-label");
   const chooser = make("select", "", "source-editor-elements");
   label.htmlFor = chooser.id;
@@ -581,7 +651,67 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     for (const control of [apply, snippet, insert, remove, insertText]) control.disabled = !editable;
     confirm.disabled = !editable || preparedEdit === null;
     cancel.disabled = disposed;
+    search.disabled = !current();
+    kindFilter.disabled = !current();
+    previousMatch.disabled = nextMatch.disabled = !current() || matchedBindings.length === 0;
   }
+
+  function syncTabStops() {
+    const id = matchedBindings.find((binding) => binding.elementId === selection?.elementId && elements.has(binding.elementId))?.elementId ??
+      matchedBindings.find((binding) => elements.has(binding.elementId))?.elementId;
+    for (const [elementId, element] of elements) element.setAttribute("tabindex", elementId === id ? "0" : "-1");
+  }
+  function rebuildMatches() {
+    matchedBindings = current() ? searchSourceBindings(session.bindings, search.value, kindFilter.value, renderedLabels) : [];
+    chooser.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = matchedBindings.length ? "Select an element…" : "No matching elements";
+    chooser.append(placeholder);
+    for (const binding of matchedBindings) {
+      const option = document.createElement("option");
+      option.value = binding.elementId;
+      const text = (renderedLabels.get(binding.elementId) || binding.snippet || "").replace(/\s+/gu, " ").trim();
+      option.textContent = `${binding.kind}: ${binding.sourceId || binding.elementId} — ${text.slice(0, 100)}`;
+      chooser.append(option);
+    }
+    chooser.value = selection?.elementId || "";
+    chooser.disabled = !matchedBindings.length;
+    searchStatus.textContent = current() ? `${matchedBindings.length} of ${session.bindings.length} source elements match.` : "Render the current source to navigate.";
+    syncTabStops();
+    syncControls();
+  }
+
+  function navigateTo(elementId, focusDiagram = false) {
+    if (!current()) return;
+    select(elementId, false);
+    // Retain diagram/search focus during navigation, but keep the source selection paired.
+    sourceEl.setSelectionRange(selection.start, selection.end);
+    const element = elements.get(elementId);
+    if (element) {
+      if (focusDiagram) element.focus({ preventScroll: true });
+      element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+    const index = matchedBindings.findIndex((binding) => binding.elementId === elementId);
+    searchStatus.textContent = `Match ${index + 1} of ${matchedBindings.length}: ${selection.kind} ${selection.sourceId || elementId}.` +
+      (element ? "" : " This source span has no addressable SVG element.");
+  }
+  function cycleMatch(delta) {
+    if (!current() || !matchedBindings.length) return;
+    const index = matchedBindings.findIndex((binding) => binding.elementId === selection?.elementId);
+    const next = index < 0 ? (delta < 0 ? matchedBindings.length - 1 : 0) :
+      (index + delta + matchedBindings.length) % matchedBindings.length;
+    navigateTo(matchedBindings[next].elementId);
+  }
+  listen(search, "input", () => { clearSelection(); rebuildMatches(); });
+  listen(kindFilter, "change", () => { clearSelection(); rebuildMatches(); });
+  listen(previousMatch, "click", () => cycleMatch(-1));
+  listen(nextMatch, "click", () => cycleMatch(1));
+  listen(search, "keydown", (event) => {
+    if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.key !== "Enter") return;
+    event.preventDefault();
+    cycleMatch(event.shiftKey ? -1 : 1);
+  });
 
   function clearStructural() {
     preparedEdit = null;
@@ -606,6 +736,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     snippet.value = "";
     snippet.disabled = true;
     apply.disabled = true;
+    syncTabStops();
     syncControls();
   }
   function invalidate() {
@@ -623,6 +754,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     }
     originalTabIndices = new Map();
     elements = new Map();
+    renderedLabels = new Map();
+    matchedBindings = [];
+    searchStatus.textContent = "Render the current source to navigate.";
     syncControls();
   }
   function current() {
@@ -630,7 +764,13 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
   function select(elementId, selectText = true) {
     if (!current()) return;
-    if (selection?.elementId === elementId) return;
+    if (selection?.elementId === elementId) {
+      if (selectText) {
+        sourceEl.focus({ preventScroll: true });
+        sourceEl.setSelectionRange(selection.start, selection.end);
+      }
+      return;
+    }
     clearSelection();
     selection = session.select(elementId);
     chooser.value = elementId;
@@ -639,6 +779,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     apply.disabled = false;
     syncControls();
     elements.get(elementId)?.setAttribute("data-source-selected", "true");
+    syncTabStops();
     if (selectText) {
       sourceEl.focus({ preventScroll: true });
       sourceEl.setSelectionRange(selection.start, selection.end);
@@ -662,6 +803,24 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     select(id);
   }, true);
   listen(outEl, "keydown", (event) => {
+    if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey ||
+        event.target.closest?.("input,textarea,select,[contenteditable]:not([contenteditable=false])")) return;
+    const from = elementFor(event.target);
+    if (from && current() && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+      const kind = session.bindings.find((binding) => binding.elementId === from)?.kind;
+      const candidates = matchedBindings.filter((binding) => binding.kind === kind).flatMap((binding) => {
+        const element = elements.get(binding.elementId);
+        if (!element || document.defaultView.getComputedStyle(element).visibility === "hidden") return [];
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 || rect.height > 0 ? [{ elementId: binding.elementId, rect }] : [];
+      });
+      const next = event.key === "Home" ? candidates[0]?.elementId : event.key === "End" ? candidates.at(-1)?.elementId :
+        directionalSourceBinding(candidates, from, event.key);
+      event.preventDefault();
+      event.stopPropagation();
+      if (next) navigateTo(next, true);
+      return;
+    }
     if (event.key !== "Enter" && event.key !== " ") return;
     const id = elementFor(event.target);
     if (!id || !current()) return;
@@ -675,6 +834,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   });
   listen(sourceEl, "select", () => {
     if (!current()) return;
+    // Several bindings can share one statement. A programmatic range change must not
+    // replace an explicitly selected B with the first binding A for that same range.
+    if (selection?.start === sourceEl.selectionStart && selection?.end === sourceEl.selectionEnd) return;
     const binding = session.bindingAt(sourceEl.selectionStart, sourceEl.selectionEnd);
     if (binding) select(binding.elementId, false);
     else clearSelection();
@@ -861,23 +1023,12 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
           if (!bindings.has(element.id)) continue;
           elements.set(element.id, element);
           originalTabIndices.set(element, element.getAttribute("tabindex"));
-          element.setAttribute("tabindex", "0");
           element.setAttribute("data-source-editable", "true");
-        }
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        placeholder.textContent = "Select an element…";
-        chooser.append(placeholder);
-        for (const binding of bindings.values()) {
-          const option = document.createElement("option");
-          option.value = binding.elementId;
-          option.textContent = `${binding.kind}: ${binding.sourceId || binding.elementId}`;
-          chooser.append(option);
+          renderedLabels.set(element.id, element.textContent);
         }
         displayedSource = source;
         renderedSvg = svg;
-        chooser.disabled = bindings.size === 0;
-        syncControls();
+        rebuildMatches();
         const warnings = snapshot.parsed?.warnings || [];
         message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
           (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
