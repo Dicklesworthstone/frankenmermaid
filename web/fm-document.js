@@ -151,6 +151,84 @@ export async function readSourceFile(file, maxBytes = MAX_FILE_BYTES) {
   return { source, name: fileName(file.name) };
 }
 
+/** An explicitly chosen file and its last observed disk contents, separate from downloads.
+ * Handles are session-only: recovery records and share links never carry write authority.
+ */
+export class SourceFileBinding {
+  #handle;
+  #source;
+  #name;
+  #maxBytes;
+  #writing = false;
+
+  constructor(handle, document, maxBytes) {
+    this.#handle = handle;
+    this.#source = document.source;
+    this.#name = document.name;
+    this.#maxBytes = maxBytes;
+  }
+  static async open(handle, maxBytes = MAX_FILE_BYTES) {
+    if (handle?.kind !== "file" || typeof handle.getFile !== "function" ||
+        typeof handle.createWritable !== "function") throw new TypeError("Choose an editable source file.");
+    const incoming = await readSourceFile(await handle.getFile(), maxBytes);
+    return new SourceFileBinding(handle, incoming, maxBytes);
+  }
+  get source() { return this.#source; }
+  get name() { return this.#name; }
+  async reload() { return SourceFileBinding.open(this.#handle, this.#maxBytes); }
+
+  async save(source, { isCurrent = () => true } = {}) {
+    if (this.#writing) throw new Error("A save is already in progress for this file.");
+    this.#writing = true;
+    let writer = null, committed = false;
+    const checkCurrent = () => {
+      if (!isCurrent()) throw new DOMException("Save cancelled: the document is no longer current.", "AbortError");
+    };
+    const checkDisk = async () => {
+      const disk = await readSourceFile(await this.#handle.getFile(), this.#maxBytes);
+      checkCurrent();
+      if (disk.source !== this.#source) {
+        throw new Error("File changed on disk. Download your edits before reloading, or save them to a different file.");
+      }
+    };
+    try {
+      checkCurrent();
+      unicodeText(source);
+      if (source.includes("\0")) throw new Error("Source contains NUL bytes; repair it before saving.");
+      if (source.length > this.#maxBytes) throw new Error("Source exceeds the file size limit.");
+      const bytes = new TextEncoder().encode(source);
+      if (bytes.byteLength > this.#maxBytes) throw new Error("Source exceeds the file size limit.");
+      // Invoke permission from the Save click, not from a timer or an automatic retry.
+      if (typeof this.#handle.requestPermission === "function" &&
+          await this.#handle.requestPermission({ mode: "readwrite" }) !== "granted") {
+        throw new DOMException("Write permission was not granted. Download your source to keep a copy.", "NotAllowedError");
+      }
+      checkCurrent();
+      await checkDisk();
+      if (source === this.#source) return true;
+      // Exclusive mode prevents competing browser writers where supported. Older browsers can
+      // ignore this option, and OS editors do not honor it: content checks remain necessary.
+      writer = await this.#handle.createWritable({ keepExistingData: false, mode: "exclusive" });
+      checkCurrent();
+      await checkDisk();
+      await writer.write(bytes);
+      checkCurrent();
+      await checkDisk();
+      // close() commits the swap file. No baseline/clean-state update before it succeeds.
+      // The API has no compare-and-swap: an OS write racing this final close is not preventable.
+      await writer.close();
+      committed = true;
+      this.#source = source;
+      return true;
+    } finally {
+      if (writer && !committed) {
+        try { await writer.abort(); } catch { /* Preserve the original failure. */ }
+      }
+      this.#writing = false;
+    }
+  }
+}
+
 /** Exact source plus a revision and export baseline, independent of editor/renderer state. */
 export class SourceDocument {
   #source;
@@ -234,6 +312,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
     }) });
   const listeners = [], downloads = new Map();
   let disposed = false, operation = 0;
+  let fileBinding = null, documentEpoch = 0, saving = false;
   let recoveryKey = null, recoveryTimer = null, recoveryPending = false;
   const confirm = confirmReplace || ((message) => host.confirm(message));
   function listen(target, name, handler) {
@@ -250,7 +329,11 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   const open = make("button", "Open source file", "document-open");
   const fresh = make("button", "New diagram", "document-new");
   const save = make("button", "Download source", "document-save");
-  for (const button of [open, fresh, save]) button.type = "button";
+  const openEditable = make("button", "Open editable file", "document-open-editable");
+  const write = make("button", "Save file", "document-write");
+  const reload = make("button", "Reload file", "document-reload");
+  openEditable.hidden = typeof host.showOpenFilePicker !== "function";
+  for (const button of [open, fresh, save, openEditable, write, reload]) button.type = "button";
   const picker = make("input", "", "document-file");
   picker.type = "file";
   picker.accept = ".mmd,.mermaid,.dot,.gv,.txt";
@@ -268,6 +351,13 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   const retryRecovery = make("button", "Retry recovery save", "document-retry-recovery");
   for (const button of [restore, saveRecovery, retryRecovery]) button.type = "button";
   retryRecovery.hidden = true;
+  const fileDirty = () => fileBinding !== null && fileBinding.source !== model.source;
+  const needsSave = () => fileBinding ? fileDirty() : model.dirty;
+  function fileControls() {
+    write.hidden = reload.hidden = fileBinding === null;
+    write.disabled = reload.disabled = disposed || saving || fileBinding === null;
+    openEditable.disabled = disposed;
+  }
   function recoveryControls() {
     restore.disabled = saveRecovery.disabled = disposed || !recoveryChoice.value;
   }
@@ -324,7 +414,8 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   function sync() {
     if (disposed) return;
     if (model.edit(sourceEl.value)) scheduleRecovery();
-    title.textContent = `${model.name}${model.dirty ? " — unexported changes" : ""}`;
+    title.textContent = `${model.name}${needsSave() ? fileBinding ? " — unsaved file changes" : " — unexported changes" : ""}`;
+    fileControls();
   }
   function download(artifact) {
     const url = host.URL.createObjectURL(new host.Blob([artifact.text], { type: artifact.mime }));
@@ -345,6 +436,8 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
     recoveryKey = null;
     if (incoming.recovery) model.restore(incoming.recovery);
     else model.open(incoming.source, incoming.name);
+    documentEpoch += 1;
+    fileBinding = incoming.fileBinding || null;
     sourceEl.value = model.view;
     scheduleRecovery();
     flushRecovery();
@@ -371,8 +464,8 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
         if (!disposed && request === operation) status.textContent = isCurrent() ? "Open cancelled: source changed while reading. Open the file again to replace it." : "Open cancelled: the shared link is no longer current.";
         return false;
       }
-      if (model.dirty) {
-        const approved = await confirm(`Replace unexported changes in ${model.name} with ${incoming.name}? Download your current source first to keep a file copy.`);
+      if (needsSave()) {
+        const approved = await confirm(`Replace unsaved or unexported changes in ${model.name} with ${incoming.name}? Save or download your current source first to keep a file copy.`);
         sync();
         if (!live()) {
           if (!disposed && request === operation) status.textContent = isCurrent() ? "Open cancelled: source changed while confirming." : "Open cancelled: the shared link is no longer current.";
@@ -381,10 +474,12 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
         if (!approved) { status.textContent = "Open cancelled; current source retained."; return false; }
       }
       const previewProblem = changedDocument(incoming);
-      status.textContent = `Opened ${model.name}. The original file is unchanged; use Download source to save a copy.${previewProblem}`;
+      status.textContent = fileBinding ? `Opened ${model.name} for editing. Save file writes back only when you request it.${previewProblem}` :
+        `Opened ${model.name}. The original file is unchanged; use Download source to save a copy.${previewProblem}`;
       return true;
     } catch (error) {
-      if (!disposed && request === operation) status.textContent = `Open failed: ${error.message || error}`;
+      if (!disposed && request === operation) status.textContent = error.name === "AbortError" ?
+        "Open cancelled; current source retained." : `Open failed: ${error.message || error}`;
       return false;
     }
   }
@@ -408,8 +503,55 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
       return false;
     }
   }
+  function openEditableFile() {
+    if (disposed || typeof host.showOpenFilePicker !== "function") return Promise.resolve(false);
+    return replaceDocument(async () => {
+      const handles = await host.showOpenFilePicker({ multiple: false, types: [{ description: "Diagram source",
+        accept: { "text/plain": [".mmd", ".mermaid", ".dot", ".gv", ".txt"] } }] });
+      if (handles.length !== 1) throw new Error("Choose one source file at a time.");
+      const binding = await SourceFileBinding.open(handles[0], maxBytes);
+      return { source: binding.source, name: binding.name, fileBinding: binding };
+    });
+  }
+  function reloadFile() {
+    if (disposed || saving || !fileBinding) return Promise.resolve(false);
+    const current = fileBinding;
+    return replaceDocument(async () => {
+      const binding = await current.reload();
+      return { source: binding.source, name: binding.name, fileBinding: binding };
+    }, () => fileBinding === current);
+  }
+  async function saveToFile() {
+    sync();
+    if (disposed || saving || !fileBinding) return false;
+    const current = fileBinding, epoch = documentEpoch;
+    const isCurrent = () => !disposed && documentEpoch === epoch && fileBinding === current;
+    saving = true;
+    fileControls();
+    status.textContent = `Saving ${current.name}…`;
+    try {
+      const artifact = model.prepareExport();
+      await current.save(artifact.text, { isCurrent });
+      if (!isCurrent()) return false;
+      model.exported(artifact);
+      sync();
+      scheduleRecovery();
+      flushRecovery();
+      status.textContent = `Saved ${current.name}.${fileDirty() ? " Newer edits are still unsaved." : ""}`;
+      return true;
+    } catch (error) {
+      if (isCurrent()) status.textContent = `Save failed: ${error.message || error}. Current source retained.`;
+      return false;
+    } finally {
+      saving = false;
+      if (!disposed) fileControls();
+    }
+  }
   const openFile = (file) => replaceDocument(() => readSourceFile(file, maxBytes));
   listen(open, "click", () => picker.click());
+  listen(openEditable, "click", () => { void openEditableFile(); });
+  listen(write, "click", () => { void saveToFile(); });
+  listen(reload, "click", () => { void reloadFile(); });
   listen(picker, "change", () => {
     const files = Array.from(picker.files || []);
     picker.value = ""; // Selecting the same file again is a real operation.
@@ -450,7 +592,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   });
   listen(host, "beforeunload", (event) => {
     sync();
-    if (!disposed && model.dirty) { event.preventDefault(); event.returnValue = ""; }
+    if (!disposed && (needsSave() || saving)) { event.preventDefault(); event.returnValue = ""; }
   });
   listen(host, "pagehide", flushRecovery);
   listen(document, "visibilitychange", () => { if (document.visibilityState === "hidden") flushRecovery(); });
@@ -460,7 +602,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   refreshRecovery(); // Recovery is opt-in: never replace fresh typing automatically.
   sync();
   return {
-    sourceChanged: sync, openFile, saveSource, flushRecovery,
+    sourceChanged: sync, openFile, openEditableFile, saveToFile, reloadFile, saveSource, flushRecovery,
     sourceSnapshot() {
       if (disposed) throw new Error("The document workspace is closed.");
       sync();
@@ -494,7 +636,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
       for (const remove of listeners) remove();
       for (const [url, timer] of downloads) { host.clearTimeout(timer); host.URL.revokeObjectURL(url); }
       downloads.clear();
-      for (const button of [open, fresh, save, restore, saveRecovery, retryRecovery]) button.disabled = true;
+      for (const button of [open, fresh, save, openEditable, write, reload, restore, saveRecovery, retryRecovery]) button.disabled = true;
     },
   };
 }
