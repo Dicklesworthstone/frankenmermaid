@@ -1,108 +1,27 @@
-//! Diagram diffing with visual highlighting.
+//! Structural and semantic diagram diffing.
 //!
-//! Compares two `MermaidDiagramIr` instances and produces a diff result
-//! that identifies added, removed, changed, and unchanged elements.
+//! Nodes and edges are only part of a Mermaid document. Chart values, schedules,
+//! sequence annotations and source-level configuration can change without adding
+//! or removing a single graph element. The public diff includes both surfaces.
+//! [`structural`] remains available for callers explicitly requesting graph-only
+//! comparison; its implementation and existing regression tests are unchanged.
 
-use crate::{TermRenderConfig, render_diagram_with_config};
-use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
+pub mod structural;
+mod semantic;
+
+pub use semantic::DiagramChange;
+pub use structural::{DiffEdge, DiffNode, DiffStatus, EdgeChange, NodeChange, colors};
+
+use crate::TermRenderConfig;
+use fm_core::MermaidDiagramIr;
 use serde::Serialize;
-use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write;
 
-/// Status of a diff element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum DiffStatus {
-    /// Element exists only in the new diagram.
-    Added,
-    /// Element exists only in the old diagram.
-    Removed,
-    /// Element exists in both but has changed.
-    Changed,
-    /// Element is identical in both diagrams.
-    Unchanged,
-}
-
-/// A diffed node with its status.
-#[derive(Debug, Clone, Serialize)]
-pub struct DiffNode {
-    /// Node ID.
-    pub id: String,
-    /// Diff status.
-    pub status: DiffStatus,
-    /// The node data (from new if exists, else from old).
-    pub node: IrNode,
-    /// Changes if status is Changed.
-    pub changes: Vec<NodeChange>,
-}
-
-/// What changed about a node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum NodeChange {
-    LabelChanged {
-        old: String,
-        new: String,
-    },
-    ShapeChanged {
-        old: NodeShape,
-        new: NodeShape,
-    },
-    ClassesChanged {
-        old: Vec<String>,
-        new: Vec<String>,
-    },
-    MembersChanged {
-        old: Vec<String>,
-        new: Vec<String>,
-    },
-    HrefChanged {
-        old: Option<String>,
-        new: Option<String>,
-    },
-    TooltipChanged {
-        old: Option<String>,
-        new: Option<String>,
-    },
-    MetadataChanged,
-}
-
-/// A diffed edge with its status.
-#[derive(Debug, Clone, Serialize)]
-pub struct DiffEdge {
-    /// Edge from-to identifier.
-    pub from_id: String,
-    pub to_id: String,
-    /// Diff status.
-    pub status: DiffStatus,
-    /// Arrow type.
-    pub arrow: ArrowType,
-    /// Changes if status is Changed.
-    pub changes: Vec<EdgeChange>,
-}
-
-/// What changed about an edge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum EdgeChange {
-    ArrowChanged {
-        old: ArrowType,
-        new: ArrowType,
-    },
-    LabelChanged {
-        old: String,
-        new: String,
-    },
-    ErNotationChanged {
-        old: Option<String>,
-        new: Option<String>,
-    },
-}
-
-/// Complete diff result between two diagrams.
+/// Complete diff between two diagrams, including non-graph document semantics.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagramDiff {
-    /// Diffed nodes.
     pub nodes: Vec<DiffNode>,
-    /// Diffed edges.
     pub edges: Vec<DiffEdge>,
-    /// Summary counts.
     pub added_nodes: usize,
     pub removed_nodes: usize,
     pub changed_nodes: usize,
@@ -111,28 +30,21 @@ pub struct DiagramDiff {
     pub removed_edges: usize,
     pub changed_edges: usize,
     pub unchanged_edges: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AlignedDiffLine {
-    status: DiffStatus,
-    old_line: Option<String>,
-    new_line: Option<String>,
+    /// Changed document fields, in deterministic order. Empty for a graph-only edit.
+    ///
+    /// Omitted from serialization when empty to preserve existing graph-only reports.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagram_changes: Vec<DiagramChange>,
 }
 
 impl DiagramDiff {
-    /// Returns true if there are any differences.
+    /// Whether either graph elements or document semantics changed.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.added_nodes > 0
-            || self.removed_nodes > 0
-            || self.changed_nodes > 0
-            || self.added_edges > 0
-            || self.removed_edges > 0
-            || self.changed_edges > 0
+        self.total_changes() != 0
     }
 
-    /// Total number of changed elements.
+    /// Changed graph elements plus changed document fields (not a source-line count).
     #[must_use]
     pub fn total_changes(&self) -> usize {
         self.added_nodes
@@ -141,547 +53,107 @@ impl DiagramDiff {
             + self.added_edges
             + self.removed_edges
             + self.changed_edges
+            + self.diagram_changes.len()
+    }
+
+    fn structural_snapshot(&self, details: bool) -> structural::DiagramDiff {
+        structural::DiagramDiff {
+            nodes: if details { self.nodes.clone() } else { Vec::new() },
+            edges: if details { self.edges.clone() } else { Vec::new() },
+            added_nodes: self.added_nodes,
+            removed_nodes: self.removed_nodes,
+            changed_nodes: self.changed_nodes,
+            unchanged_nodes: self.unchanged_nodes,
+            added_edges: self.added_edges,
+            removed_edges: self.removed_edges,
+            changed_edges: self.changed_edges,
+            unchanged_edges: self.unchanged_edges,
+        }
     }
 }
 
-/// Compute the diff between two diagrams.
+/// Compare graph structure and the semantic data consumed by specialized renderers.
 #[must_use]
 pub fn diff_diagrams(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> DiagramDiff {
-    let (nodes, node_counts) = diff_nodes(old, new);
-    let (edges, edge_counts) = diff_edges(old, new);
-
+    let structural::DiagramDiff {
+        nodes,
+        edges,
+        added_nodes,
+        removed_nodes,
+        changed_nodes,
+        unchanged_nodes,
+        added_edges,
+        removed_edges,
+        changed_edges,
+        unchanged_edges,
+    } = structural::diff_diagrams(old, new);
     DiagramDiff {
         nodes,
         edges,
-        added_nodes: node_counts.0,
-        removed_nodes: node_counts.1,
-        changed_nodes: node_counts.2,
-        unchanged_nodes: node_counts.3,
-        added_edges: edge_counts.0,
-        removed_edges: edge_counts.1,
-        changed_edges: edge_counts.2,
-        unchanged_edges: edge_counts.3,
+        added_nodes,
+        removed_nodes,
+        changed_nodes,
+        unchanged_nodes,
+        added_edges,
+        removed_edges,
+        changed_edges,
+        unchanged_edges,
+        diagram_changes: semantic::diff_metadata(old, new),
     }
 }
 
-fn diff_nodes(
-    old: &MermaidDiagramIr,
-    new: &MermaidDiagramIr,
-) -> (Vec<DiffNode>, (usize, usize, usize, usize)) {
-    let old_by_id: BTreeMap<&str, (usize, &IrNode)> = old
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.id.as_str(), (i, n)))
-        .collect();
-
-    let new_by_id: BTreeMap<&str, (usize, &IrNode)> = new
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.id.as_str(), (i, n)))
-        .collect();
-
-    let mut old_by_id = old_by_id.into_iter().peekable();
-    let mut new_by_id = new_by_id.into_iter().peekable();
-
-    let mut results = Vec::new();
-    let mut added = 0_usize;
-    let mut removed = 0_usize;
-    let mut changed = 0_usize;
-    let mut unchanged = 0_usize;
-
-    loop {
-        let next_id = match (
-            old_by_id.peek().map(|(id, _)| *id),
-            new_by_id.peek().map(|(id, _)| *id),
-        ) {
-            (Some(old_id), Some(new_id)) => old_id.min(new_id),
-            (Some(old_id), None) => old_id,
-            (None, Some(new_id)) => new_id,
-            (None, None) => break,
-        };
-
-        let old_entry = old_by_id
-            .next_if(|(id, _)| *id == next_id)
-            .map(|(_, entry)| entry);
-        let new_entry = new_by_id
-            .next_if(|(id, _)| *id == next_id)
-            .map(|(_, entry)| entry);
-
-        match (old_entry, new_entry) {
-            (None, Some((_idx, new_node))) => {
-                results.push(DiffNode {
-                    id: next_id.to_string(),
-                    status: DiffStatus::Added,
-                    node: (*new_node).clone(),
-                    changes: Vec::new(),
-                });
-                added += 1;
-            }
-            (Some((_idx, old_node)), None) => {
-                results.push(DiffNode {
-                    id: next_id.to_string(),
-                    status: DiffStatus::Removed,
-                    node: (*old_node).clone(),
-                    changes: Vec::new(),
-                });
-                removed += 1;
-            }
-            (Some((old_idx, old_node)), Some((_new_idx, new_node))) => {
-                let changes = compare_nodes(old, old_node, old_idx, new, new_node);
-                if changes.is_empty() {
-                    results.push(DiffNode {
-                        id: next_id.to_string(),
-                        status: DiffStatus::Unchanged,
-                        node: (*new_node).clone(),
-                        changes: Vec::new(),
-                    });
-                    unchanged += 1;
-                } else {
-                    results.push(DiffNode {
-                        id: next_id.to_string(),
-                        status: DiffStatus::Changed,
-                        node: (*new_node).clone(),
-                        changes,
-                    });
-                    changed += 1;
-                }
-            }
-            (None, None) => continue,
-        }
-    }
-
-    (results, (added, removed, changed, unchanged))
-}
-
-fn compare_nodes(
-    old_ir: &MermaidDiagramIr,
-    old_node: &IrNode,
-    _old_idx: usize,
-    new_ir: &MermaidDiagramIr,
-    new_node: &IrNode,
-) -> Vec<NodeChange> {
-    let mut changes = Vec::new();
-
-    // Compare shapes.
-    if old_node.shape != new_node.shape {
-        changes.push(NodeChange::ShapeChanged {
-            old: old_node.shape,
-            new: new_node.shape,
-        });
-    }
-
-    // Compare labels. Borrow each label's text and only clone when they
-    // differ, so unchanged nodes (the common diff case) allocate nothing —
-    // the node's `label` is a `LabelId` index, so the text lives outside the
-    // per-node clone and would otherwise be duplicated here for free.
-    let old_label = old_node
-        .label
-        .and_then(|lid| old_ir.labels.get(lid.0))
-        .map(|l| l.text.as_str())
-        .unwrap_or("");
-
-    let new_label = new_node
-        .label
-        .and_then(|lid| new_ir.labels.get(lid.0))
-        .map(|l| l.text.as_str())
-        .unwrap_or("");
-
-    if old_label != new_label {
-        changes.push(NodeChange::LabelChanged {
-            old: old_label.to_string(),
-            new: new_label.to_string(),
-        });
-    }
-
-    // Compare classes.
-    if old_node.classes != new_node.classes {
-        changes.push(NodeChange::ClassesChanged {
-            old: old_node.classes.clone(),
-            new: new_node.classes.clone(),
-        });
-    }
-
-    if old_node.members != new_node.members {
-        let old_members = node_member_strings(old_node);
-        let new_members = node_member_strings(new_node);
-        if old_members != new_members {
-            changes.push(NodeChange::MembersChanged {
-                old: old_members,
-                new: new_members,
-            });
-        }
-    }
-
-    if old_node.href() != new_node.href() {
-        changes.push(NodeChange::HrefChanged {
-            old: old_node.href().map(String::from),
-            new: new_node.href().map(String::from),
-        });
-    }
-
-    if old_node.tooltip() != new_node.tooltip() {
-        changes.push(NodeChange::TooltipChanged {
-            old: old_node.tooltip().map(String::from),
-            new: new_node.tooltip().map(String::from),
-        });
-    }
-
-    if old_node.class_meta != new_node.class_meta
-        || old_node.requirement_meta != new_node.requirement_meta
-        || old_node.c4_meta != new_node.c4_meta
-    {
-        changes.push(NodeChange::MetadataChanged);
-    }
-
-    changes
-}
-
-fn diff_edges(
-    old: &MermaidDiagramIr,
-    new: &MermaidDiagramIr,
-) -> (Vec<DiffEdge>, (usize, usize, usize, usize)) {
-    // Group edges by their endpoint pair (from_id, to_id).
-    let mut old_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
-    for e in &old.edges {
-        if let (Some(f), Some(t)) = (endpoint_id(old, e.from), endpoint_id(old, e.to)) {
-            old_groups.entry((f, t)).or_default().push_back(e);
-        }
-    }
-
-    let mut new_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
-    for e in &new.edges {
-        if let (Some(f), Some(t)) = (endpoint_id(new, e.from), endpoint_id(new, e.to)) {
-            new_groups.entry((f, t)).or_default().push_back(e);
-        }
-    }
-
-    let mut old_groups = old_groups.into_iter().peekable();
-    let mut new_groups = new_groups.into_iter().peekable();
-
-    let mut results = Vec::new();
-    let mut added = 0_usize;
-    let mut removed = 0_usize;
-    let mut changed = 0_usize;
-    let mut unchanged = 0_usize;
-
-    loop {
-        let next_pair = match (
-            old_groups.peek().map(|(pair, _)| *pair),
-            new_groups.peek().map(|(pair, _)| *pair),
-        ) {
-            (Some(old_pair), Some(new_pair)) => old_pair.min(new_pair),
-            (Some(old_pair), None) => old_pair,
-            (None, Some(new_pair)) => new_pair,
-            (None, None) => break,
-        };
-
-        let mut old_list = old_groups
-            .next_if(|(pair, _)| *pair == next_pair)
-            .map(|(_, edges)| edges)
-            .unwrap_or_default();
-        let mut new_list = new_groups
-            .next_if(|(pair, _)| *pair == next_pair)
-            .map(|(_, edges)| edges)
-            .unwrap_or_default();
-        let (from_id, to_id) = next_pair;
-
-        // 1. Match identical edges first (Unchanged)
-        let mut i = 0;
-        while i < old_list.len() {
-            let old_e = old_list[i];
-            let mut matched = false;
-            for j in 0..new_list.len() {
-                let new_e = new_list[j];
-                if compare_edges(old, old_e, new, new_e).is_empty() {
-                    results.push(DiffEdge {
-                        from_id: from_id.to_owned(),
-                        to_id: to_id.to_owned(),
-                        status: DiffStatus::Unchanged,
-                        arrow: new_e.arrow,
-                        changes: Vec::new(),
-                    });
-                    unchanged += 1;
-                    let _ = old_list.remove(i);
-                    let _ = new_list.remove(j);
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                i += 1;
-            }
-        }
-
-        // 2. Match remaining edges as Changed (greedy)
-        while !old_list.is_empty() && !new_list.is_empty() {
-            let old_e = old_list[0];
-            let new_e = new_list[0];
-            let _ = old_list.pop_front();
-            let _ = new_list.pop_front();
-            let changes = compare_edges(old, old_e, new, new_e);
-            results.push(DiffEdge {
-                from_id: from_id.to_owned(),
-                to_id: to_id.to_owned(),
-                status: DiffStatus::Changed,
-                arrow: new_e.arrow,
-                changes,
-            });
-            changed += 1;
-        }
-
-        // 3. Any leftover old edges are Removed
-        for old_e in old_list {
-            results.push(DiffEdge {
-                from_id: from_id.to_owned(),
-                to_id: to_id.to_owned(),
-                status: DiffStatus::Removed,
-                arrow: old_e.arrow,
-                changes: Vec::new(),
-            });
-            removed += 1;
-        }
-
-        // 4. Any leftover new edges are Added
-        for new_e in new_list {
-            results.push(DiffEdge {
-                from_id: from_id.to_owned(),
-                to_id: to_id.to_owned(),
-                status: DiffStatus::Added,
-                arrow: new_e.arrow,
-                changes: Vec::new(),
-            });
-            added += 1;
-        }
-    }
-
-    (results, (added, removed, changed, unchanged))
-}
-
-fn compare_edges(
-    old_ir: &MermaidDiagramIr,
-    old_edge: &fm_core::IrEdge,
-    new_ir: &MermaidDiagramIr,
-    new_edge: &fm_core::IrEdge,
-) -> Vec<EdgeChange> {
-    let mut changes = Vec::new();
-
-    // Compare arrow types.
-    if old_edge.arrow != new_edge.arrow {
-        changes.push(EdgeChange::ArrowChanged {
-            old: old_edge.arrow,
-            new: new_edge.arrow,
-        });
-    }
-
-    // Compare labels.
-    let old_label = old_edge
-        .label
-        .and_then(|lid| old_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
-
-    let new_label = new_edge
-        .label
-        .and_then(|lid| new_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
-
-    if old_label != new_label {
-        changes.push(EdgeChange::LabelChanged {
-            old: old_label,
-            new: new_label,
-        });
-    }
-
-    if old_edge.er_notation() != new_edge.er_notation() {
-        changes.push(EdgeChange::ErNotationChanged {
-            old: old_edge.er_notation().map(String::from),
-            new: new_edge.er_notation().map(String::from),
-        });
-    }
-
-    changes
-}
-
-fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<&str> {
-    ir.resolve_endpoint_node(endpoint)
-        .and_then(|id| ir.node(id))
-        .map(|n| n.id.as_str())
-}
-
-fn node_member_strings(node: &IrNode) -> Vec<String> {
-    node.members
-        .iter()
-        .map(|member| {
-            // List-aware since bd-nryyc: ` PK`, ` PK,FK`, or empty. Suffix style (leading
-            // space, comma-joined) preserves this diff format's historical spelling.
-            let key = if member.keys.is_empty() {
-                String::new()
-            } else {
-                let mut out = String::with_capacity(1 + member.keys.len() * 3);
-                for (index, modifier) in member.keys.iter().enumerate() {
-                    out.push_str(if index == 0 { " " } else { "," });
-                    out.push_str(match modifier {
-                        fm_core::IrAttributeKey::Pk => "PK",
-                        fm_core::IrAttributeKey::Fk => "FK",
-                        fm_core::IrAttributeKey::Uk => "UK",
-                        fm_core::IrAttributeKey::None => "",
-                    });
-                }
-                out
-            };
-            match &member.comment {
-                Some(comment) => {
-                    format!("{}:{}{} // {}", member.name, member.data_type, key, comment)
-                }
-                None => format!("{}:{}{}", member.name, member.data_type, key),
-            }
-        })
-        .collect()
-}
-
-/// ANSI color codes for diff rendering.
-pub mod colors {
-    pub const ADDED: &str = "\x1b[32m"; // Green
-    pub const REMOVED: &str = "\x1b[31m"; // Red
-    pub const CHANGED: &str = "\x1b[33m"; // Yellow
-    pub const UNCHANGED: &str = "\x1b[90m"; // Gray
-    pub const RESET: &str = "\x1b[0m";
-
-    pub const BG_ADDED: &str = "\x1b[42m"; // Green background
-    pub const BG_REMOVED: &str = "\x1b[41m"; // Red background
-    pub const BG_CHANGED: &str = "\x1b[43m"; // Yellow background
-}
-
-/// Render a diff summary to a string.
+/// Render node, edge, and document-field counts.
 #[must_use]
 pub fn render_diff_summary(diff: &DiagramDiff, use_colors: bool) -> String {
-    let mut output = String::new();
-
-    output.push_str("Diagram Diff Summary:\n");
-    output.push_str("=====================\n\n");
-
-    // Nodes section.
-    output.push_str("Nodes:\n");
-    if diff.added_nodes > 0 {
-        if use_colors {
-            output.push_str(colors::ADDED);
-        }
-        output.push_str(&format!("  + {} added\n", diff.added_nodes));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-    if diff.removed_nodes > 0 {
-        if use_colors {
-            output.push_str(colors::REMOVED);
-        }
-        output.push_str(&format!("  - {} removed\n", diff.removed_nodes));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-    if diff.changed_nodes > 0 {
+    let mut output = structural::render_diff_summary(&diff.structural_snapshot(false), use_colors);
+    if !diff.diagram_changes.is_empty() {
+        output.push_str("\nDiagram fields:\n");
         if use_colors {
             output.push_str(colors::CHANGED);
         }
-        output.push_str(&format!("  ~ {} changed\n", diff.changed_nodes));
+        let _ = writeln!(output, "  ~ {} changed", diff.diagram_changes.len());
         if use_colors {
             output.push_str(colors::RESET);
         }
     }
-    if diff.unchanged_nodes > 0 {
-        if use_colors {
-            output.push_str(colors::UNCHANGED);
-        }
-        output.push_str(&format!("  = {} unchanged\n", diff.unchanged_nodes));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-
-    output.push('\n');
-
-    // Edges section.
-    output.push_str("Edges:\n");
-    if diff.added_edges > 0 {
-        if use_colors {
-            output.push_str(colors::ADDED);
-        }
-        output.push_str(&format!("  + {} added\n", diff.added_edges));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-    if diff.removed_edges > 0 {
-        if use_colors {
-            output.push_str(colors::REMOVED);
-        }
-        output.push_str(&format!("  - {} removed\n", diff.removed_edges));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-    if diff.changed_edges > 0 {
-        if use_colors {
-            output.push_str(colors::CHANGED);
-        }
-        output.push_str(&format!("  ~ {} changed\n", diff.changed_edges));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-    if diff.unchanged_edges > 0 {
-        if use_colors {
-            output.push_str(colors::UNCHANGED);
-        }
-        output.push_str(&format!("  = {} unchanged\n", diff.unchanged_edges));
-        if use_colors {
-            output.push_str(colors::RESET);
-        }
-    }
-
     output
 }
 
-/// Render a detailed diff report suitable for CI logs and plain text tooling.
+fn append_diagram_details(output: &mut String, diff: &DiagramDiff, use_colors: bool) {
+    if diff.diagram_changes.is_empty() {
+        return;
+    }
+    output.push_str("\nDiagram Details:\n");
+    for change in &diff.diagram_changes {
+        if use_colors {
+            output.push_str(colors::CHANGED);
+        }
+        let _ = writeln!(output, "  ~ {}", change.field.escape_debug());
+        if use_colors {
+            output.push_str(colors::RESET);
+        }
+        // Values are Debug-escaped when collected. User labels cannot inject terminal
+        // control sequences or impersonate a new report section through this channel.
+        let _ = writeln!(output, "    before: {}", change.before);
+        let _ = writeln!(output, "    after:  {}", change.after);
+    }
+}
+
+/// Render an actionable report, including before/after document-field values.
 #[must_use]
 pub fn render_diff_plain(diff: &DiagramDiff) -> String {
-    let mut output = render_diff_summary(diff, false);
-
-    output.push('\n');
-    output.push_str("Node Details:\n");
-    for node in &diff.nodes {
-        output.push_str(&format!(
-            "  {} node {}\n",
-            status_symbol(node.status),
-            node.id
-        ));
-        for change in &node.changes {
-            output.push_str(&format!("    - {}\n", format_node_change(change)));
-        }
-    }
-
-    output.push('\n');
-    output.push_str("Edge Details:\n");
-    for edge in &diff.edges {
-        output.push_str(&format!(
-            "  {} edge {} -> {}\n",
-            status_symbol(edge.status),
-            edge.from_id,
-            edge.to_id
-        ));
-        for change in &edge.changes {
-            output.push_str(&format!("    - {}\n", format_edge_change(change)));
-        }
-    }
-
+    let snapshot = diff.structural_snapshot(true);
+    let old_summary = structural::render_diff_summary(&snapshot, false);
+    let mut output = structural::render_diff_plain(&snapshot).replacen(
+        &old_summary,
+        &render_diff_summary(diff, false),
+        1,
+    );
+    append_diagram_details(&mut output, diff, false);
     output
 }
 
-/// Render a side-by-side terminal diff between two diagrams with default settings.
+/// Render a side-by-side terminal diff with the default rich configuration.
 #[must_use]
 pub fn render_diff_terminal(
     old: &MermaidDiagramIr,
@@ -693,7 +165,7 @@ pub fn render_diff_terminal(
     render_diff_terminal_with_config(old, new, &TermRenderConfig::rich(), cols, rows, use_colors)
 }
 
-/// Render a side-by-side terminal diff between two diagrams with an explicit config.
+/// Render a side-by-side comparison without losing changes invisible at terminal resolution.
 #[must_use]
 pub fn render_diff_terminal_with_config(
     old: &MermaidDiagramIr,
@@ -703,759 +175,12 @@ pub fn render_diff_terminal_with_config(
     rows: usize,
     use_colors: bool,
 ) -> String {
-    let total_cols = cols.max(60);
-    let pane_width = (total_cols.saturating_sub(7) / 2).max(24);
-    let pane_rows = rows.max(12);
-
-    let old_render = render_diagram_with_config(old, config, pane_width, pane_rows);
-    let new_render = render_diagram_with_config(new, config, pane_width, pane_rows);
     let diff = diff_diagrams(old, new);
-
-    let aligned = align_rendered_lines(&old_render.output, &new_render.output);
-    let old_line_width = aligned
-        .iter()
-        .filter_map(|line| line.old_line.as_deref())
-        .map(display_width)
-        .max()
-        .unwrap_or(0)
-        .min(pane_width);
-
-    let mut output = String::new();
-    output.push_str("Diagram Diff\n");
-    output.push_str("============\n");
-    output.push_str(&render_diff_summary(&diff, use_colors));
-    output.push('\n');
-    output.push_str(&format!(
-        "{:<3} {:<width$} | New\n",
-        "",
-        "Old",
-        width = old_line_width
-    ));
-    output.push_str(&format!(
-        "{}\n",
-        "-".repeat(old_line_width.saturating_add(3 + 3 + 5))
-    ));
-
-    for line in aligned {
-        let marker = status_symbol(line.status);
-        let marker = colorize_marker(marker, line.status, use_colors);
-        let old_text = line.old_line.unwrap_or_default();
-        let new_text = line.new_line.unwrap_or_default();
-        let old_padded = pad_display(&truncate_display(&old_text, old_line_width), old_line_width);
-        let new_trimmed = truncate_display(&new_text, pane_width);
-        output.push_str(&format!("{marker}  {old_padded} | {new_trimmed}\n"));
-    }
-
+    let old_summary = structural::render_diff_summary(&diff.structural_snapshot(false), use_colors);
+    let mut output = structural::render_diff_terminal_with_config(
+        old, new, config, cols, rows, use_colors,
+    )
+    .replacen(&old_summary, &render_diff_summary(&diff, use_colors), 1);
+    append_diagram_details(&mut output, &diff, use_colors);
     output
-}
-
-fn format_node_change(change: &NodeChange) -> String {
-    match change {
-        NodeChange::LabelChanged { old, new } => format!("label: {old:?} -> {new:?}"),
-        NodeChange::ShapeChanged { old, new } => format!("shape: {old:?} -> {new:?}"),
-        NodeChange::ClassesChanged { old, new } => format!("classes: {old:?} -> {new:?}"),
-        NodeChange::MembersChanged { old, new } => format!("members: {old:?} -> {new:?}"),
-        NodeChange::HrefChanged { old, new } => format!("href: {old:?} -> {new:?}"),
-        NodeChange::TooltipChanged { old, new } => format!("tooltip: {old:?} -> {new:?}"),
-        NodeChange::MetadataChanged => "metadata changed".to_string(),
-    }
-}
-
-fn format_edge_change(change: &EdgeChange) -> String {
-    match change {
-        EdgeChange::ArrowChanged { old, new } => format!("arrow: {old:?} -> {new:?}"),
-        EdgeChange::LabelChanged { old, new } => format!("label: {old:?} -> {new:?}"),
-        EdgeChange::ErNotationChanged { old, new } => format!("er_notation: {old:?} -> {new:?}"),
-    }
-}
-
-fn status_symbol(status: DiffStatus) -> char {
-    match status {
-        DiffStatus::Added => '+',
-        DiffStatus::Removed => '-',
-        DiffStatus::Changed => '~',
-        DiffStatus::Unchanged => '=',
-    }
-}
-
-fn colorize_marker(marker: char, status: DiffStatus, use_colors: bool) -> String {
-    if !use_colors {
-        return marker.to_string();
-    }
-
-    let color = match status {
-        DiffStatus::Added => colors::ADDED,
-        DiffStatus::Removed => colors::REMOVED,
-        DiffStatus::Changed => colors::CHANGED,
-        DiffStatus::Unchanged => colors::UNCHANGED,
-    };
-    format!("{color}{marker}{}", colors::RESET)
-}
-
-fn display_width(value: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    let mut in_bracket = false;
-
-    for c in value.chars() {
-        if in_escape {
-            if c == '[' {
-                in_bracket = true;
-                in_escape = false;
-            } else {
-                in_escape = false;
-            }
-        } else if in_bracket {
-            if c.is_ascii_alphabetic() {
-                in_bracket = false;
-            }
-        } else if c == '\x1b' {
-            in_escape = true;
-        } else {
-            width += if fm_core::is_east_asian_wide(c) { 2 } else { 1 };
-        }
-    }
-
-    width
-}
-
-fn truncate_display(value: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if display_width(value) <= max_width {
-        return value.to_string();
-    }
-
-    let mut result = String::new();
-    let mut current_width = 0;
-    let mut in_escape = false;
-    let mut in_bracket = false;
-    let mut has_ansi = false;
-
-    for c in value.chars() {
-        if in_escape {
-            result.push(c);
-            if c == '[' {
-                in_bracket = true;
-                in_escape = false;
-            } else {
-                in_escape = false;
-            }
-            continue;
-        }
-        if in_bracket {
-            result.push(c);
-            if c.is_ascii_alphabetic() {
-                in_bracket = false;
-            }
-            continue;
-        }
-        if c == '\x1b' {
-            result.push(c);
-            in_escape = true;
-            has_ansi = true;
-            continue;
-        }
-
-        let char_width = if fm_core::is_east_asian_wide(c) { 2 } else { 1 };
-        if current_width + char_width > max_width {
-            if current_width < max_width {
-                result.push('…');
-            } else if !result.ends_with('…') {
-                result.pop();
-                result.push('…');
-            }
-            break;
-        }
-
-        result.push(c);
-        current_width += char_width;
-    }
-
-    if has_ansi {
-        result.push_str("\x1b[0m");
-    }
-
-    result
-}
-
-fn pad_display(value: &str, width: usize) -> String {
-    let current = display_width(value);
-    if current >= width {
-        return value.to_string();
-    }
-    format!("{value}{}", " ".repeat(width - current))
-}
-
-fn align_rendered_lines(old_output: &str, new_output: &str) -> Vec<AlignedDiffLine> {
-    let old_lines: Vec<&str> = old_output.lines().collect();
-    let new_lines: Vec<&str> = new_output.lines().collect();
-    let anchors = lcs_pairs(&old_lines, &new_lines);
-
-    let mut aligned = Vec::new();
-    let mut old_index = 0;
-    let mut new_index = 0;
-
-    for (anchor_old, anchor_new) in anchors
-        .into_iter()
-        .chain(std::iter::once((old_lines.len(), new_lines.len())))
-    {
-        aligned.extend(align_changed_block(
-            &old_lines[old_index..anchor_old],
-            &new_lines[new_index..anchor_new],
-        ));
-
-        if anchor_old < old_lines.len() && anchor_new < new_lines.len() {
-            aligned.push(AlignedDiffLine {
-                status: DiffStatus::Unchanged,
-                old_line: Some(old_lines[anchor_old].to_string()),
-                new_line: Some(new_lines[anchor_new].to_string()),
-            });
-        }
-
-        old_index = anchor_old.saturating_add(1);
-        new_index = anchor_new.saturating_add(1);
-    }
-
-    aligned
-}
-
-fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDiffLine> {
-    let mut aligned = Vec::new();
-
-    for line in old_lines {
-        aligned.push(AlignedDiffLine {
-            status: DiffStatus::Removed,
-            old_line: Some((*line).to_string()),
-            new_line: None,
-        });
-    }
-
-    for line in new_lines {
-        aligned.push(AlignedDiffLine {
-            status: DiffStatus::Added,
-            old_line: None,
-            new_line: Some((*line).to_string()),
-        });
-    }
-
-    aligned
-}
-
-fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
-    let common_prefix = old_lines
-        .iter()
-        .zip(new_lines)
-        .take_while(|(old_line, new_line)| old_line == new_line)
-        .count();
-    lcs_pairs_after_common_prefix(old_lines, new_lines, common_prefix)
-}
-
-fn lcs_pairs_after_common_prefix(
-    old_lines: &[&str],
-    new_lines: &[&str],
-    common_prefix: usize,
-) -> Vec<(usize, usize)> {
-    let old_lines = &old_lines[common_prefix..];
-    let new_lines = &new_lines[common_prefix..];
-    let row_len = new_lines.len() + 1;
-    let mut dp = vec![0_usize; (old_lines.len() + 1) * row_len];
-
-    for old_index in (0..old_lines.len()).rev() {
-        let row_start = old_index * row_len;
-        let next_row_start = row_start + row_len;
-        for new_index in (0..new_lines.len()).rev() {
-            dp[row_start + new_index] = if old_lines[old_index] == new_lines[new_index] {
-                dp[next_row_start + new_index + 1] + 1
-            } else {
-                dp[next_row_start + new_index].max(dp[row_start + new_index + 1])
-            };
-        }
-    }
-
-    let mut old_index = 0;
-    let mut new_index = 0;
-    let mut pairs: Vec<(usize, usize)> = (0..common_prefix).map(|index| (index, index)).collect();
-    while old_index < old_lines.len() && new_index < new_lines.len() {
-        if old_lines[old_index] == new_lines[new_index] {
-            pairs.push((old_index + common_prefix, new_index + common_prefix));
-            old_index += 1;
-            new_index += 1;
-        } else if dp[(old_index + 1) * row_len + new_index]
-            >= dp[old_index * row_len + new_index + 1]
-        {
-            old_index += 1;
-        } else {
-            new_index += 1;
-        }
-    }
-
-    pairs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fm_core::{
-        DiagramType, GraphDirection, IrAttributeKey, IrEdge, IrEntityAttribute, IrLabel, IrLabelId,
-        IrNodeId,
-    };
-
-    fn make_ir_with_nodes(node_ids: &[&str]) -> MermaidDiagramIr {
-        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        ir.direction = GraphDirection::LR;
-        for (i, id) in node_ids.iter().enumerate() {
-            ir.labels.push(IrLabel {
-                text: id.to_string(),
-                ..Default::default()
-            });
-            ir.nodes.push(IrNode {
-                id: id.to_string(),
-                label: Some(IrLabelId(i)),
-                ..Default::default()
-            });
-        }
-        ir
-    }
-
-    #[test]
-    fn flat_lcs_preserves_indices_and_tie_breaking() {
-        let old = ["header", "node A", "node B", "footer"];
-        let new = ["header", "inserted", "node A", "node B", "footer"];
-        assert_eq!(lcs_pairs(&old, &new), vec![(0, 0), (1, 2), (2, 3), (3, 4)]);
-
-        // The reconstruction deliberately advances the old side when both
-        // successor cells have equal scores. Flat indexing must retain that
-        // observable tie-break from the former row-vector table.
-        assert_eq!(lcs_pairs(&["a", "b"], &["b", "a"]), vec![(1, 0)]);
-        assert!(lcs_pairs(&[], &["new"]).is_empty());
-        assert!(lcs_pairs(&["old"], &[]).is_empty());
-    }
-
-    #[test]
-    fn common_prefix_lcs_matches_full_table() {
-        let old = ["header", "shared", "a", "b", "a", "footer"];
-        let new = ["header", "shared", "b", "a", "b", "footer"];
-        assert_eq!(
-            lcs_pairs(&old, &new),
-            lcs_pairs_after_common_prefix(&old, &new, 0)
-        );
-
-        let identical = ["header", "repeated", "repeated", "footer"];
-        assert_eq!(
-            lcs_pairs(&identical, &identical),
-            lcs_pairs_after_common_prefix(&identical, &identical, 0)
-        );
-    }
-
-    #[test]
-    fn node_pair_merge_preserves_sorted_union_order() {
-        let old = make_ir_with_nodes(&["A", "C"]);
-        let new = make_ir_with_nodes(&["B", "C", "D"]);
-
-        let diff = diff_diagrams(&old, &new);
-        let ordered_nodes: Vec<(&str, DiffStatus)> = diff
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node.status))
-            .collect();
-
-        assert_eq!(
-            ordered_nodes,
-            vec![
-                ("A", DiffStatus::Removed),
-                ("B", DiffStatus::Added),
-                ("C", DiffStatus::Unchanged),
-                ("D", DiffStatus::Added),
-            ]
-        );
-    }
-
-    #[test]
-    fn identical_diagrams_have_no_changes() {
-        let ir = make_ir_with_nodes(&["A", "B", "C"]);
-        let diff = diff_diagrams(&ir, &ir);
-        assert!(!diff.has_changes());
-        assert_eq!(diff.unchanged_nodes, 3);
-    }
-
-    #[test]
-    fn detects_added_nodes() {
-        let old = make_ir_with_nodes(&["A", "B"]);
-        let new = make_ir_with_nodes(&["A", "B", "C"]);
-        let diff = diff_diagrams(&old, &new);
-        assert!(diff.has_changes());
-        assert_eq!(diff.added_nodes, 1);
-        assert_eq!(diff.unchanged_nodes, 2);
-    }
-
-    #[test]
-    fn detects_removed_nodes() {
-        let old = make_ir_with_nodes(&["A", "B", "C"]);
-        let new = make_ir_with_nodes(&["A", "B"]);
-        let diff = diff_diagrams(&old, &new);
-        assert!(diff.has_changes());
-        assert_eq!(diff.removed_nodes, 1);
-    }
-
-    #[test]
-    fn detects_changed_node_labels() {
-        let old = make_ir_with_nodes(&["A"]);
-        let mut new = make_ir_with_nodes(&["A"]);
-        new.labels[0].text = "Changed".to_string();
-
-        let diff = diff_diagrams(&old, &new);
-        assert!(diff.has_changes());
-        assert_eq!(diff.changed_nodes, 1);
-    }
-
-    #[test]
-    fn detects_changed_node_members() {
-        let mut old = make_ir_with_nodes(&["A"]);
-        let mut new = make_ir_with_nodes(&["A"]);
-        old.nodes[0].members.push(IrEntityAttribute {
-            data_type: "int".to_string(),
-            name: "id".to_string(),
-            keys: vec![IrAttributeKey::Pk],
-            comment: None,
-        });
-        new.nodes[0].members.push(IrEntityAttribute {
-            data_type: "string".to_string(),
-            name: "id".to_string(),
-            keys: vec![IrAttributeKey::Pk],
-            comment: None,
-        });
-
-        let diff = diff_diagrams(&old, &new);
-        assert_eq!(diff.changed_nodes, 1);
-        assert!(matches!(
-            diff.nodes[0].changes[0],
-            NodeChange::MembersChanged { .. }
-        ));
-    }
-
-    #[test]
-    fn identical_node_members_stay_unchanged() {
-        let member = IrEntityAttribute {
-            data_type: "varchar(255)".to_string(),
-            name: "account_name".to_string(),
-            keys: vec![IrAttributeKey::Uk],
-            comment: Some("stable member comment".to_string()),
-        };
-        let mut old = make_ir_with_nodes(&["A"]);
-        let mut new = make_ir_with_nodes(&["A"]);
-        old.nodes[0].members.push(member.clone());
-        new.nodes[0].members.push(member);
-
-        let diff = diff_diagrams(&old, &new);
-        assert_eq!(diff.changed_nodes, 0);
-        assert_eq!(diff.unchanged_nodes, 1);
-        assert!(diff.nodes[0].changes.is_empty());
-    }
-
-    #[test]
-    fn identical_node_labels_stay_unchanged() {
-        // Two independently-owned IRs whose matched node carries identical label
-        // text must diff to Unchanged with no borrowed-text clone leaking into a
-        // change payload.
-        let old = make_ir_with_nodes(&["A"]);
-        let new = make_ir_with_nodes(&["A"]);
-        assert_eq!(old.labels[0].text, new.labels[0].text);
-
-        let diff = diff_diagrams(&old, &new);
-        assert_eq!(diff.changed_nodes, 0);
-        assert_eq!(diff.unchanged_nodes, 1);
-        assert!(diff.nodes[0].changes.is_empty());
-    }
-
-    #[test]
-    fn detects_added_edges() {
-        let old = make_ir_with_nodes(&["A", "B"]);
-        let mut new = make_ir_with_nodes(&["A", "B"]);
-
-        new.edges.push(IrEdge {
-            from: IrEndpoint::Node(IrNodeId(0)),
-            to: IrEndpoint::Node(IrNodeId(1)),
-            arrow: ArrowType::Arrow,
-            ..Default::default()
-        });
-
-        let diff = diff_diagrams(&old, &new);
-        assert!(diff.has_changes());
-        assert_eq!(diff.added_edges, 1);
-        assert_eq!(diff.edges[0].from_id, "A");
-        assert_eq!(diff.edges[0].to_id, "B");
-    }
-
-    #[test]
-    fn diff_summary_includes_counts() {
-        let old = make_ir_with_nodes(&["A", "B"]);
-        let new = make_ir_with_nodes(&["A", "B", "C"]);
-        let diff = diff_diagrams(&old, &new);
-        let summary = render_diff_summary(&diff, false);
-        assert!(summary.contains("1 added"));
-    }
-
-    #[test]
-    fn plain_diff_includes_detailed_changes() {
-        let old = make_ir_with_nodes(&["A"]);
-        let mut new = make_ir_with_nodes(&["A"]);
-        new.labels[0].text = "Changed".to_string();
-
-        let diff = diff_diagrams(&old, &new);
-        let plain = render_diff_plain(&diff);
-        assert!(plain.contains("Node Details"));
-        assert!(plain.contains("label"));
-    }
-
-    #[test]
-    fn terminal_diff_renders_side_by_side() {
-        let old = make_ir_with_nodes(&["A"]);
-        let new = make_ir_with_nodes(&["A", "B"]);
-        let rendered = render_diff_terminal(&old, &new, 100, 24, false);
-        assert!(rendered.contains("Diagram Diff"));
-        assert!(rendered.contains("Old"));
-        assert!(rendered.contains("| New"));
-    }
-
-    #[test]
-    fn handles_parallel_edges() {
-        let mut old_ir = make_ir_with_nodes(&["A", "B"]);
-        // Add two identical edges A -> B.
-        for _ in 0..2 {
-            old_ir.edges.push(IrEdge {
-                from: IrEndpoint::Node(IrNodeId(0)),
-                to: IrEndpoint::Node(IrNodeId(1)),
-                arrow: ArrowType::Arrow,
-                ..Default::default()
-            });
-        }
-
-        let mut new_ir = make_ir_with_nodes(&["A", "B"]);
-        // New IR has three edges A -> B.
-        for _ in 0..3 {
-            new_ir.edges.push(IrEdge {
-                from: IrEndpoint::Node(IrNodeId(0)),
-                to: IrEndpoint::Node(IrNodeId(1)),
-                arrow: ArrowType::Arrow,
-                ..Default::default()
-            });
-        }
-
-        let diff = diff_diagrams(&old_ir, &new_ir);
-        // Should detect 1 added edge, 2 unchanged edges.
-        assert_eq!(diff.added_edges, 1);
-        assert_eq!(diff.unchanged_edges, 2);
-        assert_eq!(diff.removed_edges, 0);
-    }
-
-    #[test]
-    fn parallel_edge_matching_preserves_greedy_order() {
-        fn edge(arrow: ArrowType) -> IrEdge {
-            IrEdge {
-                from: IrEndpoint::Node(IrNodeId(0)),
-                to: IrEndpoint::Node(IrNodeId(1)),
-                arrow,
-                ..Default::default()
-            }
-        }
-
-        let mut old = make_ir_with_nodes(&["A", "B"]);
-        old.edges.extend([
-            edge(ArrowType::Arrow),
-            edge(ArrowType::Line),
-            edge(ArrowType::OpenArrow),
-        ]);
-
-        let mut new = make_ir_with_nodes(&["A", "B"]);
-        new.edges.extend([
-            edge(ArrowType::Line),
-            edge(ArrowType::Arrow),
-            edge(ArrowType::Cross),
-        ]);
-
-        let diff = diff_diagrams(&old, &new);
-        let status_and_arrow: Vec<(DiffStatus, ArrowType)> = diff
-            .edges
-            .iter()
-            .map(|edge| (edge.status, edge.arrow))
-            .collect();
-        assert_eq!(
-            status_and_arrow,
-            vec![
-                (DiffStatus::Unchanged, ArrowType::Arrow),
-                (DiffStatus::Unchanged, ArrowType::Line),
-                (DiffStatus::Changed, ArrowType::Cross),
-            ]
-        );
-        assert_eq!(
-            diff.edges[2].changes,
-            vec![EdgeChange::ArrowChanged {
-                old: ArrowType::OpenArrow,
-                new: ArrowType::Cross,
-            }]
-        );
-    }
-
-    #[test]
-    fn edge_replacement_reporting() {
-        let mut old_ir = make_ir_with_nodes(&["A", "B"]);
-        old_ir.edges.push(fm_core::IrEdge {
-            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
-            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
-            arrow: fm_core::ArrowType::Arrow,
-            ..Default::default()
-        });
-
-        let mut new_ir = make_ir_with_nodes(&["A", "B"]);
-        new_ir.edges.push(fm_core::IrEdge {
-            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
-            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
-            arrow: fm_core::ArrowType::Line,
-            ..Default::default()
-        });
-
-        let diff = diff_diagrams(&old_ir, &new_ir);
-        // Current greedy implementation will see this as 1 Changed.
-        // This is actually acceptable for most users (one line changed).
-        assert_eq!(diff.changed_edges, 1);
-        assert_eq!(diff.added_edges, 0);
-        assert_eq!(diff.removed_edges, 0);
-    }
-
-    #[test]
-    fn edge_pair_merge_preserves_sorted_union_order() {
-        fn edge(from: usize, to: usize) -> IrEdge {
-            IrEdge {
-                from: IrEndpoint::Node(IrNodeId(from)),
-                to: IrEndpoint::Node(IrNodeId(to)),
-                arrow: ArrowType::Arrow,
-                ..Default::default()
-            }
-        }
-
-        let mut old = make_ir_with_nodes(&["A", "B", "C", "D"]);
-        old.edges.extend([edge(0, 2), edge(1, 0)]);
-
-        let mut new = make_ir_with_nodes(&["A", "B", "C", "D"]);
-        new.edges.extend([edge(0, 1), edge(0, 2), edge(2, 3)]);
-
-        let diff = diff_diagrams(&old, &new);
-        let ordered_pairs: Vec<(&str, &str, DiffStatus)> = diff
-            .edges
-            .iter()
-            .map(|edge| (edge.from_id.as_str(), edge.to_id.as_str(), edge.status))
-            .collect();
-
-        assert_eq!(
-            ordered_pairs,
-            vec![
-                ("A", "B", DiffStatus::Added),
-                ("A", "C", DiffStatus::Unchanged),
-                ("B", "A", DiffStatus::Removed),
-                ("C", "D", DiffStatus::Added),
-            ]
-        );
-    }
-
-    #[test]
-    fn display_width_ignores_ansi_codes() {
-        let colored = format!("{}Added{}", colors::ADDED, colors::RESET);
-        assert_eq!(display_width(&colored), 5);
-        assert_eq!(display_width("Plain"), 5);
-        assert_eq!(display_width("界"), 2);
-        assert_eq!(display_width("\x1b[31m界\x1b[0m"), 2);
-        assert_eq!(display_width("dangling \x1b"), 9);
-        assert_eq!(display_width("non-CSI \x1bXvisible"), 15);
-    }
-
-    // ─── End-to-end diff tests using parsed Mermaid input ───
-
-    fn parse_diff(a: &str, b: &str) -> DiagramDiff {
-        let old = fm_parser::parse(a);
-        let new = fm_parser::parse(b);
-        diff_diagrams(&old.ir, &new.ir)
-    }
-
-    #[test]
-    fn e2e_label_change_detected() {
-        let diff = parse_diff(
-            "flowchart LR\n  A[Hello]-->B",
-            "flowchart LR\n  A[World]-->B",
-        );
-        assert!(diff.has_changes());
-        assert!(diff.changed_nodes >= 1, "should detect label change");
-    }
-
-    #[test]
-    fn e2e_node_addition_detected() {
-        let diff = parse_diff("flowchart LR\n  A-->B", "flowchart LR\n  A-->B-->C");
-        assert!(diff.has_changes());
-        assert!(diff.added_nodes >= 1, "should detect added node C");
-    }
-
-    #[test]
-    fn e2e_edge_removal_detected() {
-        let diff = parse_diff("flowchart LR\n  A-->B\n  B-->C", "flowchart LR\n  A-->B");
-        assert!(diff.has_changes());
-        assert!(
-            diff.removed_edges >= 1 || diff.removed_nodes >= 1,
-            "should detect removed edge or node"
-        );
-    }
-
-    #[test]
-    fn e2e_identical_diagrams_no_changes() {
-        let input = "flowchart LR\n  A-->B-->C";
-        let diff = parse_diff(input, input);
-        assert!(!diff.has_changes());
-    }
-
-    #[test]
-    fn e2e_summary_format_contains_counts() {
-        let diff = parse_diff("flowchart LR\n  A-->B", "flowchart LR\n  A-->B-->C");
-        let summary = render_diff_summary(&diff, false);
-        assert!(!summary.is_empty(), "summary should be non-empty");
-        // Summary includes change counts.
-        assert!(
-            summary.contains("added") || summary.contains("changed") || summary.contains("removed"),
-            "summary should mention change types"
-        );
-    }
-
-    #[test]
-    fn e2e_plain_format_non_empty_for_changes() {
-        let diff = parse_diff(
-            "flowchart LR\n  A[Hello]-->B",
-            "flowchart LR\n  A[World]-->B",
-        );
-        let plain = render_diff_plain(&diff);
-        assert!(
-            !plain.is_empty(),
-            "plain output should be non-empty for changes"
-        );
-    }
-
-    #[test]
-    fn e2e_terminal_format_renders() {
-        let old = fm_parser::parse("flowchart LR\n  A-->B");
-        let new = fm_parser::parse("flowchart LR\n  A-->B-->C");
-        let rendered = render_diff_terminal(&old.ir, &new.ir, 100, 24, false);
-        assert!(!rendered.is_empty(), "terminal diff should produce output");
-        assert!(
-            rendered.contains("Diagram Diff"),
-            "terminal diff should contain header"
-        );
-    }
-
-    #[test]
-    fn e2e_diff_across_diagram_types() {
-        // Diff a flowchart against a different flowchart (class diagrams, etc.).
-        let diff = parse_diff(
-            "classDiagram\n  class Animal {\n    +name: string\n  }",
-            "classDiagram\n  class Animal {\n    +name: string\n    +age: int\n  }",
-        );
-        assert!(diff.has_changes(), "member change should be detected");
-    }
 }
