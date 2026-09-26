@@ -292,19 +292,38 @@ fn clone_vec_reusing<T: Clone>(
 }
 
 fn clone_node_reusing(target: &mut IrNode, source: &IrNode) {
-    target.id.clone_from(&source.id);
-    target.label = source.label;
-    target.shape = source.shape;
-    target.classes.clone_from(&source.classes);
-    target.interaction.clone_from(&source.interaction);
-    target.menu_links.clone_from(&source.menu_links);
-    target.span_primary = source.span_primary;
-    target.implicit = source.implicit;
-    target.members.clone_from(&source.members);
-    target.class_meta.clone_from(&source.class_meta);
-    target.requirement_meta.clone_from(&source.requirement_meta);
-    target.c4_meta.clone_from(&source.c4_meta);
-    target.inline_style.clone_from(&source.inline_style);
+    // Exhaustive: adding a node field must also update scratch restoration. A partial copy can
+    // retain the previous diagram's metadata even when the node's id and label look correct.
+    let IrNode {
+        id,
+        label,
+        shape,
+        classes,
+        interaction,
+        span_primary,
+        implicit,
+        members,
+        menu_links,
+        class_meta,
+        requirement_meta,
+        journey_meta,
+        c4_meta,
+        inline_style,
+    } = source;
+    target.id.clone_from(id);
+    target.label = *label;
+    target.shape = *shape;
+    target.classes.clone_from(classes);
+    target.interaction.clone_from(interaction);
+    target.menu_links.clone_from(menu_links);
+    target.span_primary = *span_primary;
+    target.implicit = *implicit;
+    target.members.clone_from(members);
+    target.class_meta.clone_from(class_meta);
+    target.requirement_meta.clone_from(requirement_meta);
+    target.journey_meta.clone_from(journey_meta);
+    target.c4_meta.clone_from(c4_meta);
+    target.inline_style.clone_from(inline_style);
 }
 
 fn clone_label_reusing(target: &mut IrLabel, source: &IrLabel) {
@@ -313,11 +332,22 @@ fn clone_label_reusing(target: &mut IrLabel, source: &IrLabel) {
 }
 
 fn clone_cluster_reusing(target: &mut IrCluster, source: &IrCluster) {
-    target.id = source.id;
-    target.title = source.title;
-    target.members.clone_from(&source.members);
-    target.grid_span = source.grid_span;
-    target.span = source.span;
+    let IrCluster {
+        id,
+        title,
+        members,
+        grid_span,
+        span,
+        c4_boundary_type,
+        classes,
+    } = source;
+    target.id = *id;
+    target.title = *title;
+    target.members.clone_from(members);
+    target.grid_span = *grid_span;
+    target.span = *span;
+    target.c4_boundary_type.clone_from(c4_boundary_type);
+    target.classes.clone_from(classes);
 }
 
 fn clone_graph_node_reusing(target: &mut IrGraphNode, source: &IrGraphNode) {
@@ -385,6 +415,8 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
     target.sequence_meta.clone_from(&source.sequence_meta);
     target.gantt_meta.clone_from(&source.gantt_meta);
     target.xy_chart_meta.clone_from(&source.xy_chart_meta);
+    target.treemap_meta.clone_from(&source.treemap_meta);
+    target.radar_meta.clone_from(&source.radar_meta);
     target.pie_meta.clone_from(&source.pie_meta);
     target.quadrant_meta.clone_from(&source.quadrant_meta);
     target.packet_meta.clone_from(&source.packet_meta);
@@ -483,6 +515,8 @@ impl IrBuilder {
         self.ir.sequence_meta.clone_from(&source.ir.sequence_meta);
         self.ir.gantt_meta.clone_from(&source.ir.gantt_meta);
         self.ir.xy_chart_meta.clone_from(&source.ir.xy_chart_meta);
+        self.ir.treemap_meta.clone_from(&source.ir.treemap_meta);
+        self.ir.radar_meta.clone_from(&source.ir.radar_meta);
         self.ir.pie_meta.clone_from(&source.ir.pie_meta);
         self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
         self.ir.packet_meta.clone_from(&source.ir.packet_meta);
@@ -490,61 +524,64 @@ impl IrBuilder {
         self.ir.state_notes.clone_from(&source.ir.state_notes);
         self.ir.diagnostics.clone_from(&source.ir.diagnostics);
 
-        self.node_id_index
-            .buckets
-            .clone_from(&source.node_id_index.buckets);
-        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
-        self.cluster_index_by_key
-            .clone_from(&source.cluster_index_by_key);
-        self.subgraph_index_by_key
-            .clone_from(&source.subgraph_index_by_key);
-        self.cluster_member_set
-            .clone_from(&source.cluster_member_set);
-        self.subgraph_member_set
-            .clone_from(&source.subgraph_member_set);
-        self.label_index
-            .buckets
-            .clone_from(&source.label_index.buckets);
-        self.warnings.clone_from(&source.warnings);
-        self.auto_created_nodes
-            .clone_from(&source.auto_created_nodes);
-        self.activation_stacks.clone_from(&source.activation_stacks);
-        self.current_participant_group
-            .clone_from(&source.current_participant_group);
-        self.fragment_stack.clone_from(&source.fragment_stack);
-        self.current_class_node_id = source.current_class_node_id;
-        self.state_stack.clone_from(&source.state_stack);
-        self.parser_config = source.parser_config;
-        self.reusable_prefix_guard = None;
+        self.reset_parser_state_from(source);
     }
 
     pub(crate) fn reset_from(&mut self, source: &Self) {
         clone_ir_reusing(&mut self.ir, &source.ir);
+        self.reset_parser_state_from(source);
+    }
+
+    /// Restore every lookup and open parser context for BOTH scratch reset paths.
+    ///
+    /// In particular, public subgraph ids and forward references must move with the IR. Keeping
+    /// an old public-id index can attach an edge to an unrelated group reusing the same slot;
+    /// omitting a source index can instead manufacture a phantom node for a real subgraph.
+    fn reset_parser_state_from(&mut self, source: &Self) {
+        // No `..`: new builder state must be given an explicit reset policy here.
+        let Self {
+            ir: _,
+            node_id_index,
+            edge_index_by_id,
+            cluster_index_by_key,
+            subgraph_index_by_key,
+            flow_forward_subgraph_members,
+            subgraph_index_by_public_key,
+            cluster_member_set,
+            subgraph_member_set,
+            label_index,
+            warnings,
+            auto_created_nodes,
+            activation_stacks,
+            current_participant_group,
+            fragment_stack,
+            current_class_node_id,
+            state_stack,
+            parser_config,
+            reusable_prefix_guard: _,
+        } = source;
         self.node_id_index
             .buckets
-            .clone_from(&source.node_id_index.buckets);
-        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
-        self.cluster_index_by_key
-            .clone_from(&source.cluster_index_by_key);
-        self.subgraph_index_by_key
-            .clone_from(&source.subgraph_index_by_key);
-        self.cluster_member_set
-            .clone_from(&source.cluster_member_set);
-        self.subgraph_member_set
-            .clone_from(&source.subgraph_member_set);
-        self.label_index
-            .buckets
-            .clone_from(&source.label_index.buckets);
-        self.warnings.clone_from(&source.warnings);
-        self.auto_created_nodes
-            .clone_from(&source.auto_created_nodes);
-        self.activation_stacks.clone_from(&source.activation_stacks);
+            .clone_from(&node_id_index.buckets);
+        self.edge_index_by_id.clone_from(edge_index_by_id);
+        self.cluster_index_by_key.clone_from(cluster_index_by_key);
+        self.subgraph_index_by_key.clone_from(subgraph_index_by_key);
+        self.flow_forward_subgraph_members
+            .clone_from(flow_forward_subgraph_members);
+        self.subgraph_index_by_public_key
+            .clone_from(subgraph_index_by_public_key);
+        self.cluster_member_set.clone_from(cluster_member_set);
+        self.subgraph_member_set.clone_from(subgraph_member_set);
+        self.label_index.buckets.clone_from(&label_index.buckets);
+        self.warnings.clone_from(warnings);
+        self.auto_created_nodes.clone_from(auto_created_nodes);
+        self.activation_stacks.clone_from(activation_stacks);
         self.current_participant_group
-            .clone_from(&source.current_participant_group);
-        self.fragment_stack.clone_from(&source.fragment_stack);
-        self.current_class_node_id = source.current_class_node_id;
-        self.state_stack.clone_from(&source.state_stack);
-        self.parser_config = source.parser_config;
+            .clone_from(current_participant_group);
+        self.fragment_stack.clone_from(fragment_stack);
+        self.current_class_node_id = *current_class_node_id;
+        self.state_stack.clone_from(state_stack);
+        self.parser_config = *parser_config;
         self.reusable_prefix_guard = None;
     }
 
@@ -702,7 +739,7 @@ impl IrBuilder {
     /// ⚠️ SEPARATE FROM [`Self::set_title`] BECAUSE RENDERERS MUST TELL THE TWO APART. mermaid draws
     /// the front-matter title for a different set of families than the `title ...` statement — see
     /// `MermaidDiagramMeta::title_from_front_matter`. Only the front matter parser calls this; every
-    /// statement path keeps `set_title`, so a new statement parser cannot claim front-matter
+    /// statement path keeps `set_title` themselves, so a new statement parser cannot claim front-matter
     /// provenance by accident.
     pub(crate) fn set_front_matter_title(&mut self, title: String) {
         self.ir.meta.title = Some(title);
@@ -777,6 +814,15 @@ impl IrBuilder {
         };
         let label = ParsedLabel::plain(title_text);
         let label_id = self.intern_label(&label, span);
+        if self
+            .ir
+            .graph
+            .subgraphs
+            .get(subgraph_index)
+            .is_some_and(|subgraph| subgraph.title != Some(label_id))
+        {
+            self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        }
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.title = Some(label_id);
         }
@@ -1040,7 +1086,7 @@ impl IrBuilder {
     pub(crate) fn set_current_class(&mut self, name: &str) {
         // Callers intern the class node immediately before this (see `lower_class_statement`'s
         // `BlockStart` arm), and node ids are stable append indices, so resolving here is identical to
-        // resolving per member — and lets `add_class_member` skip the lookup entirely.
+        // resolving per member — one extra O(1) lookup per block, instead of one per member.
         self.current_class_node_id = self.node_id_index.get(name, &self.ir.nodes);
     }
 
@@ -1763,7 +1809,7 @@ impl IrBuilder {
         // Reserve the `add_node_to_cluster` dedup set once, when the FIRST cluster is created — it fills
         // to ~node-count as members accumulate, so this skips the geometric `reserve_rehash` (~5.8% of
         // section-heavy parse: timeline −0.98%, journey −1.19%). Done here (per-section, cold) rather than
-        // in the per-node `add_node_to_cluster` so the flowchart node hot path is byte-for-byte unchanged
+        // in the per-node hot path so the flowchart node hot path is byte-for-byte unchanged
         // (moving it into the hot path regressed flowchart +0.11% via inlining), and a subgraph-free diagram
         // never reaches here so pays no unused-map allocation. Capacity-only ⇒ behavior-identical.
         if self.cluster_member_set.capacity() == 0 {
@@ -2029,7 +2075,7 @@ impl IrBuilder {
 
     /// Intern a flowchart fast-path edge endpoint (label-less Rect node) whose id is already
     /// `trim_ascii`'d and `is_fast_flow_identifier`-validated (pure ASCII, no whitespace) — so
-    /// `trim_fast(id) == id`. Interns through the normalized core to skip that redundant trim.
+    /// `trim_fast(id) == id`. Interns through the normalized core to skip the redundant `trim_fast`.
     /// The member an edge endpoint naming a SUBGRAPH should attach to (bd-pfibz).
     ///
     /// ⚠️ IT LOOKS THE ID UP IN `graph.subgraphs`, NOT IN `cluster_index_by_key`, AND THAT IS THE
@@ -2161,6 +2207,14 @@ impl IrBuilder {
             _ => text.to_owned(),
         };
         let label_id = self.intern_plain_label_owned(combined, span);
+        if self
+            .ir
+            .nodes
+            .get(node_id.0)
+            .is_some_and(|node| node.label != Some(label_id))
+        {
+            self.mark_reusable_prefix_node_dirty(node_id);
+        }
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.label = Some(label_id);
         }
@@ -2319,6 +2373,7 @@ impl IrBuilder {
                 .any(|existing| existing == normalized_class)
         {
             cluster.classes.push(normalized_class.to_string());
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
         }
     }
 
@@ -2329,6 +2384,13 @@ impl IrBuilder {
     pub(crate) fn set_journey_actors(&mut self, node_id: IrNodeId, actors: Vec<String>) {
         if actors.is_empty() {
             return;
+        }
+        if self.ir.nodes.get(node_id.0).is_some_and(|node| {
+            node.journey_meta
+                .as_ref()
+                .is_none_or(|meta| meta.actors != actors)
+        }) {
+            self.mark_reusable_prefix_node_dirty(node_id);
         }
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.journey_meta = Some(Box::new(fm_core::IrJourneyNodeMeta { actors }));
@@ -2346,6 +2408,14 @@ impl IrBuilder {
     ) {
         if boundary_type.is_empty() {
             return;
+        }
+        if self
+            .ir
+            .clusters
+            .get(cluster_index)
+            .is_some_and(|cluster| cluster.c4_boundary_type.as_deref() != Some(boundary_type))
+        {
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
         }
         if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.c4_boundary_type = Some(boundary_type.to_string());
@@ -2846,7 +2916,301 @@ fn clean_label(input: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::IrBuilder;
-    use fm_core::{DiagramType, NodeShape, Span};
+    use fm_core::{DiagramType, IrNodeId, NodeShape, Span};
+
+    fn add_test_group(builder: &mut IrBuilder, name: &str, member: &str) -> IrNodeId {
+        let span = Span::default();
+        let node = builder
+            .intern_node(member, Some(member), NodeShape::Rect, span)
+            .expect("group member");
+        let lookup = format!("{name}@title:{name}");
+        let cluster = builder
+            .ensure_cluster(&lookup, Some(name), span)
+            .expect("cluster");
+        let subgraph = builder
+            .ensure_subgraph(&lookup, name, Some(name), span, None, Some(cluster))
+            .expect("subgraph");
+        builder.add_node_to_cluster(cluster, node);
+        builder.add_node_to_subgraph(subgraph, node);
+        node
+    }
+
+    fn set_test_chart_metadata(builder: &mut IrBuilder, label: &str) {
+        builder.ir.treemap_meta = Some(fm_core::IrTreemapMeta {
+            nodes: vec![fm_core::IrTreemapItem {
+                label: label.to_string(),
+                value: Some(7.0),
+                ..Default::default()
+            }],
+            roots: vec![0],
+        });
+        builder.ir.radar_meta = Some(fm_core::IrRadarMeta {
+            axes: vec![fm_core::IrRadarAxis {
+                id: label.to_string(),
+                label: Some(label.to_string()),
+                span: Span::default(),
+            }],
+            curves: vec![fm_core::IrRadarCurve {
+                id: label.to_string(),
+                values: vec![7.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn scratch_reset_restores_and_clears_node_and_cluster_metadata() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        let node = add_test_group(&mut source, "source", "A");
+        source.set_journey_actors(node, vec!["Alice Smith".to_string()]);
+        source.add_class_to_cluster(0, "source-class");
+        source.set_cluster_c4_boundary_type(0, "SYSTEM");
+
+        let mut scratch = IrBuilder::new(DiagramType::Flowchart);
+        let previous = add_test_group(&mut scratch, "previous", "Z");
+        scratch.set_journey_actors(previous, vec!["Bob Jones".to_string()]);
+        scratch.add_class_to_cluster(0, "previous-class");
+        scratch.set_cluster_c4_boundary_type(0, "ENTERPRISE");
+
+        // Equal vector lengths exercise the in-place clone helpers, not Vec's append/Clone path.
+        let nodes_ptr = scratch.ir.nodes.as_ptr();
+        let clusters_ptr = scratch.ir.clusters.as_ptr();
+        scratch.reset_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+        assert_eq!(scratch.ir.nodes.as_ptr(), nodes_ptr);
+        assert_eq!(scratch.ir.clusters.as_ptr(), clusters_ptr);
+
+        source.ir.nodes[node.0].journey_meta = None;
+        source.ir.clusters[0].classes.clear();
+        source.ir.clusters[0].c4_boundary_type = None;
+        scratch.reset_from(&source);
+        assert_eq!(
+            scratch.ir, source.ir,
+            "old metadata must not survive an unstyled source"
+        );
+    }
+
+    #[test]
+    fn scratch_reset_restores_and_clears_chart_datasets() {
+        let mut source = IrBuilder::new(DiagramType::Treemap);
+        set_test_chart_metadata(&mut source, "source-data");
+        let mut scratch = IrBuilder::new(DiagramType::Radar);
+        set_test_chart_metadata(&mut scratch, "previous-data");
+        scratch.reset_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+
+        source.ir.treemap_meta = None;
+        source.ir.radar_meta = None;
+        scratch.reset_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+    }
+
+    #[test]
+    fn scratch_reset_replaces_subgraph_indexes_without_phantom_nodes_or_stale_aliases() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        let member = add_test_group(&mut source, "current", "A");
+        source.flow_forward_subgraph_members
+            .insert("future".to_string(), "A".to_string());
+
+        let mut scratch = IrBuilder::new(DiagramType::Flowchart);
+        add_test_group(&mut scratch, "previous", "Z");
+        scratch.flow_forward_subgraph_members
+            .insert("stale-forward".to_string(), "Z".to_string());
+        scratch.reset_from(&source);
+
+        let span = Span::default();
+        assert_eq!(
+            scratch.resolve_subgraph_endpoint("current", span),
+            Some(member)
+        );
+        assert_eq!(
+            scratch.resolve_subgraph_endpoint("future", span),
+            Some(member)
+        );
+        assert_eq!(scratch.resolve_subgraph_endpoint("previous", span), None);
+        assert_eq!(scratch.resolve_subgraph_endpoint("stale-forward", span), None);
+        assert_eq!(
+            scratch.ir.nodes.len(), 1,
+            "lookups must not invent group-name nodes"
+        );
+        assert_eq!(scratch.ir, source.ir);
+
+        let empty = IrBuilder::new(DiagramType::Flowchart);
+        scratch.reset_from(&empty);
+        add_test_group(&mut scratch, "replacement", "R");
+        assert_eq!(scratch.resolve_subgraph_endpoint("current", span), None);
+        assert_eq!(scratch.resolve_subgraph_endpoint("future", span), None);
+        assert_eq!(scratch.ir.nodes.len(), 1);
+    }
+
+    #[test]
+    fn suffix_reset_discards_group_aliases_before_their_slots_are_reused() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        let member = add_test_group(&mut source, "prefix", "A");
+        source.flow_forward_subgraph_members
+            .insert("future".to_string(), "A".to_string());
+        let mut scratch = source.clone();
+        scratch.begin_reusable_suffix(&source);
+        add_test_group(&mut scratch, "temporary", "T");
+        scratch.flow_forward_subgraph_members
+            .insert("stale-forward".to_string(), "T".to_string());
+        assert!(scratch.reusable_prefix_unchanged(&source));
+        scratch.reset_reusable_suffix_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+
+        // The new group occupies the SAME index the discarded temporary group occupied.
+        // A stale public-id map would now silently return R for an edge naming temporary.
+        add_test_group(&mut scratch, "replacement", "R");
+        let span = Span::default();
+        assert_eq!(
+            scratch.resolve_subgraph_endpoint("prefix", span),
+            Some(member)
+        );
+        assert_eq!(
+            scratch.resolve_subgraph_endpoint("future", span),
+            Some(member)
+        );
+        assert_eq!(scratch.resolve_subgraph_endpoint("temporary", span), None);
+        assert_eq!(scratch.resolve_subgraph_endpoint("stale-forward", span), None);
+        assert_eq!(scratch.ir.nodes.len(), 2);
+    }
+
+    #[test]
+    fn suffix_reset_restores_metadata_outside_the_certified_graph_prefix() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        add_test_group(&mut source, "prefix", "A");
+        set_test_chart_metadata(&mut source, "snapshot-data");
+        let mut scratch = source.clone();
+        scratch.begin_reusable_suffix(&source);
+        set_test_chart_metadata(&mut scratch, "suffix-data");
+        assert!(scratch.reusable_prefix_unchanged(&source));
+        scratch.reset_reusable_suffix_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+
+        source.ir.treemap_meta = None;
+        source.ir.radar_meta = None;
+        scratch.begin_reusable_suffix(&source);
+        scratch.reset_reusable_suffix_from(&source);
+        assert_eq!(
+            scratch.ir, source.ir,
+            "suffix datasets must also clear to None"
+        );
+    }
+
+    #[test]
+    fn batch_scratch_matches_fresh_parsing_when_switching_prefix_groups() {
+        let shared_a = concat!(
+            "flowchart TD\n",
+            "  subgraph sharedA[\"Shared ingestion platform\"]\n",
+            "    A0[\"Receive and validate customer events\"]\n",
+            "    A1[\"Normalize the complete event payload\"]\n",
+            "    A2[\"Publish canonical records to consumers\"]\n",
+            "    A0-->A1\n",
+            "    A1-->A2\n",
+            "  end\n",
+        );
+        let shared_b = concat!(
+            "flowchart TD\n",
+            "  subgraph sharedB[\"Shared accounting platform\"]\n",
+            "    B0[\"Receive and validate accounting entries\"]\n",
+            "    B1[\"Reconcile the complete transaction batch\"]\n",
+            "    B2[\"Publish reconciled entries to consumers\"]\n",
+            "    B0-->B1\n",
+            "    B1-->B2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared_a}  A2-->C[Analytics]\n"),
+            format!("{shared_a}  sharedA-->D[Dashboard]\n"),
+            format!("{shared_b}  B2-->Z[Ledger]\n"),
+            format!("{shared_b}  sharedB-->W[Invoices]\n"),
+        ];
+        let refs: Vec<_> = inputs.iter().map(String::as_str).collect();
+        let plan = crate::FlowchartBatchParsePlan::new(
+            &refs,
+            fm_core::MermaidParseMode::Compat,
+            &crate::ParserConfig::default(),
+        );
+        assert_eq!(
+            plan.stats().shared_prefix_groups, 2,
+            "must exercise compiled prefixes"
+        );
+        let fresh: Vec<_> = inputs.iter().map(|input| crate::parse(input).ir).collect();
+        let mut scratch = crate::FlowchartBatchParseScratch::default();
+        let mut certified = 0;
+        for index in [0, 2, 1, 3, 0, 1, 2, 3, 1, 0] {
+            plan.with_parse_scratch(index, &inputs[index], &mut scratch, |parsed| {
+                certified += usize::from(parsed.reusable_prefix.is_some());
+                assert_eq!(parsed.ir, &fresh[index], "batch input {index}");
+            });
+        }
+        assert!(
+            certified > 0,
+            "a full-parse fallback alone must not satisfy this test"
+        );
+    }
+
+    #[test]
+    fn semantic_edits_to_prefix_nodes_and_groups_invalidate_reuse() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        add_test_group(&mut source, "prefix", "A");
+        // Description edits must not be masked by intern_node upgrading Rect to Rounded first.
+        source.ir.nodes[0].shape = NodeShape::Rounded;
+        let edits: [fn(&mut IrBuilder); 5] = [
+            |builder| builder.add_class_to_cluster(0, "changed"),
+            |builder| builder.set_cluster_c4_boundary_type(0, "SYSTEM"),
+            |builder| builder.set_journey_actors(IrNodeId(0), vec!["Alice".to_string()]),
+            |builder| builder.set_subgraph_title(0, "New title", Span::default()),
+            |builder| builder.append_state_description("A", "More detail", Span::default()),
+        ];
+        for (index, edit) in edits.into_iter().enumerate() {
+            let mut scratch = source.clone();
+            scratch.begin_reusable_suffix(&source);
+            edit(&mut scratch);
+            assert_ne!(
+                scratch.ir, source.ir,
+                "edit {index} must change the document"
+            );
+            assert!(!scratch.reusable_prefix_unchanged(&source), "edit {index}");
+            scratch.reset_from(&source);
+            assert_eq!(scratch.ir, source.ir, "reset after edit {index}");
+        }
+    }
+
+    #[test]
+    fn identical_metadata_assignments_do_not_invalidate_prefix_reuse() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        let node = add_test_group(&mut source, "prefix", "A");
+        source.add_class_to_cluster(0, "styled");
+        source.set_cluster_c4_boundary_type(0, "SYSTEM");
+        source.set_journey_actors(node, vec!["Alice".to_string()]);
+        let mut scratch = source.clone();
+        scratch.begin_reusable_suffix(&source);
+        scratch.add_class_to_cluster(0, " styled ");
+        scratch.set_cluster_c4_boundary_type(0, "SYSTEM");
+        scratch.set_journey_actors(node, vec!["Alice".to_string()]);
+        scratch.set_subgraph_title(0, "prefix", Span::default());
+        assert_eq!(scratch.ir, source.ir);
+        assert!(scratch.reusable_prefix_unchanged(&source));
+    }
+
+    #[test]
+    fn edits_confined_to_appended_nodes_and_groups_keep_prefix_reusable() {
+        let mut source = IrBuilder::new(DiagramType::Flowchart);
+        add_test_group(&mut source, "prefix", "A");
+        let mut scratch = source.clone();
+        scratch.begin_reusable_suffix(&source);
+        let node = add_test_group(&mut scratch, "suffix", "B");
+        scratch.add_class_to_cluster(1, "styled");
+        scratch.set_cluster_c4_boundary_type(1, "SYSTEM");
+        scratch.set_journey_actors(node, vec!["Alice".to_string()]);
+        scratch.set_subgraph_title(1, "New title", Span::default());
+        scratch.append_state_description("B", "More detail", Span::default());
+        assert!(scratch.reusable_prefix_unchanged(&source));
+        scratch.reset_reusable_suffix_from(&source);
+        assert_eq!(scratch.ir, source.ir);
+    }
 
     #[test]
     fn intern_node_reuses_existing_lookup_entry() {
