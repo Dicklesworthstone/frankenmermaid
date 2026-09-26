@@ -114,6 +114,7 @@ export function shareUrl(base, hash) {
 export function mountShareControls({ panelEl, workspace }) {
   const document = panelEl.ownerDocument, host = document.defaultView;
   let disposed = false, operation = 0, revision = null, currentUrl = "";
+  let navigation = 0, observedHash = null, opening = false, openedRevision = null;
   function make(tag, text, id) {
     const element = document.createElement(tag);
     element.id = id;
@@ -134,6 +135,12 @@ export function mountShareControls({ panelEl, workspace }) {
   const status = make("p", "Links contain your source, not just an image. Anyone with a link can read it. Creating a link does not save a file.", "share-status");
   status.setAttribute("role", "status");
   link.setAttribute("aria-describedby", status.id);
+  const reopen = make("button", "Open address-bar source", "share-open");
+  reopen.type = "button";
+  reopen.hidden = true;
+  const navigationStatus = make("p", "", "share-navigation-status");
+  navigationStatus.setAttribute("role", "status");
+  navigationStatus.hidden = true;
   function clearLink() {
     currentUrl = "";
     link.value = "";
@@ -142,7 +149,13 @@ export function mountShareControls({ panelEl, workspace }) {
   }
   clearLink();
   function sourceChanged() {
-    if (disposed || revision === null || workspace.sourceSnapshot().revision === revision) return;
+    if (disposed) return;
+    const currentRevision = workspace.sourceSnapshot().revision;
+    if (openedRevision !== null && currentRevision !== openedRevision) {
+      openedRevision = null;
+      navigationStatus.textContent = "Source changed. The address-bar link still contains the original shared source; create a new link to share your edits.";
+    }
+    if (revision === null || currentRevision === revision) return;
     operation += 1;
     revision = null;
     clearLink();
@@ -195,27 +208,83 @@ export function mountShareControls({ panelEl, workspace }) {
       return false;
     }
   }
-  async function restoreInitialLink() {
+  // URL navigation is separate from link generation: copying a snapshot never changes
+  // history, and an old decoder/confirmation cannot commit into a later navigation.
+  async function restoreLocation(force = false) {
+    if (disposed) return false;
     const hash = host.location.hash;
-    if (!hash.startsWith(PREFIX)) return false;
-    status.textContent = "Opening shared source…";
-    const isCurrent = () => !disposed && host.location.hash === hash;
-    const opened = await workspace.openSharedSource(() => decodeShareHash(hash), { isCurrent });
-    if (isCurrent()) status.textContent = opened ? "Shared source opened. Edit, present, or download it using the normal document controls." :
-      "Shared source was not opened; the current document is retained. See the source-file status for details.";
-    return opened;
+    // Traversal can emit both popstate and hashchange. Never reset editor selection/undo
+    // twice, or retry a declined replacement without another explicit user action.
+    if (!force && hash === observedHash) return false;
+    const previousHash = observedHash;
+    observedHash = hash;
+    const ticket = ++navigation;
+    openedRevision = null;
+    opening = hash.startsWith(PREFIX);
+    reopen.hidden = !opening;
+    reopen.disabled = opening;
+    reopen.textContent = "Open address-bar source";
+    if (!opening) {
+      if (previousHash?.startsWith(PREFIX)) {
+        navigationStatus.hidden = false;
+        navigationStatus.textContent = "The address-bar share link was cleared. Current source retained.";
+      }
+      return false;
+    }
+    navigationStatus.hidden = false;
+    navigationStatus.textContent = "Opening shared source…";
+    const isCurrent = () => !disposed && ticket === navigation && host.location.hash === hash;
+    try {
+      const opened = await workspace.openSharedSource(() => decodeShareHash(hash), { isCurrent });
+      if (!isCurrent()) return false;
+      if (opened) {
+        openedRevision = workspace.sourceSnapshot().revision;
+        reopen.textContent = "Reopen address-bar source";
+        navigationStatus.textContent = "Shared source opened. Edit, present, or download it using the normal document controls.";
+      } else {
+        navigationStatus.textContent = "Shared source was not opened; the current document is retained. See the source-file status for details. Use Open address-bar source to retry.";
+      }
+      return opened;
+    } catch (error) {
+      if (isCurrent()) navigationStatus.textContent = `Cannot open shared source: ${error.message || error}. Current document retained.`;
+      return false;
+    } finally {
+      if (isCurrent()) { opening = false; reopen.disabled = false; }
+    }
   }
+  function onLocationChange(event) {
+    if (disposed) return;
+    // A rapid A -> B -> A can queue a B event after the location is already A. Its
+    // intervening navigation must invalidate an A decode still in flight (ABA guard).
+    // Completed opens are not repeated for these obsolete notifications.
+    if (event.newURL && new URL(event.newURL).hash !== host.location.hash) {
+      if (!opening) return;
+      navigation += 1;
+      observedHash = null;
+    }
+    void restoreLocation();
+  }
+  const openCurrentLink = () => restoreLocation(true);
+  const onReopen = () => { void openCurrentLink(); };
   const onGenerate = () => { void createLink(); };
   const onCopy = () => { void copyLink(); };
   generate.addEventListener("click", onGenerate);
   copy.addEventListener("click", onCopy);
-  const ready = restoreInitialLink();
+  reopen.addEventListener("click", onReopen);
+  host.addEventListener("hashchange", onLocationChange);
+  host.addEventListener("popstate", onLocationChange);
+  const ready = restoreLocation();
   return {
-    ready, createLink, copyLink, sourceChanged,
+    ready, createLink, copyLink, sourceChanged, openCurrentLink,
     dispose() {
       if (disposed) return;
       disposed = true;
       operation += 1;
+      navigation += 1;
+      host.removeEventListener("hashchange", onLocationChange);
+      host.removeEventListener("popstate", onLocationChange);
+      reopen.removeEventListener("click", onReopen);
+      reopen.disabled = true;
       generate.removeEventListener("click", onGenerate);
       copy.removeEventListener("click", onCopy);
       clearLink();

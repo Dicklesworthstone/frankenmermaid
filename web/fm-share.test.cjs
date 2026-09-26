@@ -197,7 +197,7 @@ test("initial shared links enter the normal document reset/render/recovery bound
   assert.equal(f.workspace.sourceSnapshot().source, source);
   assert.equal(f.sourceEl.value, "digraph{a->b}\n");
   assert.equal(f.resets, 1); assert.equal(f.changes, 1);
-  assert.match(f.byId("share-status").textContent, /Shared source opened/);
+  assert.match(f.byId("share-navigation-status").textContent, /Shared source opened/);
   assert.equal(await f.workspace.saveSource(), true);
   assert.equal(f.saved[0].text, source);
   assert.equal(f.saved[0].filename, "graph.dot");
@@ -207,7 +207,7 @@ test("corrupt initial links and ordinary anchors never replace the current sourc
     const f = await workspaceFixture(t, { hash });
     assert.equal(f.workspace.sourceSnapshot().source, "start");
     assert.equal(f.resets, 0);
-    assert.match(f.byId("share-status").textContent, hash === "#out" ? /Links contain/ : /retained/);
+    assert.match(f.byId(hash === "#out" ? "share-status" : "share-navigation-status").textContent, hash === "#out" ? /Links contain/ : /retained/);
   }
 });
 test("edits invalidate generated links, including programmatic edits without input events", async t => {
@@ -325,4 +325,166 @@ test("disposal cancels pending imports and prevents zombie controls from reading
   assert.equal(f.byId("share-copy").disabled, true);
   assert.throws(() => f.workspace.sourceSnapshot(), /closed/);
   assert.equal(f.resets, 0);
+});
+
+const tick = () => new Promise(resolve => setImmediate(resolve));
+async function navigate(f, hash, type = "hashchange") {
+  const oldURL = f.host.location.href;
+  f.host.location.hash = hash;
+  const event = new Event(type);
+  if (type === "hashchange") Object.assign(event, { oldURL, newURL: f.host.location.href });
+  f.host.dispatchEvent(event);
+  await tick();
+}
+test("same-page history traversal restores each source with its own filename and encoding", async t => {
+  const first = { source: "\uFEFFA\r\n", name: "first.mmd" }, second = { source: "digraph{a->b}\n", name: "second.dot" };
+  const f = await workspaceFixture(t, { hash: raw(first) });
+  await navigate(f, raw(second), "popstate");
+  assert.equal(f.workspace.sourceSnapshot().source, second.source);
+  assert.equal(f.workspace.sourceSnapshot().name, second.name);
+  await navigate(f, raw(first), "popstate");
+  assert.equal(f.workspace.sourceSnapshot().source, first.source);
+  assert.equal(f.workspace.sourceSnapshot().name, first.name);
+  assert.equal(f.resets, 3);
+  assert.equal(f.changes, 3);
+});
+test("paired popstate/hashchange notifications do not reopen documents or reset unsaved edits", async t => {
+  const hash = raw({ source: "original", name: "a.mmd" });
+  const f = await workspaceFixture(t, { hash });
+  await navigate(f, hash, "popstate");
+  await navigate(f, hash);
+  f.edit("unsaved revision");
+  let confirmations = 0;
+  f.approve = () => { confirmations++; return true; };
+  await navigate(f, hash, "popstate");
+  await navigate(f, hash);
+  assert.equal(confirmations, 0);
+  assert.equal(f.resets, 1);
+  assert.equal(f.workspace.sourceSnapshot().source, "unsaved revision");
+  assert.match(f.byId("share-navigation-status").textContent, /original shared source/);
+});
+test("declined history navigation retains the draft and offers an explicit retry", async t => {
+  const f = await workspaceFixture(t);
+  f.edit("my unsaved work");
+  f.approve = () => false;
+  await navigate(f, raw({ source: "incoming", name: "new.mmd" }));
+  assert.equal(f.workspace.sourceSnapshot().source, "my unsaved work");
+  assert.match(f.byId("share-navigation-status").textContent, /retained/);
+  assert.equal(f.byId("share-open").hidden, false);
+  assert.equal(f.byId("share-open").disabled, false);
+  f.approve = () => true;
+  f.byId("share-open").click();
+  await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "incoming");
+  assert.equal(f.resets, 1);
+  const records = [...f.host.localStorage.values.values()].map(JSON.parse);
+  assert.ok(records.some(record => record.source === "my unsaved work"));
+});
+test("navigation through an ordinary anchor leaves the source intact and allows returning to a share", async t => {
+  const hash = raw({ source: "shared", name: "a.mmd" });
+  const f = await workspaceFixture(t, { hash });
+  await navigate(f, "#out");
+  assert.equal(f.workspace.sourceSnapshot().source, "shared");
+  assert.equal(f.byId("share-open").hidden, true);
+  assert.match(f.byId("share-navigation-status").textContent, /Current source retained/);
+  await navigate(f, hash);
+  assert.equal(f.resets, 2);
+  assert.equal(f.byId("share-open").hidden, false);
+});
+test("A to B to A traversal invalidates old confirmations even when the final hash matches", async t => {
+  const f = await workspaceFixture(t);
+  f.edit("unsaved");
+  const approvals = [];
+  f.approve = () => new Promise(resolve => approvals.push(resolve));
+  const a = raw({ source: "A", name: "a.mmd" }), b = raw({ source: "B", name: "b.mmd" });
+  await navigate(f, a);
+  await navigate(f, b);
+  await navigate(f, a);
+  assert.equal(approvals.length, 3);
+  approvals[0](true); approvals[1](true);
+  await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "unsaved");
+  assert.equal(f.resets, 0);
+  assert.equal(f.byId("share-open").disabled, true, "old completions cannot enable current controls");
+  approvals[2](false);
+  await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "unsaved");
+  assert.equal(f.byId("share-open").disabled, false);
+});
+test("queued obsolete hash events cannot revive a prior decode or repeat a completed open", async t => {
+  const f = await workspaceFixture(t);
+  f.edit("unsaved");
+  const approvals = [];
+  f.approve = () => new Promise(resolve => approvals.push(resolve));
+  const a = raw({ source: "A", name: "a.mmd" }), b = raw({ source: "B", name: "b.mmd" });
+  await navigate(f, a);
+  // Browser already returned to A when the intervening B hashchange arrives.
+  const obsolete = new Event("hashchange");
+  Object.assign(obsolete, { newURL: "https://example.test/" + b });
+  f.host.dispatchEvent(obsolete);
+  await tick();
+  assert.equal(approvals.length, 2);
+  approvals[0](true); await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "unsaved");
+  approvals[1](true); await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "A");
+  f.host.dispatchEvent(obsolete); await tick();
+  assert.equal(f.resets, 1);
+});
+test("clearing the share hash cancels an in-flight confirmation without creating a blank document", async t => {
+  const f = await workspaceFixture(t);
+  f.edit("retained");
+  let approve;
+  f.approve = () => new Promise(resolve => { approve = resolve; });
+  await navigate(f, raw({ source: "incoming", name: "a.mmd" }));
+  await navigate(f, "");
+  approve(true); await tick();
+  assert.equal(f.workspace.sourceSnapshot().source, "retained");
+  assert.equal(f.resets, 0);
+  assert.equal(f.byId("share-open").hidden, true);
+});
+test("failed or unsupported history links do not poison subsequent valid navigations", async t => {
+  const f = await workspaceFixture(t);
+  await navigate(f, "#fm:v99:raw:e30");
+  assert.equal(f.workspace.sourceSnapshot().source, "start");
+  assert.match(f.byId("document-message").textContent, /version/);
+  await navigate(f, raw({ source: "valid", name: "valid.mmd" }));
+  assert.equal(f.workspace.sourceSnapshot().source, "valid");
+  assert.match(f.byId("share-navigation-status").textContent, /Shared source opened/);
+  assert.equal(f.resets, 1);
+});
+test("explicit reopening of the current link confirms before discarding edits", async t => {
+  const hash = raw({ source: "from link", name: "link.mmd" });
+  const f = await workspaceFixture(t, { hash });
+  f.edit("current edit");
+  f.approve = () => false;
+  assert.equal(await f.sharing.openCurrentLink(), false);
+  assert.equal(f.workspace.sourceSnapshot().source, "current edit");
+  f.approve = () => true;
+  assert.equal(await f.sharing.openCurrentLink(), true);
+  assert.equal(f.workspace.sourceSnapshot().source, "from link");
+  assert.equal(f.resets, 2);
+});
+test("navigation status and copy status cannot overwrite one another", async t => {
+  const f = await workspaceFixture(t, { hash: raw({ source: "shared", name: "a.mmd" }) });
+  const navigationStatus = f.byId("share-navigation-status").textContent;
+  assert.equal(await f.sharing.createLink(), true);
+  assert.equal(await f.sharing.copyLink(), false);
+  assert.match(f.byId("share-status").textContent, /copy it manually/);
+  assert.equal(f.byId("share-navigation-status").textContent, navigationStatus);
+});
+test("disposed controllers remove history listeners and cancel pending navigation", async t => {
+  const f = await workspaceFixture(t);
+  f.edit("keep");
+  let approve;
+  f.approve = () => new Promise(resolve => { approve = resolve; });
+  await navigate(f, raw({ source: "old", name: "old.mmd" }));
+  f.sharing.dispose();
+  approve(true); await tick();
+  await navigate(f, raw({ source: "new", name: "new.mmd" }));
+  await navigate(f, raw({ source: "newest", name: "newest.mmd" }), "popstate");
+  assert.equal(f.workspace.sourceSnapshot().source, "keep");
+  assert.equal(f.resets, 0);
+  assert.equal(await f.sharing.openCurrentLink(), false);
+  assert.equal(f.byId("share-open").disabled, true);
 });
