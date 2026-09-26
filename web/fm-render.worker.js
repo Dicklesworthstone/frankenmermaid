@@ -17,6 +17,12 @@
 // SVG plus its matching ParseLens bindings; `sourceEdit` returns a Rust-applied source edit.
 // `sourceDelete` and `sourceInsert` use Rust's formatting-preserving structural edit APIs;
 // their replies carry the actual changed range AND the newly parsed source bindings.
+// `sourceBatch` applies disjoint source-span replacements as ONE cancellable transaction. Its
+// `edits: [{ elementId, replacement }]` all address the original input snapshot. The sole success
+// reply is `sourceBatchEdited`, with `response.result.{updatedSource,changes}` and fresh bindings.
+// Changes are reported in request order; intermediate sources are never posted. A caller must
+// still check its document revision before adopting the result, just as for a single sourceEdit.
+// Shared/overlapping node/edge statement spans are rejected, not treated as semantic node edits.
 // `sourceDeck` returns the SVG and deck manifest from ONE renderDeck invocation (bd-z7g6k).
 // These use the existing WASM exports, not a second parser. Their pre-execution queue is
 // separate from the Rust render protocol, which has no source-map/edit response variant.
@@ -46,6 +52,136 @@ function sourceSnapshot(snapshot) {
   return { bindings: snapshot.bindings, parsed: { warnings: snapshot.parsed?.warnings || [] } };
 }
 
+// Bound transaction bookkeeping; yield between individual Rust edits so a large batch remains
+// cancellable. This does not claim to interrupt any synchronous parse/edit already in progress.
+const MAX_SOURCE_BATCH_EDITS = 1024;
+
+function sourceByteOffsets(source) {
+  const offsets = new Map([[0, 0]]);
+  let bytes = 0;
+  let units = 0;
+  for (const character of source) {
+    const code = character.codePointAt(0);
+    if (code >= 0xd800 && code <= 0xdfff) {
+      throw new Error("Source batch contains an unpaired surrogate; UTF-8 conversion would change it.");
+    }
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    units += character.length;
+    offsets.set(bytes, units);
+  }
+  return offsets;
+}
+
+function validateSourceBatch(edits) {
+  if (!Array.isArray(edits) || edits.length > MAX_SOURCE_BATCH_EDITS) {
+    throw new Error(`sourceBatch requires an edits array of at most ${MAX_SOURCE_BATCH_EDITS} replacements`);
+  }
+  const ids = new Set();
+  for (const edit of edits) {
+    if (!edit || typeof edit.elementId !== "string" || !edit.elementId ||
+        typeof edit.replacement !== "string") {
+      throw new Error("Each sourceBatch edit requires an elementId and string replacement");
+    }
+    if (ids.has(edit.elementId)) throw new Error(`Duplicate sourceBatch elementId: ${edit.elementId}`);
+    ids.add(edit.elementId);
+    sourceByteOffsets(edit.replacement);
+  }
+}
+
+// Validate engine ranges against the exact source at every step. These are UTF-8 byte ranges,
+// whereas JS slicing uses UTF-16 code units; neither numeric equality nor a guessed label is safe.
+function sourceBatchBindings(source, snapshot) {
+  if (!Array.isArray(snapshot?.bindings)) throw new Error("ParseLens did not return source bindings");
+  const offsets = sourceByteOffsets(source);
+  const bindings = new Map();
+  for (const binding of snapshot.bindings) {
+    if (binding.textRange == null) continue;
+    const { startByte, endByte } = binding.textRange;
+    const start = offsets.get(startByte);
+    const end = offsets.get(endByte);
+    if (typeof binding.elementId !== "string" || !binding.elementId ||
+        !Number.isSafeInteger(startByte) || !Number.isSafeInteger(endByte) ||
+        start === undefined || end === undefined || start > end) {
+      throw new Error("Source batch received an invalid UTF-8 source range");
+    }
+    const snippet = source.slice(start, end);
+    if (binding.snippet != null && binding.snippet !== snippet) {
+      throw new Error("Source batch bindings do not match the source");
+    }
+    if (bindings.has(binding.elementId)) throw new Error("Duplicate source-map element ID");
+    bindings.set(binding.elementId, { elementId: binding.elementId, sourceId: binding.sourceId,
+      kind: binding.kind, startByte, endByte, start, end, snippet });
+  }
+  return bindings;
+}
+
+async function applySourceBatch(input, edits, isLive) {
+  if (typeof wasm.parseLens !== "function" || typeof wasm.applyParseLensEdit !== "function") {
+    throw new Error("This WASM build lacks source-editing APIs; rebuild the shipped package.");
+  }
+  sourceByteOffsets(input);
+  let snapshot = wasm.parseLens(input);
+  let bindings = sourceBatchBindings(input, snapshot);
+  const plan = edits.map((edit, index) => {
+    const binding = bindings.get(edit.elementId);
+    if (!binding) throw new Error(`No editable source span for ${edit.elementId}`);
+    return { ...binding, replacement: edit.replacement, index };
+  }).sort((a, b) => b.startByte - a.startByte || b.endByte - a.endByte);
+  for (let index = 1; index < plan.length; index += 1) {
+    const later = plan[index - 1];
+    const earlier = plan[index];
+    if (earlier.endByte > later.startByte || earlier.startByte === later.startByte) {
+      throw new Error(`Overlapping source spans: ${earlier.elementId} and ${later.elementId}`);
+    }
+  }
+  let updatedSource = input;
+  const changes = [];
+  const checkLive = () => {
+    if (!isLive()) {
+      const error = new Error("Source batch superseded or cancelled");
+      error.name = "AbortError";
+      throw error;
+    }
+  };
+  for (const edit of plan) {
+    await yieldToMessages();
+    checkLive();
+    if (edit.replacement === edit.snippet) continue;
+
+    // Right-to-left application keeps every remaining original range at its original offset.
+    // IDs may nevertheless change after a reparse: rebind ONLY by the same source identity,
+    // kind, exact range and snippet. A changed/ambiguous binding aborts rather than guessing.
+    const matches = (binding) => binding.startByte === edit.startByte &&
+      binding.endByte === edit.endByte && binding.snippet === edit.snippet &&
+      binding.sourceId === edit.sourceId && binding.kind === edit.kind;
+    const originalId = bindings.get(edit.elementId);
+    const candidates = originalId && matches(originalId) ? [originalId] :
+      [...bindings.values()].filter(matches);
+    if (candidates.length !== 1) {
+      throw new Error(`Source binding changed or became ambiguous during batch: ${edit.elementId}`);
+    }
+    const binding = candidates[0];
+    const response = wasm.applyParseLensEdit(updatedSource, binding.elementId, edit.replacement);
+    const result = response?.result;
+    const expected = updatedSource.slice(0, edit.start) + edit.replacement + updatedSource.slice(edit.end);
+    if (result?.updatedSource !== expected || result.elementId !== binding.elementId ||
+        result.replacement !== edit.replacement || result.previousSnippet !== edit.snippet ||
+        result.replacedRange?.startByte !== edit.startByte || result.replacedRange?.endByte !== edit.endByte) {
+      throw new Error("Source batch edit changed text outside its selected span or returned an invalid transaction");
+    }
+    const nextBindings = sourceBatchBindings(expected, response.snapshot);
+    changes.push({ index: edit.index, elementId: edit.elementId, appliedElementId: binding.elementId,
+      replacedRange: { startByte: edit.startByte, endByte: edit.endByte },
+      previousSnippet: edit.snippet, replacement: edit.replacement });
+    updatedSource = expected;
+    snapshot = response.snapshot;
+    bindings = nextBindings;
+  }
+  checkLive();
+  changes.sort((a, b) => a.index - b.index);
+  return { result: { updatedSource, changes: changes.map(({ index, ...change }) => change) }, snapshot };
+}
+
 async function handleSourceOperation(message) {
   const { kind, requestId, input } = message;
   const editing = kind === "sourceEdit" || kind === "sourceDelete" || kind === "sourceInsert";
@@ -55,6 +191,8 @@ async function handleSourceOperation(message) {
       (kind === "sourceInsert" && typeof message.text !== "string")) {
     throw new Error("source operations require a non-negative safe integer requestId, string input, an elementId for edits, and string replacement/text for replacement/insertion");
   }
+  // Malformed batches must not evict otherwise valid queued work.
+  if (kind === "sourceBatch") validateSourceBatch(message.edits);
   // Claim at message arrival, BEFORE module loading yields. A burst during a cold import
   // retains just the newest operation. Object identity also handles cancellation + ID reuse.
   releaseSourceOperation();
@@ -66,7 +204,13 @@ async function handleSourceOperation(message) {
     await yieldToMessages();
     if (pendingSourceOperation !== operation) return;
 
-    if (kind === "sourceDeck") {
+    if (kind === "sourceBatch") {
+      const response = await applySourceBatch(input, message.edits,
+        () => pendingSourceOperation === operation);
+      if (pendingSourceOperation !== operation) return;
+      self.postMessage({ kind: "sourceBatchEdited", requestId,
+        response: { result: response.result, snapshot: sourceSnapshot(response.snapshot) } });
+    } else if (kind === "sourceDeck") {
       if (typeof wasm.renderDeck !== "function") {
         throw new Error("This WASM build lacks graph-deck rendering; rebuild the shipped package.");
       }
@@ -228,7 +372,7 @@ self.onmessage = async (event) => {
   const validRender = isRenderRequest(message);
 
   try {
-    if (["sourceRender", "sourceEdit", "sourceDelete", "sourceInsert", "sourceDeck"].includes(message.kind)) {
+    if (["sourceRender", "sourceEdit", "sourceDelete", "sourceInsert", "sourceDeck", "sourceBatch"].includes(message.kind)) {
       await handleSourceOperation(message);
       return;
     }
@@ -277,6 +421,7 @@ self.onmessage = async (event) => {
         requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
         sourceEditing: ["parseLens", "renderSvg", "applyParseLensEdit"].every((name) => typeof wasm[name] === "function"),
+        sourceBatchEditing: ["parseLens", "applyParseLensEdit"].every((name) => typeof wasm[name] === "function"),
         sourceDeletion: typeof wasm.applyParseLensDelete === "function",
         sourceInsertion: typeof wasm.applyParseLensInsertLineAfter === "function",
         deckRendering: typeof wasm.renderDeck === "function",
