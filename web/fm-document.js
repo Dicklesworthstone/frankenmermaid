@@ -176,6 +176,11 @@ export class SourceFileBinding {
   get source() { return this.#source; }
   get name() { return this.#name; }
   async reload() { return SourceFileBinding.open(this.#handle, this.#maxBytes); }
+  async isSameFile(handle) {
+    if (handle === this.#handle) return true;
+    if (typeof this.#handle.isSameEntry !== "function") throw new Error("Cannot verify the save destination's identity.");
+    return this.#handle.isSameEntry(handle);
+  }
 
   async save(source, { isCurrent = () => true } = {}) {
     if (this.#writing) throw new Error("A save is already in progress for this file.");
@@ -248,6 +253,13 @@ export class SourceDocument {
   get name() { return this.#name; }
   get revision() { return this.#revision; }
   get dirty() { return this.#source !== this.#baseline; }
+  rename(name) {
+    const safe = fileName(name);
+    if (this.#name === safe) return false;
+    this.#name = safe;
+    this.#revision += 1; // Share links include the filename as well as the source.
+    return true;
+  }
   snapshot() {
     return Object.freeze({ source: this.#source, baseline: this.#baseline, name: this.#name,
       newline: this.#newline, hasBom: this.#hasBom });
@@ -331,9 +343,13 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   const save = make("button", "Download source", "document-save");
   const openEditable = make("button", "Open editable file", "document-open-editable");
   const write = make("button", "Save file", "document-write");
+  const saveAs = make("button", "Save as…", "document-save-as");
   const reload = make("button", "Reload file", "document-reload");
   openEditable.hidden = typeof host.showOpenFilePicker !== "function";
-  for (const button of [open, fresh, save, openEditable, write, reload]) button.type = "button";
+  saveAs.hidden = typeof host.showSaveFilePicker !== "function";
+  write.setAttribute("aria-keyshortcuts", "Control+s Meta+s");
+  saveAs.setAttribute("aria-keyshortcuts", "Control+Shift+s Meta+Shift+s");
+  for (const button of [open, fresh, save, openEditable, write, saveAs, reload]) button.type = "button";
   const picker = make("input", "", "document-file");
   picker.type = "file";
   picker.accept = ".mmd,.mermaid,.dot,.gv,.txt";
@@ -356,6 +372,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   function fileControls() {
     write.hidden = reload.hidden = fileBinding === null;
     write.disabled = reload.disabled = disposed || saving || fileBinding === null;
+    saveAs.disabled = disposed || saving;
     openEditable.disabled = disposed;
   }
   function recoveryControls() {
@@ -547,11 +564,69 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
       if (!disposed) fileControls();
     }
   }
+  async function saveAsFile() {
+    sync();
+    if (disposed || saving) return false;
+    if (typeof host.showSaveFilePicker !== "function") return saveSource();
+    const current = fileBinding, epoch = documentEpoch;
+    const isCurrent = () => !disposed && documentEpoch === epoch && fileBinding === current;
+    saving = true;
+    fileControls();
+    status.textContent = "Choose where to save the current source…";
+    try {
+      const artifact = model.prepareExport();
+      // The picker is invoked before the first await, in the caller's click/keyboard gesture.
+      const handle = await host.showSaveFilePicker({ suggestedName: model.name,
+        types: [{ description: "Diagram source", accept: { "text/plain": [".mmd", ".mermaid", ".dot", ".gv", ".txt"] } }] });
+      if (!isCurrent()) return false;
+      // Choosing the current file under a different handle MUST retain its old disk baseline.
+      // Reopening that handle here would bless external changes and bypass conflict detection.
+      const sameFile = current && await current.isSameFile(handle);
+      if (!isCurrent()) return false;
+      const target = sameFile ? current : await SourceFileBinding.open(handle, maxBytes);
+      if (!isCurrent()) return false;
+      await target.save(artifact.text, { isCurrent });
+      if (!isCurrent()) return false;
+      fileBinding = target;
+      operation += 1; // An older pending open must not undo this explicit destination choice.
+      model.exported(artifact);
+      const renamed = model.rename(target.name);
+      sync();
+      scheduleRecovery();
+      flushRecovery();
+      status.textContent = `Saved ${target.name}.${fileDirty() ? " Newer edits are still unsaved." : ""}`;
+      // Keep selection/undo history: this is not a source replacement. Notify the host only when
+      // the name changes so name-bearing share links and export controls can refresh.
+      if (renamed) {
+        try { onChange(); }
+        catch (error) { status.textContent += ` Preview update failed: ${error.message || error}`; }
+      }
+      return true;
+    } catch (error) {
+      if (isCurrent()) status.textContent = error.name === "AbortError" ?
+        "Save cancelled; current source and file association retained." :
+        `Save failed: ${error.message || error}. Current source retained.`;
+      return false;
+    } finally {
+      saving = false;
+      if (!disposed) fileControls();
+    }
+  }
+  function saveKey(event) {
+    if (disposed || event.defaultPrevented || event.repeat || event.isComposing || event.altKey ||
+        !(event.ctrlKey || event.metaKey) || event.key?.toLowerCase() !== "s") return;
+    event.preventDefault();
+    if (event.shiftKey || !fileBinding) void saveAsFile();
+    else void saveToFile();
+  }
   const openFile = (file) => replaceDocument(() => readSourceFile(file, maxBytes));
   listen(open, "click", () => picker.click());
   listen(openEditable, "click", () => { void openEditableFile(); });
   listen(write, "click", () => { void saveToFile(); });
+  listen(saveAs, "click", () => { void saveAsFile(); });
   listen(reload, "click", () => { void reloadFile(); });
+  listen(sourceEl, "keydown", saveKey);
+  listen(panelEl, "keydown", saveKey);
   listen(picker, "change", () => {
     const files = Array.from(picker.files || []);
     picker.value = ""; // Selecting the same file again is a real operation.
@@ -602,7 +677,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   refreshRecovery(); // Recovery is opt-in: never replace fresh typing automatically.
   sync();
   return {
-    sourceChanged: sync, openFile, openEditableFile, saveToFile, reloadFile, saveSource, flushRecovery,
+    sourceChanged: sync, openFile, openEditableFile, saveToFile, saveAsFile, reloadFile, saveSource, flushRecovery,
     sourceSnapshot() {
       if (disposed) throw new Error("The document workspace is closed.");
       sync();
@@ -636,7 +711,7 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
       for (const remove of listeners) remove();
       for (const [url, timer] of downloads) { host.clearTimeout(timer); host.URL.revokeObjectURL(url); }
       downloads.clear();
-      for (const button of [open, fresh, save, openEditable, write, reload, restore, saveRecovery, retryRecovery]) button.disabled = true;
+      for (const button of [open, fresh, save, openEditable, write, saveAs, reload, restore, saveRecovery, retryRecovery]) button.disabled = true;
     },
   };
 }

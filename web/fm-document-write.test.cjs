@@ -308,6 +308,7 @@ test("disposal cancels staged writes and does not revive buttons on completion",
   const pending = f.workspace.saveToFile(); await tick(); f.workspace.dispose(); paused.resolve();
   assert.equal(await pending, false); assert.equal(h.source, "original"); assert.equal(h.aborts, 1);
   assert.equal(await f.workspace.openEditableFile(), false);
+  assert.equal(await f.workspace.openEditableFile(), false);
   assert.equal(await f.workspace.reloadFile(), false);
   assert.equal(f.byId("document-write").disabled, true);
 });
@@ -332,4 +333,183 @@ test("a later copy download cannot override the disk-backed clean-state comparis
   const unload = new Event("beforeunload", { cancelable: true });
   Object.defineProperty(unload, "returnValue", { value: "", writable: true });
   f.host.dispatchEvent(unload); assert.equal(unload.defaultPrevented, false);
+});
+
+test("renaming a source document changes share revision without resetting source, identity or baseline", async () => {
+  const { SourceDocument } = await loaded;
+  const d = new SourceDocument("\uFEFFA\r\n", "old.mmd");
+  d.edit("B\n"); const artifact = d.prepareExport(), revision = d.revision;
+  assert.equal(d.rename("new.dot"), true);
+  assert.equal(d.source, "\uFEFFB\r\n"); assert.equal(d.dirty, true);
+  assert.ok(d.revision > revision); assert.equal(d.rename("new.dot"), false);
+  assert.equal(d.exported(artifact), true); assert.equal(d.dirty, false);
+});
+test("Save As creates a file association for an unbound document and refreshes name-bearing consumers", async t => {
+  const target = new FileHandleFixture("", "saved.dot"), f = await workspaceFixture(t);
+  f.host.showSaveFilePicker = async options => { assert.equal(options.suggestedName, "diagram.mmd"); return target; };
+  f.edit("digraph { a -> b }"); const revision = f.workspace.sourceSnapshot().revision;
+  f.sourceEl.selectionStart = 2; f.sourceEl.selectionEnd = 6;
+  assert.equal(await f.workspace.saveAsFile(), true);
+  assert.equal(target.source, "digraph { a -> b }");
+  assert.equal(f.workspace.sourceSnapshot().name, "saved.dot");
+  assert.ok(f.workspace.sourceSnapshot().revision > revision);
+  assert.equal(f.resets, 0); assert.equal(f.changes, 1);
+  assert.equal(f.sourceEl.selectionStart, 2); assert.equal(f.sourceEl.selectionEnd, 6);
+  f.edit("next saved revision"); assert.equal(await f.workspace.saveToFile(), true);
+  assert.equal(target.source, "next saved revision");
+});
+test("Save As changes the active destination but leaves the old source file untouched", async t => {
+  const old = new FileHandleFixture(), target = new FileHandleFixture("", "copy.mmd");
+  old.isSameEntry = async () => false;
+  const f = await workspaceFixture(t, { handle: old }); await f.workspace.openEditableFile();
+  f.edit("copy source"); f.host.showSaveFilePicker = async () => target;
+  assert.equal(await f.workspace.saveAsFile(), true);
+  assert.equal(old.source, "original"); assert.equal(target.source, "copy source");
+  f.edit("copy revision"); assert.equal(await f.workspace.saveToFile(), true);
+  assert.equal(old.source, "original"); assert.equal(target.source, "copy revision");
+});
+test("Save As cancellation preserves the previous filename, dirty state and save destination", async t => {
+  const old = new FileHandleFixture(), f = await workspaceFixture(t, { handle: old });
+  await f.workspace.openEditableFile(); f.edit("unsaved");
+  f.host.showSaveFilePicker = async () => { throw new DOMException("cancel", "AbortError"); };
+  assert.equal(await f.workspace.saveAsFile(), false);
+  assert.equal(f.workspace.sourceSnapshot().name, "diagram.mmd"); assert.equal(old.creates, 0);
+  assert.match(f.byId("document-name").textContent, /unsaved/);
+  assert.equal(await f.workspace.saveToFile(), true); assert.equal(old.source, "unsaved");
+});
+test("a failed Save As never adopts the destination or marks the active draft clean", async t => {
+  const old = new FileHandleFixture(), target = new FileHandleFixture("retained", "copy.mmd");
+  old.isSameEntry = async () => false;
+  target.onClose = () => { throw new Error("disk full"); };
+  const f = await workspaceFixture(t, { handle: old }); await f.workspace.openEditableFile();
+  f.edit("my source"); f.host.showSaveFilePicker = async () => target;
+  assert.equal(await f.workspace.saveAsFile(), false);
+  assert.equal(f.workspace.sourceSnapshot().name, "diagram.mmd");
+  assert.equal(target.source, "retained"); assert.equal(target.aborts, 1);
+  assert.equal(await f.workspace.saveToFile(), true); assert.equal(old.source, "my source");
+});
+test("Save As cannot bypass an original-file conflict through a different handle for the same file", async t => {
+  const h = new FileHandleFixture(), alias = { kind: "file", name: h.name };
+  h.isSameEntry = async other => other === alias;
+  const f = await workspaceFixture(t, { handle: h }); await f.workspace.openEditableFile();
+  h.external("external"); f.edit("local"); f.host.showSaveFilePicker = async () => alias;
+  assert.equal(await f.workspace.saveAsFile(), false);
+  assert.equal(h.source, "external"); assert.equal(h.creates, 0);
+  assert.match(f.byId("document-message").textContent, /changed on disk/);
+});
+test("a same-handle Save As uses the original conflict baseline too", async t => {
+  const h = new FileHandleFixture(), f = await workspaceFixture(t, { handle: h });
+  await f.workspace.openEditableFile(); h.external("external"); f.edit("local");
+  f.host.showSaveFilePicker = async () => h;
+  assert.equal(await f.workspace.saveAsFile(), false); assert.equal(h.source, "external");
+});
+test("destination identity failures fail closed before creating a writer", async t => {
+  const h = new FileHandleFixture(), target = new FileHandleFixture("target", "target.mmd");
+  h.isSameEntry = async () => { throw new Error("cannot check identity"); };
+  const f = await workspaceFixture(t, { handle: h }); await f.workspace.openEditableFile();
+  f.edit("local"); f.host.showSaveFilePicker = async () => target;
+  assert.equal(await f.workspace.saveAsFile(), false);
+  assert.equal(h.creates, 0); assert.equal(target.creates, 0);
+  assert.equal(f.sourceEl.value, "local");
+});
+test("typing while Save As is choosing a destination saves the requested snapshot, not later edits", async t => {
+  const target = new FileHandleFixture("", "new.mmd"), f = await workspaceFixture(t);
+  const paused = gate(); f.host.showSaveFilePicker = () => paused.promise;
+  f.edit("snapshot"); const pending = f.workspace.saveAsFile(); f.edit("newer");
+  paused.resolve(target); assert.equal(await pending, true);
+  assert.equal(target.source, "snapshot"); assert.equal(f.sourceEl.value, "newer");
+  assert.equal(f.workspace.sourceSnapshot().name, "new.mmd");
+  assert.match(f.byId("document-name").textContent, /unsaved/);
+  assert.match(f.byId("document-message").textContent, /Newer edits/);
+});
+test("document replacement while Save As is picking cancels without touching the selected file", async t => {
+  const target = new FileHandleFixture("keep", "new.mmd"), f = await workspaceFixture(t);
+  const paused = gate(); f.host.showSaveFilePicker = () => paused.promise;
+  f.edit("old document"); const pending = f.workspace.saveAsFile();
+  await f.workspace.openFile(new File(["replacement"], "replacement.mmd"));
+  paused.resolve(target); assert.equal(await pending, false);
+  assert.equal(target.creates, 0); assert.equal(f.sourceEl.value, "replacement");
+  assert.equal(await f.workspace.saveToFile(), false);
+});
+test("document replacement after Save As stages bytes aborts the selected file's writer", async t => {
+  const target = new FileHandleFixture("keep", "new.mmd"), f = await workspaceFixture(t);
+  const paused = gate(); target.onWrite = () => paused.promise; f.host.showSaveFilePicker = async () => target;
+  f.edit("old document"); const pending = f.workspace.saveAsFile(); await tick();
+  await f.workspace.openFile(new File(["replacement"], "replacement.mmd"));
+  paused.resolve(); assert.equal(await pending, false);
+  assert.equal(target.source, "keep"); assert.equal(target.aborts, 1);
+});
+test("concurrent Save As and Save commands cannot race each other's destination", async t => {
+  const h = new FileHandleFixture(), f = await workspaceFixture(t, { handle: h });
+  await f.workspace.openEditableFile(); f.edit("snapshot");
+  const paused = gate(); let picks = 0;
+  f.host.showSaveFilePicker = () => { picks++; return paused.promise; };
+  const pending = f.workspace.saveAsFile();
+  assert.equal(await f.workspace.saveAsFile(), false);
+  assert.equal(await f.workspace.saveToFile(), false);
+  assert.equal(picks, 1); paused.resolve(h); assert.equal(await pending, true);
+});
+test("Save As falls back to source download without native file authority", async t => {
+  const f = await workspaceFixture(t); f.edit("fallback");
+  assert.equal(f.byId("document-save-as").hidden, true);
+  assert.equal(await f.workspace.saveAsFile(), true);
+  assert.equal(f.saved[0].text, "fallback"); assert.equal(await f.workspace.saveToFile(), false);
+});
+function key(target, options = {}) {
+  const event = new Event("keydown", { cancelable: true });
+  Object.assign(event, { key: "s", ctrlKey: true, ...options });
+  target.dispatchEvent(event); return event;
+}
+test("Save keyboard shortcuts choose native save, Save As or download in the focused workspace", async t => {
+  const h = new FileHandleFixture(), f = await workspaceFixture(t, { handle: h });
+  await f.workspace.openEditableFile(); f.edit("keyboard save");
+  assert.equal(key(f.sourceEl).defaultPrevented, true); await tick();
+  assert.equal(h.source, "keyboard save");
+  const target = new FileHandleFixture("", "keyboard.mmd"); h.isSameEntry = async () => false;
+  f.host.showSaveFilePicker = async () => target;
+  f.edit("keyboard copy"); key(f.sourceEl, { shiftKey: true }); await tick();
+  assert.equal(target.source, "keyboard copy"); assert.equal(h.source, "keyboard save");
+  f.edit("mac save"); key(f.panel, { ctrlKey: false, metaKey: true }); await tick();
+  assert.equal(target.source, "mac save");
+  const fallback = await workspaceFixture(t); fallback.edit("download"); key(fallback.sourceEl); await tick();
+  assert.equal(fallback.saved[0].text, "download");
+});
+test("keyboard handling respects composition, repeats, other modifiers and unrelated focus", async t => {
+  const f = await workspaceFixture(t);
+  for (const options of [{ isComposing: true }, { repeat: true }, { altKey: true }, { ctrlKey: false }, { key: "x" }]) {
+    assert.equal(key(f.sourceEl, options).defaultPrevented, false);
+  }
+  const elsewhere = new ElementFixture(f.document); assert.equal(key(elsewhere).defaultPrevented, false);
+  await tick(); assert.equal(f.saved.length, 0);
+  f.workspace.dispose(); assert.equal(key(f.sourceEl).defaultPrevented, false);
+});
+test("Save As invalidates older pending opens even when the filename and source stay unchanged", async t => {
+  const target = new FileHandleFixture("", "diagram.mmd"), f = await workspaceFixture(t);
+  const paused = gate();
+  const oldOpen = f.workspace.openFile({ name: "other.mmd", size: 5,
+    arrayBuffer: () => paused.promise });
+  f.host.showSaveFilePicker = async () => target;
+  assert.equal(await f.workspace.saveAsFile(), true);
+  paused.resolve(new TextEncoder().encode("other").buffer);
+  assert.equal(await oldOpen, false); assert.equal(f.sourceEl.value, "start");
+  assert.equal(target.source, "start"); assert.equal(f.resets, 0);
+});
+test("disposal cancels Save As and prevents late picker completion from reviving controls", async t => {
+  const target = new FileHandleFixture("", "new.mmd"), f = await workspaceFixture(t);
+  const paused = gate(); f.host.showSaveFilePicker = () => paused.promise;
+  const pending = f.workspace.saveAsFile(); f.workspace.dispose(); paused.resolve(target);
+  assert.equal(await pending, false); assert.equal(target.creates, 0);
+  assert.equal(f.byId("document-save-as").disabled, true);
+});
+test("preview callback failure cannot turn a successful Save As into a reported save failure", async t => {
+  const target = new FileHandleFixture("", "new.mmd"), f = await workspaceFixture(t);
+  f.host.showSaveFilePicker = async () => target;
+  // Replace the view update with a throwing host boundary by mounting an independent workspace.
+  const { mountDocumentWorkspace } = await loaded;
+  f.workspace.dispose();
+  f.workspace = mountDocumentWorkspace({ sourceEl: f.sourceEl, panelEl: f.panel,
+    onChange() { throw new Error("preview unavailable"); }, getStorage: () => f.host.localStorage });
+  assert.equal(await f.workspace.saveAsFile(), true); assert.equal(target.source, "start");
+  const message = f.panel.children.filter(e => e.id === "document-message").at(-1).textContent;
+  assert.match(message, /^Saved new.mmd/); assert.match(message, /Preview update failed/);
 });
