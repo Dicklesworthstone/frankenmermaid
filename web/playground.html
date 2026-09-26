@@ -19,8 +19,10 @@
   #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
   .warn { color: #fbbf24; }
   .err { color: #f87171; }
-  #document-toolbar, #editor-toolbar, #source-editor, #image-export { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
-  #document-toolbar, #image-export { flex-shrink: 0; }
+  #document-toolbar, #share-toolbar, #editor-toolbar, #source-editor, #image-export { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; }
+  #document-toolbar, #share-toolbar, #image-export { flex-shrink: 0; }
+  #share-url { display: block; width: 100%; box-sizing: border-box; }
+  #share-url[hidden] { display: none; }
   #image-export input { max-width: 12em; }
   #document-name { display: block; overflow-wrap: anywhere; }
   #source-editor { max-height: 40vh; overflow: auto; }
@@ -41,6 +43,7 @@
 <div id="right">
   <div id="status" role="status">starting…</div>
   <section id="document-toolbar" aria-label="Source files and recovery"></section>
+  <section id="share-toolbar" aria-label="Share editable diagram"></section>
   <div id="editor-toolbar">
     <button id="edit-source" type="button">Edit diagram source (SVG)</button>
     <button id="edit-deck" type="button">Present / export graph deck</button>
@@ -76,6 +79,7 @@
   let deckEditor = null;
   let imageExport = null;
   let documentWorkspace = null;
+  let shareControls = null;
   let sourceEditorFactory = null;
 
   function mountSourceEditorInstance() {
@@ -173,6 +177,7 @@
     if (disposed) return;
     // Source edits and undo/redo can change the textarea without dispatching an input event.
     documentWorkspace?.sourceChanged();
+    shareControls?.sourceChanged();
     imageExport?.sourceChanged();
     deckEditor?.sourceChanged();
     const previousId = liveRequestId;
@@ -316,6 +321,7 @@
     sourceEditor?.dispose();
     deckEditor?.dispose();
     imageExport?.dispose();
+    shareControls?.dispose();
     documentWorkspace?.dispose();
     clearTimeout(initTimer);
     if (worker) worker.terminate();
@@ -336,6 +342,12 @@
         deckEditor?.sourceChanged();
       },
     });
+    // Opening links uses the same guarded document replacement as file import/recovery.
+    // Sharing never depends on a successful WASM initialization or a current SVG preview.
+    import("./fm-share.js").then(({ mountShareControls }) => {
+      if (disposed) return;
+      shareControls = mountShareControls({ workspace: documentWorkspace, panelEl: document.getElementById("share-toolbar") });
+    }).catch((error) => { if (!disposed) log(`sharing unavailable: ${error.message || error}`, "err"); });
   }).catch((error) => { if (!disposed) log(`file controls unavailable: ${error.message || error}`, "err"); });
   // Export owns a separate SVG worker: a canvas preview cannot supply a full vector document.
   // Loading controls does not initialize another WASM instance until the first export request.

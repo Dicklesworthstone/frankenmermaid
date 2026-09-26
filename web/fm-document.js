@@ -358,24 +358,24 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
     try { onChange(); } catch (error) { problems.push(String(error.message || error)); }
     return problems.length ? ` Preview update failed: ${problems.join("; ")}` : "";
   }
-  async function replaceDocument(read) {
+  async function replaceDocument(read, isCurrent = () => true) {
     sync();
     if (disposed) return false;
     const request = ++operation, revision = model.revision;
-    const live = () => !disposed && request === operation && revision === model.revision;
+    const live = () => !disposed && request === operation && revision === model.revision && isCurrent();
     status.textContent = "Reading source…";
     try {
       const incoming = await read();
       sync(); // Catch programmatic source edits as well as input events.
       if (!live()) {
-        if (!disposed && request === operation) status.textContent = "Open cancelled: source changed while reading. Open the file again to replace it.";
+        if (!disposed && request === operation) status.textContent = isCurrent() ? "Open cancelled: source changed while reading. Open the file again to replace it." : "Open cancelled: the shared link is no longer current.";
         return false;
       }
       if (model.dirty) {
         const approved = await confirm(`Replace unexported changes in ${model.name} with ${incoming.name}? Download your current source first to keep a file copy.`);
         sync();
         if (!live()) {
-          if (!disposed && request === operation) status.textContent = "Open cancelled: source changed while confirming.";
+          if (!disposed && request === operation) status.textContent = isCurrent() ? "Open cancelled: source changed while confirming." : "Open cancelled: the shared link is no longer current.";
           return false;
         }
         if (!approved) { status.textContent = "Open cancelled; current source retained."; return false; }
@@ -461,6 +461,23 @@ export function mountDocumentWorkspace({ sourceEl, panelEl, onChange, onDocument
   sync();
   return {
     sourceChanged: sync, openFile, saveSource, flushRecovery,
+    sourceSnapshot() {
+      if (disposed) throw new Error("The document workspace is closed.");
+      sync();
+      // Sharing must retain BOM/line endings, but must not disclose the previous baseline.
+      return Object.freeze({ source: model.source, name: model.name, revision: model.revision });
+    },
+    openSharedSource(read, { isCurrent = () => true } = {}) {
+      return replaceDocument(async () => {
+        const incoming = await read();
+        unicodeText(incoming?.source);
+        if (typeof incoming.name !== "string" || incoming.source.includes("\0")) throw new Error("Invalid shared source document.");
+        if (incoming.source.length > maxBytes || new TextEncoder().encode(incoming.source).byteLength > maxBytes) {
+          throw new Error("Shared source exceeds the document size limit.");
+        }
+        return { source: incoming.source, name: fileName(incoming.name) };
+      }, isCurrent);
+    },
     saveArtifact(artifact) {
       if (disposed) throw new Error("The document workspace is closed.");
       if (artifact.mime?.startsWith("text/plain")) return saveSource();
