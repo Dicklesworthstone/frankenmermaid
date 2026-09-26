@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fm_core::{DiagramType, GraphDirection, MermaidDiagramIr};
+use fm_core::{DiagramType, GraphDirection, IrEndpoint, IrNodeId, IrStyleTarget, MermaidDiagramIr};
 
 use crate::{
     DiagramLayout, LayoutConfig, LayoutPoint, LayoutRect, layout_diagram_traced_with_config,
@@ -71,6 +71,8 @@ pub enum LayoutLensError {
     },
     RankAxisMoved(String),
     NonFinitePosition(String),
+    InvalidNodeReference(usize),
+    InvalidPortReference(usize),
 }
 
 impl std::fmt::Display for LayoutLensError {
@@ -112,6 +114,14 @@ impl std::fmt::Display for LayoutLensError {
             Self::NonFinitePosition(node_id) => {
                 write!(formatter, "node '{node_id}' has a non-finite layout position")
             }
+            Self::InvalidNodeReference(index) => write!(
+                formatter,
+                "LayoutLens cannot reorder an IR with an invalid node reference {index}"
+            ),
+            Self::InvalidPortReference(index) => write!(
+                formatter,
+                "LayoutLens cannot reorder an IR with an invalid port reference {index}"
+            ),
         }
     }
 }
@@ -248,8 +258,12 @@ impl LayoutLens {
 
     /// Convert a safe within-rank drag to an IR declaration-order update.
     ///
-    /// The returned IR preserves nodes from other ranks at their existing declaration slots. Edge
-    /// endpoints are IDs, so reordering these nodes cannot reconnect an edge or alter a label.
+    /// Only ranks whose visual order changed are written back. Other ranks retain their exact
+    /// declaration order, which need not match the layout algorithm's chosen visual order.
+    ///
+    /// `IrNodeId` is a vector index, not an authored ID. Every flowchart node reference, including
+    /// the graph mirror, ports, memberships and style targets, is remapped with the permutation so
+    /// a drag cannot reconnect an edge or move another node's metadata onto the dragged node.
     pub fn put(&self, edited: &LayoutLensSnapshot) -> Result<MermaidDiagramIr, LayoutLensError> {
         if edited.nodes.len() != self.snapshot.nodes.len() {
             return Err(LayoutLensError::NodeSetChanged);
@@ -293,57 +307,54 @@ impl LayoutLens {
             return Err(LayoutLensError::NodeSetChanged);
         }
 
-        let original_nodes_by_id: BTreeMap<&str, _> = self
+        let source_indices: BTreeMap<&str, usize> = self
             .original
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node))
+            .enumerate()
+            .map(|(index, node)| (node.id.as_str(), index))
             .collect();
-        if original_nodes_by_id.len() != self.original.nodes.len() {
-            return Err(LayoutLensError::NodeSetChanged);
-        }
-
-        let mut reordered = self.original.clone();
+        let mut new_to_old: Vec<usize> = (0..self.original.nodes.len()).collect();
+        let compare = |left: &&LayoutLensNode, right: &&LayoutLensNode| {
+            rank_secondary(self.complement.rank_axis, left.center)
+                .total_cmp(&rank_secondary(self.complement.rank_axis, right.center))
+                // Ties retain the captured order, not lexicographic ID order or caller Vec order.
+                .then_with(|| {
+                    original_by_id[left.node_id.as_str()]
+                        .order
+                        .cmp(&original_by_id[right.node_id.as_str()].order)
+                })
+        };
         for (rank, mut nodes) in edited_by_rank {
-            nodes.sort_unstable_by(|left, right| {
-                rank_secondary(self.complement.rank_axis, left.center)
-                    .total_cmp(&rank_secondary(self.complement.rank_axis, right.center))
-                    .then_with(|| left.node_id.cmp(&right.node_id))
-            });
-            let original_slots: Vec<usize> = self
+            nodes.sort_unstable_by(compare);
+            let mut original_nodes: Vec<_> = self
                 .snapshot
                 .nodes
                 .iter()
                 .filter(|node| node.rank == rank)
-                .map(|node| node.order)
                 .collect();
-            if original_slots.len() != nodes.len() {
-                return Err(LayoutLensError::NodeSetChanged);
-            }
-            let mut declaration_slots: Vec<usize> = original_slots
+            original_nodes.sort_unstable_by(compare);
+            if nodes
                 .iter()
-                .map(|order| {
-                    self.snapshot
-                        .nodes
-                        .iter()
-                        .find(|node| node.rank == rank && node.order == *order)
-                        .and_then(|node| {
-                            self.original
-                                .nodes
-                                .iter()
-                                .position(|original| original.id == node.node_id)
-                        })
-                        .ok_or(LayoutLensError::NodeSetChanged)
-                })
-                .collect::<Result<_, _>>()?;
-            declaration_slots.sort_unstable();
-            for (slot, node) in declaration_slots.into_iter().zip(nodes) {
-                let original = original_nodes_by_id
-                    .get(node.node_id.as_str())
-                    .ok_or(LayoutLensError::NodeSetChanged)?;
-                reordered.nodes[slot] = (*original).clone();
+                .map(|node| &node.node_id)
+                .eq(original_nodes.iter().map(|node| &node.node_id))
+            {
+                continue;
+            }
+
+            let mut slots: Vec<_> = nodes
+                .iter()
+                .map(|node| source_indices[node.node_id.as_str()])
+                .collect();
+            slots.sort_unstable();
+            for (slot, node) in slots.into_iter().zip(nodes) {
+                new_to_old[slot] = source_indices[node.node_id.as_str()];
             }
         }
+
+        // A permutation is the single source of truth for both node storage and all its users.
+        // Copying only `ir.nodes` leaves numerically valid but semantically wrong references.
+        let reordered = permute_flowchart_nodes(&self.original, &new_to_old)?;
 
         tracing::info!(
             node_count = reordered.nodes.len(),
@@ -351,6 +362,108 @@ impl LayoutLens {
         );
         Ok(reordered)
     }
+}
+
+/// Apply a declaration-order permutation without changing any flowchart relationship.
+fn permute_flowchart_nodes(
+    original: &MermaidDiagramIr,
+    new_to_old: &[usize],
+) -> Result<MermaidDiagramIr, LayoutLensError> {
+    let count = original.nodes.len();
+    if new_to_old.len() != count {
+        return Err(LayoutLensError::NodeSetChanged);
+    }
+    let mut old_to_new = vec![usize::MAX; count];
+    for (new, &old) in new_to_old.iter().enumerate() {
+        let slot = old_to_new
+            .get_mut(old)
+            .ok_or(LayoutLensError::InvalidNodeReference(old))?;
+        if *slot != usize::MAX {
+            return Err(LayoutLensError::NodeSetChanged);
+        }
+        *slot = new;
+    }
+    if new_to_old.iter().copied().eq(0..count) {
+        return Ok(original.clone());
+    }
+
+    let remap_node = |node: &mut IrNodeId| -> Result<(), LayoutLensError> {
+        node.0 = *old_to_new
+            .get(node.0)
+            .ok_or(LayoutLensError::InvalidNodeReference(node.0))?;
+        Ok(())
+    };
+    let remap_endpoint = |endpoint: &mut IrEndpoint| -> Result<(), LayoutLensError> {
+        match endpoint {
+            IrEndpoint::Node(node) => remap_node(node),
+            IrEndpoint::Port(port) if port.0 >= original.ports.len() => {
+                Err(LayoutLensError::InvalidPortReference(port.0))
+            }
+            // Port storage is not permuted; its owner is remapped below.
+            IrEndpoint::Port(_) | IrEndpoint::Unresolved => Ok(()),
+        }
+    };
+    let mut reordered = original.clone();
+    reordered.nodes = new_to_old
+        .iter()
+        .map(|&old| original.nodes[old].clone())
+        .collect();
+    for edge in &mut reordered.edges {
+        remap_endpoint(&mut edge.from)?;
+        remap_endpoint(&mut edge.to)?;
+    }
+    for port in &mut reordered.ports {
+        remap_node(&mut port.node)?;
+    }
+    for cluster in &mut reordered.clusters {
+        for member in &mut cluster.members {
+            remap_node(member)?;
+        }
+    }
+    for style in &mut reordered.style_refs {
+        if let IrStyleTarget::Node(node) = &mut style.target {
+            remap_node(node)?;
+        }
+    }
+
+    // MermaidGraphIr::node(id) indexes its Vec too. Remapping node_id fields without moving the
+    // corresponding records would leave graph.node(id) returning some other node's memberships.
+    if !original.graph.nodes.is_empty() {
+        if original.graph.nodes.len() != count
+            || original
+                .graph
+                .nodes
+                .iter()
+                .enumerate()
+                .any(|(index, node)| node.node_id.0 != index)
+        {
+            return Err(LayoutLensError::NodeSetChanged);
+        }
+        reordered.graph.nodes = new_to_old
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| {
+                let mut node = original.graph.nodes[old].clone();
+                node.node_id = IrNodeId(new);
+                node
+            })
+            .collect();
+    }
+    for edge in &mut reordered.graph.edges {
+        remap_endpoint(&mut edge.from)?;
+        remap_endpoint(&mut edge.to)?;
+    }
+    for cluster in &mut reordered.graph.clusters {
+        for member in &mut cluster.members {
+            remap_node(member)?;
+        }
+    }
+    for subgraph in &mut reordered.graph.subgraphs {
+        for member in &mut subgraph.members {
+            remap_node(member)?;
+        }
+    }
+    Ok(reordered)
 }
 
 fn rank_axis(direction: GraphDirection) -> LayoutLensAxis {
@@ -431,10 +544,7 @@ mod tests {
             .map(|slot| updated.nodes[*slot].id.clone())
             .collect();
         assert_eq!(actual_order, desired_order);
-        assert_eq!(
-            updated.edges, source.edges,
-            "dragging cannot reconnect an edge"
-        );
+        assert_edge_meaning_unchanged(&source, &updated);
     }
 
     #[test]
@@ -485,5 +595,239 @@ mod tests {
                 ..
             }) if rejected == node_id
         ));
+    }
+
+    fn endpoint_id(ir: &fm_core::MermaidDiagramIr, endpoint: fm_core::IrEndpoint) -> String {
+        let index = ir.resolve_endpoint_node(endpoint).expect("resolved endpoint");
+        ir.nodes[index.0].id.clone()
+    }
+
+    fn assert_edge_meaning_unchanged(
+        before: &fm_core::MermaidDiagramIr,
+        after: &fm_core::MermaidDiagramIr,
+    ) {
+        assert_eq!(before.edges.len(), after.edges.len());
+        for (old, new) in before.edges.iter().zip(&after.edges) {
+            assert_eq!(endpoint_id(before, old.from), endpoint_id(after, new.from));
+            assert_eq!(endpoint_id(before, old.to), endpoint_id(after, new.to));
+            let mut payload = new.clone();
+            payload.from = old.from;
+            payload.to = old.to;
+            assert_eq!(&payload, old, "edge labels, arrows and styles must not change");
+        }
+        assert_eq!(before.graph.edges.len(), after.graph.edges.len());
+        for (old, new) in before.graph.edges.iter().zip(&after.graph.edges) {
+            assert_eq!(endpoint_id(before, old.from), endpoint_id(after, new.from));
+            assert_eq!(endpoint_id(before, old.to), endpoint_id(after, new.to));
+        }
+    }
+
+    #[test]
+    fn drag_preserves_labeled_edges_ports_memberships_and_style_targets() {
+        use fm_core::{IrEndpoint, IrNodeId, IrPort, IrPortId, IrStyleTarget};
+
+        let mut source = fm_parser::parse(
+            "flowchart TB\nA[Root]\nsubgraph left\nB[Accept]\nend\n\
+             subgraph right\nC[Reject]\nend\nA -->|yes| B\nA -->|no| C\n\
+             style B fill:#ff0000\nlinkStyle 0 stroke:#0000ff\n",
+        )
+        .ir;
+        assert_eq!(source.nodes.len(), 3);
+        let b = source.nodes.iter().position(|node| node.id == "B").unwrap();
+        let c = source.nodes.iter().position(|node| node.id == "C").unwrap();
+        assert!(source.style_refs.iter().any(|style| {
+            matches!(style.target, IrStyleTarget::Node(node) if node.0 == b)
+        }));
+        assert!(!source.clusters.is_empty());
+        assert!(!source.graph.subgraphs.is_empty());
+        source.ports.push(IrPort {
+            node: IrNodeId(b),
+            name: "input".to_string(),
+            ..Default::default()
+        });
+        source.edges[0].to = IrEndpoint::Port(IrPortId(0));
+        source.graph.edges[0].to = IrEndpoint::Port(IrPortId(0));
+
+        let mut permutation: Vec<_> = (0..source.nodes.len()).collect();
+        permutation.swap(b, c);
+        let updated = super::permute_flowchart_nodes(&source, &permutation).unwrap();
+        assert_eq!(updated.nodes[b].id, "C");
+        assert_eq!(updated.nodes[c].id, "B");
+        assert_edge_meaning_unchanged(&source, &updated);
+        assert_eq!(updated.ports[0].node, IrNodeId(c));
+        assert_eq!(updated.edges[0].to, IrEndpoint::Port(IrPortId(0)));
+
+        let member_ids = |ir: &fm_core::MermaidDiagramIr, members: &[IrNodeId]| {
+            members
+                .iter()
+                .map(|id| ir.nodes[id.0].id.clone())
+                .collect::<Vec<_>>()
+        };
+        for (old, new) in source.clusters.iter().zip(&updated.clusters) {
+            assert_eq!(
+                member_ids(&source, &old.members),
+                member_ids(&updated, &new.members)
+            );
+        }
+        for (old, new) in source.graph.clusters.iter().zip(&updated.graph.clusters) {
+            assert_eq!(
+                member_ids(&source, &old.members),
+                member_ids(&updated, &new.members)
+            );
+        }
+        for (old, new) in source.graph.subgraphs.iter().zip(&updated.graph.subgraphs) {
+            assert_eq!(
+                member_ids(&source, &old.members),
+                member_ids(&updated, &new.members)
+            );
+        }
+        for (new, &old) in permutation.iter().enumerate() {
+            let mirror = updated.graph.node(IrNodeId(new)).unwrap();
+            assert_eq!(mirror.node_id, IrNodeId(new));
+            assert_eq!(mirror.clusters, source.graph.nodes[old].clusters);
+            assert_eq!(mirror.subgraphs, source.graph.nodes[old].subgraphs);
+        }
+        for (old, new) in source.style_refs.iter().zip(&updated.style_refs) {
+            match (&old.target, &new.target) {
+                (IrStyleTarget::Node(a), IrStyleTarget::Node(b)) => {
+                    assert_eq!(source.nodes[a.0].id, updated.nodes[b.0].id);
+                }
+                (a, b) => assert_eq!(a, b),
+            }
+            assert_eq!(old.style, new.style);
+        }
+        assert_eq!(updated.labels, source.labels);
+        assert_eq!(updated.constraints, source.constraints);
+        assert_eq!(updated.meta, source.meta);
+    }
+
+    #[test]
+    fn unchanged_visual_order_does_not_rewrite_declaration_order() {
+        let source = flowchart();
+        let mut layout = crate::layout_diagram(&source);
+        // Deliberately make the visual order disagree with declaration order. Layout algorithms
+        // are allowed to do this, and a GetPut must not commit their choice as a user edit.
+        for node in &mut layout.nodes {
+            node.rank = 0;
+            node.order = source.nodes.len() - 1 - node.node_index;
+            node.bounds.x = node.order as f32 * 100.0;
+            node.bounds.y = 0.0;
+        }
+        let lens = LayoutLens::from_layout(&source, &layout).unwrap();
+        assert_eq!(lens.put(lens.get()).unwrap(), source);
+
+        let mut edited = lens.get().clone();
+        edited.nodes.reverse();
+        for node in &mut edited.nodes {
+            node.center.x += 1.0; // A small drag, but no node crossed another.
+        }
+        assert_eq!(lens.put(&edited).unwrap(), source);
+    }
+
+    #[test]
+    fn editing_one_rank_does_not_normalize_untouched_ranks() {
+        let source = fm_parser::parse("flowchart TB\nA --> C\nB --> D\n").ir;
+        let mut layout = crate::layout_diagram(&source);
+        for node in &mut layout.nodes {
+            let (rank, order) = match node.node_id.as_str() {
+                "A" => (0, 1),
+                "B" => (0, 0),
+                "C" => (1, 0),
+                "D" => (1, 1),
+                _ => unreachable!(),
+            };
+            node.rank = rank;
+            node.order = order;
+            node.bounds = crate::LayoutRect {
+                x: order as f32 * 100.0,
+                y: rank as f32 * 100.0,
+                width: 10.0,
+                height: 10.0,
+            };
+        }
+        let lens = LayoutLens::from_layout(&source, &layout).unwrap();
+        let mut edited = lens.get().clone();
+        let d_x = edited
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "D")
+            .unwrap()
+            .center
+            .x;
+        edited
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == "C")
+            .unwrap()
+            .center
+            .x = d_x + 10.0;
+        let updated = lens.put(&edited).unwrap();
+        for (slot, node) in source.nodes.iter().enumerate() {
+            if matches!(node.id.as_str(), "A" | "B") {
+                assert_eq!(updated.nodes[slot], *node, "untouched rank changed");
+            }
+        }
+        let actual: Vec<_> = updated
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.id.as_str(), "C" | "D"))
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(actual, ["D", "C"]);
+        assert_edge_meaning_unchanged(&source, &updated);
+    }
+
+    #[test]
+    fn tied_positions_keep_captured_order_instead_of_sorting_by_id() {
+        let source = fm_parser::parse("flowchart LR\nZ --> A\n").ir;
+        let mut layout = crate::layout_diagram(&source);
+        for node in &mut layout.nodes {
+            node.rank = 0;
+            node.order = node.node_index;
+            node.bounds = crate::LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            };
+        }
+        let lens = LayoutLens::from_layout(&source, &layout).unwrap();
+        let mut edited = lens.get().clone();
+        edited.nodes.reverse();
+        assert_eq!(lens.put(&edited).unwrap(), source);
+    }
+
+    #[test]
+    fn corrupt_node_references_fail_without_mutating_the_original() {
+        let mut source = flowchart();
+        source.edges[0].to = fm_core::IrEndpoint::Node(fm_core::IrNodeId(usize::MAX));
+        let original = source.clone();
+        let mut permutation: Vec<_> = (0..source.nodes.len()).collect();
+        permutation.swap(1, 2);
+        assert!(matches!(
+            super::permute_flowchart_nodes(&source, &permutation),
+            Err(LayoutLensError::InvalidNodeReference(usize::MAX))
+        ));
+        assert_eq!(source, original);
+        source.edges[0].to = fm_core::IrEndpoint::Port(fm_core::IrPortId(usize::MAX));
+        assert!(matches!(
+            super::permute_flowchart_nodes(&source, &permutation),
+            Err(LayoutLensError::InvalidPortReference(usize::MAX))
+        ));
+    }
+
+    #[test]
+    fn permutation_followed_by_its_inverse_preserves_the_entire_ir() {
+        let source = flowchart();
+        for permutation in [[0, 2, 1], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let mut inverse = [0; 3];
+            for (new, old) in permutation.into_iter().enumerate() {
+                inverse[old] = new;
+            }
+            let updated = super::permute_flowchart_nodes(&source, &permutation).unwrap();
+            assert_edge_meaning_unchanged(&source, &updated);
+            let restored = super::permute_flowchart_nodes(&updated, &inverse).unwrap();
+            assert_eq!(restored, source);
+        }
     }
 }
