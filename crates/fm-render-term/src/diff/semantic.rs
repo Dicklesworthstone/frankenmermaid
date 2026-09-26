@@ -15,7 +15,7 @@ pub struct DiagramChange {
     pub after: String,
 }
 
-fn record<T: PartialEq + Debug>(
+pub(super) fn record<T: PartialEq + Debug>(
     changes: &mut Vec<DiagramChange>,
     field: &str,
     old: &T,
@@ -42,24 +42,6 @@ fn remap_node(ir: &MermaidDiagramIr, names: &BTreeMap<&str, usize>, id: &mut IrN
         .unwrap_or_else(|| names.len().saturating_add(id.0));
 }
 
-fn ordered_messages(ir: &MermaidDiagramIr) -> Vec<String> {
-    ir.edges
-        .iter()
-        .map(|edge| {
-            let endpoint = |value| {
-                ir.resolve_endpoint_node(value)
-                    .and_then(|id| ir.node(id))
-                    .map(|node| node.id.as_str())
-            };
-            let label = edge.label.and_then(|id| ir.labels.get(id.0));
-            format!(
-                "{:?}",
-                (endpoint(edge.from), endpoint(edge.to), edge.arrow, label.map(|l| &l.text))
-            )
-        })
-        .collect()
-}
-
 pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> Vec<DiagramChange> {
     let mut changes = Vec::new();
     macro_rules! field {
@@ -81,6 +63,7 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
     field!("theme", meta.theme_overrides);
     field!("c4.legend", meta.c4_show_legend);
     field!("pie", pie_meta);
+    field!("quadrant", quadrant_meta);
 
     let names: BTreeMap<&str, usize> = old
         .nodes
@@ -125,8 +108,8 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
             &participants(old),
             &participants(new),
         );
-        let old_order = ordered_messages(old);
-        let new_order = ordered_messages(new);
+        let old_order = super::elements::ordered_messages(old);
+        let new_order = super::elements::ordered_messages(new);
         if old_order != new_order {
             // Ordinary edge edits already have structural records. A pure reorder is
             // otherwise invisible because graph edges are compared as a multiset.
@@ -184,5 +167,40 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
         })
     };
     record(&mut changes, "radar", &radar(old), &radar(new));
+    let packet = |ir: &MermaidDiagramIr| {
+        ir.packet_meta.clone().map(|mut meta| {
+            for field in &mut meta.fields {
+                remap_node(ir, &names, &mut field.node);
+            }
+            meta
+        })
+    };
+    record(&mut changes, "packet", &packet(old), &packet(new));
+
+    let notes = |ir: &MermaidDiagramIr| {
+        let mut notes = ir.state_notes.clone();
+        for note in &mut notes {
+            note.span = Span::default();
+        }
+        notes
+    };
+    record(&mut changes, "state_notes", &notes(old), &notes(new));
+
+    let gitgraph = |ir: &MermaidDiagramIr| {
+        ir.git_graph_meta.clone().map(|mut meta| {
+            meta.commit_lanes = meta.commit_lanes.into_iter().filter_map(|(index, lane)| {
+                // Missing entries already mean lane zero, so an explicit zero is not an edit.
+                if lane == 0 {
+                    return None;
+                }
+                let mut node = IrNodeId(index);
+                remap_node(ir, &names, &mut node);
+                Some((node.0, lane))
+            }).collect();
+            meta
+        })
+    };
+    record(&mut changes, "gitgraph", &gitgraph(old), &gitgraph(new));
+    changes.extend(super::structure::diff_structure(old, new));
     changes
 }

@@ -6,11 +6,14 @@
 //! [`structural`] remains available for callers explicitly requesting graph-only
 //! comparison; its implementation and existing regression tests are unchanged.
 
-pub mod structural;
+mod elements;
 mod semantic;
+pub mod structural;
+mod structure;
 
+pub use elements::{DiffEdge, EdgeChange};
 pub use semantic::DiagramChange;
-pub use structural::{DiffEdge, DiffNode, DiffStatus, EdgeChange, NodeChange, colors};
+pub use structural::{DiffNode, DiffStatus, NodeChange, colors};
 
 use crate::TermRenderConfig;
 use fm_core::MermaidDiagramIr;
@@ -35,6 +38,10 @@ pub struct DiagramDiff {
     /// Omitted from serialization when empty to preserve existing graph-only reports.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagram_changes: Vec<DiagramChange>,
+    /// Before/after details for changed node and edge metadata. These explain
+    /// changes already included in node/edge counts; they are not counted twice.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub element_changes: Vec<DiagramChange>,
 }
 
 impl DiagramDiff {
@@ -59,7 +66,11 @@ impl DiagramDiff {
     fn structural_snapshot(&self, details: bool) -> structural::DiagramDiff {
         structural::DiagramDiff {
             nodes: if details { self.nodes.clone() } else { Vec::new() },
-            edges: if details { self.edges.clone() } else { Vec::new() },
+            edges: if details {
+                self.edges.iter().map(structural_edge).collect()
+            } else {
+                Vec::new()
+            },
             added_nodes: self.added_nodes,
             removed_nodes: self.removed_nodes,
             changed_nodes: self.changed_nodes,
@@ -72,34 +83,51 @@ impl DiagramDiff {
     }
 }
 
-/// Compare graph structure and the semantic data consumed by specialized renderers.
+fn structural_edge(edge: &DiffEdge) -> structural::DiffEdge {
+    structural::DiffEdge {
+        from_id: edge.from_id.clone(),
+        to_id: edge.to_id.clone(),
+        status: edge.status,
+        arrow: edge.arrow,
+        changes: edge.changes.iter().filter_map(|change| match change {
+            EdgeChange::ArrowChanged { old, new } => Some(structural::EdgeChange::ArrowChanged {
+                old: *old, new: *new,
+            }),
+            EdgeChange::LabelChanged { old, new } => Some(structural::EdgeChange::LabelChanged {
+                old: old.clone(), new: new.clone(),
+            }),
+            EdgeChange::ErNotationChanged { old, new } => Some(structural::EdgeChange::ErNotationChanged {
+                old: old.clone(), new: new.clone(),
+            }),
+            // The detailed before/after explanation is appended under Element Details.
+            EdgeChange::MetadataChanged => None,
+        }).collect(),
+    }
+}
+
+/// Compare graph structure and semantic data, preserving ports and parallel edges.
 #[must_use]
 pub fn diff_diagrams(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> DiagramDiff {
     let structural::DiagramDiff {
-        nodes,
-        edges,
-        added_nodes,
-        removed_nodes,
-        changed_nodes,
-        unchanged_nodes,
-        added_edges,
-        removed_edges,
-        changed_edges,
-        unchanged_edges,
+        nodes, added_nodes, removed_nodes, changed_nodes, unchanged_nodes, ..
     } = structural::diff_diagrams(old, new);
-    DiagramDiff {
+    let edges = elements::diff_edges(old, new);
+    let mut diff = DiagramDiff {
         nodes,
-        edges,
+        edges: edges.edges,
         added_nodes,
         removed_nodes,
         changed_nodes,
         unchanged_nodes,
-        added_edges,
-        removed_edges,
-        changed_edges,
-        unchanged_edges,
+        added_edges: edges.counts.0,
+        removed_edges: edges.counts.1,
+        changed_edges: edges.counts.2,
+        unchanged_edges: edges.counts.3,
         diagram_changes: semantic::diff_metadata(old, new),
-    }
+        element_changes: edges.details,
+    };
+    elements::augment_nodes(old, new, &mut diff);
+    diff
 }
 
 /// Render node, edge, and document-field counts.
@@ -119,23 +147,28 @@ pub fn render_diff_summary(diff: &DiagramDiff, use_colors: bool) -> String {
     output
 }
 
-fn append_diagram_details(output: &mut String, diff: &DiagramDiff, use_colors: bool) {
-    if diff.diagram_changes.is_empty() {
-        return;
-    }
-    output.push_str("\nDiagram Details:\n");
-    for change in &diff.diagram_changes {
-        if use_colors {
-            output.push_str(colors::CHANGED);
+fn append_details(output: &mut String, diff: &DiagramDiff, use_colors: bool) {
+    for (heading, changes) in [
+        ("Diagram Details", &diff.diagram_changes),
+        ("Element Details", &diff.element_changes),
+    ] {
+        if changes.is_empty() {
+            continue;
         }
-        let _ = writeln!(output, "  ~ {}", change.field.escape_debug());
-        if use_colors {
-            output.push_str(colors::RESET);
+        let _ = writeln!(output, "\n{heading}:");
+        for change in changes {
+            if use_colors {
+                output.push_str(colors::CHANGED);
+            }
+            let _ = writeln!(output, "  ~ {}", change.field.escape_debug());
+            if use_colors {
+                output.push_str(colors::RESET);
+            }
+            // Values are Debug-escaped when collected. User metadata cannot inject
+            // terminal controls or impersonate report sections through this channel.
+            let _ = writeln!(output, "    before: {}", change.before);
+            let _ = writeln!(output, "    after:  {}", change.after);
         }
-        // Values are Debug-escaped when collected. User labels cannot inject terminal
-        // control sequences or impersonate a new report section through this channel.
-        let _ = writeln!(output, "    before: {}", change.before);
-        let _ = writeln!(output, "    after:  {}", change.after);
     }
 }
 
@@ -149,7 +182,7 @@ pub fn render_diff_plain(diff: &DiagramDiff) -> String {
         &render_diff_summary(diff, false),
         1,
     );
-    append_diagram_details(&mut output, diff, false);
+    append_details(&mut output, diff, false);
     output
 }
 
@@ -176,11 +209,15 @@ pub fn render_diff_terminal_with_config(
     use_colors: bool,
 ) -> String {
     let diff = diff_diagrams(old, new);
-    let old_summary = structural::render_diff_summary(&diff.structural_snapshot(false), use_colors);
+    // The old renderer computes graph-only counts internally. Match THAT summary,
+    // not the augmented counts: metadata-only edits can promote nodes/edges to Changed.
+    let old_summary = structural::render_diff_summary(
+        &structural::diff_diagrams(old, new), use_colors,
+    );
     let mut output = structural::render_diff_terminal_with_config(
         old, new, config, cols, rows, use_colors,
     )
     .replacen(&old_summary, &render_diff_summary(&diff, use_colors), 1);
-    append_diagram_details(&mut output, &diff, use_colors);
+    append_details(&mut output, &diff, use_colors);
     output
 }
