@@ -25,17 +25,11 @@ pub fn draw_shape<C: Canvas2dContext>(
     ctx.set_line_width(stroke_width);
 
     match shape {
-        // bd-7ls21. Canvas draws the OUTER BOX for both rectangle variants: the notch and the rule
-        // are interior detail this surface has no primitive for, and a box is what the shape reduces
-        // to without them. Unlike the ER crow's feet (bd-hh0o7), a plain box here is not a FALSE
-        // statement — it is the same family of shape, just undecorated. The small circle does draw
-        // correctly, since a circle is a primitive canvas has.
-        NodeShape::NotchedRect | NodeShape::LinedRect | NodeShape::DividedRect => {
-            draw_rect(ctx, x, y, width, height, 0.0)
-        }
-        // bd-7ls21's last batch. Unlike the notched and lined rectangles above, these are NOT
-        // reduced to a box: canvas has every primitive each one needs, so drawing the box instead
-        // would be a choice to ship the wrong shape rather than a limit of the surface.
+        // These are distinct Mermaid shapes, not optional decoration. Keep their geometry aligned
+        // with fm-render-svg instead of silently reducing them to their rectangular bounds.
+        NodeShape::NotchedRect => draw_notched_rect(ctx, x, y, width, height),
+        NodeShape::LinedRect => draw_lined_rect(ctx, x, y, width, height),
+        NodeShape::DividedRect => draw_divided_rect(ctx, x, y, width, height),
         NodeShape::WindowPane => draw_window_pane(ctx, x, y, width, height),
         NodeShape::DataStore => draw_data_store(ctx, x, y, width, height),
         // ⚠️ A TEXT BLOCK PAINTS NOTHING, and the empty arm is the implementation. Falling through
@@ -48,23 +42,16 @@ pub fn draw_shape<C: Canvas2dContext>(
             draw_brace(ctx, x, y, width, height, true);
             draw_brace(ctx, x, y, width, height, false);
         }
-        NodeShape::SmallCircle | NodeShape::FramedCircle => draw_circle(ctx, x, y, width, height),
-        // The pentagon reduces to its box; the flipped triangle is drawn properly, since canvas has
-        // the primitives for it and an UPSIDE-DOWN triangle would be a different shape, not a
-        // simplified one.
-        NodeShape::NotchedPentagon => draw_rect(ctx, x, y, width, height, 0.0),
+        NodeShape::SmallCircle => draw_small_circle(ctx, x, y, width, height, false),
+        NodeShape::FramedCircle => draw_small_circle(ctx, x, y, width, height, true),
+        NodeShape::NotchedPentagon => draw_notched_pentagon(ctx, x, y, width, height),
         NodeShape::FlippedTriangle => draw_flipped_triangle(ctx, x, y, width, height),
-        // The sloped top is drawable with the primitives canvas has; the horizontal cylinder
-        // reduces to its box, as the notched shapes do.
         NodeShape::SlopedRect => draw_sloped_rect(ctx, x, y, width, height),
-        NodeShape::HorizontalCylinder => draw_rect(ctx, x, y, width, height, 0.0),
-        // The tag fold is a plain triangle canvas can draw; the lined cylinder falls back to the
-        // plain cylinder, its extra rim being interior detail.
+        NodeShape::HorizontalCylinder => draw_horizontal_cylinder(ctx, x, y, width, height),
         NodeShape::TaggedRect => draw_tagged_rect(ctx, x, y, width, height),
-        NodeShape::LinedCylinder => draw_cylinder(ctx, x, y, width, height),
+        NodeShape::LinedCylinder => draw_lined_cylinder(ctx, x, y, width, height),
         NodeShape::Document => draw_document(ctx, x, y, width, height),
-        // The rule is interior detail; canvas draws the document body without it.
-        NodeShape::LinedDocument => draw_document(ctx, x, y, width, height),
+        NodeShape::LinedDocument => draw_lined_document(ctx, x, y, width, height),
         NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
         NodeShape::Flag => draw_flag(ctx, x, y, width, height),
         NodeShape::HalfRoundedRect => draw_half_rounded_rect(ctx, x, y, width, height),
@@ -72,8 +59,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::StackedRect => draw_stacked_rect(ctx, x, y, width, height),
         NodeShape::Bang => draw_bang(ctx, x, y, width, height),
         NodeShape::CurvedTrapezoid => draw_curved_trapezoid(ctx, x, y, width, height),
-        // The document body; the fold is interior detail this surface omits.
-        NodeShape::TaggedDocument => draw_document(ctx, x, y, width, height),
+        NodeShape::TaggedDocument => draw_tagged_document(ctx, x, y, width, height),
         NodeShape::BowTieRect => draw_bow_tie_rect(ctx, x, y, width, height),
         NodeShape::Hourglass => draw_hourglass(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
@@ -193,6 +179,85 @@ fn draw_circle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) 
     ctx.begin_path();
     ctx.arc(cx, cy, r, 0.0, 2.0 * PI);
     ctx.fill();
+    ctx.stroke();
+}
+
+/// Start/stop markers have fixed radii in layout space; label-sized circles are different shapes.
+fn draw_small_circle<C: Canvas2dContext>(
+    ctx: &mut C,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    framed: bool,
+) {
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    ctx.begin_path();
+    ctx.arc(cx, cy, f64::from(fm_core::SMALL_CIRCLE_RADIUS), 0.0, 2.0 * PI);
+    ctx.fill();
+    ctx.stroke();
+    if framed {
+        // Separate paths avoid the straight connector that Canvas inserts between two arcs.
+        ctx.begin_path();
+        ctx.arc(
+            cx,
+            cy,
+            f64::from(fm_core::FRAMED_CIRCLE_INNER_RADIUS),
+            0.0,
+            2.0 * PI,
+        );
+        ctx.fill();
+        ctx.stroke();
+    }
+}
+
+/// Cubic control distance for a quarter ellipse: 4/3 * tan(pi/8).
+const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
+
+/// Horizontal cylinder: left/right elliptical caps, with the visible near rim on the left.
+fn draw_horizontal_cylinder<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let rx = w * 0.1;
+    let ry = h / 2.0;
+    let left = x + rx;
+    let right = x + w - rx;
+    let cy = y + ry;
+    let kx = rx * ELLIPSE_KAPPA;
+    let ky = ry * ELLIPSE_KAPPA;
+
+    ctx.begin_path();
+    ctx.move_to(left, y);
+    ctx.line_to(right, y);
+    ctx.bezier_curve_to(right + kx, y, x + w, cy - ky, x + w, cy);
+    ctx.bezier_curve_to(x + w, cy + ky, right + kx, y + h, right, y + h);
+    ctx.line_to(left, y + h);
+    ctx.bezier_curve_to(left - kx, y + h, x, cy + ky, x, cy);
+    ctx.bezier_curve_to(x, cy - ky, left - kx, y, left, y);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+
+    // Stroke, never refill: repainting this half ellipse changes translucent node fills.
+    ctx.begin_path();
+    ctx.move_to(left, y);
+    ctx.bezier_curve_to(left + kx, y, left + rx, cy - ky, left + rx, cy);
+    ctx.bezier_curve_to(left + rx, cy + ky, left + kx, y + h, left, y + h);
+    ctx.stroke();
+}
+
+/// A second lower half-ellipse distinguishes a lined cylinder from a plain database cylinder.
+fn draw_lined_cylinder<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_cylinder(ctx, x, y, w, h);
+    let rx = w / 2.0;
+    let ry = h * 0.1;
+    let cx = x + rx;
+    let rim_y = y + ry * 2.0;
+    let kx = rx * ELLIPSE_KAPPA;
+    let ky = ry * ELLIPSE_KAPPA;
+    ctx.begin_path();
+    ctx.move_to(x, rim_y);
+    ctx.bezier_curve_to(x, rim_y + ky, cx - kx, rim_y + ry, cx, rim_y + ry);
+    ctx.bezier_curve_to(cx + kx, rim_y + ry, x + w, rim_y + ky, x + w, rim_y);
     ctx.stroke();
 }
 
@@ -567,6 +632,76 @@ fn draw_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.quadratic_curve_to(x + w * 0.25, y + h * 1.06, x, y + h * 0.90);
     ctx.close_path();
     ctx.fill();
+    ctx.stroke();
+}
+
+/// The document rule is deliberately much closer to the left edge than the lined-rect rule.
+fn draw_lined_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_document(ctx, x, y, w, h);
+    let rule = x + w * 0.045;
+    ctx.begin_path();
+    ctx.move_to(rule, y);
+    ctx.line_to(rule, y + h * 0.94);
+    ctx.stroke();
+}
+
+/// The fold follows the existing wave, using the same split quadratic as fm-render-svg.
+fn draw_tagged_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_document(ctx, x, y, w, h);
+    ctx.begin_path();
+    ctx.move_to(x + w * 0.818, y + h * 0.8384);
+    ctx.line_to(x + w, y + h * 0.58);
+    ctx.line_to(x + w, y + h * 0.80);
+    ctx.quadratic_curve_to(x + w * 0.909, y + h * 0.8146, x + w * 0.818, y + h * 0.8384);
+    ctx.close_path();
+    ctx.stroke();
+}
+
+/// One 45-degree cut in the top-left corner, not an interior diagonal over an uncut rectangle.
+fn draw_notched_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let notch = (w.min(h) * 0.31).min(w / 2.0).min(h / 2.0);
+    ctx.begin_path();
+    ctx.move_to(x + notch, y);
+    ctx.line_to(x + w, y);
+    ctx.line_to(x + w, y + h);
+    ctx.line_to(x, y + h);
+    ctx.line_to(x, y + notch);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Two top-corner cuts; unlike notch-rect they scale independently along the two axes.
+fn draw_notched_pentagon<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let cut_x = w * f64::from(fm_core::NOTCHED_PENTAGON_CUT_X_RATIO);
+    let cut_y = h * f64::from(fm_core::NOTCHED_PENTAGON_CUT_Y_RATIO);
+    ctx.begin_path();
+    ctx.move_to(x + cut_x, y);
+    ctx.line_to(x + w - cut_x, y);
+    ctx.line_to(x + w, y + cut_y);
+    ctx.line_to(x + w, y + h);
+    ctx.line_to(x, y + h);
+    ctx.line_to(x, y + cut_y);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+fn draw_lined_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_rect(ctx, x, y, w, h, 0.0);
+    let rule = x + (w * 0.14).min(16.0);
+    ctx.begin_path();
+    ctx.move_to(rule, y);
+    ctx.line_to(rule, y + h);
+    ctx.stroke();
+}
+
+fn draw_divided_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_rect(ctx, x, y, w, h, 0.0);
+    let band = y + h * f64::from(fm_core::DIVIDED_RECT_HEADER_RATIO);
+    ctx.begin_path();
+    ctx.move_to(x, band);
+    ctx.line_to(x + w, band);
     ctx.stroke();
 }
 
@@ -1011,7 +1146,254 @@ fn draw_brace<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64, o
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::MockCanvas2dContext;
+    use crate::context::{DrawOperation, MockCanvas2dContext};
+
+    fn recorded_shape(shape: NodeShape, x: f64, y: f64, w: f64, h: f64) -> Vec<DrawOperation> {
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        draw_shape(
+            &mut ctx,
+            shape,
+            x,
+            y,
+            w,
+            h,
+            "rgba(20,40,60,0.5)",
+            "#123456",
+            2.5,
+        );
+        ctx.operations().to_vec()
+    }
+
+    fn assert_near(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.000_01, "{actual} != {expected}");
+    }
+
+    fn assert_vertices(ops: &[DrawOperation], expected: &[(f64, f64)]) {
+        let actual: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual.len(), expected.len());
+        for ((x, y), (expected_x, expected_y)) in actual.iter().zip(expected) {
+            assert_near(*x, *expected_x);
+            assert_near(*y, *expected_y);
+        }
+    }
+
+    #[test]
+    fn notched_rect_cuts_only_the_top_left_corner() {
+        let ops = recorded_shape(NodeShape::NotchedRect, 10.0, 20.0, 200.0, 100.0);
+        assert_vertices(
+            &ops,
+            &[
+                (41.0, 20.0),
+                (210.0, 20.0),
+                (210.0, 120.0),
+                (10.0, 120.0),
+                (10.0, 51.0),
+            ],
+        );
+        assert!(!ops.iter().any(|op| matches!(op, DrawOperation::Rect(..))));
+        assert_eq!(
+            &ops[ops.len() - 3..],
+            &[
+                DrawOperation::ClosePath,
+                DrawOperation::Fill,
+                DrawOperation::Stroke,
+            ]
+        );
+    }
+
+    #[test]
+    fn notched_pentagon_has_two_independently_scaled_cuts() {
+        let ops = recorded_shape(NodeShape::NotchedPentagon, 10.0, 20.0, 200.0, 100.0);
+        assert_vertices(
+            &ops,
+            &[
+                (30.0, 20.0),
+                (190.0, 20.0),
+                (210.0, 40.0),
+                (210.0, 120.0),
+                (10.0, 120.0),
+                (10.0, 40.0),
+            ],
+        );
+        assert!(!ops.iter().any(|op| matches!(op, DrawOperation::Rect(..))));
+    }
+
+    #[test]
+    fn lined_and_divided_rects_keep_distinct_rule_directions() {
+        let vertical = recorded_shape(NodeShape::LinedRect, 10.0, 20.0, 200.0, 120.0);
+        let horizontal = recorded_shape(NodeShape::DividedRect, 10.0, 20.0, 200.0, 120.0);
+        assert_vertices(&vertical, &[(26.0, 20.0), (26.0, 140.0)]);
+        assert_vertices(&horizontal, &[(10.0, 40.0), (210.0, 40.0)]);
+        for ops in [&vertical, &horizontal] {
+            assert!(ops.contains(&DrawOperation::Rect(10.0, 20.0, 200.0, 120.0)));
+            assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Fill).count(), 1);
+            assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Stroke).count(), 2);
+        }
+        let narrow = recorded_shape(NodeShape::LinedRect, 0.0, 0.0, 10.0, 100.0);
+        assert_vertices(&narrow, &[(1.4, 0.0), (1.4, 100.0)]);
+    }
+
+    #[test]
+    fn small_and_framed_markers_do_not_grow_with_the_label_box() {
+        for (w, h) in [(14.0, 14.0), (240.0, 80.0)] {
+            for (shape, expected_radii) in [
+                (NodeShape::SmallCircle, vec![7.0]),
+                (NodeShape::FramedCircle, vec![7.0, 2.5]),
+            ] {
+                let ops = recorded_shape(shape, 10.0, 20.0, w, h);
+                let arcs: Vec<_> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        DrawOperation::Arc(cx, cy, radius, from, to) => {
+                            Some((*cx, *cy, *radius, *from, *to))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(arcs.len(), expected_radii.len());
+                for (arc, radius) in arcs.iter().zip(&expected_radii) {
+                    assert_near(arc.0, 10.0 + w / 2.0);
+                    assert_near(arc.1, 20.0 + h / 2.0);
+                    assert_near(arc.2, *radius);
+                    assert_near(arc.3, 0.0);
+                    assert_near(arc.4, 2.0 * PI);
+                }
+                for expected in [DrawOperation::BeginPath, DrawOperation::Fill, DrawOperation::Stroke] {
+                    assert_eq!(ops.iter().filter(|op| **op == expected).count(), arcs.len());
+                }
+                assert!(!ops.iter().any(|op| matches!(op, DrawOperation::LineTo(..))));
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_cylinder_has_side_caps_and_a_separately_stroked_near_rim() {
+        let ops = recorded_shape(NodeShape::HorizontalCylinder, 10.0, 20.0, 200.0, 100.0);
+        assert_vertices(
+            &ops,
+            &[(30.0, 20.0), (190.0, 20.0), (30.0, 120.0), (30.0, 20.0)],
+        );
+        assert!(!ops.iter().any(|op| matches!(op, DrawOperation::Rect(..))));
+        assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Fill).count(), 1);
+        assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Stroke).count(), 2);
+
+        // Sample the actual emitted cubics, not a second drawing implementation. The first four
+        // quarters are the outer caps; the final two are the left rim inside the filled body.
+        let mut start = (0.0, 0.0);
+        let mut curve = 0;
+        for op in &ops {
+            match *op {
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => start = (x, y),
+                DrawOperation::BezierCurveTo(c1x, c1y, c2x, c2y, x, y) => {
+                    let cx = if curve < 2 { 190.0 } else { 30.0 };
+                    for step in 0..=32 {
+                        let t = f64::from(step) / 32.0;
+                        let s = 1.0 - t;
+                        let px = s.powi(3) * start.0
+                            + 3.0 * s * s * t * c1x
+                            + 3.0 * s * t * t * c2x
+                            + t.powi(3) * x;
+                        let py = s.powi(3) * start.1
+                            + 3.0 * s * s * t * c1y
+                            + 3.0 * s * t * t * c2y
+                            + t.powi(3) * y;
+                        let ellipse = ((px - cx) / 20.0).powi(2) + ((py - 70.0) / 50.0).powi(2);
+                        assert!((ellipse - 1.0).abs() < 0.000_6);
+                    }
+                    start = (x, y);
+                    curve += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(curve, 6);
+    }
+
+    #[test]
+    fn lined_cylinder_adds_a_second_lower_rim_without_repainting_the_fill() {
+        let plain = recorded_shape(NodeShape::Cylinder, 10.0, 20.0, 200.0, 100.0);
+        let lined = recorded_shape(NodeShape::LinedCylinder, 10.0, 20.0, 200.0, 100.0);
+        assert_eq!(&lined[..plain.len()], plain.as_slice());
+        let rim = &lined[plain.len()..];
+        assert_eq!(rim.len(), 5);
+        assert_eq!(rim[0], DrawOperation::BeginPath);
+        assert_eq!(rim[1], DrawOperation::MoveTo(10.0, 40.0));
+        for (op, (expected_x, expected_y)) in rim[2..4].iter().zip([(110.0, 50.0), (210.0, 40.0)]) {
+            let DrawOperation::BezierCurveTo(_, _, _, _, x, y) = op else {
+                panic!("expected a lower-rim cubic, got {op:?}");
+            };
+            assert_near(*x, expected_x);
+            assert_near(*y, expected_y);
+        }
+        assert_eq!(rim[4], DrawOperation::Stroke);
+    }
+
+    #[test]
+    fn lined_document_preserves_the_wave_and_uses_the_document_specific_rule() {
+        let plain = recorded_shape(NodeShape::Document, 10.0, 20.0, 200.0, 100.0);
+        let lined = recorded_shape(NodeShape::LinedDocument, 10.0, 20.0, 200.0, 100.0);
+        assert_eq!(&lined[..plain.len()], plain.as_slice());
+        let rule = &lined[plain.len()..];
+        assert_eq!(rule.len(), 4);
+        assert_eq!(rule[0], DrawOperation::BeginPath);
+        assert_vertices(rule, &[(19.0, 20.0), (19.0, 114.0)]);
+        assert_eq!(rule[3], DrawOperation::Stroke);
+    }
+
+    #[test]
+    fn tagged_document_fold_follows_the_wave_instead_of_cutting_a_square_corner() {
+        let plain = recorded_shape(NodeShape::Document, 10.0, 20.0, 200.0, 100.0);
+        let tagged = recorded_shape(NodeShape::TaggedDocument, 10.0, 20.0, 200.0, 100.0);
+        assert_eq!(&tagged[..plain.len()], plain.as_slice());
+        let fold = &tagged[plain.len()..];
+        assert_vertices(fold, &[(173.6, 103.84), (210.0, 78.0), (210.0, 100.0)]);
+        assert!(matches!(fold[4], DrawOperation::QuadraticCurveTo(..)));
+        if let DrawOperation::QuadraticCurveTo(cx, cy, x, y) = fold[4] {
+            assert_near(cx, 191.8);
+            assert_near(cy, 101.46);
+            assert_near(x, 173.6);
+            assert_near(y, 103.84);
+        }
+        assert_eq!(&fold[5..], &[DrawOperation::ClosePath, DrawOperation::Stroke]);
+    }
+
+    #[test]
+    fn completed_shapes_preserve_the_callers_fill_stroke_and_line_width() {
+        for shape in [
+            NodeShape::NotchedRect,
+            NodeShape::LinedRect,
+            NodeShape::DividedRect,
+            NodeShape::NotchedPentagon,
+            NodeShape::SmallCircle,
+            NodeShape::FramedCircle,
+            NodeShape::HorizontalCylinder,
+            NodeShape::LinedCylinder,
+            NodeShape::LinedDocument,
+            NodeShape::TaggedDocument,
+        ] {
+            let ops = recorded_shape(shape, -50.0, 17.0, 200.0, 100.0);
+            assert_eq!(
+                &ops[..3],
+                &[
+                    DrawOperation::SetFillStyle("rgba(20,40,60,0.5)".to_string()),
+                    DrawOperation::SetStrokeStyle("#123456".to_string()),
+                    DrawOperation::SetLineWidth(2.5),
+                ]
+            );
+            assert!(!ops[3..].iter().any(|op| matches!(
+                op,
+                DrawOperation::SetFillStyle(_)
+                    | DrawOperation::SetStrokeStyle(_)
+                    | DrawOperation::SetLineWidth(_)
+            )));
+        }
+    }
 
     #[test]
     fn draw_rect_records_operations() {
