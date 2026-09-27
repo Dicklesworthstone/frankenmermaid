@@ -52,6 +52,80 @@ function checkedBindings(source, snapshot) {
   return bindings;
 }
 
+const MAX_SOURCE_BATCH_EDITS = 1024;
+
+// Copy before the first await (including worker initialization). A caller changing its edits
+// array later must not change the transaction the user is about to review.
+function copySourceBatchEdits(edits) {
+  if (!Array.isArray(edits) || edits.length > MAX_SOURCE_BATCH_EDITS) {
+    throw new RangeError(`A source batch requires at most ${MAX_SOURCE_BATCH_EDITS} edits.`);
+  }
+  const ids = new Set();
+  const copied = [];
+  for (const edit of edits) {
+    if (!edit || typeof edit.elementId !== "string" || !edit.elementId ||
+        typeof edit.replacement !== "string") {
+      throw new TypeError("Each batch edit requires an element ID and replacement text.");
+    }
+    if (ids.has(edit.elementId)) throw new Error(`Duplicate batch element: ${edit.elementId}`);
+    ids.add(edit.elementId);
+    byteOffsets(edit.replacement);
+    copied.push(Object.freeze({ elementId: edit.elementId, replacement: edit.replacement }));
+  }
+  return Object.freeze(copied);
+}
+
+function planSourceBatch(source, bindings, edits) {
+  const offsets = new Map([...byteOffsets(source)].map(([bytes, units]) => [units, bytes]));
+  const entries = copySourceBatchEdits(edits).map((edit) => {
+    const binding = bindings.get(edit.elementId);
+    if (!binding) throw new Error(`No editable source span for ${edit.elementId}`);
+    return Object.freeze({ ...binding, replacement: edit.replacement,
+      startByte: offsets.get(binding.start), endByte: offsets.get(binding.end) });
+  });
+  const ordered = [...entries].sort((a, b) => a.start - b.start || a.end - b.end);
+  const parts = [];
+  let end = 0;
+  for (let index = 0; index < ordered.length; index += 1) {
+    const entry = ordered[index];
+    if (index && (entry.start < end || entry.start === ordered[index - 1].start)) {
+      throw new Error(`Overlapping source spans: ${ordered[index - 1].elementId} and ${entry.elementId}`);
+    }
+    parts.push(source.slice(end, entry.start), entry.replacement);
+    end = entry.end;
+  }
+  parts.push(source.slice(end));
+  return { entries, updatedSource: parts.join("") };
+}
+
+function checkBatchChange(entry, change) {
+  if (!change || change.elementId !== entry.elementId ||
+      typeof change.appliedElementId !== "string" || !change.appliedElementId ||
+      change.previousSnippet !== entry.snippet || change.replacement !== entry.replacement ||
+      change.replacedRange?.startByte !== entry.startByte || change.replacedRange?.endByte !== entry.endByte) {
+    throw new Error("The batch response does not match the requested source transaction.");
+  }
+}
+
+function checkedBatchResponse(plan, response) {
+  const entries = plan.entries.filter((entry) => entry.replacement !== entry.snippet);
+  const result = response?.result;
+  if (result?.updatedSource !== plan.updatedSource || !Array.isArray(result.changes) ||
+      result.changes.length !== entries.length) {
+    throw new Error("The batch response changed unrelated text or omitted requested edits.");
+  }
+  for (let index = 0; index < entries.length; index += 1) checkBatchChange(entries[index], result.changes[index]);
+  const bindings = checkedBindings(plan.updatedSource, response.snapshot);
+  // Never retain the transport's mutable response object as a confirmation token.
+  const preview = Object.freeze({ kind: "batch", updatedSource: plan.updatedSource,
+    changes: Object.freeze(entries.map((entry) => Object.freeze({ elementId: entry.elementId,
+      sourceId: entry.sourceId, startByte: entry.startByte, endByte: entry.endByte,
+      previousSnippet: entry.snippet, replacement: entry.replacement }))),
+    warnings: Object.freeze([...(response.snapshot.parsed?.warnings || [])].map(String)),
+  });
+  return { preview, bindings };
+}
+
 export class SourceEditSession {
   #api;
   #source = "";
@@ -59,6 +133,7 @@ export class SourceEditSession {
   #selection = null;
   #revision = 0;
   #prepared = null;
+  #batch = null;
 
   constructor(api = null) {
     if (api !== null && (typeof api?.parseLens !== "function" || typeof api.applyParseLensEdit !== "function")) {
@@ -76,6 +151,7 @@ export class SourceEditSession {
     this.#revision += 1;
     this.#selection = null;
     this.#prepared = null;
+    this.#batch = null;
     this.#bindings = new Map();
     this.#source = source;
     byteOffsets(source); // Reject strings WASM's UTF-8 encoder would silently change.
@@ -137,8 +213,48 @@ export class SourceEditSession {
     this.#bindings = bindings;
     this.#selection = null;
     this.#prepared = null;
+    this.#batch = null;
     this.#revision += 1;
     return updated;
+  }
+
+  // Begin against ONE immutable revision, not whichever selection happens to be active after
+  // the worker replies. Selection may change while staging; a source change invalidates it all.
+  beginBatch(edits) {
+    const copied = copySourceBatchEdits(edits);
+    const plan = planSourceBatch(this.#source, this.#bindings, copied);
+    const transaction = Object.freeze({ source: this.#source, edits: copied });
+    this.#prepared = null;
+    this.#batch = { transaction, plan, revision: this.#revision, preview: null };
+    return transaction;
+  }
+
+  prepareBatch(transaction, response) {
+    const batch = this.#batch;
+    if (!batch || batch.transaction !== transaction || batch.revision !== this.#revision) {
+      throw new Error("The batch is stale; prepare the edits against the current source.");
+    }
+    batch.preview = null;
+    const { preview, bindings } = checkedBatchResponse(batch.plan, response);
+    batch.preview = preview;
+    batch.bindings = bindings;
+    return preview;
+  }
+
+  cancelBatch() { this.#batch = null; }
+
+  commitBatch(preview) {
+    const batch = this.#batch;
+    if (!preview || !batch || batch.preview !== preview || batch.revision !== this.#revision) {
+      throw new Error("Batch preview is stale; prepare the edits again.");
+    }
+    this.#source = preview.updatedSource;
+    this.#bindings = batch.bindings;
+    this.#selection = null;
+    this.#prepared = null;
+    this.#batch = null;
+    this.#revision += 1;
+    return this.#source;
   }
 
   // Rust chooses the actual splice (including indentation/line terminators). Validate its
@@ -146,6 +262,7 @@ export class SourceEditSession {
   // Preparation is read-only; a private, single-use token binds confirmation to this selection.
   prepareStructural(selection, kind, text, response) {
     this.#prepared = null;
+    this.#batch = null;
     this.#checkReplacement(selection, text);
     if (kind !== "delete" && kind !== "insert") throw new Error("Unknown source operation.");
     const result = response?.result;
@@ -205,6 +322,7 @@ export class SourceEditSession {
     this.#bindings = prepared.bindings;
     this.#selection = null;
     this.#prepared = null;
+    this.#batch = null;
     this.#revision += 1;
     return this.#source;
   }
@@ -217,6 +335,42 @@ function cancelledOperation() {
   const error = new Error("Source operation superseded or editor closed.");
   error.name = "AbortError";
   return error;
+}
+
+// The fallback uses the same per-edit session checks and final transaction validator as the
+// worker client. All intermediate state is private. Parsing and replacements remain in Rust;
+// this host code only resolves current bindings and yields between synchronous WASM calls.
+async function applyLocalSourceBatch(api, input, edits, live) {
+  const working = new SourceEditSession(api);
+  let snapshot = working.setSource(input);
+  const plan = planSourceBatch(input, new Map(working.bindings.map((binding) => [binding.elementId, binding])), edits);
+  const changes = new Map();
+  for (const entry of [...plan.entries].sort((a, b) => b.start - a.start)) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!live()) throw cancelledOperation();
+    if (entry.replacement === entry.snippet) continue;
+    const matches = (binding) => binding.start === entry.start && binding.end === entry.end &&
+      binding.snippet === entry.snippet && binding.sourceId === entry.sourceId && binding.kind === entry.kind;
+    const originalId = working.bindings.find((binding) => binding.elementId === entry.elementId);
+    const candidates = originalId && matches(originalId) ? [originalId] : working.bindings.filter(matches);
+    if (candidates.length !== 1) throw new Error(`Source binding changed or became ambiguous during batch: ${entry.elementId}`);
+    const binding = candidates[0];
+    const selection = working.select(binding.elementId);
+    const response = api.applyParseLensEdit(working.source, binding.elementId, entry.replacement);
+    const result = response?.result;
+    if (result?.elementId !== binding.elementId) throw new Error("The batch edit returned the wrong element ID.");
+    const change = { elementId: entry.elementId, appliedElementId: binding.elementId,
+      replacedRange: result.replacedRange, previousSnippet: result.previousSnippet, replacement: result.replacement };
+    checkBatchChange(entry, change);
+    working.replaceWithResponse(selection, entry.replacement, response);
+    snapshot = response.snapshot;
+    changes.set(entry.elementId, change);
+  }
+  if (!live()) throw cancelledOperation();
+  const response = { result: { updatedSource: working.source,
+    changes: plan.entries.flatMap((entry) => changes.has(entry.elementId) ? [changes.get(entry.elementId)] : []) }, snapshot };
+  checkedBatchResponse(plan, response);
+  return response;
 }
 
 /** A bounded, latest-request-only client for fm-render.worker.js source authoring. */
@@ -234,6 +388,7 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
   let deckRendering = false;
   let sourceDeletion = false;
   let sourceInsertion = false;
+  let sourceBatchEditing = false;
   let closed = false;
   let failure = null;
   let pending = null;
@@ -257,6 +412,10 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
   }
   function sendPending() {
     if (!ready || !pending || pending.sent || closed || failure) return;
+    if (pending.message.kind === "sourceBatch" && !sourceBatchEditing) {
+      settle(new Error("The worker package lacks atomic batch editing; update the worker and WASM package."));
+      return;
+    }
     if (pending.message.kind === "sourceDeck" && !deckRendering) {
       settle(new Error("The worker package lacks graph-deck rendering; update the worker and WASM package."));
       return;
@@ -291,6 +450,7 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
       deckRendering = message.deckRendering === true;
       sourceDeletion = message.sourceDeletion === true;
       sourceInsertion = message.sourceInsertion === true;
+      sourceBatchEditing = message.sourceBatchEditing === true;
       sendPending();
       return;
     }
@@ -315,11 +475,13 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     }
     const rendering = pending.message.kind === "sourceRender";
     const editReply = pending.message.kind === "sourceDelete" ? "sourceDeleted" :
-      pending.message.kind === "sourceInsert" ? "sourceInserted" : "sourceEdited";
+      pending.message.kind === "sourceInsert" ? "sourceInserted" :
+      pending.message.kind === "sourceBatch" ? "sourceBatchEdited" : "sourceEdited";
     const valid = rendering
       ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
       : message.kind === editReply && typeof message.response?.result?.updatedSource === "string" &&
-        Array.isArray(message.response?.snapshot?.bindings);
+        Array.isArray(message.response?.snapshot?.bindings) &&
+        (pending.message.kind !== "sourceBatch" || Array.isArray(message.response.result.changes));
     if (!valid) { fail("mismatched source worker response"); return; }
     settle(null, rendering ? { svg: message.svg, snapshot: message.snapshot } : message.response);
   };
@@ -348,6 +510,13 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     editSource: (input, elementId, replacement) => request("sourceEdit", input, { elementId, replacement }),
     deleteSource: (input, elementId) => request("sourceDelete", input, { elementId }),
     insertSource: (input, elementId, text) => request("sourceInsert", input, { elementId, text }),
+    batchSource(input, edits) {
+      try {
+        if (typeof input !== "string") throw new TypeError("Source must be text.");
+        byteOffsets(input);
+        return request("sourceBatch", input, { edits: copySourceBatchEdits(edits) });
+      } catch (error) { return Promise.reject(error); }
+    },
     cancel,
     dispose() {
       if (closed) return;
@@ -379,8 +548,9 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     }
     return localModule;
   }
-  async function execute(kind, input, elementId, replacement) {
+  async function execute(kind, input, elementId, replacement, edits) {
     if (disposed) throw cancelledOperation();
+    if (kind === "batch") edits = copySourceBatchEdits(edits);
     const version = ++generation;
     client?.cancel();
     const live = () => !disposed && version === generation;
@@ -396,6 +566,7 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     if (client) {
       try {
         const result = await (kind === "deck" ? client.renderDeck(input) :
+          kind === "batch" ? client.batchSource(input, edits) :
           kind === "delete" ? client.deleteSource(input, elementId) :
           kind === "insert" ? client.insertSource(input, elementId, replacement) :
           kind === "render" ? client.renderSource(input) : client.editSource(input, elementId, replacement));
@@ -414,6 +585,11 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     if (!live()) throw cancelledOperation();
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (!live()) throw cancelledOperation();
+    if (kind === "batch") {
+      const result = await applyLocalSourceBatch(api, input, edits, live);
+      if (!live()) throw cancelledOperation();
+      return result;
+    }
     if (kind === "edit") return api.applyParseLensEdit(input, elementId, replacement);
     if (kind === "delete" || kind === "insert") {
       const name = kind === "delete" ? "applyParseLensDelete" : "applyParseLensInsertLineAfter";
@@ -434,6 +610,7 @@ export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
     editSource: (input, elementId, replacement) => execute("edit", input, elementId, replacement),
     deleteSource: (input, elementId) => execute("delete", input, elementId),
     insertSource: (input, elementId, text) => execute("insert", input, elementId, text),
+    batchSource: (input, edits) => execute("batch", input, undefined, undefined, edits),
     cancel() { generation += 1; client?.cancel(); },
     dispose() { disposed = true; generation += 1; client?.dispose(); },
   };
