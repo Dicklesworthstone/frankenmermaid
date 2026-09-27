@@ -735,6 +735,13 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   let originalTabIndices = new Map();
   let matchedBindings = [];
   let renderedLabels = new Map();
+  let staged = new Map();
+  let stagedSession = null;
+  let stagedEpoch = 0;
+  let batchRevision = 0;
+  let preparedBatch = null;
+  let sourceComposing = false;
+  let replacementComposing = false;
 
   function download(artifact) {
     const host = document.defaultView;
@@ -754,11 +761,11 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     }
   }
 
-  function make(tag, text, id) {
+  function make(tag, text, id, parent = panelEl) {
     const element = document.createElement(tag);
     if (text) element.textContent = text;
     if (id) element.id = id;
-    panelEl.append(element);
+    parent.append(element);
     return element;
   }
   function listen(element, event, handler, options) {
@@ -800,6 +807,26 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   snippet.spellcheck = false;
   const apply = make("button", "Apply source edit", "source-editor-apply");
   apply.type = "button";
+  const stage = make("button", "Stage replacement for batch", "source-editor-stage");
+  const batchPanel = make("fieldset", "", "source-editor-batch");
+  batchPanel.style.minWidth = "0";
+  make("legend", "Batch source edits", "", batchPanel);
+  make("p", "Select elements, edit their replacement source, and stage each change. Preview the whole batch before applying it as one undoable change. Shared or overlapping statement spans cannot be staged together. Apply or clear staged changes before using single-span edits.", "", batchPanel);
+  const batchStatus = make("p", "", "source-editor-batch-status", batchPanel);
+  batchStatus.setAttribute("role", "status");
+  const batchList = make("ol", "", "source-editor-batch-list", batchPanel);
+  batchList.style.maxHeight = "20rem";
+  batchList.style.overflow = "auto";
+  const batchPrepare = make("button", "Preview staged edits", "source-editor-batch-prepare", batchPanel);
+  const batchClear = make("button", "Clear staged edits", "source-editor-batch-clear", batchPanel);
+  const batchPreview = make("pre", "", "source-editor-batch-preview", batchPanel);
+  batchPreview.style.whiteSpace = "pre-wrap";
+  batchPreview.style.overflowWrap = "anywhere";
+  batchPreview.setAttribute("tabindex", "0");
+  batchPreview.setAttribute("aria-label", "Exact batch source changes");
+  const batchApply = make("button", "Apply all staged edits", "source-editor-batch-apply", batchPanel);
+  const batchCancel = make("button", "Discard batch preview", "source-editor-batch-cancel", batchPanel);
+  for (const button of [stage, batchPrepare, batchClear, batchApply, batchCancel]) button.type = "button";
   make("p", "Insert source after the selected span's line, or remove that span. A shared statement may contain several nodes and edges; deletion does not remove other references. Review the exact change before applying it.");
   const insertLabel = make("label", "Source to insert (Rust preserves line framing)", "source-editor-insert-label");
   const insertText = make("textarea", "", "source-editor-insert-text");
@@ -826,12 +853,195 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     saveSvg.disabled = !current() || renderedSvg === null;
     const editable = current() && selection !== null && activeEdit === null;
     for (const control of [apply, snippet, insert, remove, insertText]) control.disabled = !editable;
+    // A single-span mutation would invalidate the staged batch. Require an explicit clear
+    // rather than silently throwing away replacements the user already prepared.
+    for (const control of [apply, insert, remove]) control.disabled ||= staged.size > 0;
     confirm.disabled = !editable || preparedEdit === null;
     cancel.disabled = disposed;
     search.disabled = !current();
     kindFilter.disabled = !current();
     previousMatch.disabled = nextMatch.disabled = !current() || matchedBindings.length === 0;
+    const composing = sourceComposing || replacementComposing;
+    stage.disabled = !editable || composing || !stagedCurrent();
+    stage.textContent = staged.has(selection?.elementId) ? "Update staged replacement" : "Stage replacement for batch";
+    batchPrepare.disabled = !current() || !stagedCurrent() || !staged.size || activeEdit !== null || composing;
+    batchClear.disabled = disposed || (!staged.size && activeEdit?.kind !== "batch" && !preparedBatch);
+    batchApply.disabled = !current() || !stagedCurrent() || !preparedBatch || activeEdit !== null || composing;
+    batchApply.hidden = !preparedBatch;
+    batchCancel.hidden = !preparedBatch && activeEdit?.kind !== "batch";
+    batchCancel.disabled = disposed;
+    batchCancel.textContent = activeEdit?.kind === "batch" ? "Cancel batch preparation" : "Discard batch preview";
   }
+
+  function stagedCurrent() {
+    return !staged.size || (current() && session === stagedSession && stagedEpoch === epoch);
+  }
+
+  function clearBatchPreview() {
+    if (activeEdit?.kind === "batch") {
+      activeEdit = null;
+      backend.cancel();
+      outEl.setAttribute("aria-busy", "false");
+    }
+    preparedBatch = null;
+    session?.cancelBatch();
+    batchPreview.textContent = "";
+    batchPreview.hidden = true;
+    batchApply.hidden = true;
+    batchCancel.hidden = true;
+  }
+
+  function rebuildStaged() {
+    batchList.replaceChildren();
+    const live = stagedCurrent();
+    for (const edit of staged.values()) {
+      const item = make("li", "", "", batchList);
+      const name = edit.sourceId || edit.elementId;
+      const choose = make("button", `Edit staged replacement for ${name}`, "", item);
+      choose.type = "button";
+      choose.setAttribute("data-batch-select", edit.elementId);
+      choose.disabled = disposed || !live;
+      const detail = make("pre", `From: ${JSON.stringify(edit.snippet)}\nTo: ${JSON.stringify(edit.replacement)}`, "", item);
+      detail.style.whiteSpace = "pre-wrap";
+      detail.style.overflowWrap = "anywhere";
+      const unstage = make("button", `Unstage ${name}`, "", item);
+      unstage.type = "button";
+      unstage.setAttribute("data-batch-remove", edit.elementId);
+      unstage.disabled = disposed;
+    }
+    batchStatus.textContent = !staged.size ? "No staged edits." : live
+      ? `${staged.size} staged edits. Source is unchanged until the batch is applied.`
+      : `Source revision changed. ${staged.size} staged replacements are retained for copying only; clear them and stage again. They cannot be applied to the new source.`;
+    for (const [id, element] of elements) {
+      if (live && staged.has(id)) element.setAttribute("data-source-staged", "true");
+      else element.removeAttribute("data-source-staged");
+    }
+    syncControls();
+  }
+
+  function clearStaged() {
+    clearBatchPreview();
+    staged = new Map();
+    stagedSession = null;
+    batchRevision += 1;
+    rebuildStaged();
+  }
+
+  listen(stage, "click", () => {
+    if (!current() || !selection || activeEdit || sourceComposing || replacementComposing) return;
+    if (!stagedCurrent()) {
+      message.textContent = "Staged replacements belong to an older source revision. Clear them before staging new edits.";
+      return;
+    }
+    clearStructural();
+    clearBatchPreview();
+    try {
+      const proposed = new Map(staged);
+      if (snippet.value === selection.snippet) proposed.delete(selection.elementId);
+      else proposed.set(selection.elementId, Object.freeze({ elementId: selection.elementId,
+        sourceId: selection.sourceId, snippet: selection.snippet, replacement: snippet.value }));
+      // Read-only preflight before changing the queue. Reject overlapping node/edge aliases
+      // even when their different element IDs make them look like independent selections.
+      planSourceBatch(session.source, new Map(session.bindings.map((binding) => [binding.elementId, binding])), [...proposed.values()]);
+      staged = proposed;
+      stagedSession = session;
+      stagedEpoch = epoch;
+      batchRevision += 1;
+      rebuildStaged();
+      message.textContent = `${staged.size} source edits staged. Select another element or preview the batch. Source is unchanged.`;
+    } catch (error) {
+      message.textContent = `Cannot stage replacement: ${error.message || error}`;
+      syncControls();
+    }
+  });
+  listen(batchList, "click", (event) => {
+    const unstage = event.target.closest?.("[data-batch-remove]");
+    const choose = event.target.closest?.("[data-batch-select]");
+    if (disposed) return;
+    if (unstage && batchList.contains(unstage)) {
+      clearBatchPreview();
+      staged.delete(unstage.getAttribute("data-batch-remove"));
+      batchRevision += 1;
+      rebuildStaged();
+    } else if (choose && batchList.contains(choose) && stagedCurrent()) {
+      const id = choose.getAttribute("data-batch-select");
+      if (staged.has(id)) {
+        select(id);
+        snippet.value = staged.get(id).replacement;
+        snippet.focus();
+      }
+    }
+  });
+  listen(batchClear, "click", () => {
+    if (disposed) return;
+    clearStaged();
+    message.textContent = "Staged edits cleared. Source is unchanged.";
+  });
+  listen(batchCancel, "click", () => {
+    if (disposed) return;
+    clearBatchPreview();
+    syncControls();
+    message.textContent = "Batch preview discarded. Staged replacements remain; source is unchanged.";
+  });
+  listen(batchPrepare, "click", async () => {
+    if (!current() || !stagedCurrent() || !staged.size || activeEdit || sourceComposing || replacementComposing) return;
+    clearStructural();
+    clearBatchPreview();
+    const operation = { kind: "batch", version: epoch, revision: batchRevision, session, source: sourceEl.value };
+    let started = false;
+    const live = () => current() && operation.version === epoch && operation.revision === batchRevision &&
+      operation.session === session && operation.source === sourceEl.value && activeEdit === operation;
+    try {
+      const transaction = session.beginBatch([...staged.values()]);
+      activeEdit = operation;
+      started = true;
+      syncControls();
+      outEl.setAttribute("aria-busy", "true");
+      message.textContent = `Preparing ${staged.size} source edits — ${backend.target}…`;
+      const response = await backend.batchSource(transaction.source, transaction.edits);
+      if (!live()) return;
+      const change = session.prepareBatch(transaction, response);
+      preparedBatch = { operation, change };
+      batchPreview.textContent = change.changes.map((edit, index) =>
+        `${index + 1}. ${edit.sourceId || edit.elementId} — UTF-8 bytes ${edit.startByte}..${edit.endByte}\n` +
+        `Remove: ${JSON.stringify(edit.previousSnippet)}\nInsert: ${JSON.stringify(edit.replacement)}`
+      ).join("\n\n") + (change.warnings.length ? `\n\nParser warnings: ${change.warnings.join(" ")}` : "");
+      batchPreview.hidden = false;
+      message.textContent = `Review all ${change.changes.length} source changes, then apply or discard the batch. Source is unchanged.`;
+    } catch (error) {
+      if (live() || (!started && current() && operation.version === epoch && operation.revision === batchRevision)) {
+        message.textContent = `Cannot prepare batch: ${error.message || error}`;
+      }
+    } finally {
+      if (activeEdit === operation) {
+        activeEdit = null;
+        outEl.setAttribute("aria-busy", "false");
+        syncControls();
+      }
+    }
+  });
+  listen(batchApply, "click", () => {
+    const prepared = preparedBatch;
+    const operation = prepared?.operation;
+    if (!prepared || !current() || !stagedCurrent() || activeEdit || sourceComposing || replacementComposing ||
+        operation.version !== epoch || operation.revision !== batchRevision ||
+        operation.session !== session || operation.source !== sourceEl.value) {
+      clearBatchPreview();
+      rebuildStaged();
+      if (!disposed) message.textContent = "Batch preview is stale; prepare the edits again.";
+      return;
+    }
+    try {
+      sourceEl.value = session.commitBatch(prepared.change);
+      history.record(sourceEl.value); // Exactly one history entry for the entire transaction.
+      clearStaged();
+      invalidate();
+      message.textContent = "Batch applied. One Undo restores the entire previous source.";
+      onChange();
+    } catch (error) {
+      if (!disposed) message.textContent = `Cannot apply batch: ${error.message || error}`;
+    }
+  });
 
   function syncTabStops() {
     const id = matchedBindings.find((binding) => binding.elementId === selection?.elementId && elements.has(binding.elementId))?.elementId ??
@@ -902,7 +1112,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
 
   function clearSelection() {
     clearStructural();
-    if (activeEdit) {
+    if (activeEdit && activeEdit.kind !== "batch") {
       activeEdit = null;
       backend.cancel();
       outEl.setAttribute("aria-busy", "false");
@@ -919,6 +1129,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   function invalidate() {
     epoch += 1;
     backend.cancel();
+    clearBatchPreview();
     displayedSource = null;
     renderedSvg = null;
     clearSelection();
@@ -926,6 +1137,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     chooser.disabled = true;
     for (const [element, tabindex] of originalTabIndices) {
       element.removeAttribute("data-source-editable");
+      element.removeAttribute("data-source-staged");
       if (tabindex === null) element.removeAttribute("tabindex");
       else element.setAttribute("tabindex", tabindex);
     }
@@ -934,6 +1146,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     renderedLabels = new Map();
     matchedBindings = [];
     searchStatus.textContent = "Render the current source to navigate.";
+    // Keep obsolete drafts visible for recovery, but never revive them when source text returns
+    // to an earlier value. A new render is a new revision even when its bytes are identical.
+    rebuildStaged();
     syncControls();
   }
   function current() {
@@ -951,7 +1166,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     clearSelection();
     selection = session.select(elementId);
     chooser.value = elementId;
-    snippet.value = selection.snippet;
+    snippet.value = stagedCurrent() && staged.has(elementId) ? staged.get(elementId).replacement : selection.snippet;
     snippet.disabled = false;
     apply.disabled = false;
     syncControls();
@@ -1029,6 +1244,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     }
   });
   function discardPreview() {
+    clearBatchPreview();
     if (activeEdit?.kind) {
       activeEdit = null;
       backend.cancel();
@@ -1039,12 +1255,24 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
   listen(insertText, "input", discardPreview);
   listen(snippet, "input", discardPreview);
+  for (const [element, source] of [[sourceEl, true], [snippet, false]]) {
+    listen(element, "compositionstart", () => {
+      if (source) sourceComposing = true;
+      else replacementComposing = true;
+      discardPreview();
+    });
+    listen(element, "compositionend", () => {
+      if (source) sourceComposing = false;
+      else replacementComposing = false;
+      syncControls();
+    });
+  }
   listen(cancel, "click", () => {
     discardPreview();
     message.textContent = "Preview discarded. Source is unchanged.";
   });
   async function prepareStructural(kind) {
-    if (!current() || !selection || activeEdit) return;
+    if (!current() || !selection || activeEdit || staged.size) return;
     clearStructural();
     const operation = { kind, version: epoch, source: sourceEl.value, selection,
       text: kind === "insert" ? insertText.value : "" };
@@ -1107,7 +1335,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
       if (!disposed) message.textContent = "Source changed; select an element from the new preview.";
       return;
     }
-    if (activeEdit) return;
+    if (activeEdit || staged.size) return;
     clearStructural();
     const operation = { version: epoch, source: sourceEl.value, selection, replacement: snippet.value };
     const live = () => !disposed && operation.version === epoch && operation.source === sourceEl.value &&
