@@ -598,7 +598,9 @@ mod tests {
     }
 
     fn endpoint_id(ir: &fm_core::MermaidDiagramIr, endpoint: fm_core::IrEndpoint) -> String {
-        let index = ir.resolve_endpoint_node(endpoint).expect("resolved endpoint");
+        let index = ir
+            .resolve_endpoint_node(endpoint)
+            .expect("resolved endpoint");
         ir.nodes[index.0].id.clone()
     }
 
@@ -613,7 +615,10 @@ mod tests {
             let mut payload = new.clone();
             payload.from = old.from;
             payload.to = old.to;
-            assert_eq!(&payload, old, "edge labels, arrows and styles must not change");
+            assert_eq!(
+                &payload, old,
+                "edge labels, arrows and styles must not change"
+            );
         }
         assert_eq!(before.graph.edges.len(), after.graph.edges.len());
         for (old, new) in before.graph.edges.iter().zip(&after.graph.edges) {
@@ -635,9 +640,12 @@ mod tests {
         assert_eq!(source.nodes.len(), 3);
         let b = source.nodes.iter().position(|node| node.id == "B").unwrap();
         let c = source.nodes.iter().position(|node| node.id == "C").unwrap();
-        assert!(source.style_refs.iter().any(|style| {
-            matches!(style.target, IrStyleTarget::Node(node) if node.0 == b)
-        }));
+        assert!(
+            source
+                .style_refs
+                .iter()
+                .any(|style| { matches!(style.target, IrStyleTarget::Node(node) if node.0 == b) })
+        );
         assert!(!source.clusters.is_empty());
         assert!(!source.graph.subgraphs.is_empty());
         source.ports.push(IrPort {

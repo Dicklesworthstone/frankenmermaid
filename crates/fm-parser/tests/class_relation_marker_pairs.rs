@@ -225,11 +225,7 @@ fn a_single_ended_relation_keeps_its_marker_and_its_end() {
         // The SOURCE-end marker is the primary `ArrowType` whether or not the target end is marked
         // too, so a both-ends row is compared against the canonical spelling carrying the same
         // start marker and no end marker.
-        let canonical_type2 = if row.type1.is_some() {
-            None
-        } else {
-            row.type2
-        };
+        let canonical_type2 = if row.type1.is_some() { None } else { row.type2 };
         let Some(canonical) = reference(row.type1, canonical_type2) else {
             continue;
         };
@@ -395,8 +391,13 @@ fn a_relation_marked_at_both_ends_carries_its_far_marker() {
         // reverse variant to pair against them — see `class_relation_co_arrow`.
         let swaps = row.type1 == Some(3);
         match (both_ends && !swaps, e.co_arrow()) {
-            (true, None) => missing.push(format!("  {:<8} type1={:?} type2={:?}", row.op, row.type1, row.type2)),
-            (false, Some(co)) => spurious.push(format!("  {:<8} unexpected co_arrow {co:?}", row.op)),
+            (true, None) => missing.push(format!(
+                "  {:<8} type1={:?} type2={:?}",
+                row.op, row.type1, row.type2
+            )),
+            (false, Some(co)) => {
+                spurious.push(format!("  {:<8} unexpected co_arrow {co:?}", row.op))
+            }
             _ => {}
         }
     }

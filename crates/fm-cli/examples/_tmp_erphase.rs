@@ -6,8 +6,12 @@ fn main() {
     )
     .unwrap();
     let item = corpus.as_array().map_or(corpus.clone(), |a| a[0].clone());
-    let texts: Vec<String> = item["texts"].as_array().unwrap().iter()
-        .map(|t| t.as_str().unwrap().to_string()).collect();
+    let texts: Vec<String> = item["texts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
     println!("revisions={}", texts.len());
 
     let (mut p, mut l, mut r) = (0u128, 0u128, 0u128);
@@ -31,9 +35,21 @@ fn main() {
         bytes += svg.len();
     }
     let tot = (p + l + r) as f64;
-    println!("parse  {:>8.3} ms  {:>5.1}%", p as f64 / 1e6, 100.0 * p as f64 / tot);
-    println!("layout {:>8.3} ms  {:>5.1}%", l as f64 / 1e6, 100.0 * l as f64 / tot);
-    println!("render {:>8.3} ms  {:>5.1}%", r as f64 / 1e6, 100.0 * r as f64 / tot);
+    println!(
+        "parse  {:>8.3} ms  {:>5.1}%",
+        p as f64 / 1e6,
+        100.0 * p as f64 / tot
+    );
+    println!(
+        "layout {:>8.3} ms  {:>5.1}%",
+        l as f64 / 1e6,
+        100.0 * l as f64 / tot
+    );
+    println!(
+        "render {:>8.3} ms  {:>5.1}%",
+        r as f64 / 1e6,
+        100.0 * r as f64 / tot
+    );
     println!("total  {:>8.3} ms  bytes={bytes}", tot / 1e6);
     println!("algorithm={algo}");
     println!("guard={guard}");

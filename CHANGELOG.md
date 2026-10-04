@@ -2,13 +2,29 @@
 
 All notable changes to **frankenmermaid** are documented here.
 
-Scope window: project inception through HEAD on 2026-08-19.
+Historical scope: project inception through 2026-08-19; the v0.3.0 release section below extends that record through 2026-09-26 and the release fixes.
+
+## v0.3.0 — 2026-10-03
+
+This release includes the post-v0.2.0 engine, batch-rendering and presentation work through owner commit `0a938d76` (2026-09-26), plus the release fixes below. The historical Unreleased sections retain the earlier capability details; this release adds no new performance certification claims.
+
+- Restore the embedded presentation runtime in standalone deck HTML and preserve authored template-marker text without corrupting the manifest.
+- Match full parsing for asymmetric forward-subgraph batch inputs and revalidate changed suffixes, including Unicode identifier boundaries.
+- Bind metadata-only persistent render-cache hits to the canonical source path, preventing an equal-size/equal-mtime file from reusing another file's diagram.
+- Handle maximum packet bit indices and the full u32 range without arithmetic overflow. Charge row expansion and relative coordinate span to the existing layout guardrails; oversized packets use a reported Grid fallback that retains every field and bit range.
+- Supply missing deck defaults in the optional preview server.
+- Install verified native release archives with both command names, pinned minisign support, explicit source/version selection, and retained download stages and previous commands.
+- Update working parser, kernel, numerical, SVG, async and paired WASM dependencies. Keep wgpu 27: the wgpu 30 API requires a separate migration.
+- Point package metadata at the actual unchanged LICENSE, including its rider, and carry that file in native/WASM distributions.
+
+Known limits: explicitly permissive custom layout budgets can authorize excessive packet expansion or coordinates; the default guardrails are the safety boundary verified here. The crates.io and npm packages remain unpublished. The hosted Pages build is a separate venue and its deployment receipt is required before describing it as updated.
 
 ## Version Timeline
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
-| Unreleased | commits on `main` | 2026-07-11 → 2026-08-19 | Equivalence-clean corpora, concurrent CLI, GPU plan, janitor docs-reorg |
+| [`v0.3.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.3.0) | Release | 2026-10-03 | Batch/deck correctness, packet guardrails, native archives |
+| Historical Unreleased | commits on `main` | 2026-07-11 → 2026-08-19 | Equivalence-clean corpora, concurrent CLI, GPU plan, janitor docs-reorg |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0) | Release | 2026-07-11 | First tagged GitHub Release |
 
 > frankenmermaid is a Rust-first, Mermaid-compatible diagram engine with
@@ -18,10 +34,7 @@ Scope window: project inception through HEAD on 2026-08-19.
 > Repository: <https://github.com/Dicklesworthstone/frankenmermaid>
 > Live demo: <https://dicklesworthstone.github.io/frankenmermaid/>
 
-The first tagged release is **[`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0)** (GitHub Release, 2026-07-11) — the workspace is at version `0.2.0`
-across all crates and crates.io publishing is being prepared (see
-[`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md)).
-No later tag or GitHub Release exists; **1,512 commits** on [`main`](https://github.com/Dicklesworthstone/frankenmermaid/compare/v0.2.0...main) after `v0.2.0` are summarized under Unreleased below (through 2026-08-19, HEAD [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82)).
+The first tagged release was **[`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0)** (2026-07-11). The historical sections below summarize 1,512 subsequent commits through 2026-08-19, HEAD [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82). The v0.3.0 section covers the later release boundary; crates.io and npm remain unpublished.
 The sections below are organized chronologically and grouped by capability
 area. Every commit link points to the canonical GitHub history. Beads issue
 identifiers (`bd-XXXX`) reference the dependency-aware task tracker in

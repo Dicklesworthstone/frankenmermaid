@@ -4054,8 +4054,16 @@ const fn merge_uml_markers(
 ) -> Option<(MarkerKind, MarkerKind)> {
     match (primary, co) {
         (Some((ps, pe)), Some((cs, ce))) => Some((
-            if matches!(ps, MarkerKind::None) { cs } else { ps },
-            if matches!(pe, MarkerKind::None) { ce } else { pe },
+            if matches!(ps, MarkerKind::None) {
+                cs
+            } else {
+                ps
+            },
+            if matches!(pe, MarkerKind::None) {
+                ce
+            } else {
+                pe
+            },
         )),
         (Some(pair), None) | (None, Some(pair)) => Some(pair),
         (None, None) => None,

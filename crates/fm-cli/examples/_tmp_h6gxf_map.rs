@@ -32,7 +32,9 @@ fn report(name: &str, src: &str) {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "goldens".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "goldens".to_string());
     match mode.as_str() {
         "goldens" => {
             let dir = "crates/fm-cli/tests/golden";
@@ -43,7 +45,9 @@ fn main() {
                 .collect();
             names.sort();
             for n in names {
-                let Ok(src) = std::fs::read_to_string(format!("{dir}/{n}")) else { continue };
+                let Ok(src) = std::fs::read_to_string(format!("{dir}/{n}")) else {
+                    continue;
+                };
                 report(n.trim_end_matches(".mmd"), &src);
             }
         }
@@ -72,8 +76,11 @@ fn main() {
             };
             for (i, txt) in item["texts"].as_array().unwrap().iter().enumerate() {
                 let ir = fm_parser::parse(txt.as_str().unwrap()).ir;
-                let tr =
-                    fm_layout::layout_diagram_traced_with_algorithm_and_guardrails(&ir, LayoutAlgorithm::Tree, big);
+                let tr = fm_layout::layout_diagram_traced_with_algorithm_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Tree,
+                    big,
+                );
                 let su = fm_layout::layout_diagram_traced_with_algorithm_and_guardrails(
                     &ir,
                     LayoutAlgorithm::Sugiyama,

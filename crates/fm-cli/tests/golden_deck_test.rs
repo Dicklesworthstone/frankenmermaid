@@ -281,6 +281,56 @@ fn deck_talk_html_matches_checked_in_golden() {
 
 // ── Property suites ───────────────────────────────────────────────────
 
+#[test]
+fn deck_html_preserves_authored_template_markers_and_embeds_runtime() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let title = "{{TITLE}} {{BG}} {{FG}} {{MANIFEST_JSON}} {{RUNTIME_JS}} {{SVG_JS_STRING}} RUNTIME_JS </script> α";
+    let source = fs::read_to_string(deck_golden_dir().join("flowchart_subgraphs.mmd"))
+        .expect("fixture")
+        .replace("Subgraph tour", title);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args(["deck", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run deck");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(source.as_bytes())
+        .expect("source");
+    let output = child.wait_with_output().expect("deck result");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let html = String::from_utf8(output.stdout).expect("html");
+    let manifest_block = html
+        .split("<script type=\"application/json\" id=\"deck-manifest\">")
+        .nth(1)
+        .expect("manifest script")
+        .split("</script>")
+        .next()
+        .expect("manifest contents");
+    let manifest: serde_json::Value =
+        serde_json::from_str(manifest_block).expect("valid manifest JSON");
+    assert_eq!(manifest["title"], title);
+    assert!(
+        html.contains(include_str!("../src/deck_runtime.js")),
+        "runtime must be embedded"
+    );
+    assert!(!html.contains("<script>RUNTIME_JS</script>"));
+    assert!(
+        html.contains(&fm_render_svg::escape_xml_text(title)),
+        "literal title must remain escaped HTML"
+    );
+}
+
 /// A generated diagram + deck for the property suites: always a SUPPORTED family
 /// (flowchart), sometimes with a subgraph, with authored/auto/no reveals and each edge
 /// policy — plus arbitrary junk selectors to exercise degradation.

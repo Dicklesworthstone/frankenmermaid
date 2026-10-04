@@ -5837,8 +5837,6 @@ Shared IR,Terminal ANSI,20`
  * textContent (deck text is untrusted; never innerHTML).
  */
 (() => {
-  
-
   var CAMERA_LERP = 0.085; // per-frame approach factor, graphcon's feel
   var SNAP_EPSILON = 0.1; // px: snap-to-target threshold that lets the loop park
   var STAGGER_MS = 90; // per-element reveal interval within a step
@@ -5873,8 +5871,7 @@ Shared IR,Terminal ANSI,20`
   function reducedMotion() {
     try {
       return (
-        typeof matchMedia === "function" &&
-        matchMedia("(prefers-reduced-motion: reduce)").matches
+        typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches
       );
     } catch (_error) {
       return false;
@@ -5940,10 +5937,7 @@ Shared IR,Terminal ANSI,20`
       "opacity:0;transition:opacity .18s ease;}" +
       ".fm-deck-tip.fm-deck-tip-show{opacity:.96;}";
     stage.appendChild(style);
-    stage.style.setProperty(
-      "--fm-deck-dim",
-      String(clamp(manifest.options.dimOpacity, 0, 1))
-    );
+    stage.style.setProperty("--fm-deck-dim", String(clamp(manifest.options.dimOpacity, 0, 1)));
 
     // A11y: the stage is a slideshow region; slide changes are announced politely.
     stage.setAttribute("role", "region");
@@ -6024,10 +6018,7 @@ Shared IR,Terminal ANSI,20`
     /* ── Morph model (graphcon parity, bd-tm1q7) ─────────────────── */
 
     var morphEnabled =
-      !reducedMotion() &&
-      !!geometryOf &&
-      !!endpointsOf &&
-      Object.keys(geometryOf).length > 0;
+      !reducedMotion() && !!geometryOf && !!endpointsOf && Object.keys(geometryOf).length > 0;
     var morphNodes = Object.create(null); // elementId -> node motion state
     var morphNodeIds = [];
     var liveEdges = [];
@@ -6044,11 +6035,7 @@ Shared IR,Terminal ANSI,20`
       if (!dx && !dy) return [node.fx, node.fy];
       var hw = node.hw + 4;
       var hh = node.hh + 4;
-      var scale = Math.min(
-        dx ? hw / Math.abs(dx) : Infinity,
-        dy ? hh / Math.abs(dy) : Infinity,
-        1
-      );
+      var scale = Math.min(dx ? hw / Math.abs(dx) : Infinity, dy ? hh / Math.abs(dy) : Infinity, 1);
       return [node.fx + dx * scale, node.fy + dy * scale];
     }
 
@@ -6100,12 +6087,18 @@ Shared IR,Terminal ANSI,20`
           return;
         }
         // Engine edges are groups wrapping a path; hand-authored fixtures may use bare paths.
-        var enginePath =
-          group.tagName === "path" ? group : group.querySelector("path");
+        var enginePath = group.tagName === "path" ? group : group.querySelector("path");
         if (!enginePath) return;
         var live = document.createElementNS("http://www.w3.org/2000/svg", "path");
         // Inherit the engine path's look (theme classes, width, dash, arrow markers).
-        var carry = ["class", "stroke", "stroke-width", "stroke-dasharray", "marker-start", "marker-end"];
+        var carry = [
+          "class",
+          "stroke",
+          "stroke-width",
+          "stroke-dasharray",
+          "marker-start",
+          "marker-end",
+        ];
         for (var c = 0; c < carry.length; c += 1) {
           var value = enginePath.getAttribute(carry[c]);
           if (value !== null) live.setAttribute(carry[c], value);
@@ -6193,7 +6186,7 @@ Shared IR,Terminal ANSI,20`
       var scale = Math.min(
         size.w / (bounds.width + margin * 2),
         size.h / (bounds.height + margin * 2),
-        zoomMax
+        zoomMax,
       );
       return {
         x: bounds.x + bounds.width / 2,
@@ -6404,8 +6397,12 @@ Shared IR,Terminal ANSI,20`
 
     function updateChrome() {
       var slide = currentSlide();
-      var title = slide ? slide.title : (manifest.overview && manifest.overview.title) || "Overview";
-      var caption = slide ? slide.caption || "" : (manifest.overview && manifest.overview.caption) || "";
+      var title = slide
+        ? slide.title
+        : (manifest.overview && manifest.overview.title) || "Overview";
+      var caption = slide
+        ? slide.caption || ""
+        : (manifest.overview && manifest.overview.caption) || "";
       if (ui.title) ui.title.textContent = title;
       if (ui.caption) ui.caption.textContent = caption;
       if (ui.num) {
@@ -6572,7 +6569,11 @@ Shared IR,Terminal ANSI,20`
           var loop = edge.from;
           edge.group.setAttribute(
             "transform",
-            "translate(" + (loop.fx - loop.hx).toFixed(2) + " " + (loop.fy - loop.hy).toFixed(2) + ")"
+            "translate(" +
+              (loop.fx - loop.hx).toFixed(2) +
+              " " +
+              (loop.fy - loop.hy).toFixed(2) +
+              ")",
           );
           continue;
         }
@@ -6580,14 +6581,21 @@ Shared IR,Terminal ANSI,20`
         var b = borderPoint(edge.to, edge.from.fx, edge.from.fy);
         edge.live.setAttribute(
           "d",
-          "M " + a[0].toFixed(2) + " " + a[1].toFixed(2) + " L " + b[0].toFixed(2) + " " + b[1].toFixed(2)
+          "M " +
+            a[0].toFixed(2) +
+            " " +
+            a[1].toFixed(2) +
+            " L " +
+            b[0].toFixed(2) +
+            " " +
+            b[1].toFixed(2),
         );
         // The label (still inside the parked engine group) rides to the live midpoint.
         var mx = (a[0] + b[0]) / 2;
         var my = (a[1] + b[1]) / 2;
         edge.group.setAttribute(
           "transform",
-          "translate(" + (mx - edge.mx0).toFixed(2) + " " + (my - edge.my0).toFixed(2) + ")"
+          "translate(" + (mx - edge.mx0).toFixed(2) + " " + (my - edge.my0).toFixed(2) + ")",
         );
       }
     }

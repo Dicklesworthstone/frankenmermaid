@@ -65,7 +65,11 @@ impl DiagramDiff {
 
     fn structural_snapshot(&self, details: bool) -> structural::DiagramDiff {
         structural::DiagramDiff {
-            nodes: if details { self.nodes.clone() } else { Vec::new() },
+            nodes: if details {
+                self.nodes.clone()
+            } else {
+                Vec::new()
+            },
             edges: if details {
                 self.edges.iter().map(structural_edge).collect()
             } else {
@@ -89,19 +93,32 @@ fn structural_edge(edge: &DiffEdge) -> structural::DiffEdge {
         to_id: edge.to_id.clone(),
         status: edge.status,
         arrow: edge.arrow,
-        changes: edge.changes.iter().filter_map(|change| match change {
-            EdgeChange::ArrowChanged { old, new } => Some(structural::EdgeChange::ArrowChanged {
-                old: *old, new: *new,
-            }),
-            EdgeChange::LabelChanged { old, new } => Some(structural::EdgeChange::LabelChanged {
-                old: old.clone(), new: new.clone(),
-            }),
-            EdgeChange::ErNotationChanged { old, new } => Some(structural::EdgeChange::ErNotationChanged {
-                old: old.clone(), new: new.clone(),
-            }),
-            // The detailed before/after explanation is appended under Element Details.
-            EdgeChange::MetadataChanged => None,
-        }).collect(),
+        changes: edge
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                EdgeChange::ArrowChanged { old, new } => {
+                    Some(structural::EdgeChange::ArrowChanged {
+                        old: *old,
+                        new: *new,
+                    })
+                }
+                EdgeChange::LabelChanged { old, new } => {
+                    Some(structural::EdgeChange::LabelChanged {
+                        old: old.clone(),
+                        new: new.clone(),
+                    })
+                }
+                EdgeChange::ErNotationChanged { old, new } => {
+                    Some(structural::EdgeChange::ErNotationChanged {
+                        old: old.clone(),
+                        new: new.clone(),
+                    })
+                }
+                // The detailed before/after explanation is appended under Element Details.
+                EdgeChange::MetadataChanged => None,
+            })
+            .collect(),
     }
 }
 
@@ -109,7 +126,12 @@ fn structural_edge(edge: &DiffEdge) -> structural::DiffEdge {
 #[must_use]
 pub fn diff_diagrams(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> DiagramDiff {
     let structural::DiagramDiff {
-        nodes, added_nodes, removed_nodes, changed_nodes, unchanged_nodes, ..
+        nodes,
+        added_nodes,
+        removed_nodes,
+        changed_nodes,
+        unchanged_nodes,
+        ..
     } = structural::diff_diagrams(old, new);
     let edges = elements::diff_edges(old, new);
     let mut diff = DiagramDiff {
@@ -211,13 +233,11 @@ pub fn render_diff_terminal_with_config(
     let diff = diff_diagrams(old, new);
     // The old renderer computes graph-only counts internally. Match THAT summary,
     // not the augmented counts: metadata-only edits can promote nodes/edges to Changed.
-    let old_summary = structural::render_diff_summary(
-        &structural::diff_diagrams(old, new), use_colors,
-    );
-    let mut output = structural::render_diff_terminal_with_config(
-        old, new, config, cols, rows, use_colors,
-    )
-    .replacen(&old_summary, &render_diff_summary(&diff, use_colors), 1);
+    let old_summary =
+        structural::render_diff_summary(&structural::diff_diagrams(old, new), use_colors);
+    let mut output =
+        structural::render_diff_terminal_with_config(old, new, config, cols, rows, use_colors)
+            .replacen(&old_summary, &render_diff_summary(&diff, use_colors), 1);
     append_details(&mut output, &diff, use_colors);
     output
 }

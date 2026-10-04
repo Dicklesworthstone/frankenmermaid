@@ -191,6 +191,7 @@ fi
 
 echo "==> Syncing npm package metadata"
 cp "$ROOT_DIR/README.md" "$OUT_DIR/README.md"
+cp "$ROOT_DIR/LICENSE" "$OUT_DIR/LICENSE"
 PACKAGE_JSON="$OUT_DIR/package.json" \
 PACKAGE_NAME="$PACKAGE_NAME" \
 PACKAGE_DESCRIPTION="$PACKAGE_DESCRIPTION" \
@@ -209,6 +210,7 @@ from pathlib import Path
 package_json = Path(os.environ["PACKAGE_JSON"])
 payload = json.loads(package_json.read_text())
 payload["name"] = os.environ["PACKAGE_NAME"]
+payload["license"] = "SEE LICENSE IN LICENSE"
 payload["description"] = os.environ["PACKAGE_DESCRIPTION"]
 payload["repository"] = {
     "type": "git",
@@ -219,6 +221,7 @@ payload["bugs"] = {"url": os.environ["PACKAGE_BUGS_URL"]}
 payload["keywords"] = ["mermaid", "diagram", "wasm", "svg", "canvas"]
 payload["frankenmermaidSourceSha256"] = os.environ["SOURCE_SHA256"]
 payload["files"] = [
+    "LICENSE",
     "README.md",
     "frankenmermaid_bg.wasm",
     "frankenmermaid.js",

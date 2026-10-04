@@ -1825,6 +1825,9 @@ impl CompiledFlowchartPrefix {
     }
 
     pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
+        if !can_reuse_flowchart_prefix(input, self.prefix.as_ref()) {
+            return None;
+        }
         let suffix = input.strip_prefix(self.prefix.as_ref())?;
         let mut builder = self.builder.clone();
         parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
@@ -1839,6 +1842,9 @@ impl CompiledFlowchartPrefix {
         input: &str,
         scratch: &'a mut CompiledFlowchartScratch,
     ) -> Option<FlowchartBatchParseRef<'a>> {
+        if !can_reuse_flowchart_prefix(input, self.prefix.as_ref()) {
+            return None;
+        }
         let suffix = input.strip_prefix(self.prefix.as_ref())?;
         let same_prefix = scratch
             .prefix_identity
@@ -1918,7 +1924,7 @@ fn mentions_identifier(haystack: &str, token: &str) -> bool {
         if starts_clean && ends_clean {
             return true;
         }
-        from = start + 1;
+        from = start + token.chars().next().map_or(1, char::len_utf8);
     }
     false
 }
@@ -2075,6 +2081,7 @@ pub(crate) fn can_reuse_flowchart_prefix(input: &str, prefix: &str) -> bool {
         return false;
     };
     !suffix.is_empty()
+        && !suffix_declares_a_subgraph_named_in_prefix(prefix, suffix)
         && !byte_lines(suffix)
             .map(trim_fast)
             .any(shared_prefix_global_directive)
@@ -8561,7 +8568,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                             // `start-end` span, as before; the geometry below is recorded for
                             // single-bit fields too.
                             if range.contains('-') {
-                                let bit_width = end - start + 1;
+                                let bit_width = u64::from(end) - u64::from(start) + 1;
                                 builder.add_class_to_node_id(
                                     node_id,
                                     &format!("packet-bits-{bit_width}"),
@@ -17085,6 +17092,22 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identifier_mentions_preserve_unicode_and_overlapping_boundaries() {
+        for (haystack, token, expected) in [
+            ("αbeta", "α", false),
+            ("αbeta α", "α", true),
+            ("αα", "α", true),
+            ("aaa aa", "aa", true),
+            ("aaa", "aa", false),
+            ("Latex Late", "Late", true),
+            ("Latex", "Late", false),
+            ("anything", "", false),
+        ] {
+            assert_eq!(super::mentions_identifier(haystack, token), expected);
+        }
+    }
+
     /// ⚠️ LIB-LEVEL GUARD, PLACED IN THE SAME FILE AS THE FUNCTION IT PROTECTS.
     ///
     /// `flow_forward_subgraph_members` has had its `resolved.insert` deleted THREE times

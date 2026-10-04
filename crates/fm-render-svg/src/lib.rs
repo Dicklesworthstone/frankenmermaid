@@ -14784,163 +14784,163 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // draws it there (bd-f9t0r), so the second marker is read out of THIS mapping rather than a
     // second copy of it that could drift. Previously this was an inline `match arrow`.
     let edge_visuals = |arrow: ArrowType| -> (Option<&str>, Option<&str>, Option<&str>, &str) {
-            match arrow {
-                ArrowType::Line | ArrowType::ThickLine => (None, None, None, &colors.edge),
-                ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
-                ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
-                ArrowType::HalfArrowTop => (None, None, Some("url(#arrow-half-top)"), &colors.edge),
-                ArrowType::HalfArrowBottom => {
-                    (None, None, Some("url(#arrow-half-bottom)"), &colors.edge)
-                }
-                ArrowType::HalfArrowTopReverse => {
-                    (None, Some("url(#arrow-half-bottom)"), None, &colors.edge)
-                }
-                ArrowType::HalfArrowBottomReverse => {
-                    (None, Some("url(#arrow-half-top)"), None, &colors.edge)
-                }
-                ArrowType::StickArrowTop => (None, None, Some("url(#arrow-stick-top)"), &colors.edge),
-                ArrowType::StickArrowBottom => {
-                    (None, None, Some("url(#arrow-stick-bottom)"), &colors.edge)
-                }
-                ArrowType::StickArrowTopReverse => {
-                    (None, Some("url(#arrow-stick-bottom)"), None, &colors.edge)
-                }
-                ArrowType::StickArrowBottomReverse => {
-                    (None, Some("url(#arrow-stick-top)"), None, &colors.edge)
-                }
-                ArrowType::ThickArrow => (None, None, Some("url(#arrow-filled)"), &colors.edge),
-                ArrowType::DottedArrow => (Some("5,5"), None, Some("url(#arrow-end)"), &colors.edge),
-                ArrowType::DottedOpenArrow => {
-                    (Some("5,5"), None, Some("url(#arrow-open)"), &colors.edge)
-                }
-                ArrowType::DottedCross => (Some("5,5"), None, Some("url(#arrow-cross)"), &colors.edge),
-                ArrowType::HalfArrowTopDotted => (
-                    Some("5,5"),
-                    None,
-                    Some("url(#arrow-half-top)"),
-                    &colors.edge,
-                ),
-                ArrowType::HalfArrowBottomDotted => (
-                    Some("5,5"),
-                    None,
-                    Some("url(#arrow-half-bottom)"),
-                    &colors.edge,
-                ),
-                ArrowType::HalfArrowTopReverseDotted => (
-                    Some("5,5"),
-                    Some("url(#arrow-half-bottom)"),
-                    None,
-                    &colors.edge,
-                ),
-                ArrowType::HalfArrowBottomReverseDotted => (
-                    Some("5,5"),
-                    Some("url(#arrow-half-top)"),
-                    None,
-                    &colors.edge,
-                ),
-                ArrowType::StickArrowTopDotted => (
-                    Some("5,5"),
-                    None,
-                    Some("url(#arrow-stick-top)"),
-                    &colors.edge,
-                ),
-                ArrowType::StickArrowBottomDotted => (
-                    Some("5,5"),
-                    None,
-                    Some("url(#arrow-stick-bottom)"),
-                    &colors.edge,
-                ),
-                ArrowType::StickArrowTopReverseDotted => (
-                    Some("5,5"),
-                    Some("url(#arrow-stick-bottom)"),
-                    None,
-                    &colors.edge,
-                ),
-                ArrowType::StickArrowBottomReverseDotted => (
-                    Some("5,5"),
-                    Some("url(#arrow-stick-top)"),
-                    None,
-                    &colors.edge,
-                ),
-                ArrowType::Circle | ArrowType::ThickCircle => {
-                    (None, None, Some("url(#arrow-circle)"), &colors.edge)
-                }
-                ArrowType::Cross | ArrowType::ThickCross => {
-                    (None, None, Some("url(#arrow-cross)"), &colors.edge)
-                }
-                ArrowType::DottedCircle => {
-                    (Some("5,5"), None, Some("url(#arrow-circle)"), &colors.edge)
-                }
-                ArrowType::CircleBoth | ArrowType::ThickCircleBoth => (
-                    None,
-                    Some("url(#arrow-circle)"),
-                    Some("url(#arrow-circle)"),
-                    &colors.edge,
-                ),
-                ArrowType::DottedCircleBoth => (
-                    Some("5,5"),
-                    Some("url(#arrow-circle)"),
-                    Some("url(#arrow-circle)"),
-                    &colors.edge,
-                ),
-                ArrowType::CrossBoth | ArrowType::ThickCrossBoth => (
-                    None,
-                    Some("url(#arrow-cross)"),
-                    Some("url(#arrow-cross)"),
-                    &colors.edge,
-                ),
-                ArrowType::DottedCrossBoth => (
-                    Some("5,5"),
-                    Some("url(#arrow-cross)"),
-                    Some("url(#arrow-cross)"),
-                    &colors.edge,
-                ),
-                ArrowType::DottedLine => (Some("5,5"), None, None, &colors.edge),
-                ArrowType::DoubleArrow => (
-                    None,
-                    Some("url(#arrow-start)"),
-                    Some("url(#arrow-end)"),
-                    &colors.edge,
-                ),
-                ArrowType::DoubleThickArrow => (
-                    None,
-                    Some("url(#arrow-start-filled)"),
-                    Some("url(#arrow-filled)"),
-                    &colors.edge,
-                ),
-                ArrowType::DoubleDottedArrow => (
-                    Some("5,5"),
-                    Some("url(#arrow-start)"),
-                    Some("url(#arrow-end)"),
-                    &colors.edge,
-                ),
-                // UML aggregation/composition put the diamond on the OWNING end, which is the source for
-                // `o--`/`*--` and the target for the reversed `--o`/`--*` — hence marker-start vs -end
-                // rather than one variant plus a flag. Hollow diamond = aggregation, filled = composition.
-                ArrowType::Aggregation => (None, Some("url(#arrow-diamond-open)"), None, &colors.edge),
-                ArrowType::AggregationReverse => {
-                    (None, None, Some("url(#arrow-diamond-open)"), &colors.edge)
-                }
-                ArrowType::Composition => (None, Some("url(#arrow-diamond)"), None, &colors.edge),
-                ArrowType::CompositionReverse => {
-                    (None, None, Some("url(#arrow-diamond)"), &colors.edge)
-                }
-                // UML generalization: hollow triangle on the PARENT end. `Animal <|-- Dog` reads "Dog
-                // inherits Animal", so the parent is the source; `--|>` puts it at the target.
-                ArrowType::Inheritance => (
-                    None,
-                    Some("url(#start-arrow-triangle-open)"),
-                    None,
-                    &colors.edge,
-                ),
-                ArrowType::InheritanceReverse => {
-                    (None, None, Some("url(#arrow-triangle-open)"), &colors.edge)
-                }
-                // UML lollipop: the socket marks the end that PROVIDES the interface — the source for
-                // `()--`, the target for `--()`. Same start/end split as the diamonds above.
-                ArrowType::Lollipop => (None, Some("url(#start-arrow-lollipop)"), None, &colors.edge),
-                ArrowType::LollipopReverse => (None, None, Some("url(#arrow-lollipop)"), &colors.edge),
+        match arrow {
+            ArrowType::Line | ArrowType::ThickLine => (None, None, None, &colors.edge),
+            ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
+            ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
+            ArrowType::HalfArrowTop => (None, None, Some("url(#arrow-half-top)"), &colors.edge),
+            ArrowType::HalfArrowBottom => {
+                (None, None, Some("url(#arrow-half-bottom)"), &colors.edge)
             }
+            ArrowType::HalfArrowTopReverse => {
+                (None, Some("url(#arrow-half-bottom)"), None, &colors.edge)
+            }
+            ArrowType::HalfArrowBottomReverse => {
+                (None, Some("url(#arrow-half-top)"), None, &colors.edge)
+            }
+            ArrowType::StickArrowTop => (None, None, Some("url(#arrow-stick-top)"), &colors.edge),
+            ArrowType::StickArrowBottom => {
+                (None, None, Some("url(#arrow-stick-bottom)"), &colors.edge)
+            }
+            ArrowType::StickArrowTopReverse => {
+                (None, Some("url(#arrow-stick-bottom)"), None, &colors.edge)
+            }
+            ArrowType::StickArrowBottomReverse => {
+                (None, Some("url(#arrow-stick-top)"), None, &colors.edge)
+            }
+            ArrowType::ThickArrow => (None, None, Some("url(#arrow-filled)"), &colors.edge),
+            ArrowType::DottedArrow => (Some("5,5"), None, Some("url(#arrow-end)"), &colors.edge),
+            ArrowType::DottedOpenArrow => {
+                (Some("5,5"), None, Some("url(#arrow-open)"), &colors.edge)
+            }
+            ArrowType::DottedCross => (Some("5,5"), None, Some("url(#arrow-cross)"), &colors.edge),
+            ArrowType::HalfArrowTopDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-half-top)"),
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowBottomDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-half-bottom)"),
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowTopReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-half-bottom)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::HalfArrowBottomReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-half-top)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::StickArrowTopDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-stick-top)"),
+                &colors.edge,
+            ),
+            ArrowType::StickArrowBottomDotted => (
+                Some("5,5"),
+                None,
+                Some("url(#arrow-stick-bottom)"),
+                &colors.edge,
+            ),
+            ArrowType::StickArrowTopReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-stick-bottom)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::StickArrowBottomReverseDotted => (
+                Some("5,5"),
+                Some("url(#arrow-stick-top)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::Circle | ArrowType::ThickCircle => {
+                (None, None, Some("url(#arrow-circle)"), &colors.edge)
+            }
+            ArrowType::Cross | ArrowType::ThickCross => {
+                (None, None, Some("url(#arrow-cross)"), &colors.edge)
+            }
+            ArrowType::DottedCircle => {
+                (Some("5,5"), None, Some("url(#arrow-circle)"), &colors.edge)
+            }
+            ArrowType::CircleBoth | ArrowType::ThickCircleBoth => (
+                None,
+                Some("url(#arrow-circle)"),
+                Some("url(#arrow-circle)"),
+                &colors.edge,
+            ),
+            ArrowType::DottedCircleBoth => (
+                Some("5,5"),
+                Some("url(#arrow-circle)"),
+                Some("url(#arrow-circle)"),
+                &colors.edge,
+            ),
+            ArrowType::CrossBoth | ArrowType::ThickCrossBoth => (
+                None,
+                Some("url(#arrow-cross)"),
+                Some("url(#arrow-cross)"),
+                &colors.edge,
+            ),
+            ArrowType::DottedCrossBoth => (
+                Some("5,5"),
+                Some("url(#arrow-cross)"),
+                Some("url(#arrow-cross)"),
+                &colors.edge,
+            ),
+            ArrowType::DottedLine => (Some("5,5"), None, None, &colors.edge),
+            ArrowType::DoubleArrow => (
+                None,
+                Some("url(#arrow-start)"),
+                Some("url(#arrow-end)"),
+                &colors.edge,
+            ),
+            ArrowType::DoubleThickArrow => (
+                None,
+                Some("url(#arrow-start-filled)"),
+                Some("url(#arrow-filled)"),
+                &colors.edge,
+            ),
+            ArrowType::DoubleDottedArrow => (
+                Some("5,5"),
+                Some("url(#arrow-start)"),
+                Some("url(#arrow-end)"),
+                &colors.edge,
+            ),
+            // UML aggregation/composition put the diamond on the OWNING end, which is the source for
+            // `o--`/`*--` and the target for the reversed `--o`/`--*` — hence marker-start vs -end
+            // rather than one variant plus a flag. Hollow diamond = aggregation, filled = composition.
+            ArrowType::Aggregation => (None, Some("url(#arrow-diamond-open)"), None, &colors.edge),
+            ArrowType::AggregationReverse => {
+                (None, None, Some("url(#arrow-diamond-open)"), &colors.edge)
+            }
+            ArrowType::Composition => (None, Some("url(#arrow-diamond)"), None, &colors.edge),
+            ArrowType::CompositionReverse => {
+                (None, None, Some("url(#arrow-diamond)"), &colors.edge)
+            }
+            // UML generalization: hollow triangle on the PARENT end. `Animal <|-- Dog` reads "Dog
+            // inherits Animal", so the parent is the source; `--|>` puts it at the target.
+            ArrowType::Inheritance => (
+                None,
+                Some("url(#start-arrow-triangle-open)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::InheritanceReverse => {
+                (None, None, Some("url(#arrow-triangle-open)"), &colors.edge)
+            }
+            // UML lollipop: the socket marks the end that PROVIDES the interface — the source for
+            // `()--`, the target for `--()`. Same start/end split as the diamonds above.
+            ArrowType::Lollipop => (None, Some("url(#start-arrow-lollipop)"), None, &colors.edge),
+            ArrowType::LollipopReverse => (None, None, Some("url(#arrow-lollipop)"), &colors.edge),
+        }
     };
 
     let (base_dasharray, marker_start, marker_end, base_color): (

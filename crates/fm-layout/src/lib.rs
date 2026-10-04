@@ -4883,7 +4883,10 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Kanban => {
             matches!(diagram_type, DiagramType::Journey | DiagramType::Kanban)
         }
-        LayoutAlgorithm::Grid => matches!(diagram_type, DiagramType::BlockBeta),
+        LayoutAlgorithm::Grid => matches!(
+            diagram_type,
+            DiagramType::BlockBeta | DiagramType::PacketBeta
+        ),
         LayoutAlgorithm::Sequence => matches!(diagram_type, DiagramType::Sequence),
         LayoutAlgorithm::Pie => matches!(diagram_type, DiagramType::Pie),
         LayoutAlgorithm::Quadrant => matches!(diagram_type, DiagramType::QuadrantChart),
@@ -5066,6 +5069,38 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             iterations: nodes.saturating_add(4),
             route_ops: edges.saturating_mul(2).saturating_add(nodes),
         },
+        LayoutAlgorithm::Packet => {
+            // A single logical field can materialize millions of row pieces. Admit that work
+            // through the same central guardrails as every other layout, before allocating it.
+            let pieces = ir.packet_meta.as_ref().map_or(nodes, |packet| {
+                packet.fields.iter().filter(|field| field.node.0 < nodes
+                    && field.start_bit <= field.end_bit).fold(nodes, |work, field| {
+                    let rows = u64::from(field.end_bit / PACKET_BITS_PER_ROW)
+                        - u64::from(field.start_bit / PACKET_BITS_PER_ROW) + 1;
+                    work.saturating_add(usize::try_from(rows.saturating_sub(1)).unwrap_or(usize::MAX))
+                })
+            });
+            // Large gaps between short fields can also erase positive-height geometry in
+            // f32. Charge the relative row span to this admission, not the absolute bit index.
+            let row_span = ir.packet_meta.as_ref().and_then(|packet| {
+                packet.fields.iter().filter(|field| field.node.0 < nodes
+                    && field.start_bit <= field.end_bit).fold(None, |span, field| {
+                    let first = field.start_bit / PACKET_BITS_PER_ROW;
+                    let last = field.end_bit / PACKET_BITS_PER_ROW;
+                    Some(span.map_or((first, last), |(min, max): (u32, u32)| {
+                        (min.min(first), max.max(last))
+                    }))
+                })
+            }).map_or(0, |(first, last)| {
+                usize::try_from(u64::from(last) - u64::from(first) + 1).unwrap_or(usize::MAX)
+            });
+            let pieces = pieces.max(row_span);
+            LayoutCostEstimate {
+                time_ms: pieces.saturating_mul(3).saturating_add(edges.saturating_mul(2)).saturating_add(6),
+                iterations: pieces.saturating_add(2),
+                route_ops: edges.saturating_mul(6).saturating_add(pieces),
+            }
+        },
         LayoutAlgorithm::Timeline
         | LayoutAlgorithm::Gantt
         | LayoutAlgorithm::XyChart
@@ -5076,7 +5111,6 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         | LayoutAlgorithm::Quadrant
         | LayoutAlgorithm::GitGraph
         | LayoutAlgorithm::Architecture
-        | LayoutAlgorithm::Packet
         // Squarify is a single descending-sorted pass per sibling group: cheap and linear.
         | LayoutAlgorithm::Treemap
         // Polar placement is one trig call per vertex.
@@ -8978,7 +9012,16 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // fallback parse produced) is handled exactly once below.
     let mut boxes: Vec<Option<LayoutRect>> = vec![None; node_count];
     let mut continuations: Vec<LayoutPacketFieldContinuation> = Vec::new();
-    let mut max_row = 0_u32;
+    let bits_per_row = u64::from(PACKET_BITS_PER_ROW);
+    // Rebasing avoids losing a small field's geometry at the u32 bit-index limit.
+    let row_origin = packet
+        .fields
+        .iter()
+        .filter(|field| field.node.0 < node_count && field.start_bit <= field.end_bit)
+        .map(|field| u64::from(field.start_bit) / bits_per_row)
+        .min()
+        .unwrap_or(0);
+    let mut max_row = 0_u64;
     for field in &packet.fields {
         let Some(slot) = boxes.get_mut(field.node.0) else {
             continue;
@@ -8991,16 +9034,18 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         // piece keeping the field's label (bd-8vr0). Each piece is `bits * PACKET_BIT_WIDTH` wide,
         // so the pieces still sum to the field's exact bit-proportional width and no piece ever
         // extends past its row.
-        let mut cursor = field.start_bit;
+        let mut cursor = u64::from(field.start_bit);
+        let end_bit = u64::from(field.end_bit);
         let mut segment = 0_usize;
-        while cursor <= field.end_bit {
-            let row = cursor / PACKET_BITS_PER_ROW;
-            let row_last_bit = (row + 1) * PACKET_BITS_PER_ROW - 1;
-            let piece_end = field.end_bit.min(row_last_bit);
-            max_row = max_row.max(row);
+        while cursor <= end_bit {
+            let row = cursor / bits_per_row;
+            let row_last_bit = (row + 1) * bits_per_row - 1;
+            let piece_end = end_bit.min(row_last_bit);
+            let relative_row = row - row_origin;
+            max_row = max_row.max(relative_row);
             let rect = LayoutRect {
-                x: (cursor % PACKET_BITS_PER_ROW) as f32 * PACKET_BIT_WIDTH,
-                y: row as f32 * row_pitch,
+                x: (cursor % bits_per_row) as f32 * PACKET_BIT_WIDTH,
+                y: relative_row as f32 * row_pitch,
                 width: (piece_end - cursor + 1) as f32 * PACKET_BIT_WIDTH,
                 height: row_height,
             };

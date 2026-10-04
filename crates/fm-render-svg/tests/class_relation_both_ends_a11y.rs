@@ -55,7 +55,9 @@ fn a_relation_marked_at_both_ends_names_both_ends_in_its_accessible_text() {
             continue;
         };
         if edge.co_arrow().is_none() {
-            wrong.push(format!("  {op:<7} carries no co_arrow, so it cannot name a far end"));
+            wrong.push(format!(
+                "  {op:<7} carries no co_arrow, so it cannot name a far end"
+            ));
             continue;
         }
 
@@ -63,7 +65,11 @@ fn a_relation_marked_at_both_ends_names_both_ends_in_its_accessible_text() {
         if !svg.contains(near) || !svg.contains(far) {
             wrong.push(format!(
                 "  {op:<7} missing {}: expected both {near:?} and {far:?}",
-                if svg.contains(near) { "the FAR phrase" } else { "the NEAR phrase" },
+                if svg.contains(near) {
+                    "the FAR phrase"
+                } else {
+                    "the NEAR phrase"
+                },
             ));
         }
     }
@@ -97,7 +103,10 @@ fn a_single_ended_relation_still_names_exactly_one_end() {
             "`{op}` is single-ended but carries a co_arrow"
         );
         let svg = render(&source);
-        assert!(svg.contains(phrase), "`{op}` lost its own phrase {phrase:?}");
+        assert!(
+            svg.contains(phrase),
+            "`{op}` lost its own phrase {phrase:?}"
+        );
         assert!(
             !svg.contains(absent),
             "`{op}` gained a far-end phrase {absent:?} it has no marker for"

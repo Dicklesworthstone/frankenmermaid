@@ -1,21 +1,24 @@
 //! Public-API regressions for changes that leave the graph topology unchanged.
 
 use fm_core::{
-    Diagnostic, DiagramType, GanttDate, IrGanttMeta, IrGanttTask, IrNode, IrNodeId,
-    IrRadarAxis, IrRadarCurve, IrRadarMeta, IrTreemapItem, IrTreemapMeta,
-    MermaidDiagramIr, Span,
+    Diagnostic, DiagramType, GanttDate, IrGanttMeta, IrGanttTask, IrNode, IrNodeId, IrRadarAxis,
+    IrRadarCurve, IrRadarMeta, IrTreemapItem, IrTreemapMeta, MermaidDiagramIr, Span,
 };
 use fm_render_term::diff::{
-    diff_diagrams, render_diff_plain, render_diff_summary, render_diff_terminal,
-    structural,
+    diff_diagrams, render_diff_plain, render_diff_summary, render_diff_terminal, structural,
 };
 
 fn assert_field(old: &MermaidDiagramIr, new: &MermaidDiagramIr, field: &str) {
     let diff = diff_diagrams(old, new);
     assert!(diff.has_changes(), "{field} must affect has_changes");
-    assert!(diff.total_changes() > 0, "{field} must affect total_changes");
     assert!(
-        diff.diagram_changes.iter().any(|change| change.field == field),
+        diff.total_changes() > 0,
+        "{field} must affect total_changes"
+    );
+    assert!(
+        diff.diagram_changes
+            .iter()
+            .any(|change| change.field == field),
         "missing {field}: {:?}",
         diff.diagram_changes
     );
@@ -35,24 +38,38 @@ fn sequence_note_edit_is_not_reported_as_identical() {
 
 #[test]
 fn sequence_message_reordering_is_semantic_not_just_a_multiset() {
-    let old = fm_parser::parse("sequenceDiagram\nparticipant A\nparticipant B\nA->>B: first\nA->>B: second\n").ir;
-    let new = fm_parser::parse("sequenceDiagram\nparticipant A\nparticipant B\nA->>B: second\nA->>B: first\n").ir;
+    let old = fm_parser::parse(
+        "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: first\nA->>B: second\n",
+    )
+    .ir;
+    let new = fm_parser::parse(
+        "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: second\nA->>B: first\n",
+    )
+    .ir;
     assert!(!structural::diff_diagrams(&old, &new).has_changes());
     assert_field(&old, &new, "sequence.message_order");
 }
 
 #[test]
 fn sequence_participant_order_is_observable() {
-    let old = fm_parser::parse("sequenceDiagram\nparticipant A\nparticipant B\nA->>B: request\n").ir;
-    let new = fm_parser::parse("sequenceDiagram\nparticipant B\nparticipant A\nA->>B: request\n").ir;
+    let old =
+        fm_parser::parse("sequenceDiagram\nparticipant A\nparticipant B\nA->>B: request\n").ir;
+    let new =
+        fm_parser::parse("sequenceDiagram\nparticipant B\nparticipant A\nA->>B: request\n").ir;
     assert_field(&old, &new, "sequence.participant_order");
 }
 
 #[test]
 fn sequence_activation_and_numbering_are_compared() {
     for (old_source, new_source) in [
-        ("sequenceDiagram\nA->>B: call\n", "sequenceDiagram\nautonumber\nA->>B: call\n"),
-        ("sequenceDiagram\nA->>B: call\n", "sequenceDiagram\nA->>+B: call\ndeactivate B\n"),
+        (
+            "sequenceDiagram\nA->>B: call\n",
+            "sequenceDiagram\nautonumber\nA->>B: call\n",
+        ),
+        (
+            "sequenceDiagram\nA->>B: call\n",
+            "sequenceDiagram\nA->>+B: call\ndeactivate B\n",
+        ),
     ] {
         let old = fm_parser::parse(old_source).ir;
         let new = fm_parser::parse(new_source).ir;
@@ -75,16 +92,25 @@ fn chart_and_schedule_values_are_compared_through_real_parsing() {
             "xychart",
         ),
     ] {
-        assert_field(&fm_parser::parse(old_source).ir, &fm_parser::parse(new_source).ir, field);
+        assert_field(
+            &fm_parser::parse(old_source).ir,
+            &fm_parser::parse(new_source).ir,
+            field,
+        );
     }
 }
 
 fn radar() -> MermaidDiagramIr {
     let mut ir = MermaidDiagramIr::empty(DiagramType::Radar);
     ir.radar_meta = Some(IrRadarMeta {
-        axes: vec![IrRadarAxis { id: "speed".into(), ..Default::default() }],
+        axes: vec![IrRadarAxis {
+            id: "speed".into(),
+            ..Default::default()
+        }],
         curves: vec![IrRadarCurve {
-            id: "current".into(), values: vec![5.0], ..Default::default()
+            id: "current".into(),
+            values: vec![5.0],
+            ..Default::default()
         }],
         ..Default::default()
     });
@@ -95,7 +121,9 @@ fn treemap() -> MermaidDiagramIr {
     let mut ir = MermaidDiagramIr::empty(DiagramType::Treemap);
     ir.treemap_meta = Some(IrTreemapMeta {
         nodes: vec![IrTreemapItem {
-            label: "Revenue".into(), value: Some(10.0), ..Default::default()
+            label: "Revenue".into(),
+            value: Some(10.0),
+            ..Default::default()
         }],
         roots: vec![0],
     });
@@ -128,7 +156,8 @@ fn chart_source_spans_and_diagnostics_do_not_create_changes() {
         if let Some(meta) = new.treemap_meta.as_mut() {
             meta.nodes[0].span = Span::at_line(100, 40);
         }
-        new.diagnostics.push(Diagnostic::warning("different source position"));
+        new.diagnostics
+            .push(Diagnostic::warning("different source position"));
         assert!(!diff_diagrams(&old, &new).has_changes());
     }
 }
@@ -137,12 +166,19 @@ fn chart_source_spans_and_diagnostics_do_not_create_changes() {
 fn backing_node_reindexing_does_not_change_a_schedule() {
     let mut old = MermaidDiagramIr::empty(DiagramType::Gantt);
     old.nodes = vec![
-        IrNode { id: "A".into(), ..Default::default() },
-        IrNode { id: "B".into(), ..Default::default() },
+        IrNode {
+            id: "A".into(),
+            ..Default::default()
+        },
+        IrNode {
+            id: "B".into(),
+            ..Default::default()
+        },
     ];
     old.gantt_meta = Some(IrGanttMeta {
         tasks: vec![IrGanttTask {
-            node: IrNodeId(0), start: Some(GanttDate::Absolute("2024-01-01".into())),
+            node: IrNodeId(0),
+            start: Some(GanttDate::Absolute("2024-01-01".into())),
             ..Default::default()
         }],
         ..Default::default()
@@ -183,8 +219,14 @@ fn metadata_addition_and_removal_are_symmetric() {
     let forward = diff_diagrams(&old, &new);
     let reverse = diff_diagrams(&new, &old);
     assert_eq!(forward.diagram_changes.len(), 1);
-    assert_eq!(forward.diagram_changes[0].before, reverse.diagram_changes[0].after);
-    assert_eq!(forward.diagram_changes[0].after, reverse.diagram_changes[0].before);
+    assert_eq!(
+        forward.diagram_changes[0].before,
+        reverse.diagram_changes[0].after
+    );
+    assert_eq!(
+        forward.diagram_changes[0].after,
+        reverse.diagram_changes[0].before
+    );
     assert_eq!(forward.total_changes(), reverse.total_changes());
 }
 
@@ -196,8 +238,14 @@ fn ordinary_graph_reports_remain_byte_identical() {
     let baseline = structural::diff_diagrams(&old, &new);
     assert!(diff.diagram_changes.is_empty());
     assert_eq!(diff.total_changes(), baseline.total_changes());
-    assert_eq!(render_diff_plain(&diff), structural::render_diff_plain(&baseline));
-    assert_eq!(render_diff_summary(&diff, true), structural::render_diff_summary(&baseline, true));
+    assert_eq!(
+        render_diff_plain(&diff),
+        structural::render_diff_plain(&baseline)
+    );
+    assert_eq!(
+        render_diff_summary(&diff, true),
+        structural::render_diff_summary(&baseline, true)
+    );
 }
 
 #[test]

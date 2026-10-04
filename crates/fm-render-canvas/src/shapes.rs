@@ -194,7 +194,13 @@ fn draw_small_circle<C: Canvas2dContext>(
     let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     ctx.begin_path();
-    ctx.arc(cx, cy, f64::from(fm_core::SMALL_CIRCLE_RADIUS), 0.0, 2.0 * PI);
+    ctx.arc(
+        cx,
+        cy,
+        f64::from(fm_core::SMALL_CIRCLE_RADIUS),
+        0.0,
+        2.0 * PI,
+    );
     ctx.fill();
     ctx.stroke();
     if framed {
@@ -1165,7 +1171,10 @@ mod tests {
     }
 
     fn assert_near(actual: f64, expected: f64) {
-        assert!((actual - expected).abs() < 0.000_01, "{actual} != {expected}");
+        assert!(
+            (actual - expected).abs() < 0.000_01,
+            "{actual} != {expected}"
+        );
     }
 
     fn assert_vertices(ops: &[DrawOperation], expected: &[(f64, f64)]) {
@@ -1232,8 +1241,16 @@ mod tests {
         assert_vertices(&horizontal, &[(10.0, 40.0), (210.0, 40.0)]);
         for ops in [&vertical, &horizontal] {
             assert!(ops.contains(&DrawOperation::Rect(10.0, 20.0, 200.0, 120.0)));
-            assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Fill).count(), 1);
-            assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Stroke).count(), 2);
+            assert_eq!(
+                ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+                1
+            );
+            assert_eq!(
+                ops.iter()
+                    .filter(|op| **op == DrawOperation::Stroke)
+                    .count(),
+                2
+            );
         }
         let narrow = recorded_shape(NodeShape::LinedRect, 0.0, 0.0, 10.0, 100.0);
         assert_vertices(&narrow, &[(1.4, 0.0), (1.4, 100.0)]);
@@ -1264,7 +1281,11 @@ mod tests {
                     assert_near(arc.3, 0.0);
                     assert_near(arc.4, 2.0 * PI);
                 }
-                for expected in [DrawOperation::BeginPath, DrawOperation::Fill, DrawOperation::Stroke] {
+                for expected in [
+                    DrawOperation::BeginPath,
+                    DrawOperation::Fill,
+                    DrawOperation::Stroke,
+                ] {
                     assert_eq!(ops.iter().filter(|op| **op == expected).count(), arcs.len());
                 }
                 assert!(!ops.iter().any(|op| matches!(op, DrawOperation::LineTo(..))));
@@ -1280,8 +1301,16 @@ mod tests {
             &[(30.0, 20.0), (190.0, 20.0), (30.0, 120.0), (30.0, 20.0)],
         );
         assert!(!ops.iter().any(|op| matches!(op, DrawOperation::Rect(..))));
-        assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Fill).count(), 1);
-        assert_eq!(ops.iter().filter(|op| **op == DrawOperation::Stroke).count(), 2);
+        assert_eq!(
+            ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+            1
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|op| **op == DrawOperation::Stroke)
+                .count(),
+            2
+        );
 
         // Sample the actual emitted cubics, not a second drawing implementation. The first four
         // quarters are the outer caps; the final two are the left rim inside the filled body.
@@ -1360,7 +1389,10 @@ mod tests {
             assert_near(x, 173.6);
             assert_near(y, 103.84);
         }
-        assert_eq!(&fold[5..], &[DrawOperation::ClosePath, DrawOperation::Stroke]);
+        assert_eq!(
+            &fold[5..],
+            &[DrawOperation::ClosePath, DrawOperation::Stroke]
+        );
     }
 
     #[test]

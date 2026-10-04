@@ -4909,3 +4909,144 @@ fn deck_subcommand_exit_codes_are_actionable() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("only supported with --format svg"),);
 }
+
+#[test]
+fn release_regression_batch_cache_binds_the_input_path() {
+    // Retain the private fixture directory for release evidence.
+    let root = tempfile::tempdir().expect("fixture directory").keep();
+    let first = root.join("first");
+    let second = root.join("second");
+    let out = root.join("out");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let a = first.join("same.mmd");
+    let b = second.join("same.mmd");
+    std::fs::write(&a, "flowchart LR\nA-->B\n").unwrap();
+    std::fs::write(&b, "flowchart LR\nC-->D\n").unwrap();
+    let modified = a.metadata().unwrap().modified().unwrap();
+    std::fs::File::open(&b)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(a.metadata().unwrap().len(), b.metadata().unwrap().len());
+    assert_eq!(
+        a.metadata().unwrap().modified().unwrap(),
+        b.metadata().unwrap().modified().unwrap()
+    );
+    let run = |input: &std::path::Path| {
+        let result = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+            .arg("render-batch")
+            .arg(input)
+            .arg("--out-dir")
+            .arg(&out)
+            .args(["--jobs", "1"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result
+    };
+    run(&a);
+    run(&b);
+    let ordinary = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .arg("render")
+        .arg(&b)
+        .args(["--format", "svg"])
+        .output()
+        .unwrap();
+    assert!(ordinary.status.success());
+    assert_eq!(
+        std::fs::read(out.join("same.svg")).unwrap(),
+        ordinary.stdout,
+        "matching file metadata must not reuse another input's diagram"
+    );
+    let warm = run(&b);
+    assert!(
+        String::from_utf8_lossy(&warm.stderr).contains("1 persistent hits"),
+        "ordinary repeated input should still use the cache"
+    );
+}
+
+#[test]
+fn release_regression_packet_maximum_single_bit_is_finite_and_visible() {
+    let result = parse("packet-beta\n4294967295: \"Maximum\"\n");
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let layout = layout_diagram(&result.ir);
+    assert_eq!(layout.nodes.len(), 1);
+    assert!(layout.extensions.packet_field_continuations.is_empty());
+    for value in [
+        layout.bounds.x,
+        layout.bounds.y,
+        layout.bounds.width,
+        layout.bounds.height,
+        layout.nodes[0].bounds.x,
+        layout.nodes[0].bounds.y,
+    ] {
+        assert!(value.is_finite());
+    }
+    assert!(
+        layout.nodes[0].bounds.y.abs() < 1000.0,
+        "normalize the row origin before f32 conversion"
+    );
+    let svg = render_svg_with_layout(&result.ir, &layout, &SvgRenderConfig::default());
+    assert!(svg.contains("4294967295"));
+    assert!(svg.contains("Maximum"));
+    assert!(!svg.contains("NaN") && !svg.contains("Infinity"));
+    let mark = svg.split("class=\"fm-packet-bit\"").next().unwrap();
+    let y = mark
+        .rsplit(" y=\"")
+        .next()
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .parse::<f32>()
+        .unwrap();
+    assert!(y >= 0.0, "bit label must be inside the SVG viewBox");
+}
+
+#[test]
+fn release_regression_packet_expansion_uses_reported_guardrail_fallback() {
+    // Below u32::MAX so parsing itself cannot overflow its inherited bit-width calculation.
+    let result = parse("packet-beta\n0-4000000000: \"Huge field\"\n");
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let traced = layout_diagram_traced(&result.ir);
+    assert!(traced.trace.guard.fallback_applied);
+    assert_eq!(
+        traced.trace.guard.initial_algorithm,
+        LayoutAlgorithm::Packet
+    );
+    assert_eq!(traced.trace.guard.selected_algorithm, LayoutAlgorithm::Grid);
+    assert!(traced.trace.guard.estimated_layout_iterations > 125_000_000);
+    assert!(
+        traced
+            .layout
+            .extensions
+            .packet_field_continuations
+            .is_empty()
+    );
+    assert_eq!(traced.layout.nodes.len(), 1);
+    let svg = render_svg_with_layout(&result.ir, &traced.layout, &SvgRenderConfig::default());
+    assert!(svg.contains("Huge field") && svg.contains("4000000000"));
+}
+
+#[test]
+fn release_regression_packet_distant_single_bits_preserve_visible_fields() {
+    let result = parse("packet-beta\n0: \"Near\"\n4294967295: \"Far\"\n");
+    assert!(result.warnings.is_empty());
+    let traced = layout_diagram_traced(&result.ir);
+    assert!(traced.trace.guard.fallback_applied);
+    assert_eq!(traced.trace.guard.selected_algorithm, LayoutAlgorithm::Grid);
+    assert_eq!(traced.layout.nodes.len(), 2);
+    for node in &traced.layout.nodes {
+        assert!(
+            node.bounds.y + node.bounds.height
+                <= traced.layout.bounds.y + traced.layout.bounds.height
+        );
+    }
+    let svg = render_svg_with_layout(&result.ir, &traced.layout, &SvgRenderConfig::default());
+    assert!(svg.contains("Near") && svg.contains("Far") && svg.contains("4294967295"));
+}

@@ -79,7 +79,10 @@
       "steps": [
         {
           "step": 1,
-          "elementIds": ["fm-node-db-3", "fm-edge-2"]
+          "elementIds": [
+            "fm-node-db-3",
+            "fm-edge-2"
+          ]
         }
       ]
     }
@@ -90,10 +93,18 @@
     "tour": true
   },
   "nodeSlideIndex": {
-    "fm-node-admin-1": ["people"],
-    "fm-node-db-3": ["systems"],
-    "fm-node-user-0": ["people"],
-    "fm-node-web-2": ["systems"]
+    "fm-node-admin-1": [
+      "people"
+    ],
+    "fm-node-db-3": [
+      "systems"
+    ],
+    "fm-node-user-0": [
+      "people"
+    ],
+    "fm-node-web-2": [
+      "systems"
+    ]
   },
   "nodeGeometry": {
     "fm-node-admin-1": {

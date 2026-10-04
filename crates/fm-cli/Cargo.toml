@@ -5,7 +5,7 @@ keywords = ["cli", "mermaid", "diagram", "svg", "render"]
 categories = ["command-line-utilities", "visualization"]
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -74,8 +74,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 # Optional dependencies
 notify = { version = "8.2", optional = true }
 tiny_http = { version = "0.12", optional = true }
-resvg = { version = "0.47", optional = true, default-features = false }
-usvg = { version = "0.47", optional = true, default-features = false }
+resvg = { version = "0.48.1", optional = true, default-features = false }
+usvg = { version = "0.48.1", optional = true, default-features = false }
 
 # Native global allocator. The whole pipeline (parse interning, layout point/index vecs,
 # render output buffer) is allocation-heavy; a measured full-pipeline profile put glibc

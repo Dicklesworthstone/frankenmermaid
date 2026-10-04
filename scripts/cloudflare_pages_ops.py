@@ -69,6 +69,8 @@ REQUIRED_BUNDLE_FILES = (
     "pkg/frankenmermaid_bg.wasm",
     "pkg/frankenmermaid_bg.wasm.d.ts",
     "pkg/package.json",
+    "pkg/LICENSE",
+    "pkg/README.md",
     "evidence/capability_scenario_matrix.json",
 )
 # Files published under a different path than their source (source -> bundle destination).

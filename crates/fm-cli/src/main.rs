@@ -1234,6 +1234,9 @@ struct BatchReportCarry<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BatchRenderCacheEntry {
     key: String,
+    /// Metadata-only cache hits must belong to the same file, including across cwd changes.
+    #[serde(default)]
+    source_path: Option<PathBuf>,
     #[serde(default)]
     source_digest: String,
     #[serde(default)]
@@ -1740,6 +1743,7 @@ impl BatchRenderCacheSession {
             };
             let entry = BatchRenderCacheEntry {
                 key,
+                source_path: Path::new(input).canonicalize().ok(),
                 source_digest: source_digest.clone(),
                 options_key: options_key.clone(),
                 source_bytes,
@@ -2034,6 +2038,7 @@ mod batch_render_cache_tests {
     fn entry() -> BatchRenderCacheEntry {
         BatchRenderCacheEntry {
             key: format!("{}:options", "a".repeat(64)),
+            source_path: None,
             source_digest: "a".repeat(64),
             options_key: "options".to_owned(),
             source_bytes: 123,
@@ -2884,6 +2889,7 @@ mod batch_render_cache_tests {
         let source_digest = super::sha256_hex(b"alpha");
         let entry = BatchRenderCacheEntry {
             key: format!("{source_digest}:options"),
+            source_path: input_path.canonicalize().ok(),
             source_digest,
             options_key: "options".to_owned(),
             source_bytes: metadata.len(),
@@ -3804,6 +3810,8 @@ fn run() -> Result<()> {
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
             let options = RenderCommandOptions {
+                deck_capture: false,
+                deck_manifest_out: None,
                 parse_mode: resolve_parse_mode(None, &loaded_config.file),
                 parser_config,
                 layout_algorithm: resolve_layout_algorithm(None, &loaded_config.file)?,
@@ -7292,6 +7300,10 @@ fn cmd_render_batch(
             }
 
             let manifest_modified = prior_cache_modified?;
+            let source_path = Path::new(input).canonicalize().ok()?;
+            if entry.source_path.as_ref() != Some(&source_path) {
+                return None;
+            }
             let source_metadata = Path::new(input).metadata().ok()?;
             let output_metadata = destination.metadata().ok()?;
             if !batch_cache_entry_matches_early(
@@ -7816,6 +7828,7 @@ fn cmd_render_batch(
                 };
                 let entry = BatchRenderCacheEntry {
                     key,
+                    source_path: Path::new(&inputs[index]).canonicalize().ok(),
                     source_digest: digest.clone(),
                     options_key: options_key.clone(),
                     source_bytes,
@@ -8611,6 +8624,27 @@ fn guard_inline_script(payload: &str) -> String {
     payload.replace("</", "<\\/")
 }
 
+/// Substitute only markers in the template, never marker-shaped authored data.
+fn fill_deck_template(replacements: &[(&str, &str)]) -> String {
+    let mut remaining = DECK_TEMPLATE_HTML;
+    let mut html = String::with_capacity(remaining.len());
+    while let Some((offset, marker, value)) = replacements
+        .iter()
+        .filter_map(|(marker, value)| {
+            remaining
+                .find(marker)
+                .map(|offset| (offset, *marker, *value))
+        })
+        .min_by_key(|(offset, _, _)| *offset)
+    {
+        html.push_str(&remaining[..offset]);
+        html.push_str(value);
+        remaining = &remaining[offset + marker.len()..];
+    }
+    html.push_str(remaining);
+    html
+}
+
 /// Turn a diagram with a deck directive into a presentation artifact (epic bd-z7g6k).
 ///
 /// Runs the SAME render pipeline as `render` (`render_source` with `deck_capture`), so
@@ -8705,13 +8739,16 @@ fn cmd_deck(input: &str, options: DeckCommandOptions<'_>) -> Result<()> {
             // manifest JSON inside an application/json block; both get the </script guard.
             let svg_js_string = guard_inline_script(&serde_json::to_string(&svg)?);
             let manifest_block = guard_inline_script(&manifest_json);
-            let html = DECK_TEMPLATE_HTML
-                .replace("{{TITLE}}", &fm_render_svg::escape_xml_text(&title))
-                .replace("{{BG}}", &colors.background)
-                .replace("{{FG}}", &colors.text)
-                .replace("{{MANIFEST_JSON}}", &manifest_block)
-                .replace("{{RUNTIME_JS}}", DECK_RUNTIME_JS)
-                .replace("{{SVG_JS_STRING}}", &svg_js_string);
+            let escaped_title = fm_render_svg::escape_xml_text(&title);
+            let html = fill_deck_template(&[
+                ("{{TITLE}}", &escaped_title),
+                ("{{BG}}", &colors.background),
+                ("{{FG}}", &colors.text),
+                ("{{MANIFEST_JSON}}", &manifest_block),
+                ("{{RUNTIME_JS}}", DECK_RUNTIME_JS),
+                ("RUNTIME_JS", DECK_RUNTIME_JS),
+                ("{{SVG_JS_STRING}}", &svg_js_string),
+            ]);
             write_output(output, &html)
         }
     }
@@ -11489,6 +11526,8 @@ mod serve_tests {
     /// Plain SVG render options for the preview tests below.
     fn preview_test_options() -> RenderCommandOptions<'static> {
         RenderCommandOptions {
+            deck_capture: false,
+            deck_manifest_out: None,
             parse_mode: MermaidParseMode::Compat,
             parser_config: ParserConfig::default(),
             layout_algorithm: LayoutAlgorithm::Auto,

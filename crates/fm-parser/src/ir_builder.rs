@@ -3010,12 +3010,14 @@ mod tests {
     fn scratch_reset_replaces_subgraph_indexes_without_phantom_nodes_or_stale_aliases() {
         let mut source = IrBuilder::new(DiagramType::Flowchart);
         let member = add_test_group(&mut source, "current", "A");
-        source.flow_forward_subgraph_members
+        source
+            .flow_forward_subgraph_members
             .insert("future".to_string(), "A".to_string());
 
         let mut scratch = IrBuilder::new(DiagramType::Flowchart);
         add_test_group(&mut scratch, "previous", "Z");
-        scratch.flow_forward_subgraph_members
+        scratch
+            .flow_forward_subgraph_members
             .insert("stale-forward".to_string(), "Z".to_string());
         scratch.reset_from(&source);
 
@@ -3029,9 +3031,13 @@ mod tests {
             Some(member)
         );
         assert_eq!(scratch.resolve_subgraph_endpoint("previous", span), None);
-        assert_eq!(scratch.resolve_subgraph_endpoint("stale-forward", span), None);
         assert_eq!(
-            scratch.ir.nodes.len(), 1,
+            scratch.resolve_subgraph_endpoint("stale-forward", span),
+            None
+        );
+        assert_eq!(
+            scratch.ir.nodes.len(),
+            1,
             "lookups must not invent group-name nodes"
         );
         assert_eq!(scratch.ir, source.ir);
@@ -3048,12 +3054,14 @@ mod tests {
     fn suffix_reset_discards_group_aliases_before_their_slots_are_reused() {
         let mut source = IrBuilder::new(DiagramType::Flowchart);
         let member = add_test_group(&mut source, "prefix", "A");
-        source.flow_forward_subgraph_members
+        source
+            .flow_forward_subgraph_members
             .insert("future".to_string(), "A".to_string());
         let mut scratch = source.clone();
         scratch.begin_reusable_suffix(&source);
         add_test_group(&mut scratch, "temporary", "T");
-        scratch.flow_forward_subgraph_members
+        scratch
+            .flow_forward_subgraph_members
             .insert("stale-forward".to_string(), "T".to_string());
         assert!(scratch.reusable_prefix_unchanged(&source));
         scratch.reset_reusable_suffix_from(&source);
@@ -3072,7 +3080,10 @@ mod tests {
             Some(member)
         );
         assert_eq!(scratch.resolve_subgraph_endpoint("temporary", span), None);
-        assert_eq!(scratch.resolve_subgraph_endpoint("stale-forward", span), None);
+        assert_eq!(
+            scratch.resolve_subgraph_endpoint("stale-forward", span),
+            None
+        );
         assert_eq!(scratch.ir.nodes.len(), 2);
     }
 
@@ -3133,7 +3144,8 @@ mod tests {
             &crate::ParserConfig::default(),
         );
         assert_eq!(
-            plan.stats().shared_prefix_groups, 2,
+            plan.stats().shared_prefix_groups,
+            2,
             "must exercise compiled prefixes"
         );
         let fresh: Vec<_> = inputs.iter().map(|input| crate::parse(input).ir).collect();

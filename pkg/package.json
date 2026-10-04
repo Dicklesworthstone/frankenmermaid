@@ -2,13 +2,14 @@
   "name": "@frankenmermaid/core",
   "type": "module",
   "description": "Rust-first Mermaid-compatible diagram engine for WebAssembly and browser rendering.",
-  "version": "0.2.0",
-  "license": "MIT",
+  "version": "0.3.0",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dicklesworthstone/frankenmermaid.git"
   },
   "files": [
+    "LICENSE",
     "README.md",
     "frankenmermaid_bg.wasm",
     "frankenmermaid.js",
@@ -31,5 +32,5 @@
   "bugs": {
     "url": "https://github.com/Dicklesworthstone/frankenmermaid/issues"
   },
-  "frankenmermaidSourceSha256": "89887b0f69856162aef1b30fabc38b4c59c3ae7343dba48d976775d90b00baab"
+  "frankenmermaidSourceSha256": "6294db736aaa2d969b69f1edb6fa0fdb6b47ecb4a1ded945548a10af0d09d822"
 }

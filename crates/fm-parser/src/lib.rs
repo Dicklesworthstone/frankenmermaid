@@ -2751,6 +2751,102 @@ mod tests {
     }
 
     #[test]
+    fn batch_asymmetric_forward_subgraph_matches_full_parse_in_both_orders() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform for the batch\"]\n",
+            "    S0[\"Receive and validate events\"]\n",
+            "    S0-->Late\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  S0-->A\n"),
+            format!("{shared}  subgraph Late\n    L0[\"Later\"]\n  end\n  L0-->B\n"),
+        ];
+        for refs in [
+            [inputs[0].as_str(), inputs[1].as_str()],
+            [inputs[1].as_str(), inputs[0].as_str()],
+        ] {
+            let plan = FlowchartBatchParsePlan::new(
+                &refs,
+                MermaidParseMode::Compat,
+                &ParserConfig::default(),
+            );
+            let mut scratch = FlowchartBatchParseScratch::default();
+            for (index, input) in refs.iter().enumerate() {
+                let expected = parse(input);
+                assert_eq!(plan.parse(index, input), expected);
+                plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                    assert_eq!(actual.ir, &expected.ir);
+                    assert_eq!(actual.warnings, expected.warnings);
+                    assert_eq!(actual.confidence, expected.confidence);
+                    assert_eq!(actual.detection_method, expected.detection_method);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn batch_changed_suffix_revalidates_forward_subgraphs_and_global_directives() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform for the batch\"]\n",
+            "    S0[\"Receive and validate events\"]\n",
+            "    S0-->Late\n",
+            "  end\n",
+        );
+        let inputs = [format!("{shared}  S0-->A\n"), format!("{shared}  S0-->B\n")];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        assert_eq!(plan.stats().shared_prefix_groups, 1);
+        let mut scratch = FlowchartBatchParseScratch::default();
+        for suffix in [
+            "  subgraph Late\n    L0[\"Later\"]\n  end\n  L0-->B\n",
+            "  S0-->A\n  style S0 fill:#ff0000\n",
+        ] {
+            let input = format!("{shared}{suffix}");
+            let expected = parse(&input);
+            assert_eq!(plan.parse(0, &input), expected);
+            plan.with_parse_scratch(0, &input, &mut scratch, |actual| {
+                assert_eq!(actual.ir, &expected.ir);
+                assert_eq!(actual.warnings, expected.warnings);
+                assert_eq!(actual.confidence, expected.confidence);
+                assert_eq!(actual.detection_method, expected.detection_method);
+                assert!(actual.reusable_prefix.is_none());
+            });
+        }
+        assert_eq!(plan.parse(1, &inputs[1]), parse(&inputs[1]));
+    }
+
+    #[test]
+    fn batch_unicode_subgraph_boundary_matches_full_parse() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform for the batch\"]\n",
+            "    S0[\"Receive αbeta and validate events\"]\n",
+            "    S0-->S1\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  subgraph α\n    A-->B\n  end\n"),
+            format!("{shared}  S1-->C\n"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+        for (index, input) in inputs.iter().enumerate() {
+            let expected = parse(input);
+            assert_eq!(plan.parse(index, input), expected);
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                assert_eq!(actual.ir, &expected.ir);
+                assert_eq!(actual.warnings, expected.warnings);
+            });
+        }
+    }
+
+    #[test]
     fn batch_scratch_restores_full_prefix_after_a_mutating_suffix() {
         let shared = concat!(
             "flowchart LR\n",

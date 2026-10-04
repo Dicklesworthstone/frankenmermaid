@@ -100,7 +100,10 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
     record(&mut changes, "sequence", &sequence(old), &sequence(new));
     if old.diagram_type == DiagramType::Sequence || new.diagram_type == DiagramType::Sequence {
         let participants = |ir: &MermaidDiagramIr| {
-            ir.nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
+            ir.nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>()
         };
         record(
             &mut changes,
@@ -118,7 +121,12 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
             old_set.sort();
             new_set.sort();
             if old_set == new_set {
-                record(&mut changes, "sequence.message_order", &old_order, &new_order);
+                record(
+                    &mut changes,
+                    "sequence.message_order",
+                    &old_order,
+                    &new_order,
+                );
             }
         }
     }
@@ -188,15 +196,19 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
 
     let gitgraph = |ir: &MermaidDiagramIr| {
         ir.git_graph_meta.clone().map(|mut meta| {
-            meta.commit_lanes = meta.commit_lanes.into_iter().filter_map(|(index, lane)| {
-                // Missing entries already mean lane zero, so an explicit zero is not an edit.
-                if lane == 0 {
-                    return None;
-                }
-                let mut node = IrNodeId(index);
-                remap_node(ir, &names, &mut node);
-                Some((node.0, lane))
-            }).collect();
+            meta.commit_lanes = meta
+                .commit_lanes
+                .into_iter()
+                .filter_map(|(index, lane)| {
+                    // Missing entries already mean lane zero, so an explicit zero is not an edit.
+                    if lane == 0 {
+                        return None;
+                    }
+                    let mut node = IrNodeId(index);
+                    remap_node(ir, &names, &mut node);
+                    Some((node.0, lane))
+                })
+                .collect();
             meta
         })
     };

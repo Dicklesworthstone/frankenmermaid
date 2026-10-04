@@ -149,7 +149,12 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
 /// A single top-left cut, matching the SVG and Canvas notch rather than its enclosing rectangle.
 #[must_use]
 pub fn notched_rect_path(bounds: LayoutRect) -> Vec<PathCmd> {
-    let LayoutRect { x, y, width: w, height: h } = bounds;
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
     let notch = (w.min(h) * 0.31).min(w / 2.0).min(h / 2.0);
     vec![
         PathCmd::MoveTo { x: x + notch, y },
@@ -164,13 +169,24 @@ pub fn notched_rect_path(bounds: LayoutRect) -> Vec<PathCmd> {
 /// Two top-corner cuts, with the same independently scaled axes as the rendered shape.
 #[must_use]
 pub fn notched_pentagon_path(bounds: LayoutRect) -> Vec<PathCmd> {
-    let LayoutRect { x, y, width: w, height: h } = bounds;
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
     let cut_x = w * fm_core::NOTCHED_PENTAGON_CUT_X_RATIO;
     let cut_y = h * fm_core::NOTCHED_PENTAGON_CUT_Y_RATIO;
     vec![
         PathCmd::MoveTo { x: x + cut_x, y },
-        PathCmd::LineTo { x: x + w - cut_x, y },
-        PathCmd::LineTo { x: x + w, y: y + cut_y },
+        PathCmd::LineTo {
+            x: x + w - cut_x,
+            y,
+        },
+        PathCmd::LineTo {
+            x: x + w,
+            y: y + cut_y,
+        },
         PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::LineTo { x, y: y + h },
         PathCmd::LineTo { x, y: y + cut_y },
@@ -183,7 +199,12 @@ pub fn notched_pentagon_path(bounds: LayoutRect) -> Vec<PathCmd> {
 /// Only the outside belongs here: including the near rim would create a second hit/clip contour.
 #[must_use]
 pub fn horizontal_cylinder_path(bounds: LayoutRect) -> Vec<PathCmd> {
-    let LayoutRect { x, y, width: w, height: h } = bounds;
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
     let rx = w * 0.1;
     let ry = h / 2.0;
     let left = x + rx;
@@ -196,25 +217,37 @@ pub fn horizontal_cylinder_path(bounds: LayoutRect) -> Vec<PathCmd> {
         PathCmd::MoveTo { x: left, y },
         PathCmd::LineTo { x: right, y },
         PathCmd::CubicTo {
-            c1x: right + kx, c1y: y,
-            c2x: x + w, c2y: cy - ky,
-            x: x + w, y: cy,
+            c1x: right + kx,
+            c1y: y,
+            c2x: x + w,
+            c2y: cy - ky,
+            x: x + w,
+            y: cy,
         },
         PathCmd::CubicTo {
-            c1x: x + w, c1y: cy + ky,
-            c2x: right + kx, c2y: y + h,
-            x: right, y: y + h,
+            c1x: x + w,
+            c1y: cy + ky,
+            c2x: right + kx,
+            c2y: y + h,
+            x: right,
+            y: y + h,
         },
         PathCmd::LineTo { x: left, y: y + h },
         PathCmd::CubicTo {
-            c1x: left - kx, c1y: y + h,
-            c2x: x, c2y: cy + ky,
-            x, y: cy,
+            c1x: left - kx,
+            c1y: y + h,
+            c2x: x,
+            c2y: cy + ky,
+            x,
+            y: cy,
         },
         PathCmd::CubicTo {
-            c1x: x, c1y: cy - ky,
-            c2x: left - kx, c2y: y,
-            x: left, y,
+            c1x: x,
+            c1y: cy - ky,
+            c2x: left - kx,
+            c2y: y,
+            x: left,
+            y,
         },
         PathCmd::Close,
     ]
@@ -223,18 +256,30 @@ pub fn horizontal_cylinder_path(bounds: LayoutRect) -> Vec<PathCmd> {
 /// A document's wavy bottom, using the same two quadratics as SVG and Canvas.
 #[must_use]
 pub fn document_path(bounds: LayoutRect) -> Vec<PathCmd> {
-    let LayoutRect { x, y, width: w, height: h } = bounds;
+    let LayoutRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = bounds;
     vec![
         PathCmd::MoveTo { x, y },
         PathCmd::LineTo { x: x + w, y },
-        PathCmd::LineTo { x: x + w, y: y + h * 0.80 },
-        PathCmd::QuadTo {
-            cx: x + w * 0.75, cy: y + h * 0.84,
-            x: x + w * 0.5, y: y + h * 0.95,
+        PathCmd::LineTo {
+            x: x + w,
+            y: y + h * 0.80,
         },
         PathCmd::QuadTo {
-            cx: x + w * 0.25, cy: y + h * 1.06,
-            x, y: y + h * 0.90,
+            cx: x + w * 0.75,
+            cy: y + h * 0.84,
+            x: x + w * 0.5,
+            y: y + h * 0.95,
+        },
+        PathCmd::QuadTo {
+            cx: x + w * 0.25,
+            cy: y + h * 1.06,
+            x,
+            y: y + h * 0.90,
         },
         PathCmd::Close,
     ]
@@ -785,7 +830,10 @@ mod tests {
     }
 
     fn assert_near(actual: f32, expected: f32) {
-        assert!((actual - expected).abs() < 0.000_1, "{actual} != {expected}");
+        assert!(
+            (actual - expected).abs() < 0.000_1,
+            "{actual} != {expected}"
+        );
     }
 
     fn vertices(path: &[PathCmd]) -> Vec<(f32, f32)> {
@@ -805,7 +853,14 @@ mod tests {
                     out.extend_from_slice(&[x, y]);
                 }
                 PathCmd::QuadTo { cx, cy, x, y } => out.extend_from_slice(&[cx, cy, x, y]),
-                PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
                     out.extend_from_slice(&[c1x, c1y, c2x, c2y, x, y]);
                 }
                 _ => {}
@@ -829,7 +884,13 @@ mod tests {
         assert_eq!(path.len(), 6);
         assert_vertices(
             &path,
-            &[(41.0, 20.0), (210.0, 20.0), (210.0, 120.0), (10.0, 120.0), (10.0, 51.0)],
+            &[
+                (41.0, 20.0),
+                (210.0, 20.0),
+                (210.0, 120.0),
+                (10.0, 120.0),
+                (10.0, 51.0),
+            ],
         );
         assert!(matches!(path.last(), Some(PathCmd::Close)));
     }
@@ -840,8 +901,14 @@ mod tests {
         assert_eq!(path.len(), 7);
         assert_vertices(
             &path,
-            &[(30.0, 20.0), (190.0, 20.0), (210.0, 40.0),
-                (210.0, 120.0), (10.0, 120.0), (10.0, 40.0)],
+            &[
+                (30.0, 20.0),
+                (190.0, 20.0),
+                (210.0, 40.0),
+                (210.0, 120.0),
+                (10.0, 120.0),
+                (10.0, 40.0),
+            ],
         );
         assert!(matches!(path.last(), Some(PathCmd::Close)));
     }
@@ -851,23 +918,39 @@ mod tests {
         let path = node_path(test_bounds(), NodeShape::HorizontalCylinder);
         assert_eq!(path.len(), 8);
         assert_vertices(&path, &[(30.0, 20.0), (190.0, 20.0), (30.0, 120.0)]);
-        assert_eq!(path.iter().filter(|cmd| matches!(cmd, PathCmd::MoveTo { .. })).count(), 1);
+        assert_eq!(
+            path.iter()
+                .filter(|cmd| matches!(cmd, PathCmd::MoveTo { .. }))
+                .count(),
+            1
+        );
         let mut start = (30.0, 20.0);
         let mut curves = 0;
         for cmd in &path {
             match *cmd {
                 PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => start = (x, y),
-                PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+                PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
                     let center_x = if curves < 2 { 190.0 } else { 30.0 };
                     for step in 0..=32 {
                         let t = step as f32 / 32.0;
                         let s = 1.0 - t;
-                        let px = s.powi(3) * start.0 + 3.0 * s * s * t * c1x
-                            + 3.0 * s * t * t * c2x + t.powi(3) * x;
-                        let py = s.powi(3) * start.1 + 3.0 * s * s * t * c1y
-                            + 3.0 * s * t * t * c2y + t.powi(3) * y;
-                        let ellipse = ((px - center_x) / 20.0).powi(2)
-                            + ((py - 70.0) / 50.0).powi(2);
+                        let px = s.powi(3) * start.0
+                            + 3.0 * s * s * t * c1x
+                            + 3.0 * s * t * t * c2x
+                            + t.powi(3) * x;
+                        let py = s.powi(3) * start.1
+                            + 3.0 * s * s * t * c1y
+                            + 3.0 * s * t * t * c2y
+                            + t.powi(3) * y;
+                        let ellipse =
+                            ((px - center_x) / 20.0).powi(2) + ((py - 70.0) / 50.0).powi(2);
                         assert!((ellipse - 1.0).abs() < 0.000_7);
                     }
                     start = (x, y);
@@ -882,14 +965,18 @@ mod tests {
 
     #[test]
     fn document_variants_share_the_wave_but_not_interior_decorations() {
-        for shape in [NodeShape::Document, NodeShape::LinedDocument, NodeShape::TaggedDocument] {
+        for shape in [
+            NodeShape::Document,
+            NodeShape::LinedDocument,
+            NodeShape::TaggedDocument,
+        ] {
             let path = node_path(test_bounds(), shape);
             assert_eq!(path.len(), 6);
             assert_vertices(&path, &[(10.0, 20.0), (210.0, 20.0), (210.0, 100.0)]);
-            for (cmd, expected) in path[3..5].iter().zip([
-                [160.0, 104.0, 110.0, 115.0],
-                [60.0, 126.0, 10.0, 110.0],
-            ]) {
+            for (cmd, expected) in path[3..5]
+                .iter()
+                .zip([[160.0, 104.0, 110.0, 115.0], [60.0, 126.0, 10.0, 110.0]])
+            {
                 let PathCmd::QuadTo { cx, cy, x, y } = cmd else {
                     panic!("document bottom must be quadratic");
                 };
@@ -904,7 +991,11 @@ mod tests {
     #[test]
     fn marker_boundaries_keep_fixed_radius_in_wide_and_square_layout_boxes() {
         for (width, height) in [(14.0, 14.0), (240.0, 80.0)] {
-            let bounds = LayoutRect { width, height, ..test_bounds() };
+            let bounds = LayoutRect {
+                width,
+                height,
+                ..test_bounds()
+            };
             for shape in [NodeShape::SmallCircle, NodeShape::FramedCircle] {
                 let path = node_path(bounds, shape);
                 let points = vertices(&path);
@@ -922,24 +1013,46 @@ mod tests {
     #[test]
     fn completed_boundaries_remain_finite_closed_and_repeatable_for_degenerate_extents() {
         for (width, height) in [
-            (0.0, 0.0), (0.0, 20.0), (2.0, 1000.0), (1000.0, 2.0),
+            (0.0, 0.0),
+            (0.0, 20.0),
+            (2.0, 1000.0),
+            (1000.0, 2.0),
             (f32::MIN_POSITIVE, f32::MIN_POSITIVE),
         ] {
-            let bounds = LayoutRect { x: -15.5, y: 7.25, width, height };
+            let bounds = LayoutRect {
+                x: -15.5,
+                y: 7.25,
+                width,
+                height,
+            };
             for shape in [
-                NodeShape::NotchedRect, NodeShape::NotchedPentagon, NodeShape::HorizontalCylinder,
-                NodeShape::Document, NodeShape::LinedDocument, NodeShape::TaggedDocument,
-                NodeShape::SmallCircle, NodeShape::FramedCircle,
+                NodeShape::NotchedRect,
+                NodeShape::NotchedPentagon,
+                NodeShape::HorizontalCylinder,
+                NodeShape::Document,
+                NodeShape::LinedDocument,
+                NodeShape::TaggedDocument,
+                NodeShape::SmallCircle,
+                NodeShape::FramedCircle,
             ] {
                 let path = node_path(bounds, shape);
                 assert!(matches!(path.first(), Some(PathCmd::MoveTo { .. })));
                 assert!(matches!(path.last(), Some(PathCmd::Close)));
                 let actual = coordinates(&path);
-                assert!(actual.iter().all(|value| value.is_finite() && !value.is_subnormal()));
+                assert!(
+                    actual
+                        .iter()
+                        .all(|value| value.is_finite() && !value.is_subnormal())
+                );
                 assert_eq!(
-                    actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-                    coordinates(&node_path(bounds, shape)).iter()
-                        .map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    coordinates(&node_path(bounds, shape))
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
                 );
             }
         }
