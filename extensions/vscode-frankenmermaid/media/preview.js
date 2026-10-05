@@ -16,6 +16,8 @@ function createPreviewController({ document, window, vscode,
   let committedMessage;
   let elementRegistry = new Map();
   let selectedNodes = [];
+  let sourceEditor;
+  let nextEditId = 0;
 
   function highlight(nodes) {
     for (const node of selectedNodes) node.removeAttribute("aria-current");
@@ -29,6 +31,76 @@ function createPreviewController({ document, window, vscode,
     if (text !== undefined) node.textContent = text;
     if (className) node.className = className;
     return node;
+  }
+
+  function invalidateSourceEditor() {
+    if (!sourceEditor || sourceEditor.applied) return;
+    sourceEditor.stale = true;
+    sourceEditor.apply.disabled = true;
+    sourceEditor.notice.textContent = "Source changed. This draft is kept for copying, but cannot be applied. Discard it and select a current element to edit again.";
+  }
+
+  function openSourceEditor(message, diagram, binding, current) {
+    if (disposed || current !== revision || committedMessage !== message) return;
+    if (sourceEditor && (sourceEditor.pending || (!sourceEditor.applied
+      && sourceEditor.input.value !== sourceEditor.originalInput))) {
+      sourceEditor.notice.textContent = "An unapplied draft is already open. Apply it or discard it before editing another fragment.";
+      sourceEditor.input.focus();
+      return;
+    }
+    if (typeof engine.applyParseLensEdit !== "function" || typeof binding.snippet !== "string") {
+      status.textContent = "This engine build does not provide editable source fragments.";
+      return;
+    }
+    sourceEditor?.panel.remove();
+    const panel = element("section");
+    const input = element("textarea");
+    input.setAttribute("aria-label", "Source fragment replacement");
+    input.spellcheck = false;
+    input.value = binding.snippet;
+    const apply = element("button", "Apply source edit");
+    const cancel = element("button", "Discard draft");
+    const notice = element("p"); notice.setAttribute("role", "status");
+    panel.append(element("h2", `Edit source fragment — diagram ${diagram.id + 1}`),
+      element("p", "This is the complete engine-owned source fragment, not a label rename. A statement may include multiple nodes and edges. Applying makes one undoable editor change; it does not save the file."),
+      input, apply, cancel, notice);
+    const draft = { panel, input, apply, cancel, notice, message, diagram, binding,
+      originalInput: input.value, stale: false, pending: false, applied: false };
+    sourceEditor = draft;
+    cancel.addEventListener("click", () => {
+      if (draft.pending || sourceEditor !== draft) return;
+      panel.remove(); sourceEditor = undefined;
+    });
+    apply.addEventListener("click", () => {
+      if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
+      if (committedMessage !== message || current !== revision) { invalidateSourceEditor(); return; }
+      try {
+        // Textarea.value uses LF. Match the engine input's convention before calling Rust;
+        // the host separately restores Markdown's stripped container indent and native EOL.
+        const eol = diagram.source.match(/\r\n|\n|\r/u)?.[0] || "\n";
+        const replacement = input.value.replace(/\r\n|\n|\r/gu, eol);
+        if (new TextEncoder().encode(replacement).length > 2 * 1024 * 1024) throw new Error("Replacement exceeds the 2 MiB limit.");
+        for (const character of replacement) {
+          const code = character.codePointAt(0);
+          if (code >= 0xd800 && code <= 0xdfff) throw new Error("Replacement contains an unpaired surrogate.");
+        }
+        const response = engine.applyParseLensEdit(diagram.source, binding.elementId, replacement);
+        if (!response?.result || !Array.isArray(response.snapshot?.bindings)) throw new Error("Engine did not return a complete source-edit receipt.");
+        draft.editId = ++nextEditId;
+        draft.pending = true;
+        apply.disabled = true; cancel.disabled = true;
+        notice.textContent = "Applying through the source editor…";
+        vscode.postMessage({ type: "apply-source-edit", requestId: message.requestId,
+          documentVersion: message.documentVersion, diagramId: diagram.id, elementId: binding.elementId,
+          editId: draft.editId, replacement, result: response.result });
+      } catch (error) {
+        draft.pending = false;
+        apply.disabled = false; cancel.disabled = false;
+        notice.textContent = `Edit not applied: ${errorText(error)}`;
+      }
+    });
+    root.append(panel);
+    input.focus();
   }
 
   async function start() {
@@ -136,6 +208,13 @@ function createPreviewController({ document, window, vscode,
         .map((binding) => [binding.elementId, binding]));
       const nodes = new Map();
       registry.set(diagram.id, nodes);
+      let selectedBinding;
+      const edit = element("button", "Edit selected source fragment");
+      edit.disabled = true;
+      edit.addEventListener("click", () => {
+        if (selectedBinding) openSourceEditor(message, diagram, selectedBinding, current);
+      });
+      tools.append(edit);
       for (const node of view.svgElement.querySelectorAll("[id]")) {
         const binding = bindings.get(node.id);
         if (!binding) continue;
@@ -147,6 +226,8 @@ function createPreviewController({ document, window, vscode,
           event.preventDefault(); event.stopPropagation();
           if (disposed || current !== revision) return;
           highlight([node]);
+          selectedBinding = binding;
+          edit.disabled = typeof engine.applyParseLensEdit !== "function" || typeof binding.snippet !== "string";
           send({ elementId: binding.elementId });
         };
         node.addEventListener("click", select);
@@ -176,6 +257,7 @@ function createPreviewController({ document, window, vscode,
     if (!engine || disposed || message.requestId <= latestRequestId) return;
     latestRequestId = message.requestId;
     const current = ++revision;
+    invalidateSourceEditor();
     committedMessage = undefined;
     elementRegistry = new Map();
     root.setAttribute("aria-busy", "true");
@@ -209,7 +291,7 @@ function createPreviewController({ document, window, vscode,
       await yieldToHost();
     }
     if (disposed || current !== revision) return;
-    root.replaceChildren(...cards);
+    root.replaceChildren(...cards, ...(sourceEditor ? [sourceEditor.panel] : []));
     highlight([]);
     committedMessage = message;
     elementRegistry = registry;
@@ -235,7 +317,17 @@ function createPreviewController({ document, window, vscode,
   function onMessage(event) {
     const message = event.data;
     if (disposed) return;
-    if (message && committedMessage && message.requestId === committedMessage.requestId
+    if (message?.type === "source-edit-result" && sourceEditor?.pending
+      && message.editId === sourceEditor.editId && message.requestId === sourceEditor.message.requestId
+      && message.documentVersion === sourceEditor.message.documentVersion && typeof message.ok === "boolean"
+      && typeof message.message === "string") {
+      sourceEditor.pending = false;
+      sourceEditor.cancel.disabled = false;
+      sourceEditor.applied = message.ok;
+      sourceEditor.input.readOnly = message.ok;
+      sourceEditor.apply.disabled = message.ok || sourceEditor.stale;
+      sourceEditor.notice.textContent = message.message;
+    } else if (message && committedMessage && message.requestId === committedMessage.requestId
       && message.documentVersion === committedMessage.documentVersion && message.type === "select-source"
       && Array.isArray(message.targets) && message.targets.length <= 256
       && message.targets.every((target) => Number.isSafeInteger(target?.diagramId) && typeof target.elementId === "string")) {
@@ -247,10 +339,11 @@ function createPreviewController({ document, window, vscode,
       && message.requestId > latestRequestId && typeof message.message === "string") {
       latestRequestId = message.requestId;
       revision += 1;
+      invalidateSourceEditor();
       committedMessage = undefined;
       elementRegistry = new Map();
       highlight([]);
-      root.replaceChildren();
+      root.replaceChildren(...(sourceEditor ? [sourceEditor.panel] : []));
       root.setAttribute("aria-busy", "false");
       status.textContent = message.message;
     } else if (isRenderMessage(message)) {

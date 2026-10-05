@@ -4,7 +4,7 @@ const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler,
   isPreviewDocument, normalizePreviewDebounceMs,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
-  sourceSelectionTargets,
+  sourceSelectionTargets, planSourceEdit,
 } = require("./preview-contract.cjs");
 
 const panels = new Map();
@@ -156,12 +156,54 @@ async function revealSource(entry, message) {
   editor.revealRange(target, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
+async function applySourceEdit(entry, message) {
+  if (!Number.isSafeInteger(message.editId) || message.editId < 1) return;
+  const reply = (ok, text) => {
+    if (!entry.disposed) void entry.panel.webview.postMessage({ type: "source-edit-result",
+      requestId: message.requestId, documentVersion: message.documentVersion,
+      editId: message.editId, ok, message: text });
+  };
+  if (!isCurrentSnapshot(entry, message)) {
+    reply(false, "Source changed. Your draft was not applied; select a current element.");
+    return;
+  }
+  if (entry.editing) { reply(false, "Another source edit is being applied."); return; }
+  entry.editing = true;
+  try {
+    const snapshot = entry.snapshot;
+    const plan = planSourceEdit(entry.document, snapshot, entry.reports, message);
+    if (!plan.changed) { reply(true, "Source is unchanged."); return; }
+    const editor = await vscode.window.showTextDocument(entry.document,
+      { viewColumn: entry.sourceColumn, preserveFocus: true, preview: false });
+    // Opening an editor is asynchronous. Recheck at the actual commit boundary, then let
+    // TextEditor.edit's versioned transaction reject any edit racing inside the VS Code host.
+    if (entry.snapshot !== snapshot || !isCurrentSnapshot(entry, message)
+      || entry.document.getText() !== plan.before
+      || editor.document.uri.toString() !== entry.document.uri.toString()) {
+      throw new Error("Source changed while opening the editor. Your draft was not applied.");
+    }
+    const applied = await editor.edit((builder) => builder.replace(vscodeRange(plan.range), plan.newText),
+      { undoStopBefore: true, undoStopAfter: true });
+    if (!applied) throw new Error("VS Code refused the edit (read-only or changed document). Your draft was kept.");
+    reply(true, "Source updated. Use the editor's Undo to restore it.");
+    // Source-change events normally invalidate first. Do so here as well before another queued
+    // webview message can reuse this receipt, including hosts which deliver that event later.
+    entry.snapshot = undefined;
+    entry.reports = undefined;
+    diagnostics?.delete(entry.document.uri);
+    entry.scheduler.schedule(() => postRender(entry));
+  } catch (error) {
+    reply(false, error instanceof Error ? error.message : String(error));
+  } finally { entry.editing = false; }
+}
+
 async function receiveMessage(entry, message) {
   if (entry.disposed) return;
   if (message?.type === "ready") { entry.ready = true; postRender(entry); }
   else if (message?.type === "rendered") acceptRenderReport(entry, message);
   else if (message?.type === "reveal") await revealSource(entry, message);
   else if (message?.type === "export-svg") await exportSvg(entry, message);
+  else if (message?.type === "apply-source-edit") await applySourceEdit(entry, message);
 }
 
 function previewDebounceMs() {

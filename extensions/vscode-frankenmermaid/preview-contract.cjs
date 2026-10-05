@@ -43,7 +43,7 @@ function extractMermaidBlocks(document) {
         throw new Error(`Preview supports at most ${MAX_PREVIEW_DIAGRAMS} diagrams per document.`);
       }
       blocks.push({ id: blocks.length, source: fence.body.join("\n"),
-        startLine: fence.startLine, lineMap: fence.lineMap });
+        startLine: fence.startLine, lineMap: fence.lineMap, fenceIndent: fence.indent });
     }
     fence = undefined;
   }
@@ -78,6 +78,7 @@ function createRenderSnapshot(document, requestId, title) {
   const blocks = extractMermaidBlocks(document);
   return {
     blocks,
+    documentSource: document.getText(),
     message: {
       type: "render", requestId, documentVersion: document.version, title,
       diagrams: blocks.map(({ id, source, startLine }) => ({ id, source, startLine })),
@@ -199,6 +200,57 @@ function isCurrentSnapshot(entry, message) {
     && entry.document.version === message.documentVersion);
 }
 
+// The host owns document identity and ranges; the webview returns only a Rust lens receipt.
+// Do not accept a document URI, arbitrary editor range, or a whole-document replacement from it.
+function planSourceEdit(document, snapshot, reports, message) {
+  const before = document.getText();
+  if (before !== snapshot.documentSource) throw new Error("Source changed; select the element again.");
+  const block = snapshot.blocks[message.diagramId];
+  const binding = reports?.get(message.diagramId)?.bindings.get(message.elementId);
+  if (!Number.isSafeInteger(message.diagramId) || !block || !binding) {
+    throw new Error("This element has no current editable source fragment.");
+  }
+  const { replacement, result } = message;
+  if (typeof replacement !== "string" || Buffer.byteLength(replacement, "utf8") > MAX_PREVIEW_BYTES) {
+    throw new Error("Source replacement must be text within the 2 MiB limit.");
+  }
+  utf8Boundaries(replacement, new Set()); // Reject lossy UTF-16 to UTF-8 conversion.
+  const offsets = utf8Boundaries(block.source, new Set([binding.startByte, binding.endByte]));
+  const start = offsets.get(binding.startByte);
+  const end = offsets.get(binding.endByte);
+  const updated = block.source.slice(0, start) + replacement + block.source.slice(end);
+  if (!result || result.elementId !== binding.elementId || result.previousSnippet !== binding.snippet
+    || result.replacement !== replacement || result.replacedRange?.startByte !== binding.startByte
+    || result.replacedRange?.endByte !== binding.endByte || result.updatedSource !== updated) {
+    throw new Error("The Rust edit receipt does not match the selected source fragment.");
+  }
+  if (replacement === binding.snippet) {
+    return { before, after: before, range: binding.range, newText: replacement, changed: false };
+  }
+  // TextEditor.edit normalizes inserted newlines to the document's EOL convention. Markdown's
+  // engine input is de-indented/LF-normalized, so restore ONLY its container indentation here.
+  // Mermaid indentation inside the fragment remains authored text, never reformatted by JS.
+  const eol = document.eol === 2 ? "\r\n" : document.eol === 1 ? "\n"
+    : before.match(/\r\n|\n|\r/u)?.[0] || "\n";
+  const markdown = !isMermaidDocument(document);
+  const separator = eol + (markdown ? " ".repeat(block.fenceIndent) : "");
+  const newText = replacement.split(/\r\n|\n|\r/u).join(separator);
+  const starts = lineStarts(before);
+  const from = starts[binding.range.start.line] + binding.range.start.character;
+  const to = starts[binding.range.end.line] + binding.range.end.character;
+  const after = before.slice(0, from) + newText + before.slice(to);
+  if (Buffer.byteLength(after, "utf8") > MAX_PREVIEW_BYTES) throw new Error("Edited document exceeds the 2 MiB limit.");
+  // A replacement containing a fence closer must not escape into Markdown prose or consume a
+  // sibling diagram. Re-extraction checks the same container grammar used for the original view.
+  const next = extractMermaidBlocks({ fileName: document.fileName, languageId: document.languageId,
+    getText: () => after });
+  if (next.length !== snapshot.blocks.length || next.some((item, index) =>
+    item.source !== (index === message.diagramId ? updated : snapshot.blocks[index].source))) {
+    throw new Error("Edit changes a Markdown fence or cannot preserve the source's line endings.");
+  }
+  return { before, after, range: binding.range, newText, changed: before !== after };
+}
+
 // Prefer the narrowest engine binding containing the editor selection. A statement may own
 // several node/edge IDs with the SAME span: highlight all of them rather than inventing a winner.
 function sourceSelectionTargets(reports, selection) {
@@ -281,6 +333,8 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBina
     h2 { font-size: 1rem; overflow-wrap: anywhere; }
     button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; padding: .4rem .7rem; margin: .25rem .5rem .25rem 0; cursor: pointer; }
     button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+    button:disabled { opacity: .6; cursor: default; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 8rem; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); font-family: var(--vscode-editor-font-family, monospace); }
     .error { color: var(--vscode-errorForeground); white-space: pre-wrap; overflow-wrap: anywhere; }
     #status { margin-bottom: 1rem; }
   </style>
@@ -299,4 +353,5 @@ module.exports = {
   MAX_PREVIEW_BYTES, MAX_PREVIEW_DIAGRAMS,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
   sourceSelectionTargets,
+  planSourceEdit,
 };
