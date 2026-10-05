@@ -9,6 +9,7 @@ const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler, extractMermaidBlocks,
   isMermaidDocument, isPreviewDocument, normalizePreviewDebounceMs, MAX_PREVIEW_DIAGRAMS,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
+  sourceSelectionTargets,
 } = require("../preview-contract.cjs");
 const { createPreviewController } = require("../media/preview.js");
 
@@ -150,12 +151,23 @@ function previewHarness({ engine, loadEngine, yieldToHost } = {}) {
   const calls = [];
   const messages = [];
   const initializations = [];
+  const serializations = [];
   const document = { body: { dataset: { wasmModule: "local-module", wasmBinary: "local-wasm", styleNonce: "nonce" } },
     getElementById: (id) => id === "preview" ? root : status,
     createElement: (tag) => new Element(tag), importNode: (node) => node };
   const window = {
     addEventListener: (type, fn) => listeners.set(type, fn),
     removeEventListener: (type) => listeners.delete(type),
+    XMLSerializer: class {
+      serializeToString(node) {
+        assert.equal(node.querySelectorAll("script").length, 0);
+        assert.equal(node.getAttribute("onclick"), null);
+        assert.equal(node.querySelectorAll("style")[0].getAttribute("nonce"), null);
+        assert.equal(node.querySelectorAll("[id]")[0].getAttribute("role"), null);
+        const text = '<svg xmlns="http://www.w3.org/2000/svg"><title>café 😀</title></svg>';
+        serializations.push(text); return text;
+      }
+    },
     DOMParser: class {
       parseFromString(svg) {
         const node = new Element(svg === "INVALID" ? "parsererror" : "svg");
@@ -176,7 +188,7 @@ function previewHarness({ engine, loadEngine, yieldToHost } = {}) {
     data: { type: "render", title: "file.md", requestId, documentVersion: 3,
       diagrams: sources.map((source, id) => ({ id, source, startLine: id * 3 })) },
   });
-  return { root, status, listeners, calls, messages, initializations, controller, send };
+  return { root, status, listeners, calls, messages, initializations, serializations, controller, send };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -268,7 +280,9 @@ test("failed initialization is retryable; disposal suppresses late initializatio
 function extensionHarness({ assetsAvailable = () => true } = {}) {
   const commands = new Map(); const events = new Map(); const created = []; const errors = []; const stats = [];
   const problems = new Map(); const editors = [];
-  const uri = (name) => ({ path: name, toString: () => `file://${name}` });
+  const saves = []; const writes = []; const copies = [];
+  const uri = (name, scheme = "file") => ({ path: name, scheme, toString: () => `${scheme}://${name}`,
+    with: (changes) => uri(changes.path || name, changes.scheme || scheme) });
   const vscode = {
     Uri: { joinPath: (base, ...parts) => uri(path.posix.join(base.path, ...parts)) },
     ViewColumn: { Beside: 2, One: 1 },
@@ -286,6 +300,8 @@ function extensionHarness({ assetsAvailable = () => true } = {}) {
     window: {
       activeTextEditor: undefined,
       showWarningMessage: (message) => errors.push(message), showErrorMessage: (message) => errors.push(message),
+      showSaveDialog: async (options) => { saves.push(options); return undefined; },
+      onDidChangeTextEditorSelection: (fn) => events.set("selection", fn),
       showTextDocument: async (document, options) => {
         const editor = { document, options, revealed: [], revealRange: (range) => editor.revealed.push(range) };
         editors.push(editor); return editor;
@@ -304,22 +320,32 @@ function extensionHarness({ assetsAvailable = () => true } = {}) {
       },
     },
     workspace: {
-      fs: { stat: async (value) => { stats.push(value.path); if (!assetsAvailable(value.path)) throw new Error("ENOENT"); return {}; } },
+      fs: {
+        stat: async (value) => { stats.push(value.path); if (!assetsAvailable(value.path)) throw new Error("ENOENT"); return {}; },
+        writeFile: async (destination, bytes) => writes.push({ destination, bytes }),
+      },
       getConfiguration: () => ({ get: () => 0 }), asRelativePath: (value) => value.path,
       onDidChangeTextDocument: (fn) => events.set("edit", fn),
       onDidChangeConfiguration: (fn) => events.set("config", fn),
       onDidCloseTextDocument: (fn) => events.set("close", fn),
     },
     commands: { registerCommand: (name, fn) => commands.set(name, fn) },
+    env: { clipboard: { writeText: async (text) => copies.push(text) } },
   };
   const module = { exports: {} };
   const filename = path.join(__dirname, "..", "extension.js");
-  vm.runInNewContext(fs.readFileSync(filename, "utf8"), { module, require: (name) => name === "vscode" ? vscode
+  vm.runInNewContext(fs.readFileSync(filename, "utf8"), { module, Buffer, require: (name) => name === "vscode" ? vscode
     : name === "./preview-contract.cjs" ? require("../preview-contract.cjs") : require(name), }, { filename });
   const context = { extensionUri: uri("/repo/extensions/vscode-frankenmermaid"), subscriptions: [] };
   module.exports.activate(context);
-  const open = async (doc) => { vscode.window.activeTextEditor = { document: doc }; await commands.get("frankenmermaid.showPreview")(); };
-  return { commands, events, created, errors, stats, problems, editors, open, vscode, deactivate: module.exports.deactivate };
+  const open = async (doc) => {
+    // Test documents have a minimal URI; a real VS Code URI supports scheme and with().
+    doc.uri = uri(doc.uri.path);
+    vscode.window.activeTextEditor = { document: doc };
+    await commands.get("frankenmermaid.showPreview")();
+  };
+  return { commands, events, created, errors, stats, problems, editors, saves, writes, copies, uri,
+    open, vscode, deactivate: module.exports.deactivate };
 }
 
 test("extension executes Markdown preview command, waits for ready, and resends latest document", async (t) => {
@@ -498,4 +524,132 @@ test("navigation rechecks document revision after asynchronous editor opening", 
   const editor = { document: doc, revealRange: () => assert.fail("stale reveal") };
   doc.version += 1; resolve(editor); await navigating;
   assert.equal(editor.selection, undefined);
+});
+
+test("source selection chooses the narrowest engine span and preserves shared-statement identities", () => {
+  const block = extractMermaidBlocks(documentFor("A[café]-->B", "x.mmd", "mermaid"))[0];
+  const bindings = checkedSourceBindings(block, [bindingFor(block.source, block.source, "wide"),
+    bindingFor(block.source, "café", "node"), bindingFor(block.source, "café", "edge")]);
+  const reports = new Map([[2, { bindings }]]);
+  const selection = { start: { line: 0, character: 3 }, end: { line: 0, character: 4 } };
+  assert.deepEqual(sourceSelectionTargets(reports, selection), [
+    { diagramId: 2, elementId: "node" }, { diagramId: 2, elementId: "edge" },
+  ]);
+  assert.deepEqual(sourceSelectionTargets(reports, { start: { line: 2, character: 0 }, end: { line: 2, character: 0 } }), []);
+  assert.deepEqual(sourceSelectionTargets(reports, { start: { line: 0, character: 6 }, end: { line: 0, character: 6 } }), [{ diagramId: 2, elementId: "wide" }]);
+  assert.deepEqual(sourceSelectionTargets(reports, { start: { line: -1, character: 0 }, end: { line: 0, character: 0 } }), []);
+});
+
+test("cursor messages highlight only the correct diagram scope and do not steal focus or echo navigation", async () => {
+  const source = "A[café]";
+  const binding = bindingFor(source, "café");
+  const h = previewHarness({ engine: { default: async () => {}, renderSvg: () => "<svg/>",
+    parseLens: () => ({ bindings: [binding], parsed: { warnings: [] } }) } });
+  await h.controller.start(); h.send([source, source]); await settle();
+  const first = h.root.children[0].children[1].shadowRoot.children[1].querySelectorAll("[id]")[0];
+  const second = h.root.children[1].children[1].shadowRoot.children[1].querySelectorAll("[id]")[0];
+  const count = h.messages.length;
+  const select = { type: "select-source", requestId: 1, documentVersion: 3,
+    targets: [{ diagramId: 1, elementId: binding.elementId }] };
+  h.listeners.get("message")({ data: select });
+  assert.equal(first.getAttribute("aria-current"), null);
+  assert.equal(second.getAttribute("aria-current"), "true");
+  assert.equal(h.messages.length, count, "programmatic highlighting must not emit a reveal loop");
+  h.listeners.get("message")({ data: { ...select, requestId: 0, targets: [] } });
+  assert.equal(second.getAttribute("aria-current"), "true");
+  h.listeners.get("message")({ data: { ...select, targets: [] } });
+  assert.equal(second.getAttribute("aria-current"), null);
+});
+
+test("extension selection events use current host-validated bindings and clear in prose", async (t) => {
+  const h = extensionHarness(); t.after(h.deactivate);
+  const doc = documentFor("# readme\n```mermaid\nA[café]\n```");
+  await h.open(doc); const panel = h.created[0]; await panel.receive({ type: "ready" });
+  const report = reportFor(panel, panel.messages.at(-1).diagrams[0].source); await panel.receive(report);
+  const editor = { document: doc, selection: { start: { line: 2, character: 3 }, end: { line: 2, character: 3 } } };
+  h.events.get("selection")({ textEditor: editor });
+  assert.equal(panel.messages.at(-1).type, "select-source");
+  assert.deepEqual(panel.messages.at(-1).targets, [{ diagramId: 0, elementId: "fm-node-a-0" }]);
+  editor.selection = { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } };
+  h.events.get("selection")({ textEditor: editor });
+  assert.deepEqual(panel.messages.at(-1).targets, []);
+  const count = panel.messages.length;
+  doc.version += 1;
+  h.events.get("selection")({ textEditor: editor });
+  assert.equal(panel.messages.length, count);
+});
+
+test("SVG export buttons reuse the sanitized undecorated render and reject obsolete UI", async () => {
+  const h = previewHarness(); await h.controller.start(); h.send(["A"]); await settle();
+  const tools = h.root.children[0].children[2];
+  assert.deepEqual(tools.children.map((button) => button.textContent), ["Show source", "Save SVG", "Copy SVG"]);
+  for (const [index, action] of [[1, "save"], [2, "copy"]]) {
+    tools.children[index].listeners.get("click")();
+    assert.deepEqual(h.messages.at(-1), { type: "export-svg", action, requestId: 1,
+      documentVersion: 3, diagramId: 0, svg: h.serializations[0] });
+  }
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.serializations.length, 1);
+  const count = h.messages.length;
+  h.send(["B"], 2); tools.children[1].listeners.get("click")();
+  assert.equal(h.messages.length, count);
+  await settle();
+  h.listeners.get("message")({ data: { type: "export-complete", requestId: 1, documentVersion: 3, action: "save" } });
+  assert.equal(h.status.textContent, "1 diagram.");
+});
+
+const exportedSvg = '<svg xmlns="http://www.w3.org/2000/svg"><text>café 😀</text></svg>';
+async function exportHarness(t) {
+  const h = extensionHarness(); t.after(h.deactivate);
+  const doc = documentFor("A[café]", "/work/diagram.mmd", "mermaid");
+  await h.open(doc); const panel = h.created[0]; await panel.receive({ type: "ready" });
+  const report = reportFor(panel, doc.getText()); await panel.receive(report);
+  const action = { type: "export-svg", action: "save", requestId: report.requestId,
+    documentVersion: 3, diagramId: 0, svg: exportedSvg, destination: "file:///ignored.svg" };
+  return { ...h, doc, panel, action };
+}
+
+test("native SVG export writes exact UTF-8 to the dialog-selected destination and can copy", async (t) => {
+  const h = await exportHarness(t);
+  const destination = h.uri("/chosen/output.svg");
+  h.vscode.window.showSaveDialog = async (options) => {
+    h.saves.push(options); return destination;
+  };
+  await h.panel.receive(h.action);
+  assert.equal(h.saves[0].defaultUri.path, "/work/diagram.svg");
+  assert.equal(h.writes.length, 1); assert.equal(h.writes[0].destination, destination);
+  assert.equal(h.writes[0].bytes.toString("utf8"), exportedSvg);
+  assert.equal(h.panel.messages.at(-1).type, "export-complete");
+  await h.panel.receive({ ...h.action, action: "copy" });
+  assert.deepEqual(h.copies, [exportedSvg]);
+  assert.equal(h.saves.length, 1, "copy must not open a save dialog");
+});
+
+test("cancelled, stale, malformed and source-overwriting exports never write a file", async (t) => {
+  const h = await exportHarness(t);
+  await h.panel.receive(h.action); // Native dialog cancellation.
+  assert.equal(h.writes.length, 0);
+  h.vscode.window.showSaveDialog = async () => h.doc.uri;
+  await h.panel.receive(h.action);
+  assert.match(h.errors.at(-1), /cannot overwrite/u);
+  await h.panel.receive({ ...h.action, svg: "not an SVG" });
+  assert.match(h.errors.at(-1), /bounded SVG/u);
+  let resolve;
+  h.vscode.window.showSaveDialog = () => new Promise((done) => { resolve = done; });
+  const saving = h.panel.receive(h.action);
+  h.doc.version += 1; resolve(h.uri("/chosen/output.svg")); await saving;
+  assert.match(h.errors.at(-1), /Source changed/u);
+  await h.panel.receive({ ...h.action, action: "copy" });
+  assert.equal(h.writes.length, 0); assert.equal(h.copies.length, 0);
+});
+
+test("a failed write releases the save lock and reports the actual failure", async (t) => {
+  const h = await exportHarness(t);
+  h.vscode.window.showSaveDialog = async () => h.uri("/chosen/output.svg");
+  h.vscode.workspace.fs.writeFile = async () => { throw new Error("disk full"); };
+  await h.panel.receive(h.action);
+  assert.match(h.errors.at(-1), /disk full/u);
+  h.vscode.workspace.fs.writeFile = async (destination, bytes) => h.writes.push({ destination, bytes });
+  await h.panel.receive(h.action);
+  assert.equal(h.writes.length, 1);
 });

@@ -4,6 +4,7 @@ const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler,
   isPreviewDocument, normalizePreviewDebounceMs,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
+  sourceSelectionTargets,
 } = require("./preview-contract.cjs");
 
 const panels = new Map();
@@ -90,6 +91,50 @@ function acceptRenderReport(entry, message) {
   }
   entry.reports = checked;
   diagnostics.set(entry.document.uri, problems);
+  publishSourceSelection(entry, vscode.window.activeTextEditor);
+}
+
+function publishSourceSelection(entry, editor) {
+  if (!editor || editor.document.uri.toString() !== entry.document.uri.toString()
+    || !entry.reports || !isCurrentSnapshot(entry, entry.snapshot?.message)) return;
+  void entry.panel.webview.postMessage({ type: "select-source",
+    requestId: entry.snapshot.message.requestId, documentVersion: entry.document.version,
+    targets: sourceSelectionTargets(entry.reports, editor.selection) });
+}
+
+async function exportSvg(entry, message) {
+  if (!isCurrentSnapshot(entry, message) || !Number.isSafeInteger(message.diagramId)
+    || !entry.reports?.has(message.diagramId) || !["save", "copy"].includes(message.action)) return;
+  const svg = message.svg;
+  if (typeof svg !== "string" || Buffer.byteLength(svg, "utf8") > 16 * 1024 * 1024
+    || !/^\s*(?:<\?xml[^>]*\?>\s*)?<svg(?:\s|>)/u.test(svg)) {
+    throw new Error("The preview did not return a valid bounded SVG export.");
+  }
+  if (message.action === "copy") {
+    await vscode.env.clipboard.writeText(svg);
+  } else {
+    if (entry.exporting) return;
+    entry.exporting = true;
+    try {
+      const sourceUri = entry.document.uri;
+      const suffix = entry.snapshot.blocks.length > 1 ? `-diagram-${message.diagramId + 1}` : "";
+      const defaultUri = sourceUri.scheme === "untitled" ? undefined
+        : sourceUri.with({ path: sourceUri.path.replace(/\.[^./]+$/u, "") + suffix + ".svg", query: "", fragment: "" });
+      const destination = await vscode.window.showSaveDialog({ defaultUri,
+        filters: { "SVG image": ["svg"] }, saveLabel: "Save SVG" });
+      if (!destination) return;
+      // A delayed save dialog cannot authorize exporting an obsolete document snapshot.
+      if (!isCurrentSnapshot(entry, message)) throw new Error("Source changed while choosing a destination. Render again before exporting.");
+      if (!/\.svg$/iu.test(destination.path)
+        || destination.toString().toLowerCase() === sourceUri.toString().toLowerCase()) {
+        throw new Error("Choose a separate .svg file; export cannot overwrite the source document.");
+      }
+      // Only the native save dialog chooses the destination. Never use a URI from webview data.
+      await vscode.workspace.fs.writeFile(destination, Buffer.from(svg, "utf8"));
+    } finally { entry.exporting = false; }
+  }
+  if (isCurrentSnapshot(entry, message)) void entry.panel.webview.postMessage({ type: "export-complete",
+    requestId: message.requestId, documentVersion: message.documentVersion, action: message.action });
 }
 
 async function revealSource(entry, message) {
@@ -116,6 +161,7 @@ async function receiveMessage(entry, message) {
   if (message?.type === "ready") { entry.ready = true; postRender(entry); }
   else if (message?.type === "rendered") acceptRenderReport(entry, message);
   else if (message?.type === "reveal") await revealSource(entry, message);
+  else if (message?.type === "export-svg") await exportSvg(entry, message);
 }
 
 function previewDebounceMs() {
@@ -197,6 +243,10 @@ function activate(context) {
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
       panels.get(document.uri.toString())?.panel.dispose();
+    }),
+    vscode.window.onDidChangeTextEditorSelection((event) => {
+      const entry = panels.get(event.textEditor.document.uri.toString());
+      if (entry) publishSourceSelection(entry, event.textEditor);
     }),
   );
 }

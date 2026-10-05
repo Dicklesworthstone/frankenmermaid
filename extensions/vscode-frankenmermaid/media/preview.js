@@ -13,6 +13,15 @@ function createPreviewController({ document, window, vscode,
   let starting = false;
   let revision = 0;
   let latestRequestId = -1;
+  let committedMessage;
+  let elementRegistry = new Map();
+  let selectedNodes = [];
+
+  function highlight(nodes) {
+    for (const node of selectedNodes) node.removeAttribute("aria-current");
+    selectedNodes = [...new Set(nodes)];
+    for (const node of selectedNodes) node.setAttribute("aria-current", "true");
+  }
 
   const errorText = (error) => error instanceof Error ? error.message : String(error);
   function element(tag, text, className) {
@@ -62,6 +71,9 @@ function createPreviewController({ document, window, vscode,
         if (/^on/iu.test(attribute.name)) node.removeAttribute(attribute.name);
       }
     }
+    // Capture the sanitized rendered artifact BEFORE adding preview-only nonces, focus state or
+    // source navigation roles. Exports never re-render and never serialize the decorated preview.
+    const exportSvg = new window.XMLSerializer().serializeToString(svgElement);
     for (const style of svgElement.querySelectorAll("style")) style.setAttribute("nonce", styleNonce);
     const host = element("div");
     // Every SVG keeps its original source-bound IDs. Separate tree scopes prevent one diagram's
@@ -72,7 +84,7 @@ function createPreviewController({ document, window, vscode,
     shadow.append(style, svgElement);
     // A preview must not navigate its webview when an authored `click` link is activated.
     svgElement.addEventListener("click", (event) => event.preventDefault());
-    return { host, svgElement };
+    return { host, svgElement, svg: exportSvg };
   }
 
   function sourceInsight(source) {
@@ -100,7 +112,7 @@ function createPreviewController({ document, window, vscode,
     return { bindings: Array.isArray(lens?.bindings) ? lens.bindings : [], diagnostics };
   }
 
-  function sourceControls(card, view, insight, message, diagram, current) {
+  function sourceControls(card, view, insight, message, diagram, current, registry) {
     const send = (detail) => {
       if (!disposed && current === revision) vscode.postMessage({ type: "reveal", requestId: message.requestId,
         documentVersion: message.documentVersion, diagramId: diagram.id, ...detail });
@@ -111,21 +123,30 @@ function createPreviewController({ document, window, vscode,
     tools.append(showSource);
     card.append(tools);
     if (view) {
+      for (const [action, label] of [["save", "Save SVG"], ["copy", "Copy SVG"]]) {
+        const button = element("button", label);
+        button.addEventListener("click", () => {
+          if (!disposed && current === revision) vscode.postMessage({ type: "export-svg", action,
+            requestId: message.requestId, documentVersion: message.documentVersion,
+            diagramId: diagram.id, svg: view.svg });
+        });
+        tools.append(button);
+      }
       const bindings = new Map(insight.bindings.filter((binding) => binding?.textRange)
         .map((binding) => [binding.elementId, binding]));
-      let selected;
+      const nodes = new Map();
+      registry.set(diagram.id, nodes);
       for (const node of view.svgElement.querySelectorAll("[id]")) {
         const binding = bindings.get(node.id);
         if (!binding) continue;
+        nodes.set(binding.elementId, node);
         node.setAttribute("role", "button");
         node.setAttribute("tabindex", "0");
         node.setAttribute("aria-label", `Show source for ${String(binding.sourceId || binding.elementId).slice(0, 200)}`);
         const select = (event) => {
           event.preventDefault(); event.stopPropagation();
           if (disposed || current !== revision) return;
-          selected?.removeAttribute("aria-current");
-          selected = node;
-          node.setAttribute("aria-current", "true");
+          highlight([node]);
           send({ elementId: binding.elementId });
         };
         node.addEventListener("click", select);
@@ -155,10 +176,13 @@ function createPreviewController({ document, window, vscode,
     if (!engine || disposed || message.requestId <= latestRequestId) return;
     latestRequestId = message.requestId;
     const current = ++revision;
+    committedMessage = undefined;
+    elementRegistry = new Map();
     root.setAttribute("aria-busy", "true");
     status.textContent = "Rendering…";
     const cards = [];
     const reports = [];
+    const registry = new Map();
     let failed = 0;
     for (const diagram of message.diagrams) {
       if (disposed || current !== revision) return;
@@ -178,7 +202,7 @@ function createPreviewController({ document, window, vscode,
         card.append(element("p", `Unable to render this diagram: ${errorText(error)}`, "error"));
         insight.diagnostics.push({ severity: "error", message: `Rendering failed: ${errorText(error)}` });
       }
-      sourceControls(card, view, insight, message, diagram, current);
+      sourceControls(card, view, insight, message, diagram, current, registry);
       reports.push({ id: diagram.id, ...insight });
       cards.push(card);
       // Yield between diagrams so newer edits/disposal can cancel the unfinished document render.
@@ -186,6 +210,9 @@ function createPreviewController({ document, window, vscode,
     }
     if (disposed || current !== revision) return;
     root.replaceChildren(...cards);
+    highlight([]);
+    committedMessage = message;
+    elementRegistry = registry;
     root.setAttribute("aria-busy", "false");
     status.textContent = cards.length === 0 ? "No Mermaid code fences found in this document."
       : `${cards.length} diagram${cards.length === 1 ? "" : "s"}${failed ? `; ${failed} could not render` : ""}.`;
@@ -208,10 +235,21 @@ function createPreviewController({ document, window, vscode,
   function onMessage(event) {
     const message = event.data;
     if (disposed) return;
-    if (message?.type === "preview-error" && Number.isSafeInteger(message.requestId)
+    if (message && committedMessage && message.requestId === committedMessage.requestId
+      && message.documentVersion === committedMessage.documentVersion && message.type === "select-source"
+      && Array.isArray(message.targets) && message.targets.length <= 256
+      && message.targets.every((target) => Number.isSafeInteger(target?.diagramId) && typeof target.elementId === "string")) {
+      highlight(message.targets.map((target) => elementRegistry.get(target.diagramId)?.get(target.elementId)).filter(Boolean));
+    } else if (message?.type === "export-complete" && committedMessage
+      && message.requestId === committedMessage.requestId && message.documentVersion === committedMessage.documentVersion) {
+      status.textContent = message.action === "save" ? "SVG saved." : "SVG copied to clipboard.";
+    } else if (message?.type === "preview-error" && Number.isSafeInteger(message.requestId)
       && message.requestId > latestRequestId && typeof message.message === "string") {
       latestRequestId = message.requestId;
       revision += 1;
+      committedMessage = undefined;
+      elementRegistry = new Map();
+      highlight([]);
       root.replaceChildren();
       root.setAttribute("aria-busy", "false");
       status.textContent = message.message;
@@ -223,6 +261,9 @@ function createPreviewController({ document, window, vscode,
   function dispose() {
     disposed = true;
     revision += 1;
+    committedMessage = undefined;
+    elementRegistry = new Map();
+    highlight([]);
     window.removeEventListener("message", onMessage);
     window.removeEventListener("pagehide", dispose);
   }

@@ -199,6 +199,30 @@ function isCurrentSnapshot(entry, message) {
     && entry.document.version === message.documentVersion);
 }
 
+// Prefer the narrowest engine binding containing the editor selection. A statement may own
+// several node/edge IDs with the SAME span: highlight all of them rather than inventing a winner.
+function sourceSelectionTargets(reports, selection) {
+  const valid = (point) => point && Number.isSafeInteger(point.line) && point.line >= 0
+    && Number.isSafeInteger(point.character) && point.character >= 0;
+  if (!reports || !valid(selection?.start) || !valid(selection?.end)) return [];
+  const compare = (left, right) => left.line - right.line || left.character - right.character;
+  if (compare(selection.start, selection.end) > 0) return [];
+  const empty = compare(selection.start, selection.end) === 0;
+  let width = Infinity;
+  let targets = [];
+  for (const [diagramId, report] of reports) {
+    for (const binding of report.bindings.values()) {
+      const { start, end } = binding.range;
+      if (compare(start, selection.start) > 0 || compare(selection.end, end) > 0
+        || (empty && compare(selection.start, end) >= 0)) continue;
+      const size = binding.endByte - binding.startByte;
+      if (size < width) { width = size; targets = []; }
+      if (size === width && targets.length < 256) targets.push({ diagramId, elementId: binding.elementId });
+    }
+  }
+  return targets;
+}
+
 function normalizePreviewDebounceMs(value) {
   if (!Number.isInteger(value) || value < 0 || value > MAX_PREVIEW_DEBOUNCE_MS) {
     return DEFAULT_PREVIEW_DEBOUNCE_MS;
@@ -274,4 +298,5 @@ module.exports = {
   isMermaidDocument, isMarkdownDocument, isPreviewDocument, normalizePreviewDebounceMs,
   MAX_PREVIEW_BYTES, MAX_PREVIEW_DIAGRAMS,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
+  sourceSelectionTargets,
 };
