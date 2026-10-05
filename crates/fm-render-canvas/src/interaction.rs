@@ -18,6 +18,7 @@
 
 use fm_core::MermaidDiagramIr;
 use fm_layout::{DiagramLayout, LayoutRect};
+use std::sync::Arc;
 
 /// One interactive node's clickable area and what the author attached to it.
 ///
@@ -206,13 +207,9 @@ impl NodeSelection {
         if !x.is_finite() || !y.is_finite() {
             return false;
         }
-        let target = selectable_nodes(ir, layout).rev().find(|node| {
-            let bounds = node.bounds;
-            x >= f64::from(bounds.x)
-                && y >= f64::from(bounds.y)
-                && x < f64::from(bounds.x) + f64::from(bounds.width)
-                && y < f64::from(bounds.y) + f64::from(bounds.height)
-        });
+        let target = selectable_nodes(ir, layout)
+            .rev()
+            .find(|node| node.contains(x, y));
         self.replace(target.map(|node| node.id))
     }
 
@@ -297,6 +294,13 @@ struct SelectableNode<'a> {
 }
 
 impl SelectableNode<'_> {
+    fn contains(self, x: f64, y: f64) -> bool {
+        x >= f64::from(self.bounds.x)
+            && y >= f64::from(self.bounds.y)
+            && x < f64::from(self.bounds.x) + f64::from(self.bounds.width)
+            && y < f64::from(self.bounds.y) + f64::from(self.bounds.height)
+    }
+
     fn center(self) -> (f64, f64) {
         (
             f64::from(self.bounds.x) + f64::from(self.bounds.width) / 2.0,
@@ -364,6 +368,233 @@ fn navigation_score(
     }
     let outside_beam = u8::from(low.max(next_low) >= high.min(next_high));
     Some((outside_beam, forward * forward + cross * cross, forward))
+}
+
+/// A retained Canvas2D diagram: geometry, selection and the last actual draw stay together.
+///
+/// Supply a matched IR/layout pair to [`Self::set_diagram`], then [`Self::redraw`]. Redrawing after
+/// a resize or selection change never parses or lays out again. Picking uses the viewport from
+/// that draw, including fit, padding and origin normalization, NOT raw layout coordinates.
+///
+/// Pointer coordinates and `canvas_size` are backing-store pixels. Browser hosts convert CSS
+/// coordinates once and pass the canvas's current width/height. A resized canvas cannot be picked
+/// until redrawn. Hosts must also call [`Self::invalidate`] when clearing/replacing its pixels
+/// without changing dimensions (including assigning the same width). The session owns no DOM and
+/// cannot observe external canvas writes. Selection methods change state; redraw to show it.
+#[derive(Debug, Default)]
+pub struct CanvasSession {
+    frame: Option<CanvasFrame>,
+    selection: NodeSelection,
+    selection_style: crate::CanvasSelectionStyle,
+    last_result: Option<crate::CanvasRenderResult>,
+}
+
+#[derive(Debug)]
+struct CanvasFrame {
+    ir: MermaidDiagramIr,
+    layout: Arc<DiagramLayout>,
+    config: crate::CanvasRenderConfig,
+}
+
+impl CanvasSession {
+    /// Replace the diagram without copying its layout. Retain selection by author ID when valid.
+    /// The old pointer map becomes unusable immediately, before any new drawing occurs.
+    pub fn set_diagram(
+        &mut self,
+        ir: MermaidDiagramIr,
+        layout: Arc<DiagramLayout>,
+        config: crate::CanvasRenderConfig,
+    ) {
+        self.selection.reconcile(&ir, &layout);
+        self.frame = Some(CanvasFrame { ir, layout, config });
+        self.invalidate();
+    }
+
+    /// Draw the retained diagram at the context's CURRENT size and refresh the pointer map.
+    /// Returns `None` before a diagram is supplied; in that case the context is untouched.
+    pub fn redraw<C: crate::Canvas2dContext>(
+        &mut self,
+        context: &mut C,
+    ) -> Option<&crate::CanvasRenderResult> {
+        let frame = self.frame.as_ref()?;
+        let result = crate::render_to_canvas_with_selection(
+            &frame.ir,
+            &frame.layout,
+            context,
+            &frame.config,
+            &mut self.selection,
+            &self.selection_style,
+        );
+        Some(self.last_result.insert(result))
+    }
+
+    /// Forget pixels and their pointer map, but keep geometry and selection for a later redraw.
+    pub fn invalidate(&mut self) {
+        self.last_result = None;
+    }
+
+    /// Release retained IR, layout, click metadata and selection. Does not clear a host's canvas.
+    pub fn clear(&mut self) {
+        self.frame = None;
+        self.last_result = None;
+        self.selection.clear();
+    }
+
+    /// The last completed draw, provided its dimensions still match the host's canvas.
+    #[must_use]
+    pub fn last_result(&self, canvas_size: [f64; 2]) -> Option<&crate::CanvasRenderResult> {
+        let result = self.last_result.as_ref()?;
+        let viewport = result.viewport;
+        (canvas_size[0].is_finite()
+            && canvas_size[1].is_finite()
+            && canvas_size[0] > 0.0
+            && canvas_size[1] > 0.0
+            && canvas_size[0] == viewport.canvas_width
+            && canvas_size[1] == viewport.canvas_height)
+            .then_some(result)
+    }
+
+    /// Topmost node box at a canvas-space point. Far boundaries are half-open, like selection.
+    #[must_use]
+    pub fn hit_test_node(&self, x: f64, y: f64, canvas_size: [f64; 2]) -> Option<&str> {
+        let (x, y) = self.layout_point(x, y, canvas_size)?;
+        self.node_at(x, y).map(|node| node.id)
+    }
+
+    /// Interaction attached to the topmost node under the pointer; never activates it.
+    /// An ordinary node obscuring a linked node blocks the link rather than clicking through it.
+    #[must_use]
+    pub fn hit_test_interaction(
+        &self,
+        x: f64,
+        y: f64,
+        canvas_size: [f64; 2],
+    ) -> Option<&HitRegion> {
+        let (x, y) = self.layout_point(x, y, canvas_size)?;
+        let node = self.node_at(x, y)?;
+        self.last_result(canvas_size)?
+            .hit_regions
+            .iter()
+            .rev()
+            .find(|region| region.node_index == node.node_index && region.bounds == node.bounds)
+    }
+
+    /// Nearest rendered edge polyline within a tolerance measured in CANVAS pixels.
+    /// Bundled-away paths and non-finite segments are excluded. Equal-distance ties use edge ID.
+    #[must_use]
+    pub fn hit_test_edge(
+        &self,
+        x: f64,
+        y: f64,
+        max_distance: f64,
+        canvas_size: [f64; 2],
+    ) -> Option<usize> {
+        use fm_core::cga::{CgaLineSegment, CgaPoint};
+
+        if !max_distance.is_finite() || max_distance < 0.0 {
+            return None;
+        }
+        let (x, y) = self.layout_point(x, y, canvas_size)?;
+        let tolerance = max_distance / self.last_result(canvas_size)?.viewport.zoom;
+        if !tolerance.is_finite() {
+            return None;
+        }
+        let point = CgaPoint::new(x, y);
+        let frame = self.frame.as_ref()?;
+        let mut closest: Option<(usize, f64)> = None;
+        for edge in &frame.layout.edges {
+            if edge.bundled {
+                continue;
+            }
+            for points in edge.points.windows(2) {
+                let start = points[0];
+                let end = points[1];
+                if ![start.x, start.y, end.x, end.y].iter().all(|value| value.is_finite()) {
+                    continue;
+                }
+                let distance = CgaLineSegment::new(
+                    CgaPoint::new(f64::from(start.x), f64::from(start.y)),
+                    CgaPoint::new(f64::from(end.x), f64::from(end.y)),
+                )
+                .distance_to_point(&point);
+                if distance.is_finite()
+                    && distance <= tolerance
+                    && closest.is_none_or(|(index, best)| {
+                        distance < best || (distance == best && edge.edge_index < index)
+                    })
+                {
+                    closest = Some((edge.edge_index, distance));
+                }
+            }
+        }
+        closest.map(|(index, _)| index)
+    }
+
+    /// The selected author's ID. Selection does not itself follow a link or call user code.
+    #[must_use]
+    pub fn selected_node_id(&self) -> Option<&str> {
+        self.selection.selected_node_id()
+    }
+
+    /// Select a placed node. Unknown IDs and repeated selection leave state unchanged.
+    pub fn select_node(&mut self, id: &str) -> bool {
+        self.frame.as_ref().is_some_and(|frame| {
+            self.selection.select_node(&frame.ir, &frame.layout, id)
+        })
+    }
+
+    /// Select at a rendered canvas point. Empty space clears focus; invalid/stale points do not.
+    pub fn select_at(&mut self, x: f64, y: f64, canvas_size: [f64; 2]) -> bool {
+        let Some((x, y)) = self.layout_point(x, y, canvas_size) else {
+            return false;
+        };
+        self.frame.as_ref().is_some_and(|frame| {
+            self.selection.select_at(&frame.ir, &frame.layout, x, y)
+        })
+    }
+
+    /// Navigate spatially without reparsing or relayout. Returns whether focus moved.
+    pub fn navigate_selection(&mut self, direction: NavigationDirection) -> bool {
+        self.frame.as_ref().is_some_and(|frame| {
+            self.selection.navigate(&frame.ir, &frame.layout, direction)
+        })
+    }
+
+    /// Clear focus, retaining the diagram.
+    pub fn clear_selection(&mut self) -> bool {
+        self.selection.clear()
+    }
+
+    /// Set the focus-ring appearance for the next redraw.
+    pub fn set_selection_style(&mut self, style: crate::CanvasSelectionStyle) {
+        self.selection_style = style;
+    }
+
+    fn layout_point(&self, x: f64, y: f64, canvas_size: [f64; 2]) -> Option<(f64, f64)> {
+        let viewport = self.last_result(canvas_size)?.viewport;
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x >= canvas_size[0]
+            || y >= canvas_size[1]
+            || !viewport.zoom.is_finite()
+            || viewport.zoom <= 0.0
+            || !viewport.offset_x.is_finite()
+            || !viewport.offset_y.is_finite()
+        {
+            return None;
+        }
+        let point = viewport.canvas_to_diagram(x, y);
+        (point.0.is_finite() && point.1.is_finite()).then_some(point)
+    }
+
+    fn node_at(&self, x: f64, y: f64) -> Option<SelectableNode<'_>> {
+        let frame = self.frame.as_ref()?;
+        selectable_nodes(&frame.ir, &frame.layout)
+            .rev()
+            .find(|node| node.contains(x, y))
+    }
 }
 
 #[cfg(test)]
@@ -569,5 +800,237 @@ mod selection_tests {
         selection.select_node(&ir, &layout, "A");
         assert!(selection.navigate(&ir, &layout, NavigationDirection::Right));
         assert_eq!(selection.selected_node_id(), Some("B"));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use crate::{CanvasRenderConfig, DrawOperation, MockCanvas2dContext, ViewportTransform};
+    use fm_layout::LayoutPoint;
+
+    fn diagram() -> (MermaidDiagramIr, Arc<DiagramLayout>) {
+        let ir = fm_parser::parse(
+            "flowchart LR\n A[Alpha] --> B[Beta]\n click A \"https://example.com\" \"Alpha tip\"\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 2);
+        let mut layout = fm_layout::layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 2);
+        assert_eq!(layout.edges.len(), 1);
+        layout.bounds = LayoutRect { x: -100.0, y: -50.0, width: 400.0, height: 200.0 };
+        for node in &mut layout.nodes {
+            node.bounds = LayoutRect {
+                x: if ir.nodes[node.node_index].id == "A" { -80.0 } else { 200.0 },
+                y: -20.0,
+                width: 40.0,
+                height: 30.0,
+            };
+        }
+        layout.edges[0].points = vec![
+            LayoutPoint { x: -40.0, y: -5.0 },
+            LayoutPoint { x: 200.0, y: -5.0 },
+        ];
+        (ir, Arc::new(layout))
+    }
+
+    fn session(auto_fit: bool) -> CanvasSession {
+        let (ir, layout) = diagram();
+        let mut session = CanvasSession::default();
+        session.set_diagram(ir, layout, CanvasRenderConfig {
+            auto_fit,
+            padding: if auto_fit { 0.0 } else { 7.0 },
+            ..CanvasRenderConfig::default()
+        });
+        session
+    }
+
+    // Independent observation of what the renderer issued, not a round trip through the reported
+    // viewport (a mutually wrong forward/inverse pair would pass such a test).
+    fn drawn_label(context: &MockCanvas2dContext, label: &str) -> (f64, f64) {
+        let transform = context.operations().iter().find_map(|operation| match *operation {
+            DrawOperation::SetTransform(a, b, c, d, e, f) => Some(ViewportTransform { a, b, c, d, e, f }),
+            _ => None,
+        }).expect("the real renderer sets a viewport transform");
+        let (x, y) = context.operations().iter().find_map(|operation| match operation {
+            DrawOperation::FillText(text, x, y) if text == label => Some((*x, *y)),
+            _ => None,
+        }).expect("the real renderer draws the parsed label");
+        transform.apply(x, y)
+    }
+
+    #[test]
+    fn session_picks_the_actual_drawn_label_under_fit_and_manual_padding() {
+        for (auto_fit, expected) in [(true, (20.0, 32.5)), (false, (47.0, 52.0))] {
+            let mut session = session(auto_fit);
+            let mut context = MockCanvas2dContext::new(200.0, 120.0);
+            session.redraw(&mut context).expect("draw");
+            let (x, y) = drawn_label(&context, "Alpha");
+            assert!((x - expected.0).abs() < 1e-6 && (y - expected.1).abs() < 1e-6);
+            assert_eq!(session.hit_test_node(x, y, [200.0, 120.0]), Some("A"));
+            let hit = session.hit_test_interaction(x, y, [200.0, 120.0]).expect("link");
+            assert_eq!(hit.href.as_deref(), Some("https://example.com"));
+            assert_eq!(hit.tooltip.as_deref(), Some("Alpha tip"));
+            assert!(session.select_at(x, y, [200.0, 120.0]));
+            assert_eq!(session.selected_node_id(), Some("A"));
+        }
+    }
+
+    #[test]
+    fn session_redraw_reuses_geometry_and_replaces_resize_sensitive_picking() {
+        let mut session = session(true);
+        let original = Arc::clone(&session.frame.as_ref().unwrap().layout);
+        let mut small = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut small).unwrap();
+        let small_point = drawn_label(&small, "Alpha");
+        assert_eq!(session.hit_test_node(small_point.0, small_point.1, [400.0, 240.0]), None);
+        assert!(!session.select_at(small_point.0, small_point.1, [400.0, 240.0]));
+        let mut large = MockCanvas2dContext::new(400.0, 240.0);
+        session.redraw(&mut large).unwrap();
+        let large_point = drawn_label(&large, "Alpha");
+        assert_ne!(small_point, large_point);
+        assert_eq!(session.hit_test_node(large_point.0, large_point.1, [400.0, 240.0]), Some("A"));
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert!(Arc::ptr_eq(&original, &session.frame.as_ref().unwrap().layout));
+    }
+
+    #[test]
+    fn session_edge_tolerance_is_in_pixels_not_layout_units() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        // The horizontal edge is at y=32.5 after 0.5x fit: the query is 3 screen pixels away,
+        // but 6 layout units away. Passing the unscaled tolerance to layout-space distance fails.
+        assert_eq!(session.hit_test_edge(90.0, 35.5, 3.01, [200.0, 120.0]), Some(0));
+        assert_eq!(session.hit_test_edge(90.0, 35.5, 2.99, [200.0, 120.0]), None);
+        for tolerance in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(session.hit_test_edge(90.0, 32.5, tolerance, [200.0, 120.0]), None);
+        }
+    }
+
+    #[test]
+    fn session_excludes_bundled_edges_and_breaks_ties_deterministically() {
+        let (ir, original) = diagram();
+        let mut layout = (*original).clone();
+        let mut duplicate = layout.edges[0].clone();
+        duplicate.edge_index = 7;
+        layout.edges.insert(0, duplicate);
+        let mut session = CanvasSession::default();
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        let config = CanvasRenderConfig { padding: 0.0, ..CanvasRenderConfig::default() };
+        session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), Some(0));
+        layout.edges[1].bundled = true;
+        session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), Some(7));
+        layout.edges[0].points[0].x = f32::NAN;
+        session.set_diagram(ir, Arc::new(layout), config);
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), None);
+    }
+
+    #[test]
+    fn session_never_clicks_through_an_unlinked_node_and_uses_half_open_bounds() {
+        let (ir, original) = diagram();
+        let mut layout = (*original).clone();
+        layout.nodes.sort_by(|a, b| ir.nodes[a.node_index].id.cmp(&ir.nodes[b.node_index].id));
+        layout.nodes[1].bounds = layout.nodes[0].bounds;
+        let config = CanvasRenderConfig { padding: 0.0, ..CanvasRenderConfig::default() };
+        let mut session = CanvasSession::default();
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), Some("B"));
+        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_none());
+        assert_eq!(session.hit_test_node(30.0, 32.5, [200.0, 120.0]), None);
+        assert_eq!(session.hit_test_node(20.0, 40.0, [200.0, 120.0]), None);
+        layout.nodes.reverse();
+        session.set_diagram(ir, Arc::new(layout), config);
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), Some("A"));
+        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_some());
+    }
+
+    #[test]
+    fn session_selection_redraw_preserves_content_and_erases_the_old_ring() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        let plain = session.redraw(&mut context).unwrap().clone();
+        let baseline = context.operations().to_vec();
+        assert!(session.select_node("A"));
+        context.clear();
+        let selected = session.redraw(&mut context).unwrap();
+        assert_eq!(selected.draw_calls, plain.draw_calls + 2);
+        assert_eq!(selected.hit_regions, plain.hit_regions);
+        assert_eq!(selected.nodes_drawn, plain.nodes_drawn);
+        assert_eq!(selected.edges_drawn, plain.edges_drawn);
+        assert_eq!(selected.labels_drawn, plain.labels_drawn);
+        assert_eq!(&context.operations()[..baseline.len()], baseline.as_slice());
+        assert!(session.navigate_selection(NavigationDirection::Right));
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(!session.navigate_selection(NavigationDirection::Right));
+        assert!(session.clear_selection());
+        context.clear();
+        session.redraw(&mut context).unwrap();
+        assert_eq!(context.operations(), baseline.as_slice());
+    }
+
+    #[test]
+    fn session_source_replacement_reconciles_selection_and_invalidates_old_hits() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        assert!(session.select_node("B"));
+        let ir = fm_parser::parse("flowchart LR\n B[Beta]\n A[Alpha]\n").ir;
+        let layout = Arc::new(fm_layout::layout_diagram(&ir));
+        session.set_diagram(ir, layout, CanvasRenderConfig::default());
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), None);
+        let ir = fm_parser::parse("flowchart LR\n A[Alpha]\n").ir;
+        let layout = Arc::new(fm_layout::layout_diagram(&ir));
+        session.set_diagram(ir, layout, CanvasRenderConfig::default());
+        assert_eq!(session.selected_node_id(), None);
+        assert!(session.redraw(&mut context).is_some());
+    }
+
+    #[test]
+    fn session_invalid_and_outside_queries_do_not_steal_selection() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        assert!(session.select_node("A"));
+        for (x, y) in [(f64::NAN, 32.5), (20.0, f64::INFINITY), (-1.0, 32.5), (200.0, 32.5)] {
+            assert_eq!(session.hit_test_node(x, y, [200.0, 120.0]), None);
+            assert!(!session.select_at(x, y, [200.0, 120.0]));
+            assert_eq!(session.selected_node_id(), Some("A"));
+        }
+        assert!(session.select_at(100.0, 100.0, [200.0, 120.0]));
+        assert_eq!(session.selected_node_id(), None);
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            session.last_result.as_mut().unwrap().viewport.zoom = zoom;
+            assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), None);
+        }
+    }
+
+    #[test]
+    fn session_explicit_invalidation_and_clear_cannot_revive_stale_metadata() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        session.select_node("A");
+        session.invalidate();
+        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_none());
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert!(session.redraw(&mut context).is_some());
+        session.clear();
+        context.clear();
+        assert_eq!(session.selected_node_id(), None);
+        assert!(session.redraw(&mut context).is_none());
+        assert!(context.operations().is_empty());
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert!(!session.navigate_selection(NavigationDirection::Right));
     }
 }
