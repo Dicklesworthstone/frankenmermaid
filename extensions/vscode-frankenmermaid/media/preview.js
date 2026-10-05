@@ -67,12 +67,88 @@ function createPreviewController({ document, window, vscode,
     // Every SVG keeps its original source-bound IDs. Separate tree scopes prevent one diagram's
     // markers/gradients/CSS from binding to identically named definitions in another diagram.
     const shadow = host.attachShadow({ mode: "open" });
-    const style = element("style", "svg{display:block;max-width:100%;height:auto}");
+    const style = element("style", "svg{display:block;max-width:100%;height:auto} [aria-current=true]{filter:drop-shadow(0 0 3px var(--vscode-focusBorder,#06f))} [role=button]:focus-visible{outline:2px solid var(--vscode-focusBorder,#06f)}");
     style.setAttribute("nonce", styleNonce);
     shadow.append(style, svgElement);
     // A preview must not navigate its webview when an authored `click` link is activated.
     svgElement.addEventListener("click", (event) => event.preventDefault());
     return { host, svgElement };
+  }
+
+  function sourceInsight(source) {
+    const lens = typeof engine.parseLens === "function" ? engine.parseLens(source) : undefined;
+    const parsed = lens?.parsed || (typeof engine.parse === "function" ? engine.parse(source) : undefined);
+    const diagnostics = [];
+    const seen = new Set();
+    const add = (value) => {
+      const message = typeof value.message === "string" ? value.message.slice(0, 16000) : "";
+      if (!message) return;
+      const key = `${message}:${value.span?.start?.line || 0}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (diagnostics.length < 500) diagnostics.push({ message, span: value.span,
+        severity: String(value.severity || "warning").toLowerCase(), suggestion: value.suggestion });
+    };
+    for (const diagnostic of parsed?.ir?.diagnostics || []) add(diagnostic);
+    for (const warning of parsed?.warnings || []) {
+      if (typeof warning === "string" && !diagnostics.some((diagnostic) => diagnostic.message === warning)) {
+        add({ message: warning, severity: "warning" });
+      }
+    }
+    if (seen.size > diagnostics.length) diagnostics.push({ message: "Additional diagnostics were omitted (500-item limit).", severity: "info" });
+    if (!lens) add({ message: "This engine build has no source bindings; element navigation is unavailable.", severity: "info" });
+    return { bindings: Array.isArray(lens?.bindings) ? lens.bindings : [], diagnostics };
+  }
+
+  function sourceControls(card, view, insight, message, diagram, current) {
+    const send = (detail) => {
+      if (!disposed && current === revision) vscode.postMessage({ type: "reveal", requestId: message.requestId,
+        documentVersion: message.documentVersion, diagramId: diagram.id, ...detail });
+    };
+    const tools = element("div");
+    const showSource = element("button", "Show source");
+    showSource.addEventListener("click", () => send({}));
+    tools.append(showSource);
+    card.append(tools);
+    if (view) {
+      const bindings = new Map(insight.bindings.filter((binding) => binding?.textRange)
+        .map((binding) => [binding.elementId, binding]));
+      let selected;
+      for (const node of view.svgElement.querySelectorAll("[id]")) {
+        const binding = bindings.get(node.id);
+        if (!binding) continue;
+        node.setAttribute("role", "button");
+        node.setAttribute("tabindex", "0");
+        node.setAttribute("aria-label", `Show source for ${String(binding.sourceId || binding.elementId).slice(0, 200)}`);
+        const select = (event) => {
+          event.preventDefault(); event.stopPropagation();
+          if (disposed || current !== revision) return;
+          selected?.removeAttribute("aria-current");
+          selected = node;
+          node.setAttribute("aria-current", "true");
+          send({ elementId: binding.elementId });
+        };
+        node.addEventListener("click", select);
+        node.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") select(event);
+        });
+      }
+    }
+    if (insight.diagnostics.length) {
+      const details = element("details");
+      details.open = insight.diagnostics.some((diagnostic) => diagnostic.severity === "error");
+      details.append(element("summary", `${insight.diagnostics.length} engine diagnostic(s)`));
+      const list = element("ul");
+      insight.diagnostics.forEach((diagnostic, index) => {
+        const item = element("li");
+        const link = element("button", `${diagnostic.severity}: ${diagnostic.message}`);
+        link.addEventListener("click", () => send({ diagnosticIndex: index }));
+        item.append(link);
+        if (diagnostic.suggestion) item.append(element("p", String(diagnostic.suggestion)));
+        list.append(item);
+      });
+      details.append(list); card.append(details);
+    }
   }
 
   async function render(message) {
@@ -82,19 +158,28 @@ function createPreviewController({ document, window, vscode,
     root.setAttribute("aria-busy", "true");
     status.textContent = "Rendering…";
     const cards = [];
+    const reports = [];
     let failed = 0;
     for (const diagram of message.diagrams) {
       if (disposed || current !== revision) return;
       const card = element("section");
       card.append(element("h2", `${message.title} — diagram ${diagram.id + 1} (line ${diagram.startLine + 1})`));
+      let view;
+      let insight = { bindings: [], diagnostics: [] };
+      // Failure of optional inspection must never suppress an otherwise renderable diagram.
+      try { insight = sourceInsight(diagram.source); }
+      catch (error) { insight.diagnostics.push({ severity: "warning", message: `Source inspection failed: ${errorText(error)}` }); }
       try {
         const svg = engine.renderSvg(diagram.source);
-        const view = svgView(svg);
+        view = svgView(svg);
         card.append(view.host);
       } catch (error) {
         failed += 1;
         card.append(element("p", `Unable to render this diagram: ${errorText(error)}`, "error"));
+        insight.diagnostics.push({ severity: "error", message: `Rendering failed: ${errorText(error)}` });
       }
+      sourceControls(card, view, insight, message, diagram, current);
+      reports.push({ id: diagram.id, ...insight });
       cards.push(card);
       // Yield between diagrams so newer edits/disposal can cancel the unfinished document render.
       await yieldToHost();
@@ -104,6 +189,8 @@ function createPreviewController({ document, window, vscode,
     root.setAttribute("aria-busy", "false");
     status.textContent = cards.length === 0 ? "No Mermaid code fences found in this document."
       : `${cards.length} diagram${cards.length === 1 ? "" : "s"}${failed ? `; ${failed} could not render` : ""}.`;
+    vscode.postMessage({ type: "rendered", requestId: message.requestId,
+      documentVersion: message.documentVersion, reports });
   }
 
   function isRenderMessage(message) {

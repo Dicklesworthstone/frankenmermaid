@@ -8,6 +8,7 @@ const vm = require("node:vm");
 const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler, extractMermaidBlocks,
   isMermaidDocument, isPreviewDocument, normalizePreviewDebounceMs, MAX_PREVIEW_DIAGRAMS,
+  blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
 } = require("../preview-contract.cjs");
 const { createPreviewController } = require("../media/preview.js");
 
@@ -126,6 +127,7 @@ class Element {
   set textContent(text) { this._text = String(text); this.children = []; }
   get textContent() { return this._text + this.children.map((child) => child.textContent).join(""); }
   get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })); }
+  get id() { return this.getAttribute("id") || ""; }
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
   getAttribute(name) { return this.attrs.get(name) ?? null; }
   removeAttribute(name) { this.attrs.delete(name); }
@@ -135,7 +137,7 @@ class Element {
   addEventListener(type, fn) { this.listeners.set(type, fn); }
   querySelectorAll(selector) {
     return this.children.flatMap((node) => [
-      ...(selector === "*" || node.localName === selector ? [node] : []), ...node.querySelectorAll(selector),
+      ...(selector === "*" || node.localName === selector || (selector === "[id]" && node.id) ? [node] : []), ...node.querySelectorAll(selector),
     ]);
   }
   attachShadow() { this.shadowRoot = new Element("shadow-root"); return this.shadowRoot; }
@@ -160,6 +162,7 @@ function previewHarness({ engine, loadEngine, yieldToHost } = {}) {
         node.namespaceURI = "http://www.w3.org/2000/svg";
         node.setAttribute("onclick", "bad()");
         node.append(new Element("script"), new Element("style"), new Element("defs"));
+        const bound = new Element("g"); bound.setAttribute("id", "fm-node-a-0"); node.append(bound);
         return { documentElement: node, querySelector: () => svg === "INVALID" ? node : null };
       }
     },
@@ -264,13 +267,29 @@ test("failed initialization is retryable; disposal suppresses late initializatio
 
 function extensionHarness({ assetsAvailable = () => true } = {}) {
   const commands = new Map(); const events = new Map(); const created = []; const errors = []; const stats = [];
+  const problems = new Map(); const editors = [];
   const uri = (name) => ({ path: name, toString: () => `file://${name}` });
   const vscode = {
     Uri: { joinPath: (base, ...parts) => uri(path.posix.join(base.path, ...parts)) },
-    ViewColumn: { Beside: 2 },
+    ViewColumn: { Beside: 2, One: 1 },
+    Range: class { constructor(line, character, endLine, endCharacter) {
+      this.start = { line, character }; this.end = { line: endLine, character: endCharacter };
+    } },
+    Selection: class { constructor(start, end) { this.start = start; this.end = end; } },
+    Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
+    DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
+    TextEditorRevealType: { InCenterIfOutsideViewport: 2 },
+    languages: { createDiagnosticCollection: () => ({
+      set: (value, entries) => problems.set(value.toString(), entries),
+      delete: (value) => problems.delete(value.toString()), dispose: () => problems.clear(),
+    }) },
     window: {
       activeTextEditor: undefined,
       showWarningMessage: (message) => errors.push(message), showErrorMessage: (message) => errors.push(message),
+      showTextDocument: async (document, options) => {
+        const editor = { document, options, revealed: [], revealRange: (range) => editor.revealed.push(range) };
+        editors.push(editor); return editor;
+      },
       createWebviewPanel: () => {
         const panel = { messages: [], disposed: false, reveal: () => {},
           onDidDispose: (fn) => { panel.onDispose = fn; },
@@ -300,7 +319,7 @@ function extensionHarness({ assetsAvailable = () => true } = {}) {
   const context = { extensionUri: uri("/repo/extensions/vscode-frankenmermaid"), subscriptions: [] };
   module.exports.activate(context);
   const open = async (doc) => { vscode.window.activeTextEditor = { document: doc }; await commands.get("frankenmermaid.showPreview")(); };
-  return { commands, events, created, errors, stats, open, vscode, deactivate: module.exports.deactivate };
+  return { commands, events, created, errors, stats, problems, editors, open, vscode, deactivate: module.exports.deactivate };
 }
 
 test("extension executes Markdown preview command, waits for ready, and resends latest document", async (t) => {
@@ -334,4 +353,149 @@ test("checkout engine fallback is extension-owned, and missing assets fail visib
   await missing.open(documentFor("A-->B", "x.mmd", "mermaid"));
   assert.equal(missing.created[0].disposed, true);
   assert.match(missing.errors[0], /engine assets are missing/u);
+});
+
+function bindingFor(source, snippet, elementId = "fm-node-a-0") {
+  const offset = source.indexOf(snippet);
+  assert.ok(offset >= 0);
+  const startByte = Buffer.byteLength(source.slice(0, offset));
+  return { elementId, sourceId: "A", snippet,
+    textRange: { startByte, endByte: startByte + Buffer.byteLength(snippet) } };
+}
+
+test("source bindings map UTF-8 bytes to exact UTF-16 document ranges inside Markdown", () => {
+  const block = extractMermaidBlocks(documentFor("# 😀\r\n  ```mermaid\r\n  flowchart LR\r\n  A[😀 café]-->B\r\n  ```"))[0];
+  const binding = bindingFor(block.source, "café");
+  const selected = checkedSourceBindings(block, [binding]).get(binding.elementId);
+  assert.deepEqual(selected.range, { start: { line: 3, character: 7 }, end: { line: 3, character: 11 } });
+  assert.equal(selected.snippet, "café");
+});
+
+test("multiline source bindings preserve CRLF coordinates and reject broken boundaries", () => {
+  const source = "flowchart LR\r\nA[😀]\r\nB[café]\r\n";
+  const block = extractMermaidBlocks(documentFor(source, "x.mmd", "mermaid"))[0];
+  const raw = bindingFor(source, "A[😀]\r\nB[café]");
+  assert.deepEqual(checkedSourceBindings(block, [raw]).get(raw.elementId).range,
+    { start: { line: 1, character: 0 }, end: { line: 2, character: 7 } });
+  const emoji = bindingFor(source, "😀");
+  assert.throws(() => checkedSourceBindings(block, [{ ...emoji,
+    textRange: { startByte: emoji.textRange.startByte + 1, endByte: emoji.textRange.endByte } }]), /UTF-8/u);
+  assert.throws(() => checkedSourceBindings(block, [{ ...raw, snippet: "changed" }]), /does not match/u);
+  assert.throws(() => checkedSourceBindings(block, [raw, raw]), /duplicate/u);
+  assert.throws(() => checkedSourceBindings(block, [{ ...raw, textRange: { startByte: -1, endByte: 4 } }]), /byte range/u);
+  assert.equal(checkedSourceBindings(block, [{ elementId: "synthetic", textRange: null }]).size, 0);
+});
+
+test("diagnostics map engine lines without guessing column units; empty fences stay in bounds", () => {
+  const block = extractMermaidBlocks(documentFor("# Readme\n  ```mermaid\n  flowchart LR\n  A[😀]\n  B\n  ```"))[0];
+  const issues = checkedDiagnostics(block, [{ severity: "error", message: "broken", suggestion: "fix this",
+    span: { start: { line: 2, col: 999 }, end: { line: 3, col: 999 } } }]);
+  assert.deepEqual(issues[0].range, { start: { line: 3, character: 2 }, end: { line: 4, character: 3 } });
+  assert.equal(issues[0].suggestion, "fix this");
+  const empty = extractMermaidBlocks(documentFor("```mermaid"))[0];
+  assert.deepEqual(blockRange(empty), { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } });
+  assert.throws(() => checkedDiagnostics(block, [{ message: {} }]), /Invalid/u);
+});
+
+test("current-snapshot checks reject closed, disposed, and immediately edited documents", () => {
+  const document = documentFor("A", "x.mmd", "mermaid");
+  const entry = { document, snapshot: createRenderSnapshot(document, 1, "x.mmd") };
+  const message = { requestId: 1, documentVersion: 3 };
+  assert.equal(isCurrentSnapshot(entry, message), true);
+  assert.equal(isCurrentSnapshot(entry, null), false);
+  document.version = 4; assert.equal(isCurrentSnapshot(entry, message), false);
+  document.version = 3; entry.disposed = true; assert.equal(isCurrentSnapshot(entry, message), false);
+  entry.disposed = false; document.isClosed = true; assert.equal(isCurrentSnapshot(entry, message), false);
+});
+
+test("production controller exposes engine diagnostics and keyboard source navigation", async () => {
+  const source = "flowchart LR\nA[😀]-->B";
+  const binding = bindingFor(source, "A[😀]-->B");
+  const engine = { default: async () => {}, renderSvg: () => "<svg/>",
+    parseLens: () => ({ bindings: [binding], parsed: { warnings: ["recovered"], ir: { diagnostics: [
+      { severity: "Error", message: "broken", span: { start: { line: 2 }, end: { line: 2 } } },
+    ] } } }) };
+  const h = previewHarness({ engine }); await h.controller.start();
+  h.send([source]); await settle();
+  const report = h.messages.at(-1);
+  assert.equal(report.type, "rendered");
+  assert.equal(report.reports[0].bindings[0], binding);
+  assert.deepEqual(report.reports[0].diagnostics.map((value) => value.severity), ["error", "warning"]);
+  const svg = h.root.children[0].children[1].shadowRoot.children[1];
+  const node = svg.querySelectorAll("[id]")[0];
+  assert.equal(node.getAttribute("role"), "button");
+  let prevented = 0;
+  node.listeners.get("keydown")({ key: "Enter", preventDefault: () => prevented++, stopPropagation: () => {} });
+  assert.equal(prevented, 1);
+  assert.deepEqual(h.messages.at(-1), { type: "reveal", requestId: 1, documentVersion: 3, diagramId: 0, elementId: binding.elementId });
+  const before = h.messages.length;
+  h.send([source], 2);
+  node.listeners.get("click")({ preventDefault: () => {}, stopPropagation: () => {} });
+  assert.equal(h.messages.length, before, "old DOM must not emit navigation after a new render starts");
+  await settle();
+});
+
+test("optional inspection failure keeps the diagram and reports the actual failure", async () => {
+  const h = previewHarness({ engine: { default: async () => {}, renderSvg: () => "<svg/>",
+    parseLens: () => { throw new Error("bad map"); } } });
+  await h.controller.start(); h.send(["A"]); await settle();
+  assert.ok(h.root.children[0].children[1].shadowRoot);
+  assert.match(h.messages.at(-1).reports[0].diagnostics[0].message, /bad map/u);
+});
+
+function reportFor(panel, blockSource) {
+  const request = panel.messages.at(-1);
+  return { type: "rendered", requestId: request.requestId, documentVersion: request.documentVersion,
+    reports: [{ id: 0, bindings: [bindingFor(blockSource, "café")], diagnostics: [
+      { message: "Recovered invalid syntax", severity: "warning", suggestion: "Check the arrow",
+        span: { start: { line: 2 }, end: { line: 2 } } },
+    ] }] };
+}
+
+test("extension publishes real reports to Problems and navigates only its bound document", async (t) => {
+  const h = extensionHarness(); t.after(h.deactivate);
+  const doc = documentFor("# readme\n  ```mermaid\n  flowchart LR\n  A[😀 café]-->B\n  ```");
+  await h.open(doc); const panel = h.created[0]; await panel.receive({ type: "ready" });
+  const report = reportFor(panel, panel.messages.at(-1).diagrams[0].source);
+  await panel.receive(report);
+  const problems = h.problems.get(doc.uri.toString());
+  assert.equal(problems.length, 1); assert.equal(problems[0].severity, 1);
+  assert.match(problems[0].message, /Suggestion: Check the arrow/u);
+  assert.equal(problems[0].range.start.line, 3);
+  const action = { type: "reveal", requestId: report.requestId, documentVersion: 3, diagramId: 0,
+    elementId: "fm-node-a-0", uri: "file:///not-allowed.mmd" };
+  await panel.receive(action);
+  assert.equal(h.editors[0].document, doc);
+  assert.deepEqual(h.editors[0].selection.start, { line: 3, character: 7 });
+  assert.deepEqual(h.editors[0].selection.end, { line: 3, character: 11 });
+  doc.version = 4;
+  h.events.get("edit")({ document: doc, contentChanges: [{}] });
+  assert.equal(h.problems.size, 0);
+  await panel.receive(report); await panel.receive(action);
+  assert.equal(h.problems.size, 0); assert.equal(h.editors.length, 1);
+});
+
+test("forged ranges disable only source navigation and emit a visible diagnostic", async (t) => {
+  const h = extensionHarness(); t.after(h.deactivate);
+  const doc = documentFor("flowchart LR\nA[café]", "x.mmd", "mermaid");
+  await h.open(doc); const panel = h.created[0]; await panel.receive({ type: "ready" });
+  const report = reportFor(panel, doc.getText());
+  report.reports[0].bindings[0].textRange.endByte = 9999;
+  await panel.receive(report);
+  assert.match(h.problems.get(doc.uri.toString()).at(-1).message, /Source navigation disabled/u);
+  await panel.receive({ type: "reveal", requestId: report.requestId, documentVersion: 3, diagramId: 0, elementId: "fm-node-a-0" });
+  assert.equal(h.editors.length, 0);
+});
+
+test("navigation rechecks document revision after asynchronous editor opening", async (t) => {
+  const h = extensionHarness(); t.after(h.deactivate);
+  const doc = documentFor("A[café]", "x.mmd", "mermaid");
+  await h.open(doc); const panel = h.created[0]; await panel.receive({ type: "ready" });
+  const report = reportFor(panel, doc.getText()); await panel.receive(report);
+  let resolve;
+  h.vscode.window.showTextDocument = () => new Promise((done) => { resolve = done; });
+  const navigating = panel.receive({ type: "reveal", requestId: report.requestId, documentVersion: 3, diagramId: 0, elementId: "fm-node-a-0" });
+  const editor = { document: doc, revealRange: () => assert.fail("stale reveal") };
+  doc.version += 1; resolve(editor); await navigating;
+  assert.equal(editor.selection, undefined);
 });

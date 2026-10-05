@@ -85,6 +85,120 @@ function createRenderSnapshot(document, requestId, title) {
   };
 }
 
+// Resolve only requested UTF-8 boundaries, not a map entry for every byte/character of a large
+// document. Invalid boundaries (including the middle of an emoji) are absent from the result.
+function utf8Boundaries(source, requested) {
+  const offsets = new Map();
+  let bytes = 0;
+  let units = 0;
+  for (const character of source) {
+    const code = character.codePointAt(0);
+    if (code >= 0xd800 && code <= 0xdfff) {
+      throw new Error("Source contains an unpaired surrogate; repair it before source navigation.");
+    }
+    if (requested.has(bytes)) offsets.set(bytes, units);
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    units += character.length;
+  }
+  if (requested.has(bytes)) offsets.set(bytes, units);
+  return offsets;
+}
+
+function lineStarts(source) {
+  const starts = [0];
+  for (const match of source.matchAll(/\r\n|\n|\r/gu)) starts.push(match.index + match[0].length);
+  return starts;
+}
+
+function documentPosition(block, starts, offset) {
+  let low = 0;
+  let high = starts.length;
+  while (low + 1 < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (starts[middle] <= offset) low = middle;
+    else high = middle;
+  }
+  const mapped = block.lineMap[low];
+  if (!mapped) return undefined;
+  const character = offset - starts[low];
+  // A CRLF is one document line break, never two selectable characters beyond the line end.
+  if (character > mapped.text.length) return undefined;
+  return { line: mapped.line, character: mapped.indent + character };
+}
+
+function blockRange(block) {
+  const first = block.lineMap[0];
+  const last = block.lineMap.at(-1);
+  return {
+    start: { line: first?.line ?? Math.max(0, block.startLine - 1), character: first?.indent ?? 0 },
+    end: { line: last?.line ?? Math.max(0, block.startLine - 1), character: last ? last.indent + last.text.length : 0 },
+  };
+}
+
+function checkedSourceBindings(block, bindings) {
+  if (!Array.isArray(bindings) || bindings.length > 20000) throw new Error("Invalid source-binding list.");
+  const requested = new Set();
+  for (const binding of bindings) {
+    if (!binding || typeof binding !== "object") throw new Error("Invalid source binding.");
+    if (binding.textRange == null) continue;
+    const { startByte, endByte } = binding.textRange;
+    if (!Number.isSafeInteger(startByte) || !Number.isSafeInteger(endByte)
+      || startByte < 0 || endByte < startByte) throw new Error("Invalid source-binding byte range.");
+    requested.add(startByte); requested.add(endByte);
+  }
+  const offsets = utf8Boundaries(block.source, requested);
+  const starts = lineStarts(block.source);
+  const checked = new Map();
+  for (const binding of bindings) {
+    if (binding.textRange == null) continue; // Synthesized elements are not source-editable.
+    const start = offsets.get(binding.textRange.startByte);
+    const end = offsets.get(binding.textRange.endByte);
+    if (typeof binding.elementId !== "string" || !binding.elementId || binding.elementId.length > 4096
+      || checked.has(binding.elementId) || start === undefined || end === undefined) {
+      throw new Error("Source map has duplicate IDs or invalid UTF-8 boundaries.");
+    }
+    const snippet = block.source.slice(start, end);
+    if (binding.snippet != null && binding.snippet !== snippet) throw new Error("Source map does not match the rendered source.");
+    const range = { start: documentPosition(block, starts, start), end: documentPosition(block, starts, end) };
+    if (!range.start || !range.end) throw new Error("Source map does not resolve to document positions.");
+    checked.set(binding.elementId, { elementId: binding.elementId, range, snippet,
+      startByte: binding.textRange.startByte, endByte: binding.textRange.endByte });
+  }
+  return checked;
+}
+
+// Diagnostics select the engine-reported lines. Do not reinterpret parser-specific column units
+// as VS Code's UTF-16 columns; exact element selections use the checked byte ranges above.
+function diagnosticRange(block, span) {
+  const first = span?.start?.line;
+  const last = span?.end?.line;
+  if (!Number.isSafeInteger(first) || first < 1 || first > block.lineMap.length) return blockRange(block);
+  const end = Number.isSafeInteger(last) && last >= first && last <= block.lineMap.length ? last : first;
+  const startLine = block.lineMap[first - 1];
+  const endLine = block.lineMap[end - 1];
+  return { start: { line: startLine.line, character: startLine.indent },
+    end: { line: endLine.line, character: endLine.indent + endLine.text.length } };
+}
+
+function checkedDiagnostics(block, diagnostics) {
+  if (!Array.isArray(diagnostics) || diagnostics.length > 512) throw new Error("Invalid diagnostic list.");
+  return diagnostics.map((diagnostic) => {
+    if (!diagnostic || typeof diagnostic.message !== "string" || diagnostic.message.length > 16000) {
+      throw new Error("Invalid diagnostic message.");
+    }
+    const severity = ["error", "warning", "info", "hint"].includes(diagnostic.severity) ? diagnostic.severity : "warning";
+    const suggestion = typeof diagnostic.suggestion === "string" ? diagnostic.suggestion.slice(0, 16000) : "";
+    return { message: diagnostic.message, severity, suggestion, range: diagnosticRange(block, diagnostic.span) };
+  });
+}
+
+function isCurrentSnapshot(entry, message) {
+  return Boolean(message && !entry.disposed && !entry.document.isClosed && entry.snapshot
+    && message.requestId === entry.snapshot.message.requestId
+    && message.documentVersion === entry.snapshot.message.documentVersion
+    && entry.document.version === message.documentVersion);
+}
+
 function normalizePreviewDebounceMs(value) {
   if (!Number.isInteger(value) || value < 0 || value > MAX_PREVIEW_DEBOUNCE_MS) {
     return DEFAULT_PREVIEW_DEBOUNCE_MS;
@@ -159,4 +273,5 @@ module.exports = {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler, extractMermaidBlocks,
   isMermaidDocument, isMarkdownDocument, isPreviewDocument, normalizePreviewDebounceMs,
   MAX_PREVIEW_BYTES, MAX_PREVIEW_DIAGRAMS,
+  blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
 };

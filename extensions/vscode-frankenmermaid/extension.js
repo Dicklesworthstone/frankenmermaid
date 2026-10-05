@@ -3,9 +3,11 @@ const vscode = require("vscode");
 const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler,
   isPreviewDocument, normalizePreviewDebounceMs,
+  blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
 } = require("./preview-contract.cjs");
 
 const panels = new Map();
+let diagnostics;
 
 async function previewResources(context, panel) {
   const candidates = [
@@ -43,6 +45,8 @@ async function previewResources(context, panel) {
 function postRender(entry) {
   if (!entry.ready || entry.disposed || entry.document.isClosed) return;
   const requestId = ++entry.requestId;
+  entry.reports = undefined;
+  diagnostics?.delete(entry.document.uri);
   try {
     entry.snapshot = createRenderSnapshot(entry.document, requestId,
       vscode.workspace.asRelativePath(entry.document.uri, false));
@@ -52,6 +56,66 @@ function postRender(entry) {
     void entry.panel.webview.postMessage({ type: "preview-error", requestId,
       message: error instanceof Error ? error.message : String(error) });
   }
+}
+
+function vscodeRange(range) {
+  return new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character);
+}
+
+function acceptRenderReport(entry, message) {
+  if (!isCurrentSnapshot(entry, message) || !Array.isArray(message.reports)
+    || message.reports.length !== entry.snapshot.blocks.length) return;
+  const checked = new Map();
+  const problems = [];
+  for (const [index, report] of message.reports.entries()) {
+    if (report?.id !== index) throw new Error("Preview returned an invalid diagram identity.");
+    const block = entry.snapshot.blocks[index];
+    let bindings;
+    const issues = checkedDiagnostics(block, report.diagnostics);
+    try { bindings = checkedSourceBindings(block, report.bindings); }
+    catch (error) {
+      // Keep the SVG and real diagnostics; make a broken map non-actionable and visible.
+      bindings = new Map();
+      issues.push({ message: `Source navigation disabled: ${error.message}`, severity: "warning", range: blockRange(block) });
+    }
+    checked.set(index, { bindings, diagnostics: issues });
+    for (const issue of issues) {
+      const severity = { error: vscode.DiagnosticSeverity.Error, warning: vscode.DiagnosticSeverity.Warning,
+        info: vscode.DiagnosticSeverity.Information, hint: vscode.DiagnosticSeverity.Hint }[issue.severity];
+      const problem = new vscode.Diagnostic(vscodeRange(issue.range),
+        issue.message + (issue.suggestion ? `\nSuggestion: ${issue.suggestion}` : ""), severity);
+      problem.source = "FrankenMermaid";
+      problems.push(problem);
+    }
+  }
+  entry.reports = checked;
+  diagnostics.set(entry.document.uri, problems);
+}
+
+async function revealSource(entry, message) {
+  if (!isCurrentSnapshot(entry, message) || !Number.isSafeInteger(message.diagramId)) return;
+  const block = entry.snapshot.blocks[message.diagramId];
+  const report = entry.reports?.get(message.diagramId);
+  if (!block || !report) return;
+  let range;
+  if (typeof message.elementId === "string") range = report.bindings.get(message.elementId)?.range;
+  else if (Number.isSafeInteger(message.diagnosticIndex)) range = report.diagnostics[message.diagnosticIndex]?.range;
+  else if (message.elementId === undefined && message.diagnosticIndex === undefined) range = blockRange(block);
+  if (!range) return;
+  // The bound document is the ONLY navigation target. Never accept a URI/path from webview data.
+  const editor = await vscode.window.showTextDocument(entry.document,
+    { viewColumn: entry.sourceColumn, preserveFocus: false, preview: false });
+  if (!isCurrentSnapshot(entry, message) || editor.document.uri.toString() !== entry.document.uri.toString()) return;
+  const target = vscodeRange(range);
+  editor.selection = new vscode.Selection(target.start, target.end);
+  editor.revealRange(target, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
+
+async function receiveMessage(entry, message) {
+  if (entry.disposed) return;
+  if (message?.type === "ready") { entry.ready = true; postRender(entry); }
+  else if (message?.type === "rendered") acceptRenderReport(entry, message);
+  else if (message?.type === "reveal") await revealSource(entry, message);
 }
 
 function previewDebounceMs() {
@@ -77,19 +141,20 @@ async function showPreview(context, document) {
     `FrankenMermaid: ${document.fileName.split(/[\\/]/u).pop()}`, vscode.ViewColumn.Beside,
     { enableScripts: true });
   entry = { document, panel, ready: false, disposed: false, requestId: 0,
+    sourceColumn: vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One,
     scheduler: new DebouncedRenderScheduler(previewDebounceMs()) };
   panels.set(key, entry);
   panel.onDidDispose(() => {
     entry.disposed = true;
     entry.scheduler.dispose();
+    diagnostics?.delete(entry.document.uri);
     panels.delete(key);
   }, undefined, context.subscriptions);
   // Register before assigning HTML: a fast cached WASM init must not race past our ready listener.
   panel.webview.onDidReceiveMessage((message) => {
-    if (message?.type === "ready" && !entry.disposed) {
-      entry.ready = true;
-      postRender(entry);
-    }
+    return receiveMessage(entry, message).catch((error) => {
+      if (!entry.disposed) void vscode.window.showErrorMessage(`FrankenMermaid: ${error.message}`);
+    });
   }, undefined, context.subscriptions);
   try {
     const resources = await previewResources(context, panel);
@@ -105,6 +170,8 @@ async function showPreview(context, document) {
 }
 
 function activate(context) {
+  diagnostics = vscode.languages.createDiagnosticCollection("frankenmermaid");
+  context.subscriptions.push(diagnostics);
   context.subscriptions.push(
     vscode.commands.registerCommand("frankenmermaid.showPreview", () => {
       const editor = vscode.window.activeTextEditor;
@@ -117,6 +184,8 @@ function activate(context) {
         entry.document = event.document;
         // Invalidate source-bound actions immediately, not after the debounce expires.
         entry.snapshot = undefined;
+        entry.reports = undefined;
+        diagnostics.delete(entry.document.uri);
         entry.scheduler.schedule(() => postRender(entry));
       }
     }),
@@ -135,6 +204,8 @@ function activate(context) {
 function deactivate() {
   for (const entry of panels.values()) entry.panel.dispose();
   panels.clear();
+  diagnostics?.dispose();
+  diagnostics = undefined;
 }
 
 module.exports = { activate, deactivate };
