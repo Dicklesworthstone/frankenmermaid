@@ -1,7 +1,7 @@
 {
   "name": "frankenmermaid-vscode",
   "displayName": "FrankenMermaid Preview",
-  "description": "Live Mermaid previews rendered by FrankenMermaid WebAssembly.",
+  "description": "Live Mermaid and Markdown diagram previews rendered by FrankenMermaid WebAssembly.",
   "version": "0.1.0",
   "publisher": "frankenmermaid",
   "license": "MIT",
@@ -22,6 +22,15 @@
         "title": "FrankenMermaid: Show Live Preview"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "frankenmermaid.showPreview",
+          "when": "editorLangId == mermaid || editorLangId == mmd || editorLangId == markdown || resourceExtname == .mmd || resourceExtname == .mermaid",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "FrankenMermaid",
       "properties": {
