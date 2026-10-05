@@ -251,6 +251,59 @@ function planSourceEdit(document, snapshot, reports, message) {
   return { before, after, range: binding.range, newText, changed: before !== after };
 }
 
+// Each receipt addresses the SAME original render, not an intermediate edited source. Check all
+// receipts before constructing one native transaction; aliases of a shared statement overlap too.
+function planSourceBatch(document, snapshot, reports, message) {
+  if (!Array.isArray(message.edits) || message.edits.length < 1 || message.edits.length > 64) {
+    throw new Error("A source batch requires between 1 and 64 fragment edits.");
+  }
+  let payloadBytes = 0;
+  const plans = [];
+  const ids = new Set();
+  const starts = lineStarts(snapshot.documentSource);
+  for (const edit of message.edits) {
+    payloadBytes += Buffer.byteLength(JSON.stringify(edit) || "", "utf8");
+    if (payloadBytes > 16 * 1024 * 1024) throw new Error("Source batch exceeds the 16 MiB receipt limit.");
+    if (!edit || typeof edit.elementId !== "string" || !Number.isSafeInteger(edit.diagramId)) {
+      throw new Error("Invalid batch fragment identity.");
+    }
+    const key = `${edit.diagramId}:${edit.elementId}`;
+    if (ids.has(key)) throw new Error("A source batch cannot repeat an element.");
+    ids.add(key);
+    const plan = planSourceEdit(document, snapshot, reports, edit);
+    const binding = reports.get(edit.diagramId).bindings.get(edit.elementId);
+    plans.push({ ...plan, edit, binding,
+      from: starts[plan.range.start.line] + plan.range.start.character,
+      to: starts[plan.range.end.line] + plan.range.end.character });
+  }
+  plans.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (let index = 1; index < plans.length; index += 1) {
+    if (plans[index].from < plans[index - 1].to || plans[index].from === plans[index - 1].from) {
+      throw new Error("Source fragments overlap or share a statement. Edit that statement only once.");
+    }
+  }
+  const before = document.getText();
+  let after = before;
+  const expected = snapshot.blocks.map((block) => Buffer.from(block.source, "utf8"));
+  for (const plan of [...plans].reverse()) {
+    if (!plan.changed) continue;
+    after = after.slice(0, plan.from) + plan.newText + after.slice(plan.to);
+    const { diagramId, replacement } = plan.edit;
+    const bytes = expected[diagramId];
+    expected[diagramId] = Buffer.concat([bytes.subarray(0, plan.binding.startByte),
+      Buffer.from(replacement, "utf8"), bytes.subarray(plan.binding.endByte)]);
+  }
+  // Two individually harmless replacements can jointly form a fence closer. Validate the
+  // COMBINED document, not just the individual receipts, before any native edit is dispatched.
+  const next = extractMermaidBlocks({ fileName: document.fileName, languageId: document.languageId,
+    getText: () => after });
+  if (next.length !== expected.length || next.some((block, index) => block.source !== expected[index].toString("utf8"))) {
+    throw new Error("Combined edits change a Markdown fence or a different diagram.");
+  }
+  return { before, after, changed: before !== after,
+    edits: plans.filter((plan) => plan.changed).map(({ range, newText }) => ({ range, newText })) };
+}
+
 // Prefer the narrowest engine binding containing the editor selection. A statement may own
 // several node/edge IDs with the SAME span: highlight all of them rather than inventing a winner.
 function sourceSelectionTargets(reports, selection) {
@@ -335,6 +388,7 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBina
     button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
     button:disabled { opacity: .6; cursor: default; }
     textarea { box-sizing: border-box; width: 100%; min-height: 8rem; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); font-family: var(--vscode-editor-font-family, monospace); }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
     .error { color: var(--vscode-errorForeground); white-space: pre-wrap; overflow-wrap: anywhere; }
     #status { margin-bottom: 1rem; }
   </style>
@@ -353,5 +407,5 @@ module.exports = {
   MAX_PREVIEW_BYTES, MAX_PREVIEW_DIAGRAMS,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
   sourceSelectionTargets,
-  planSourceEdit,
+  planSourceEdit, planSourceBatch,
 };

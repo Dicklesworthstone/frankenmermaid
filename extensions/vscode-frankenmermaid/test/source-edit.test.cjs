@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const test = require("node:test");
-const { createRenderSnapshot, checkedSourceBindings, planSourceEdit } = require("../preview-contract.cjs");
+const { createRenderSnapshot, checkedSourceBindings, planSourceEdit, planSourceBatch } = require("../preview-contract.cjs");
 const { createPreviewController } = require("../media/preview.js");
 
 // These tests execute the production host/controller. Only VS Code, DOM, and Rust-WASM are
@@ -258,17 +258,19 @@ class Element {
   attachShadow() { this.shadowRoot = new Element("shadow-root"); return this.shadowRoot; }
   click() { this.listeners.get("click")?.({ preventDefault() {}, stopPropagation() {} }); }
 }
-async function controllerHarness(t, source = "flowchart LR\nA --> B\n") {
+async function controllerHarness(t, source = "flowchart LR\nA --> B\n",
+  fragments = [{ snippet: "A --> B", id: "fm-node-a-0" }]) {
   const root = new Element("main"), status = new Element("div"), messages = [], calls = [], listeners = new Map();
   const engine = { default: async () => {}, renderSvg: () => "<svg/>",
-    parseLens(input) { return { parsed: { warnings: [] }, bindings: [bindingFor(input, "A --> B")] }; },
-    applyParseLensEdit(input, id, replacement) { calls.push({ input, id, replacement }); return receipt(input, bindingFor(input, "A --> B", id), replacement); },
+    parseLens(input) { return { parsed: { warnings: [] }, bindings: fragments.map((item) => bindingFor(input, item.snippet, item.id)) }; },
+    applyParseLensEdit(input, id, replacement) { calls.push({ input, id, replacement });
+      return receipt(input, bindingFor(input, fragments.find((item) => item.id === id).snippet, id), replacement); },
   };
   const document = { body: { dataset: { wasmModule: "module", wasmBinary: "bytes", styleNonce: "nonce" } },
     getElementById: (id) => id === "preview" ? root : status, createElement: (tag) => new Element(tag), importNode: (node) => node };
   const window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name),
     DOMParser: class { parseFromString() { const svg = new Element("svg"); svg.namespaceURI = "http://www.w3.org/2000/svg";
-      const node = new Element("g"); node.setAttribute("id", "fm-node-a-0"); svg.append(node);
+      for (const fragment of fragments) { const node = new Element("g"); node.setAttribute("id", fragment.id); svg.append(node); }
       return { documentElement: svg, querySelector: () => null }; } },
     XMLSerializer: class { serializeToString() { return '<svg xmlns="http://www.w3.org/2000/svg"/>'; } },
   };
@@ -280,8 +282,8 @@ async function controllerHarness(t, source = "flowchart LR\nA --> B\n") {
     title: "graph.mmd", diagrams: [{ id: 0, source, startLine: 0 }] });
   render(); await settle();
   const button = (label) => root.querySelectorAll("button").find((node) => node.textContent === label);
-  const open = () => {
-    root.children[0].children[1].shadowRoot.querySelectorAll("[id]")[0].click();
+  const open = (index = 0) => {
+    root.children[0].children[1].shadowRoot.querySelectorAll("[id]")[index].click();
     button("Edit selected source fragment").click();
   };
   return { root, status, messages, calls, engine, send, render, button, open };
@@ -297,7 +299,7 @@ test("production webview calls Rust with the captured source and waits for host 
   assert.equal(h.button("Apply source edit").disabled, true);
   h.button("Apply source edit").click(); assert.equal(h.calls.length, 1);
   h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3, editId: request.editId + 1, ok: true, message: "wrong" });
-  assert.equal(input.readOnly, undefined);
+  assert.equal(input.readOnly, true); // The submitted text cannot change during an async host write.
   h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3, editId: request.editId, ok: true, message: "Applied" });
   assert.equal(input.readOnly, true);
   assert.equal(h.button("Discard draft").disabled, false);
@@ -314,6 +316,7 @@ test("engine errors and host rejections preserve the draft and permit a retry", 
   const request = h.messages.at(-1);
   h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3, editId: request.editId, ok: false, message: "Read only" });
   assert.equal(input.value, "A --> C"); assert.equal(h.button("Apply source edit").disabled, false);
+  assert.equal(input.readOnly, false);
   h.button("Apply source edit").click(); assert.equal(h.calls.length, 2);
 });
 
@@ -337,4 +340,198 @@ test("missing editing APIs and malformed engine receipts never dispatch a docume
   h.root.querySelectorAll("textarea")[0].value = "new"; h.button("Apply source edit").click();
   assert.match(h.root.textContent, /complete source-edit receipt/u);
   assert.equal(h.messages.some((message) => message.type === "apply-source-edit"), false);
+});
+
+function batchFixture(doc, changes) {
+  const snapshot = createRenderSnapshot(doc, 1, doc.fileName);
+  const raw = new Map(snapshot.blocks.map((block) => [block.id, []]));
+  const edits = changes.map(({ diagramId = 0, snippet, replacement, id }, index) => {
+    const block = snapshot.blocks[diagramId];
+    const binding = bindingFor(block.source, snippet, id || `element-${index}`);
+    raw.get(diagramId).push(binding);
+    return { diagramId, elementId: binding.elementId, replacement,
+      result: receipt(block.source, binding, replacement).result };
+  });
+  const reports = new Map(snapshot.blocks.map((block) => [block.id,
+    { bindings: checkedSourceBindings(block, raw.get(block.id)), diagnostics: [] }]));
+  const message = { type: "apply-source-batch", requestId: 1, documentVersion: doc.version, editId: 1, edits };
+  return { snapshot, reports, raw, message };
+}
+function batchPlan(doc, changes) {
+  const f = batchFixture(doc, changes);
+  return planSourceBatch(doc, f.snapshot, f.reports, f.message);
+}
+
+test("batch uses original Unicode offsets even when an earlier replacement changes length", () => {
+  const doc = makeDocument("flowchart LR\nA[😀] --> B\nC --> D\n");
+  const result = batchPlan(doc, [
+    { snippet: "A[😀] --> B", replacement: "A[longer label 東京] --> E\nE --> B" },
+    { snippet: "C --> D", replacement: "C --> Z" },
+  ]);
+  assert.equal(result.after, "flowchart LR\nA[longer label 東京] --> E\nE --> B\nC --> Z\n");
+  assert.equal(result.edits.length, 2);
+  assert.equal(result.edits[1].range.start.line, 2);
+});
+
+test("one batch spans multiple Markdown diagrams and keeps unrelated content byte-exact", () => {
+  const doc = makeDocument("Text\r\n  ```mermaid\r\n  flowchart LR\r\n  A --> B\r\n  ```\r\nDo not touch 😀\r\n~~~mermaid\r\nflowchart LR\r\nC --> D\r\n~~~\r\n", "/work/readme.md", 2);
+  const result = batchPlan(doc, [
+    { diagramId: 1, snippet: "C --> D", replacement: "C --> F" },
+    { snippet: "A --> B", replacement: "A --> E\nE --> B" },
+  ]);
+  assert.equal(result.after, "Text\r\n  ```mermaid\r\n  flowchart LR\r\n  A --> E\r\n  E --> B\r\n  ```\r\nDo not touch 😀\r\n~~~mermaid\r\nflowchart LR\r\nC --> F\r\n~~~\r\n");
+});
+
+test("shared-statement aliases, overlapping fragments and repeated IDs abort the whole batch", () => {
+  const doc = makeDocument("flowchart LR\nA --> B\nC --> D\n");
+  for (const snippets of [["A --> B", "A --> B"], ["A --> B", "B"]]) {
+    assert.throws(() => batchPlan(doc, snippets.map((snippet) => ({ snippet, replacement: "new" }))), /overlap|share/u);
+  }
+  const f = batchFixture(doc, [{ snippet: "A --> B", replacement: "A --> C" }]);
+  f.message.edits.push(f.message.edits[0]);
+  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, f.message), /repeat/u);
+});
+
+test("combined fence escapes are rejected even though each individual edit is allowed", () => {
+  const doc = makeDocument("```mermaid\nflowchart LR\nAB\n```\nuntouched prose", "/work/readme.md");
+  const f = batchFixture(doc, [{ snippet: "A", replacement: "``" }, { snippet: "B", replacement: "`" }]);
+  for (const edit of f.message.edits) assert.doesNotThrow(() => planSourceEdit(doc, f.snapshot, f.reports, edit));
+  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, f.message), /Combined edits/u);
+});
+
+test("batch cardinality, payload and final document budgets are enforced", () => {
+  const doc = makeDocument("flowchart LR\nA --> B\nC --> D\n");
+  const f = batchFixture(doc, [{ snippet: "A --> B", replacement: "A --> C" }]);
+  for (const edits of [[], null, Array(65).fill(f.message.edits[0])]) {
+    assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, { edits }), /1 and 64/u);
+  }
+  f.message.edits[0].result.updatedSource = "x".repeat(16 * 1024 * 1024);
+  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, f.message), /16 MiB/u);
+  const large = "x".repeat(1100000);
+  assert.throws(() => batchPlan(doc, [{ snippet: "A --> B", replacement: large },
+    { snippet: "C --> D", replacement: large }]), /2 MiB/u);
+});
+
+test("no-op batch members do not create extra editor changes", () => {
+  const doc = makeDocument("flowchart LR\nA --> B\nC --> D\n");
+  const result = batchPlan(doc, [{ snippet: "A --> B", replacement: "A --> B" },
+    { snippet: "C --> D", replacement: "C --> E" }]);
+  assert.equal(result.edits.length, 1);
+  const unchanged = batchPlan(doc, [{ snippet: "A --> B", replacement: "A --> B" }]);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.edits.length, 0);
+});
+
+async function acceptBatch(h, changes) {
+  const f = batchFixture(h.doc, changes);
+  const render = h.render();
+  await h.receive({ type: "rendered", requestId: render.requestId, documentVersion: render.documentVersion,
+    reports: f.snapshot.blocks.map((block) => ({ id: block.id, bindings: f.raw.get(block.id), diagnostics: [] })) });
+  f.message.requestId = render.requestId;
+  f.message.documentVersion = render.documentVersion;
+  return f.message;
+}
+
+test("production host applies two fragments as one native transaction, with whole-batch undo", async (t) => {
+  const before = "flowchart LR\nA --> B\nC --> D\n";
+  const h = await hostHarness(t, makeDocument(before));
+  const m = await acceptBatch(h, [{ snippet: "A --> B", replacement: "A --> E\nE --> B" },
+    { snippet: "C --> D", replacement: "C --> Z" }]);
+  await h.receive(m);
+  assert.equal(h.doc.text, "flowchart LR\nA --> E\nE --> B\nC --> Z\n");
+  assert.equal(h.editCalls.length, 1);
+  assert.equal(h.editCalls[0].changes.length, 2);
+  h.undo(); assert.equal(h.doc.text, before);
+  h.redo(); assert.equal(h.doc.text, "flowchart LR\nA --> E\nE --> B\nC --> Z\n");
+  await h.receive(m); assert.equal(h.editCalls.length, 1);
+});
+
+test("a bad last receipt never partially applies earlier fragments; refused batches remain retryable", async (t) => {
+  const before = "flowchart LR\nA --> B\nC --> D\n";
+  const h = await hostHarness(t, makeDocument(before));
+  const m = await acceptBatch(h, [{ snippet: "A --> B", replacement: "A --> E" },
+    { snippet: "C --> D", replacement: "C --> Z" }]);
+  const original = m.edits[1].result.updatedSource;
+  m.edits[1].result.updatedSource += "extra";
+  await h.receive(m); assert.equal(h.editCalls.length, 0); assert.equal(h.doc.text, before);
+  m.edits[1].result.updatedSource = original;
+  h.rejectEdit = true; await h.receive(m); assert.equal(h.doc.text, before);
+  h.rejectEdit = false; await h.receive(m); assert.equal(h.doc.text, "flowchart LR\nA --> E\nC --> Z\n");
+});
+
+test("production controller stages separate Rust receipts, then dispatches only one batch", async (t) => {
+  const h = await controllerHarness(t, "flowchart LR\nA --> B\nC --> D\n",
+    [{ snippet: "A --> B", id: "fm-node-a-0" }, { snippet: "C --> D", id: "fm-node-c-1" }]);
+  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; h.button("Stage fragment").click();
+  assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+  h.open(1); h.root.querySelectorAll("textarea")[0].value = "C --> Z";
+  h.button("Apply source edit").click(); assert.match(h.root.textContent, /apply all staged edits together/u);
+  h.button("Apply staged edits").click(); assert.match(h.root.textContent, /Stage or discard the open/u);
+  h.button("Stage fragment").click();
+  assert.equal(h.calls.length, 2);
+  assert.ok(h.calls.every((call) => call.input === "flowchart LR\nA --> B\nC --> D\n"));
+  h.button("Apply staged edits").click();
+  const message = h.messages.at(-1);
+  assert.equal(message.type, "apply-source-batch");
+  assert.equal(message.edits.length, 2);
+  assert.deepEqual(message.edits.map((edit) => edit.replacement), ["A --> E", "C --> Z"]);
+  h.button("Apply staged edits").click();
+  assert.equal(h.messages.filter((m) => m.type === "apply-source-batch").length, 1);
+});
+
+test("stale batches retain replacement text but cannot write after a new render", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  h.root.querySelectorAll("textarea")[0].value = "A[retain my work] --> E"; h.button("Stage fragment").click();
+  h.render(2); await settle();
+  assert.match(h.root.textContent, /retain my work/u);
+  assert.equal(h.button("Apply staged edits").disabled, true);
+  h.button("Apply staged edits").click();
+  assert.equal(h.messages.some((m) => m.type === "apply-source-batch"), false);
+  h.button("Discard staged edits").click(); assert.equal(h.button("Apply staged edits"), undefined);
+});
+
+test("shared spans are rejected at staging and rejected host batches keep every staged change", async (t) => {
+  const h = await controllerHarness(t, "flowchart LR\nA --> B\n",
+    [{ snippet: "A --> B", id: "fm-node-a-0" }, { snippet: "A --> B", id: "fm-node-b-1" }]);
+  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; h.button("Stage fragment").click();
+  h.open(1); h.root.querySelectorAll("textarea")[0].value = "A --> F"; h.button("Stage fragment").click();
+  assert.match(h.root.textContent, /overlaps a staged statement/u);
+  assert.equal(h.root.querySelectorAll("textarea")[0].value, "A --> F");
+  h.button("Discard draft").click(); h.button("Apply staged edits").click();
+  const request = h.messages.at(-1);
+  h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3, editId: request.editId, ok: false, message: "Refused" });
+  assert.match(h.root.textContent, /A --> E/u);
+  assert.equal(h.button("Apply staged edits").disabled, false);
+  h.button("Remove staged fragment").click();
+  assert.equal(h.button("Apply staged edits").disabled, true);
+});
+
+test("a batch refused after asynchronous editor opening leaves every original fragment intact", async (t) => {
+  const before = "flowchart LR\nA --> B\nC --> D\n";
+  const h = await hostHarness(t, makeDocument(before));
+  const m = await acceptBatch(h, [{ snippet: "A --> B", replacement: "A --> E" },
+    { snippet: "C --> D", replacement: "C --> Z" }]);
+  let resolve;
+  h.openEditor = () => new Promise((done) => { resolve = done; });
+  const pending = h.receive(m);
+  h.change(before + "%% new typing\n");
+  resolve(h.editor); await pending;
+  assert.equal(h.editCalls.length, 0);
+  assert.equal(h.doc.text, before + "%% new typing\n");
+  assert.equal(h.messages.at(-1).ok, false);
+});
+
+test("staging copies engine receipt scalars rather than retaining mutable engine results", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "A --> C";
+  let response;
+  const original = h.engine.applyParseLensEdit;
+  h.engine.applyParseLensEdit = (...args) => { response = original(...args); return response; };
+  h.button("Stage fragment").click();
+  response.result.replacement = "MUTATED";
+  response.result.replacedRange.startByte = 0;
+  h.button("Apply staged edits").click();
+  const sent = h.messages.at(-1).edits[0];
+  assert.equal(sent.result.replacement, "A --> C");
+  assert.equal(sent.result.replacedRange.startByte, Buffer.byteLength("flowchart LR\n"));
 });

@@ -4,7 +4,7 @@ const {
   buildPreviewHtml, createRenderSnapshot, DebouncedRenderScheduler,
   isPreviewDocument, normalizePreviewDebounceMs,
   blockRange, checkedSourceBindings, checkedDiagnostics, isCurrentSnapshot,
-  sourceSelectionTargets, planSourceEdit,
+  sourceSelectionTargets, planSourceEdit, planSourceBatch,
 } = require("./preview-contract.cjs");
 
 const panels = new Map();
@@ -171,7 +171,9 @@ async function applySourceEdit(entry, message) {
   entry.editing = true;
   try {
     const snapshot = entry.snapshot;
-    const plan = planSourceEdit(entry.document, snapshot, entry.reports, message);
+    const plan = message.type === "apply-source-batch"
+      ? planSourceBatch(entry.document, snapshot, entry.reports, message)
+      : planSourceEdit(entry.document, snapshot, entry.reports, message);
     if (!plan.changed) { reply(true, "Source is unchanged."); return; }
     const editor = await vscode.window.showTextDocument(entry.document,
       { viewColumn: entry.sourceColumn, preserveFocus: true, preview: false });
@@ -182,8 +184,10 @@ async function applySourceEdit(entry, message) {
       || editor.document.uri.toString() !== entry.document.uri.toString()) {
       throw new Error("Source changed while opening the editor. Your draft was not applied.");
     }
-    const applied = await editor.edit((builder) => builder.replace(vscodeRange(plan.range), plan.newText),
-      { undoStopBefore: true, undoStopAfter: true });
+    const edits = plan.edits || [{ range: plan.range, newText: plan.newText }];
+    const applied = await editor.edit((builder) => {
+      for (const edit of edits) builder.replace(vscodeRange(edit.range), edit.newText);
+    }, { undoStopBefore: true, undoStopAfter: true });
     if (!applied) throw new Error("VS Code refused the edit (read-only or changed document). Your draft was kept.");
     reply(true, "Source updated. Use the editor's Undo to restore it.");
     // Source-change events normally invalidate first. Do so here as well before another queued
@@ -203,7 +207,7 @@ async function receiveMessage(entry, message) {
   else if (message?.type === "rendered") acceptRenderReport(entry, message);
   else if (message?.type === "reveal") await revealSource(entry, message);
   else if (message?.type === "export-svg") await exportSvg(entry, message);
-  else if (message?.type === "apply-source-edit") await applySourceEdit(entry, message);
+  else if (message?.type === "apply-source-edit" || message?.type === "apply-source-batch") await applySourceEdit(entry, message);
 }
 
 function previewDebounceMs() {
