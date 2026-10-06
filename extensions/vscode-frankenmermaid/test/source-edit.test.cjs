@@ -256,7 +256,7 @@ class Element {
     ]);
   }
   attachShadow() { this.shadowRoot = new Element("shadow-root"); return this.shadowRoot; }
-  click() { this.listeners.get("click")?.({ preventDefault() {}, stopPropagation() {} }); }
+  click() { return this.listeners.get("click")?.({ preventDefault() {}, stopPropagation() {} }); }
 }
 async function controllerHarness(t, source = "flowchart LR\nA --> B\n",
   fragments = [{ snippet: "A --> B", id: "fm-node-a-0" }]) {
@@ -286,13 +286,13 @@ async function controllerHarness(t, source = "flowchart LR\nA --> B\n",
     root.children[0].children[1].shadowRoot.querySelectorAll("[id]")[index].click();
     button("Edit selected source fragment").click();
   };
-  return { root, status, messages, calls, engine, send, render, button, open };
+  return { root, status, messages, calls, engine, send, render, button, open, controller };
 }
 
 test("production webview calls Rust with the captured source and waits for host acknowledgement", async (t) => {
   const h = await controllerHarness(t, "flowchart LR\r\nA --> B\r\n"); h.open();
   const input = h.root.querySelectorAll("textarea")[0]; input.value = "A[😀] --> C\nC --> B";
-  h.button("Apply source edit").click();
+  await h.button("Apply source edit").click();
   assert.deepEqual(h.calls, [{ input: "flowchart LR\r\nA --> B\r\n", id: "fm-node-a-0", replacement: "A[😀] --> C\r\nC --> B" }]);
   const request = h.messages.at(-1);
   assert.equal(request.type, "apply-source-edit");
@@ -310,9 +310,9 @@ test("engine errors and host rejections preserve the draft and permit a retry", 
   const input = h.root.querySelectorAll("textarea")[0]; input.value = "A --> C";
   const original = h.engine.applyParseLensEdit;
   h.engine.applyParseLensEdit = () => { throw new Error("Rust refused this fragment"); };
-  h.button("Apply source edit").click(); assert.match(h.root.textContent, /Rust refused/u);
+  await h.button("Apply source edit").click(); assert.match(h.root.textContent, /Rust refused/u);
   assert.equal(input.value, "A --> C");
-  h.engine.applyParseLensEdit = original; h.button("Apply source edit").click();
+  h.engine.applyParseLensEdit = original; await h.button("Apply source edit").click();
   const request = h.messages.at(-1);
   h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3, editId: request.editId, ok: false, message: "Read only" });
   assert.equal(input.value, "A --> C"); assert.equal(h.button("Apply source edit").disabled, false);
@@ -337,7 +337,7 @@ test("missing editing APIs and malformed engine receipts never dispatch a docume
   const h = await controllerHarness(t); h.engine.applyParseLensEdit = undefined; h.open();
   assert.equal(h.root.querySelectorAll("textarea").length, 0);
   h.engine.applyParseLensEdit = () => ({ result: {} }); h.open();
-  h.root.querySelectorAll("textarea")[0].value = "new"; h.button("Apply source edit").click();
+  h.root.querySelectorAll("textarea")[0].value = "new"; await h.button("Apply source edit").click();
   assert.match(h.root.textContent, /complete source-edit receipt/u);
   assert.equal(h.messages.some((message) => message.type === "apply-source-edit"), false);
 });
@@ -462,12 +462,12 @@ test("a bad last receipt never partially applies earlier fragments; refused batc
 test("production controller stages separate Rust receipts, then dispatches only one batch", async (t) => {
   const h = await controllerHarness(t, "flowchart LR\nA --> B\nC --> D\n",
     [{ snippet: "A --> B", id: "fm-node-a-0" }, { snippet: "C --> D", id: "fm-node-c-1" }]);
-  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; h.button("Stage fragment").click();
+  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; await h.button("Stage fragment").click();
   assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
   h.open(1); h.root.querySelectorAll("textarea")[0].value = "C --> Z";
   h.button("Apply source edit").click(); assert.match(h.root.textContent, /apply all staged edits together/u);
   h.button("Apply staged edits").click(); assert.match(h.root.textContent, /Stage or discard the open/u);
-  h.button("Stage fragment").click();
+  await h.button("Stage fragment").click();
   assert.equal(h.calls.length, 2);
   assert.ok(h.calls.every((call) => call.input === "flowchart LR\nA --> B\nC --> D\n"));
   h.button("Apply staged edits").click();
@@ -481,7 +481,7 @@ test("production controller stages separate Rust receipts, then dispatches only 
 
 test("stale batches retain replacement text but cannot write after a new render", async (t) => {
   const h = await controllerHarness(t); h.open();
-  h.root.querySelectorAll("textarea")[0].value = "A[retain my work] --> E"; h.button("Stage fragment").click();
+  h.root.querySelectorAll("textarea")[0].value = "A[retain my work] --> E"; await h.button("Stage fragment").click();
   h.render(2); await settle();
   assert.match(h.root.textContent, /retain my work/u);
   assert.equal(h.button("Apply staged edits").disabled, true);
@@ -493,8 +493,8 @@ test("stale batches retain replacement text but cannot write after a new render"
 test("shared spans are rejected at staging and rejected host batches keep every staged change", async (t) => {
   const h = await controllerHarness(t, "flowchart LR\nA --> B\n",
     [{ snippet: "A --> B", id: "fm-node-a-0" }, { snippet: "A --> B", id: "fm-node-b-1" }]);
-  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; h.button("Stage fragment").click();
-  h.open(1); h.root.querySelectorAll("textarea")[0].value = "A --> F"; h.button("Stage fragment").click();
+  h.open(); h.root.querySelectorAll("textarea")[0].value = "A --> E"; await h.button("Stage fragment").click();
+  h.open(1); h.root.querySelectorAll("textarea")[0].value = "A --> F"; await h.button("Stage fragment").click();
   assert.match(h.root.textContent, /overlaps a staged statement/u);
   assert.equal(h.root.querySelectorAll("textarea")[0].value, "A --> F");
   h.button("Discard draft").click(); h.button("Apply staged edits").click();
@@ -527,11 +527,186 @@ test("staging copies engine receipt scalars rather than retaining mutable engine
   let response;
   const original = h.engine.applyParseLensEdit;
   h.engine.applyParseLensEdit = (...args) => { response = original(...args); return response; };
-  h.button("Stage fragment").click();
+  await h.button("Stage fragment").click();
   response.result.replacement = "MUTATED";
   response.result.replacedRange.startByte = 0;
   h.button("Apply staged edits").click();
   const sent = h.messages.at(-1).edits[0];
   assert.equal(sent.result.replacement, "A --> C");
   assert.equal(sent.result.replacedRange.startByte, Buffer.byteLength("flowchart LR\n"));
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+for (const action of ["Apply source edit", "Stage fragment"]) {
+  test(`asynchronous ${action} freezes one receipt and rejects stale completion`, async (t) => {
+    const h = await controllerHarness(t); h.open();
+    const input = h.root.querySelectorAll("textarea")[0]; input.value = "A[keep 😀] --> C";
+    const gate = deferred();
+    let response, calls = 0;
+    const original = h.engine.applyParseLensEdit;
+    h.engine.applyParseLensEdit = (...args) => { calls += 1; response = original(...args); return gate.promise; };
+    const pending = h.button(action).click();
+    assert.equal(input.readOnly, true);
+    assert.equal(h.button("Stage fragment").disabled, true);
+    h.button("Apply source edit").click(); h.button("Stage fragment").click();
+    assert.equal(calls, 1);
+    assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+    h.render(2); await settle();
+    gate.resolve(response); await pending;
+    assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+    assert.equal(h.button("Apply staged edits"), undefined);
+    assert.equal(h.root.querySelectorAll("textarea")[0], input);
+    assert.equal(input.value, "A[keep 😀] --> C");
+    assert.equal(input.readOnly, false);
+    assert.equal(h.button("Apply source edit").disabled, true);
+    assert.equal(h.button("Discard draft").disabled, false);
+    assert.match(h.root.textContent, /Source changed/u);
+  });
+}
+
+test("a delayed worker receipt preserves captured text and stays locked until native acknowledgement", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "A[submitted] --> C";
+  const gate = deferred(), original = h.engine.applyParseLensEdit;
+  let response;
+  h.engine.applyParseLensEdit = (...args) => { response = original(...args); return gate.promise; };
+  const pending = h.button("Apply source edit").click();
+  input.value = "programmatic mutation cannot change the submitted receipt";
+  gate.resolve(response); await pending;
+  const request = h.messages.at(-1);
+  assert.equal(request.type, "apply-source-edit");
+  assert.equal(request.replacement, "A[submitted] --> C");
+  assert.equal(request.result.replacement, request.replacement);
+  assert.equal(input.readOnly, true);
+  assert.equal(h.button("Discard draft").disabled, true);
+  h.button("Apply source edit").click(); assert.equal(h.calls.length, 1);
+  h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3,
+    editId: request.editId, ok: false, message: "Native write refused" });
+  assert.equal(input.readOnly, false);
+  assert.equal(h.button("Apply source edit").disabled, false);
+});
+
+test("asynchronous worker failures keep drafts retryable without fabricating a receipt", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "A --> retry";
+  const original = h.engine.applyParseLensEdit;
+  h.engine.applyParseLensEdit = async () => { throw new Error("Worker time budget exceeded"); };
+  await h.button("Stage fragment").click();
+  assert.match(h.root.textContent, /time budget/u);
+  assert.equal(input.value, "A --> retry");
+  assert.equal(input.readOnly, false);
+  assert.equal(h.button("Stage fragment").disabled, false);
+  assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+  h.engine.applyParseLensEdit = async (...args) => original(...args);
+  await h.button("Stage fragment").click();
+  h.button("Apply staged edits").click();
+  assert.equal(h.messages.at(-1).edits[0].replacement, "A --> retry");
+});
+
+test("disposal destroys the engine and ignores an outstanding source-edit result", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "A --> C";
+  const gate = deferred(), original = h.engine.applyParseLensEdit;
+  let response, destroyed = 0;
+  h.engine.destroy = () => { destroyed += 1; };
+  h.engine.applyParseLensEdit = (...args) => { response = original(...args); return gate.promise; };
+  const pending = h.button("Apply source edit").click();
+  h.controller.dispose(); h.controller.dispose();
+  gate.resolve(response); await pending;
+  assert.equal(destroyed, 1);
+  assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+});
+
+for (const method of ["parseLens", "renderSvg"]) {
+  test(`new renders cancel pending ${method} and never publish its obsolete result`, async (t) => {
+    const h = await controllerHarness(t), gate = deferred(), original = h.engine[method];
+    let first = true, pending = false, cancellations = 0, oldResult;
+    h.engine[method] = (...args) => {
+      const result = original(...args);
+      if (!first) return Promise.resolve(result);
+      first = false; pending = true; oldResult = result; return gate.promise;
+    };
+    h.engine.cancelPending = () => { if (pending) { cancellations += 1; pending = false; } };
+    h.render(2); await settle();
+    assert.equal(pending, true);
+    assert.equal(h.root.getAttribute("aria-busy"), "true");
+    h.render(3); await settle();
+    gate.resolve(oldResult); await settle();
+    assert.equal(cancellations, 1);
+    assert.deepEqual(h.messages.filter((m) => m.type === "rendered").map((m) => m.requestId), [1, 3]);
+    assert.equal(h.root.getAttribute("aria-busy"), "false");
+    assert.equal(h.status.textContent, "1 diagram.");
+  });
+}
+
+test("asynchronous inspection failure preserves rendering and one failed render does not suppress siblings", async (t) => {
+  const h = await controllerHarness(t);
+  h.engine.parseLens = async () => { throw new Error("inspection unavailable"); };
+  h.engine.renderSvg = async (source) => { if (source === "bad") throw new Error("worker render failed"); return "<svg/>"; };
+  h.send({ type: "render", requestId: 2, documentVersion: 4, title: "two.md",
+    diagrams: [{ id: 0, source: "bad", startLine: 0 }, { id: 1, source: "good", startLine: 4 }] });
+  await settle();
+  const report = h.messages.filter((m) => m.type === "rendered").at(-1);
+  assert.equal(report.requestId, 2);
+  assert.equal(report.reports.length, 2);
+  assert.equal(report.reports[0].diagnostics.some((d) => d.severity === "error"), true);
+  assert.equal(report.reports[1].diagnostics.some((d) => d.severity === "error"), false);
+  assert.equal(h.root.querySelectorAll("button").filter((b) => b.textContent === "Save SVG").length, 1);
+});
+
+test("host preview HTML loads only its owned worker with a bounded worker CSP", async (t) => {
+  // Run the same HTML builder used by the production extension, including hostile attribute text.
+  const { buildPreviewHtml } = require("../preview-contract.cjs");
+  const html = buildPreviewHtml({ cspSource: "https://owned.vscode-resource.vscode-cdn.net",
+    nonce: "test", scriptUri: "owned-preview", workerUri: 'owned-worker?x="&y=<',
+    wasmModuleUri: "owned-module", wasmBinaryUri: "owned-binary" });
+  assert.match(html, /worker-src blob:;/u);
+  assert.doesNotMatch(/script-src ([^;]+)/u.exec(html)[1], /'unsafe-eval'|'unsafe-inline'|blob:/u);
+  assert.match(html, /data-engine-worker="owned-worker\?x=&quot;&amp;y=&lt;"/u);
+  assert.ok(html.indexOf('src="owned-worker') < html.indexOf('src="owned-preview'));
+});
+
+test("default controller loader selects the worker transport, not a main-thread WASM import", async () => {
+  const root = new Element("main"), status = new Element("div"), listeners = new Map(), created = [], messages = [];
+  let destroyed = 0;
+  const worker = { default: async () => {}, renderSvg: async () => "<svg/>", destroy: () => { destroyed += 1; } };
+  const document = { body: { dataset: { wasmModule: "owned-module", wasmBinary: "owned-binary", engineWorker: "owned-worker" } },
+    getElementById: (id) => id === "preview" ? root : status, createElement: (tag) => new Element(tag) };
+  const window = { addEventListener: (key, fn) => listeners.set(key, fn), removeEventListener: (key) => listeners.delete(key),
+    FmPreviewEngineWorker: { create: (options) => { created.push(options); return worker; } } };
+  const controller = createPreviewController({ document, window, vscode: { postMessage: (m) => messages.push(m) } });
+  await controller.start();
+  assert.deepEqual(created, [{ moduleUrl: "owned-module", binaryUrl: "owned-binary", workerUrl: "owned-worker" }]);
+  assert.deepEqual(messages, [{ type: "ready" }]);
+  controller.dispose(); assert.equal(destroyed, 1);
+});
+
+test("disposal interrupts initialization and failed initialization releases its worker before retry", async () => {
+  const root = new Element("main"), status = new Element("div"), listeners = new Map(), messages = [];
+  const document = { body: { dataset: {} }, getElementById: (id) => id === "preview" ? root : status,
+    createElement: (tag) => new Element(tag) };
+  const window = { addEventListener: (key, fn) => listeners.set(key, fn), removeEventListener: (key) => listeners.delete(key) };
+  const gate = deferred(); let destroyed = 0;
+  const engine = { default: () => gate.promise, renderSvg: async () => "<svg/>", destroy: () => { destroyed += 1; } };
+  const controller = createPreviewController({ document, window, vscode: { postMessage: (m) => messages.push(m) }, loadEngine: () => engine });
+  const starting = controller.start(); await settle();
+  controller.dispose(); assert.equal(destroyed, 1);
+  gate.resolve(); await starting;
+  assert.equal(messages.length, 0);
+  assert.equal(listeners.size, 0);
+  let loads = 0, failedDestroyed = 0;
+  const retrying = createPreviewController({ document, window, vscode: { postMessage: (m) => messages.push(m) },
+    loadEngine: () => ++loads === 1 ? { default: async () => { throw new Error("bad init"); },
+      destroy: () => { failedDestroyed += 1; } } : { default: async () => {}, renderSvg: async () => "<svg/>" } });
+  await retrying.start();
+  assert.equal(failedDestroyed, 1);
+  assert.match(root.textContent, /Retry engine/u);
+  await retrying.start();
+  assert.deepEqual(messages, [{ type: "ready" }]);
+  retrying.dispose();
 });

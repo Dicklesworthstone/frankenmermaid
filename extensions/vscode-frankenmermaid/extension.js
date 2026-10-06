@@ -37,6 +37,7 @@ async function previewResources(context, panel) {
       cspSource: panel.webview.cspSource,
       nonce: crypto.randomBytes(16).toString("base64"),
       scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, "preview.js")),
+      workerUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, "engine-worker.js")),
       wasmModuleUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(packageRoot, "frankenmermaid.js")),
       wasmBinaryUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(packageRoot, "frankenmermaid_bg.wasm")),
     }),

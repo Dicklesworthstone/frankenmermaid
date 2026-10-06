@@ -1,14 +1,15 @@
 /* The engine owns Mermaid semantics. This controller owns only webview lifecycle and presentation.
  * Export the same controller to Node tests; no source rewriting or alternate render path. */
 function createPreviewController({ document, window, vscode,
-  loadEngine = (url) => import(/* @vite-ignore */ url),
+  loadEngine = (moduleUrl, binaryUrl, workerUrl) => window.FmPreviewEngineWorker.create({ moduleUrl, binaryUrl, workerUrl }),
   yieldToHost = () => new Promise((resolve) => setTimeout(resolve, 0)),
 }) {
   const root = document.getElementById("preview");
   const status = document.getElementById("status");
-  const { wasmModule, wasmBinary, styleNonce } = document.body.dataset;
+  const { wasmModule, wasmBinary, engineWorker, styleNonce } = document.body.dataset;
   if (!root || !status) throw new Error("FrankenMermaid preview roots are missing");
   let engine;
+  let initializingEngine;
   let disposed = false;
   let starting = false;
   let revision = 0;
@@ -47,7 +48,30 @@ function createPreviewController({ document, window, vscode,
     sourceEditor.notice.textContent = "Source changed. This draft is kept for copying, but cannot be applied. Discard it and select a current element to edit again.";
   }
 
-  function captureSourceEdit(draft) {
+  // Worker calls yield to source changes and disposal. Freeze the submitted text and prevent
+  // double submission until either the worker fails or the native host owns the transaction.
+  function beginDraftComputation(draft) {
+    draft.pending = true; draft.computing = true;
+    draft.input.readOnly = true;
+    draft.apply.disabled = true; draft.stage.disabled = true; draft.cancel.disabled = true;
+    draft.notice.textContent = "Checking source edit in the engine…";
+  }
+
+  function finishDraftComputation(draft) {
+    if (!draft.computing) return;
+    draft.computing = false; draft.pending = false;
+    draft.input.readOnly = draft.applied;
+    draft.apply.disabled = draft.stale || draft.applied;
+    draft.stage.disabled = draft.stale || draft.applied;
+    draft.cancel.disabled = false;
+  }
+
+  function currentDraft(draft, current) {
+    return !disposed && sourceEditor === draft && !draft.stale
+      && committedMessage === draft.message && current === revision;
+  }
+
+  async function captureSourceEdit(draft) {
     const { diagram, binding, input } = draft;
     // Textarea.value uses LF. Match the engine input before asking Rust for the edit.
     const eol = diagram.source.match(/\r\n|\n|\r/u)?.[0] || "\n";
@@ -57,7 +81,7 @@ function createPreviewController({ document, window, vscode,
       const code = character.codePointAt(0);
       if (code >= 0xd800 && code <= 0xdfff) throw new Error("Replacement contains an unpaired surrogate.");
     }
-    const response = engine.applyParseLensEdit(diagram.source, binding.elementId, replacement);
+    const response = await engine.applyParseLensEdit(diagram.source, binding.elementId, replacement);
     const result = response?.result;
     if (!result || !Array.isArray(response.snapshot?.bindings) || typeof result.updatedSource !== "string") {
       throw new Error("Engine did not return a complete source-edit receipt.");
@@ -87,7 +111,7 @@ function createPreviewController({ document, window, vscode,
     }
   }
 
-  function stageSourceEdit(draft, current) {
+  async function stageSourceEdit(draft, current) {
     if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
     if (committedMessage !== draft.message || current !== revision) { invalidateSourceEditor(); return; }
     try {
@@ -95,7 +119,9 @@ function createPreviewController({ document, window, vscode,
       if (stagedBatch && !stagedBatch.applied && stagedBatch.message !== draft.message) {
         throw new Error("Discard the stale batch before staging edits from another render.");
       }
-      const edit = captureSourceEdit(draft);
+      beginDraftComputation(draft);
+      const edit = await captureSourceEdit(draft);
+      if (!currentDraft(draft, current)) return;
       if (edit.replacement === draft.binding.snippet) throw new Error("This fragment has no changes to stage.");
       if (!stagedBatch || stagedBatch.applied) {
         stagedBatch?.panel.remove();
@@ -144,7 +170,9 @@ function createPreviewController({ document, window, vscode,
       batch.edits.set(key, edit); refreshBatch(batch);
       draft.panel.remove(); sourceEditor = undefined;
       batch.notice.textContent = "Fragment staged. Select another diagram element, or apply the batch together.";
-    } catch (error) { draft.notice.textContent = `Fragment not staged: ${errorText(error)}`; }
+    } catch (error) {
+      if (currentDraft(draft, current)) draft.notice.textContent = `Fragment not staged: ${errorText(error)}`;
+    } finally { finishDraftComputation(draft); }
   }
 
   function openSourceEditor(message, diagram, binding, current) {
@@ -181,14 +209,16 @@ function createPreviewController({ document, window, vscode,
       if (draft.pending || sourceEditor !== draft) return;
       panel.remove(); sourceEditor = undefined;
     });
-    apply.addEventListener("click", () => {
+    apply.addEventListener("click", async () => {
       if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
       if (committedMessage !== message || current !== revision) { invalidateSourceEditor(); return; }
       if (stagedBatch && !stagedBatch.applied && stagedBatch.edits.size) {
         notice.textContent = "Stage this fragment, then apply all staged edits together."; return;
       }
       try {
-        const edit = captureSourceEdit(draft);
+        beginDraftComputation(draft);
+        const edit = await captureSourceEdit(draft);
+        if (!currentDraft(draft, current)) return;
         draft.editId = ++nextEditId;
         draft.pending = true;
         input.readOnly = true;
@@ -196,12 +226,10 @@ function createPreviewController({ document, window, vscode,
         notice.textContent = "Applying through the source editor…";
         vscode.postMessage({ type: "apply-source-edit", requestId: message.requestId,
           documentVersion: message.documentVersion, editId: draft.editId, ...edit });
+        draft.computing = false; // Only the native acknowledgement may now unlock this draft.
       } catch (error) {
-        draft.pending = false;
-        input.readOnly = false;
-        apply.disabled = false; stage.disabled = false; cancel.disabled = false;
-        notice.textContent = `Edit not applied: ${errorText(error)}`;
-      }
+        if (currentDraft(draft, current)) notice.textContent = `Edit not applied: ${errorText(error)}`;
+      } finally { finishDraftComputation(draft); }
     });
     root.append(panel);
     input.focus();
@@ -211,9 +239,11 @@ function createPreviewController({ document, window, vscode,
     if (disposed || starting || engine) return;
     starting = true;
     status.textContent = "Loading FrankenMermaid…";
+    let wasm;
     try {
-      const wasm = await loadEngine(wasmModule);
-      if (disposed) return;
+      wasm = await loadEngine(wasmModule, wasmBinary, engineWorker);
+      if (disposed) { wasm.destroy?.(); return; }
+      initializingEngine = wasm;
       await wasm.default({ module_or_path: wasmBinary });
       if (disposed) return;
       if (typeof wasm.renderSvg !== "function") throw new Error("Engine has no renderSvg export.");
@@ -222,12 +252,14 @@ function createPreviewController({ document, window, vscode,
       status.textContent = "Waiting for document…";
       vscode.postMessage({ type: "ready" });
     } catch (error) {
+      wasm?.destroy?.();
       if (disposed) return;
       status.textContent = `Unable to initialize FrankenMermaid: ${errorText(error)}`;
       const retry = element("button", "Retry engine initialization");
       retry.addEventListener("click", () => void start());
       root.replaceChildren(retry);
     } finally {
+      initializingEngine = undefined;
       starting = false;
     }
   }
@@ -263,9 +295,9 @@ function createPreviewController({ document, window, vscode,
     return { host, svgElement, svg: exportSvg };
   }
 
-  function sourceInsight(source) {
-    const lens = typeof engine.parseLens === "function" ? engine.parseLens(source) : undefined;
-    const parsed = lens?.parsed || (typeof engine.parse === "function" ? engine.parse(source) : undefined);
+  async function sourceInsight(source) {
+    const lens = typeof engine.parseLens === "function" ? await engine.parseLens(source) : undefined;
+    const parsed = lens?.parsed || (typeof engine.parse === "function" ? await engine.parse(source) : undefined);
     const diagnostics = [];
     const seen = new Set();
     const add = (value) => {
@@ -361,6 +393,7 @@ function createPreviewController({ document, window, vscode,
     if (!engine || disposed || message.requestId <= latestRequestId) return;
     latestRequestId = message.requestId;
     const current = ++revision;
+    engine.cancelPending?.();
     invalidateSourceEditor();
     committedMessage = undefined;
     elementRegistry = new Map();
@@ -377,13 +410,16 @@ function createPreviewController({ document, window, vscode,
       let view;
       let insight = { bindings: [], diagnostics: [] };
       // Failure of optional inspection must never suppress an otherwise renderable diagram.
-      try { insight = sourceInsight(diagram.source); }
+      try { insight = await sourceInsight(diagram.source); }
       catch (error) { insight.diagnostics.push({ severity: "warning", message: `Source inspection failed: ${errorText(error)}` }); }
+      if (disposed || current !== revision) return;
       try {
-        const svg = engine.renderSvg(diagram.source);
+        const svg = await engine.renderSvg(diagram.source);
+        if (disposed || current !== revision) return;
         view = svgView(svg);
         card.append(view.host);
       } catch (error) {
+        if (disposed || current !== revision) return;
         failed += 1;
         card.append(element("p", `Unable to render this diagram: ${errorText(error)}`, "error"));
         insight.diagnostics.push({ severity: "error", message: `Rendering failed: ${errorText(error)}` });
@@ -453,6 +489,7 @@ function createPreviewController({ document, window, vscode,
       && message.requestId > latestRequestId && typeof message.message === "string") {
       latestRequestId = message.requestId;
       revision += 1;
+      engine?.cancelPending?.();
       invalidateSourceEditor();
       committedMessage = undefined;
       elementRegistry = new Map();
@@ -466,8 +503,11 @@ function createPreviewController({ document, window, vscode,
   }
 
   function dispose() {
+    if (disposed) return;
     disposed = true;
     revision += 1;
+    engine?.destroy?.();
+    initializingEngine?.destroy?.();
     committedMessage = undefined;
     elementRegistry = new Map();
     highlight([]);

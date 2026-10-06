@@ -371,14 +371,14 @@ function escapeAttribute(value) {
     .replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
 }
 
-function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBinaryUri }) {
+function buildPreviewHtml({ cspSource, nonce, scriptUri, workerUri, wasmModuleUri, wasmBinaryUri }) {
   const safeNonce = escapeAttribute(nonce);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob: ${escapeAttribute(cspSource)}; connect-src ${escapeAttribute(cspSource)}; script-src 'nonce-${safeNonce}' ${escapeAttribute(cspSource)} 'wasm-unsafe-eval'; style-src 'nonce-${safeNonce}'; style-src-attr 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob: ${escapeAttribute(cspSource)}; connect-src ${escapeAttribute(cspSource)}; worker-src blob:; script-src 'nonce-${safeNonce}' ${escapeAttribute(cspSource)} 'wasm-unsafe-eval'; style-src 'nonce-${safeNonce}'; style-src-attr 'unsafe-inline';">
   <title>FrankenMermaid Preview</title>
   <style nonce="${safeNonce}">
     body { padding: 1rem; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
@@ -393,9 +393,10 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBina
     #status { margin-bottom: 1rem; }
   </style>
 </head>
-<body data-wasm-module="${escapeAttribute(wasmModuleUri)}" data-wasm-binary="${escapeAttribute(wasmBinaryUri)}" data-style-nonce="${safeNonce}">
+<body data-wasm-module="${escapeAttribute(wasmModuleUri)}" data-wasm-binary="${escapeAttribute(wasmBinaryUri)}" data-engine-worker="${escapeAttribute(workerUri)}" data-style-nonce="${safeNonce}">
   <div id="status" role="status" aria-live="polite">Loading FrankenMermaid…</div>
   <main id="preview" aria-label="Mermaid diagrams"></main>
+  <script nonce="${safeNonce}" src="${escapeAttribute(workerUri)}"></script>
   <script nonce="${safeNonce}" type="module" src="${escapeAttribute(scriptUri)}"></script>
 </body>
 </html>`;
