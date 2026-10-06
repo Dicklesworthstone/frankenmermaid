@@ -55,7 +55,7 @@ all seven.
 
 | Capability | What it does |
 |---|---|
-| **31 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, treemap, radar-beta, info, 5 C4 variants, requirement, kanban, ishikawa, treeView-beta, venn-beta, wardley-beta |
+| **32 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, treemap, radar-beta, info, 5 C4 variants, requirement, kanban, ishikawa, treeView-beta, venn-beta, wardley-beta, eventmodeling |
 | **Intent-aware parsing** | Best-effort recovery with structured diagnostics. Fuzzy keyword matching catches typos like `flowchar` or `seqeunceDiagram`; dangling edges auto-create placeholder nodes; never panics on malformed input |
 | **18 layout algorithms plus Auto** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet, architecture, treemap, radar — auto-selected per diagram type |
 | **4 cycle strategies** | Greedy, DFS back-edge, MFAS approximation, full cycle-aware with SCC detection and cluster collapse |
@@ -98,6 +98,7 @@ all seven.
 | `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
 | `venn` | Venn-beta | Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point |
 | `wardley` | Wardley-beta | Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links |
+| `eventmodeling` | EventModeling | Source-order timeframes in stacked type swimlanes, staircase placement across lane changes, two-thirds/one-third flow arrows |
 <!-- END GENERATED: layout-algorithms -->
 
 ## Quick example
@@ -218,6 +219,7 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | `treeView-beta` | Implemented |
 | `venn-beta` | Implemented |
 | `wardley-beta` | Implemented |
+| `eventmodeling` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
 The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md), generated from the same pinned Rust sources as the tables above. Runtime status and reference parity are separate axes there: a family can render end to end (`Runtime: Full`) while still owing documented reference behavior (`Parity: Partial`) — the two columns never collapse into one status.
@@ -843,7 +845,7 @@ frankenmermaid/
                     ▼
       ┌──────────────────────────────┐
       │ fm-parser                    │
-      │  • type detection            │  31 diagram types
+      │  • type detection            │  32 diagram types
       │  • fuzzy matching            │  Levenshtein + heuristics
       │  • recovery + warnings       │  best-effort, never crashes
       │  • IR builder (interning)    │

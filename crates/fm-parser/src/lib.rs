@@ -1350,8 +1350,9 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
             confidence: 0.3,
             method: DetectionMethod::Fallback,
             warnings: vec![format!(
-                "'{kind}' is a mermaid diagram type this renderer does not implement yet. \
-                 Rendering it as a flowchart will not be meaningful."
+                "'{kind}' is the header mermaid requires for this diagram type, and the spelling \
+                 used here is rejected upstream; write '{kind}' to render it. Rendering it as a \
+                 flowchart will not be meaningful."
             )],
         };
     }
@@ -1365,7 +1366,12 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
     }
 }
 
-/// Diagram headers that upstream mermaid supports and this renderer does not.
+/// Header spellings that upstream mermaid's detectors match but its grammars REJECT, answered with
+/// the spelling that works.
+///
+/// This began as the list of upstream types this renderer did not implement; every one of them is
+/// implemented now, `eventmodeling` last, so what remains are the bare spellings of `-beta`-only
+/// families, whose `-beta` header renders here.
 ///
 /// Every entry is taken from the incumbent's OWN detector table, not from guesswork: the pinned
 /// 11.15.0 bundle carries 31 start-anchored detectors, and these are the ones with no `DiagramType`
@@ -1388,7 +1394,8 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 /// That is also why the warning below no longer tells the author their input "was not misspelled".
 /// For `radar-beta` that is true; for a bare `radar` it is false, because mermaid rejects it too —
 /// and confidently absolving a malformed document is worse than the generic message this replaced.
-/// The message now says only what is certain: this renderer does not implement the type.
+/// The message now says only what is certain: the header mermaid requires, and that this one is
+/// rejected.
 ///
 /// When one of these lands as a real `DiagramType`, DELETE its entry rather than leave a message
 /// claiming the feature is missing.
@@ -1428,8 +1435,8 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // ⚠️ `treemap` AND `info` WERE HERE AND ARE NOT ANY MORE (bd-9ghyo, bd-a3tmn). This list
         // means "your syntax is right, we have not built this type"; leaving an implemented type in
         // it tells an author their working diagram is unsupported. Same rule the shape tables live
-        // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it.
-        "eventmodeling" => Some("eventmodeling"),
+        // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it. `eventmodeling`
+        // was the last such entry.
         // ⚠️ `ishikawa` WAS HERE and is not any more: the family is implemented, and
         // `an_implemented_type_is_never_named_as_unimplemented` pins that it is never reported as
         // unimplemented again.
@@ -1564,6 +1571,9 @@ fn exact_diagram_type_with(
     {
         // `wardley-beta` ONLY, for the same reason: a bare `wardley` is rejected upstream.
         Some(DiagramType::Wardley)
+    } else if line.trim_start().starts_with("eventmodeling") {
+        // The incumbent's detector is `/^\s*eventmodeling/`: case-sensitive, no word boundary.
+        Some(DiagramType::EventModeling)
     } else if matches(line, "ishikawa") {
         // The incumbent's detector is `/^\s*ishikawa(-beta)?\b/i`; `matches` already accepts the
         // `-beta` suffix, so both spellings land here, exactly as they both parse upstream.
@@ -1612,6 +1622,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("treeview-beta", DiagramType::TreeView),
     ("venn-beta", DiagramType::Venn),
     ("wardley-beta", DiagramType::Wardley),
+    ("eventmodeling", DiagramType::EventModeling),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -4323,16 +4334,15 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         }
     }
 
-    /// A diagram type mermaid supports and we do not must SAY so.
+    /// A bare spelling of a `-beta`-only type must be NAMED, with the header that works.
     ///
-    /// The old message ("could not detect diagram type") sends the author to check syntax that is
-    /// perfectly correct. Naming the type is the difference between "you typed it wrong" and "we
-    /// have not built this yet", which have different fixes.
+    /// The generic message ("could not detect diagram type") sends the author hunting for a typo
+    /// in a header that is one suffix away from rendering. Every upstream type is implemented now,
+    /// so these are the only headers this strategy still answers.
     #[test]
     fn an_unimplemented_upstream_type_is_named_rather_than_blamed_on_syntax() {
         for (source, expected) in [
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
-            ("eventmodeling\n  x\n", "eventmodeling"),
             ("treeView\n  root\n", "treeView"),
             ("venn\n  a\n", "venn"),
             ("wardley\n  a\n", "wardley"),
@@ -4381,6 +4391,10 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 "wardley-beta\n  component A [0.5, 0.5]\n",
                 fm_core::DiagramType::Wardley,
             ),
+            (
+                "eventmodeling\n  tf 01 ui Start\n",
+                fm_core::DiagramType::EventModeling,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);
@@ -4388,8 +4402,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 !detected
                     .warnings
                     .iter()
-                    .any(|w| w.contains("does not implement")),
-                "an implemented type was reported unimplemented: {:?}",
+                    .any(|w| w.contains("rejected upstream")),
+                "an implemented header was reported as rejected: {:?}",
                 detected.warnings
             );
         }
@@ -4411,9 +4425,9 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
             assert!(
-                !joined.contains("does not implement yet"),
-                "{source:?} was reported as unimplemented rather than as an unrecognised header: \
-                 {joined:?}"
+                !joined.contains("rejected upstream"),
+                "{source:?} was answered as a known spelling rather than as an unrecognised \
+                 header: {joined:?}"
             );
         }
     }
@@ -4437,11 +4451,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
             assert!(
-                !detected
-                    .warnings
-                    .join(" ")
-                    .contains("does not implement yet"),
-                "{source:?} was called unimplemented"
+                !detected.warnings.join(" ").contains("rejected upstream"),
+                "{source:?} was called a rejected spelling"
             );
         }
     }
@@ -4737,8 +4748,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             detected
                 .warnings
                 .iter()
-                .any(|w| w.contains("does not implement")),
-            "the unimplemented-type message was replaced: {:?}",
+                .any(|w| w.contains("rejected upstream") && w.contains("radar-beta")),
+            "the rejected-spelling message was replaced: {:?}",
             detected.warnings
         );
     }

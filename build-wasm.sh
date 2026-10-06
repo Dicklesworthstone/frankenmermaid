@@ -120,7 +120,18 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # ~10 kinds of marks), the projection inlined into `compute_traced_layout_with_config_and_guardrails`
 # ~4.4K, and serde for the five new IR structs ~2.5K. No shared machinery was added; the remainder
 # is the family. Headroom after raise: 1290 bytes.
-MAX_GZIP_BYTES=$((726 * 1024))
+#
+# Raised 726K -> 733K on 2026-10-06 for the `eventmodeling` family, the last mermaid 11.15.0 type
+# this renderer lacked, measured the same way from the committed pkg/ (5ac1939, 742134 gzip):
+#   749987 gzip  + eventmodeling: whitespace-insensitive lexer and statement grammar, lane keying,
+#                  labels with markup, flow rules, IR meta + serialisation, swimlane layout (+7853)
+#   748995 gzip  after replacing the lane `sort_unstable_by_key` with an insertion sort (-992;
+#                  ~1.6K pre-opt of quicksort/smallsort/ipnsort instantiations)
+# Function-by-function against 5ac1939 with names kept: the parser inlined into
+# `parse_mermaid_with_detection_and_config` ~6.3K pre-opt plus the lexer's data reader 0.7K, the
+# layout inlined into the guardrail dispatcher ~2.9K, serde for the new meta ~0.4K. The remainder
+# is the family. Headroom after raise: 1597 bytes.
+MAX_GZIP_BYTES=$((733 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

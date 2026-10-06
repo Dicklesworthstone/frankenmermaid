@@ -171,6 +171,16 @@
       "node_count": 3,
       "nodes_checksum": "8803637056d0eaf8"
     },
+    "eventmodeling_basic": {
+      "edge_count": 5,
+      "edges_checksum": "99a45dc5fbb34970",
+      "layout_algorithm": "auto",
+      "layout_checksum": "51a85cb3ff650830",
+      "layout_height": 557.5,
+      "layout_width": 656.690002,
+      "node_count": 6,
+      "nodes_checksum": "b3629ac118b20989"
+    },
     "flowchart_classdef": {
       "edge_count": 2,
       "edges_checksum": "effa8d01f4770f10",

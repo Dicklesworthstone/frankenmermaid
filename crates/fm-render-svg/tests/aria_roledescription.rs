@@ -74,6 +74,7 @@ const ALL_TYPES: &[DiagramType] = &[
     DiagramType::TreeView,
     DiagramType::Venn,
     DiagramType::Wardley,
+    DiagramType::EventModeling,
     DiagramType::Unknown,
 ];
 
@@ -289,7 +290,8 @@ const fn declaration_index(ty: DiagramType) -> usize {
         DiagramType::TreeView => 28,
         DiagramType::Venn => 29,
         DiagramType::Wardley => 30,
-        DiagramType::Unknown => 31,
+        DiagramType::EventModeling => 31,
+        DiagramType::Unknown => 32,
     }
 }
 

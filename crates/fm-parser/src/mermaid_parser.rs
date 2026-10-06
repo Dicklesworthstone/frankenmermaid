@@ -625,6 +625,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::TreeView => parse_tree_view(content, &mut builder),
         DiagramType::Venn => parse_venn(content, &mut builder),
         DiagramType::Wardley => parse_wardley(content, &mut builder),
+        DiagramType::EventModeling => parse_event_model(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -8583,6 +8584,449 @@ fn apply_venn_styles(builder: &mut IrBuilder, meta: &fm_core::IrVennMeta, styles
             paint_text(builder, text.node, color);
         }
     }
+}
+
+/// A cursor over an `eventmodeling` document. The grammar hides ALL whitespace, newlines included,
+/// so statements are read token by token rather than line by line; `%%`, `//` and `/* */` are
+/// comments.
+struct EmLexer<'a> {
+    text: &'a str,
+    pos: usize,
+    line: usize,
+}
+
+impl<'a> EmLexer<'a> {
+    fn advance(&mut self, len: usize) {
+        let end = (self.pos + len).min(self.text.len());
+        self.line += memchr::memchr_iter(b'\n', &self.text.as_bytes()[self.pos..end]).count();
+        self.pos = end;
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.text[self.pos..]
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            let rest = self.rest();
+            let trimmed = rest.trim_start();
+            self.advance(rest.len() - trimmed.len());
+            let skip = if trimmed.starts_with("%%") || trimmed.starts_with("//") {
+                trimmed.find('\n').unwrap_or(trimmed.len())
+            } else if trimmed.starts_with("/*") {
+                trimmed.find("*/").map_or(trimmed.len(), |end| end + 2)
+            } else {
+                return;
+            };
+            self.advance(skip);
+        }
+    }
+
+    /// An identifier, frame number or qualified name: `[A-Za-z0-9_.]+`.
+    fn word(&mut self) -> &'a str {
+        self.skip_trivia();
+        let rest = self.rest();
+        let len = rest
+            .bytes()
+            .position(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'.'))
+            .unwrap_or(rest.len());
+        self.advance(len);
+        &rest[..len]
+    }
+
+    fn eat(&mut self, token: &str) -> bool {
+        self.skip_trivia();
+        if self.rest().starts_with(token) {
+            self.advance(token.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_line(&mut self) {
+        let rest = self.rest();
+        self.advance(rest.find('\n').unwrap_or(rest.len()));
+    }
+
+    /// A data value: `{ … }` on one line, a `{` block closed by a line holding only `}`, or a
+    /// quoted string. Returns the text inside.
+    fn data(&mut self) -> Option<&'a str> {
+        self.skip_trivia();
+        let rest = self.rest();
+        let line_end = rest.find('\n').unwrap_or(rest.len());
+        let line = &rest[..line_end];
+        let (inner, consumed) = match rest.as_bytes().first()? {
+            b'{' if line.trim_end().len() > 1 && line.contains('}') => {
+                let close = line.rfind('}')?;
+                (&line[1..close], close + 1)
+            }
+            b'{' => {
+                // A block: everything up to a line that holds only `}`.
+                let mut offset = line_end;
+                loop {
+                    if offset >= rest.len() {
+                        break (&rest[line_end.min(rest.len())..], rest.len());
+                    }
+                    let next_end = rest[offset + 1..]
+                        .find('\n')
+                        .map_or(rest.len(), |end| offset + 1 + end);
+                    if rest[offset + 1..next_end].trim() == "}" {
+                        break (&rest[line_end..offset], next_end);
+                    }
+                    offset = next_end;
+                }
+            }
+            quote @ (b'"' | b'\'') => {
+                let close = line.rfind(char::from(*quote)).filter(|&close| close > 0)?;
+                (&line[1..close], close + 1)
+            }
+            _ => return None,
+        };
+        self.advance(consumed);
+        Some(inner)
+    }
+}
+
+/// One `eventmodeling` timeframe (`tf`) or reset frame (`rf`), as written.
+struct EmFrame<'a> {
+    name: &'a str,
+    kind: &'a str,
+    reset: bool,
+    identifier: &'a str,
+    sources: Vec<&'a str>,
+    data: Option<&'a str>,
+    data_ref: Option<&'a str>,
+    span: Span,
+}
+
+/// The grammar's `EmModelEntityType`.
+fn is_event_model_type(word: &str) -> bool {
+    matches!(
+        word,
+        "ui" | "cmd" | "command" | "evt" | "event" | "rmo" | "readmodel" | "pcr" | "processor"
+    )
+}
+
+/// The swimlane a frame of `kind` belongs to: upstream's lane key (0 / 100 / 200 bases, a
+/// namespaced lane just after its base), its caption, and the box colours.
+fn event_model_lane(kind: &str) -> (u32, &'static str, &'static str, &'static str) {
+    match kind {
+        "ui" => (0, "UI/Automation", "UI/A: ", "fill:#ffffff,stroke:#dbdada"),
+        "pcr" | "processor" => (0, "UI/Automation", "UI/A: ", "fill:#edb3f6,stroke:#b88cbf"),
+        "rmo" | "readmodel" => (
+            100,
+            "Command/Read Model",
+            "C/RM: ",
+            "fill:#d3f1a2,stroke:#a3b732",
+        ),
+        "cmd" | "command" => (
+            100,
+            "Command/Read Model",
+            "C/RM: ",
+            "fill:#bcd6fe,stroke:#679ac3",
+        ),
+        _ => (200, "Events", "Stream: ", "fill:#ffb778,stroke:#c19a0f"),
+    }
+}
+
+/// Parse an `eventmodeling` document.
+///
+/// Mirrors the pinned 11.15.0 grammar and `eventmodeling` db:
+///
+/// - `tf|timeframe NN type ns.Name (->> NN)* ([[Data]])? (`type`)? {inline data}` and the same with
+///   `rf|resetframe`; types `ui`, `cmd|command`, `evt|event`, `rmo|readmodel`, `pcr|processor`;
+/// - `data Name {` … `}` blocks that a frame's `[[Data]]` shows; `entity`, `note` and `gwt`
+///   statements are read and, as upstream, not drawn;
+/// - each frame is a box in its type's swimlane (UI/Automation, Command/Read Model, Events), or in
+///   a lane of its own namespace (`UI/A: ns`, `C/RM: ns`, `Stream: ns`) when it is written `ns.Name`;
+/// - the flow: from each `->>` source, else from the nearest EARLIER frame in a different lane;
+///   the first frame and reset frames have no implied source.
+///
+/// One deliberate difference: upstream means to reuse a namespace's lane
+/// (`findSwimlaneByNamespace`) but never records the namespace on the lane, so every namespaced
+/// frame opens a new row; here frames of one namespace share their lane.
+#[allow(clippy::too_many_lines)]
+fn parse_event_model(content: &str, builder: &mut IrBuilder) {
+    let mut lexer = EmLexer {
+        text: content,
+        pos: 0,
+        line: 1,
+    };
+    let mut frames: Vec<EmFrame<'_>> = Vec::new();
+    let mut data_entities: Vec<(&str, &str)> = Vec::new();
+    let mut header_seen = false;
+    let span_at = |line: usize| Span::at_line(line, 0);
+
+    loop {
+        lexer.skip_trivia();
+        if lexer.rest().is_empty() {
+            break;
+        }
+        let line = lexer.line;
+        let word = lexer.word();
+        match word {
+            "eventmodeling" if !header_seen => header_seen = true,
+            // Read by the generic title and accessibility passes.
+            "title" | "accTitle" => lexer.skip_line(),
+            "accDescr" => {
+                if lexer.rest().trim_start().starts_with('{') {
+                    let close = lexer.rest().find('}').map_or(lexer.rest().len(), |c| c + 1);
+                    lexer.advance(close);
+                } else {
+                    lexer.skip_line();
+                }
+            }
+            "entity" => {
+                lexer.word();
+            }
+            "tf" | "timeframe" | "rf" | "resetframe" => {
+                let name = lexer.word();
+                let kind = lexer.word();
+                let identifier = lexer.word();
+                if name.is_empty() || !is_event_model_type(kind) || identifier.is_empty() {
+                    builder.add_warning(format!(
+                        "Line {line}: expected `tf NN type Name` (types ui, cmd, evt, rmo, pcr)"
+                    ));
+                    lexer.skip_line();
+                    continue;
+                }
+                let mut frame = EmFrame {
+                    name,
+                    kind,
+                    reset: word.starts_with('r'),
+                    identifier,
+                    sources: Vec::new(),
+                    data: None,
+                    data_ref: None,
+                    span: span_at(line),
+                };
+                while lexer.eat("->>") {
+                    frame.sources.push(lexer.word());
+                }
+                if lexer.eat("[[") {
+                    frame.data_ref = Some(lexer.word());
+                    lexer.eat("]]");
+                }
+                if lexer.eat("`") {
+                    lexer.word();
+                    lexer.eat("`");
+                }
+                frame.data = lexer.data();
+                frames.push(frame);
+            }
+            "data" | "note" => {
+                let name = lexer.word();
+                if lexer.eat("`") {
+                    lexer.word();
+                    lexer.eat("`");
+                }
+                let block = lexer.data();
+                if word == "data" {
+                    data_entities.push((name, block.unwrap_or_default()));
+                }
+            }
+            "gwt" => {
+                lexer.word();
+                // `given (type Entity)+ (when …)? then (type Entity)+`: drawn by no renderer.
+                loop {
+                    let mark = (lexer.pos, lexer.line);
+                    let next = lexer.word();
+                    if matches!(next, "given" | "when" | "then") {
+                        continue;
+                    }
+                    if is_event_model_type(next) {
+                        lexer.word();
+                        continue;
+                    }
+                    (lexer.pos, lexer.line) = mark;
+                    break;
+                }
+            }
+            _ => {
+                builder.add_warning(format!(
+                    "Line {line}: unsupported eventmodeling syntax: {}",
+                    trim_fast(lexer.rest().split('\n').next().unwrap_or(""))
+                        .trim_start_matches(word)
+                ));
+                if word.is_empty() {
+                    lexer.advance(lexer.rest().chars().next().map_or(1, char::len_utf8));
+                }
+                lexer.skip_line();
+            }
+        }
+    }
+
+    // Lanes are keyed as upstream keys them and drawn in key order.
+    let mut lane_keys: Vec<(u32, Option<&str>, usize)> = Vec::new();
+    let mut frame_lanes: Vec<u32> = Vec::with_capacity(frames.len());
+    let mut nodes: Vec<Option<IrNodeId>> = Vec::with_capacity(frames.len());
+    for (index, frame) in frames.iter().enumerate() {
+        let (base, caption, prefix, colours) = event_model_lane(frame.kind);
+        let parts: Vec<&str> = frame.identifier.split('.').collect();
+        let namespace = (parts.len() == 2).then(|| parts[0]);
+        let key = match namespace {
+            None => base,
+            Some(ns) => lane_keys
+                .iter()
+                .find(|(key, lane_ns, _)| *lane_ns == Some(ns) && key / 100 == base / 100)
+                .map_or_else(
+                    || {
+                        lane_keys
+                            .iter()
+                            .map(|(key, _, _)| *key)
+                            .filter(|key| *key > base && *key < base + 100)
+                            .max()
+                            .unwrap_or(base)
+                            + 1
+                    },
+                    |(key, _, _)| *key,
+                ),
+        };
+        let cluster = match lane_keys.iter().find(|(k, _, _)| *k == key) {
+            Some(&(_, _, cluster)) => Some(cluster),
+            None => {
+                let title =
+                    namespace.map_or_else(|| caption.to_string(), |ns| format!("{prefix}{ns}"));
+                let cluster =
+                    builder.ensure_cluster(&format!("em-lane-{key}"), Some(&title), frame.span);
+                if let Some(cluster) = cluster {
+                    builder.push_style_ref(
+                        fm_core::IrStyleTarget::Cluster(cluster),
+                        "fill:#fafafa,stroke:#f0f0f0,stroke-dasharray:none".to_string(),
+                        frame.span,
+                    );
+                    lane_keys.push((key, namespace, cluster));
+                }
+                cluster
+            }
+        };
+        frame_lanes.push(key);
+
+        // A bold name, then the frame's data in a monospace block.
+        let name = if parts.len() == 2 {
+            parts[1]
+        } else {
+            frame.identifier
+        };
+        let data = frame.data.map(trim_fast).or_else(|| {
+            let wanted = frame.data_ref?;
+            let found = data_entities.iter().find(|(name, _)| *name == wanted);
+            if found.is_none() {
+                builder.add_warning(format!(
+                    "eventmodeling frame {} references undeclared data `{wanted}`",
+                    frame.name
+                ));
+            }
+            found.map(|(_, block)| *block)
+        });
+        let mut label = ParsedLabel {
+            text: name.to_string(),
+            segments: vec![IrLabelSegment::Text {
+                text: name.to_string(),
+                bold: true,
+                italic: false,
+                code: false,
+                strike: false,
+            }],
+        };
+        // Dedented by the block's common indent, so nesting inside it survives.
+        let indent = data
+            .into_iter()
+            .flat_map(str::lines)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.len() - line.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        for line in data.into_iter().flat_map(str::lines).map(str::trim_end) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let line = &line[indent.min(line.len() - line.trim_start().len())..];
+            label.text.push('\n');
+            label.text.push_str(line);
+            label.segments.push(IrLabelSegment::LineBreak);
+            label.segments.push(IrLabelSegment::Text {
+                text: line.to_string(),
+                bold: false,
+                italic: false,
+                code: true,
+                strike: false,
+            });
+        }
+        let node = builder.intern_node_label_owned(
+            &format!("frame_{}", index + 1),
+            Some(label),
+            NodeShape::Rect,
+            frame.span,
+        );
+        if let Some(node) = node {
+            if let Some(ir_node) = builder.node_mut(node) {
+                ir_node.inline_style = Some(Box::new(fm_core::parse_style_string(colours)));
+            }
+            if let Some(cluster) = cluster {
+                builder.add_node_to_cluster(cluster, node);
+            }
+        }
+        nodes.push(node);
+    }
+
+    // The flow between frames.
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(target) = nodes[index] else {
+            continue;
+        };
+        if frame.reset || (index == 0 && frame.sources.is_empty()) {
+            continue;
+        }
+        if frame.sources.is_empty() {
+            let source = (0..index)
+                .rev()
+                .find(|&earlier| frame_lanes[earlier] != frame_lanes[index])
+                .and_then(|earlier| nodes[earlier]);
+            if let Some(source) = source {
+                builder.push_edge(source, target, ArrowType::Arrow, None, frame.span);
+            }
+            continue;
+        }
+        for wanted in &frame.sources {
+            match frames
+                .iter()
+                .position(|f| f.name == *wanted)
+                .and_then(|i| nodes[i])
+            {
+                Some(source) => {
+                    builder.push_edge(source, target, ArrowType::Arrow, None, frame.span)
+                }
+                None => builder.add_warning(format!(
+                    "eventmodeling frame {} names an undeclared source frame `{wanted}`",
+                    frame.name
+                )),
+            }
+        }
+    }
+
+    // Insertion sort: a model has a handful of lanes, and a `sort_*` call would add ~1.6K of
+    // quicksort instantiations to the WASM bundle for them.
+    for i in 1..lane_keys.len() {
+        let mut j = i;
+        while j > 0 && lane_keys[j - 1].0 > lane_keys[j].0 {
+            lane_keys.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let lanes: Vec<usize> = lane_keys.iter().map(|(_, _, cluster)| *cluster).collect();
+    let frames = nodes
+        .iter()
+        .zip(&frame_lanes)
+        .filter_map(|(node, key)| {
+            Some((
+                node.as_ref()?.0,
+                lane_keys.iter().position(|(k, _, _)| k == key)?,
+            ))
+        })
+        .collect();
+    builder.ir_mut().event_model_meta = Some(fm_core::IrEventModelMeta { lanes, frames });
 }
 
 /// One `wardley-beta` anchor, component or pipeline component, as written.
@@ -27776,6 +28220,83 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(parsed.ir.clusters.len(), 2, "frame and pipeline box");
     }
 
+    /// Frames land in their type lanes (namespaced ones in their own lane, shared by the namespace),
+    /// lanes come out in upstream's key order, and the flow follows `->>` or the nearest earlier
+    /// frame in another lane — never into a reset frame or out of nowhere into the first frame.
+    #[test]
+    fn eventmodeling_lanes_and_flow() {
+        let parsed = parse_mermaid(
+            "eventmodeling\n%% a comment\ntf 01 ui Cart\ntf 02 cmd AddItem { itemId: 42 }\ntf 03 evt ItemAdded [[Item]]\ntf 04 evt Shop.Stocked\ntf 05 evt Shop.Sold\nrf 06 rmo Reset\ntf 07 pcr Ship ->> 03 ->> 04\ndata Item {\n  itemId: 42\n}\nentity Customer\nnote 02 {\n  ignored\n}\ngwt 02 given evt ItemAdded when cmd AddItem then evt ItemAdded\n",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::EventModeling);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.event_model_meta.as_ref().expect("meta");
+        let titles: Vec<String> = meta
+            .lanes
+            .iter()
+            .map(|&cluster| {
+                let title = parsed.ir.clusters[cluster].title.expect("lane caption");
+                parsed.ir.labels[title.0].text.clone()
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "UI/Automation",
+                "Command/Read Model",
+                "Events",
+                "Stream: Shop"
+            ]
+        );
+        let lanes: Vec<usize> = meta.frames.iter().map(|(_, lane)| *lane).collect();
+        assert_eq!(lanes, [0, 1, 2, 3, 3, 1, 0]);
+
+        // Labels: the bare name, then the data as code lines.
+        let label = |frame: usize| {
+            let node = &parsed.ir.nodes[meta.frames[frame].0];
+            parsed.ir.labels[node.label.expect("label").0].text.clone()
+        };
+        assert_eq!(label(1), "AddItem\nitemId: 42");
+        assert_eq!(label(2), "ItemAdded\nitemId: 42");
+        assert_eq!(label(3), "Stocked");
+
+        // 01 -> 02 -> 03 (implied), 03 -> 04 (implied, different lane), 04 -> 05 has none (same
+        // lane: nearest earlier in ANOTHER lane is 03), the reset frame none, and 07 from 03 and 04.
+        let edges: Vec<(usize, usize)> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| match (edge.from, edge.to) {
+                (fm_core::IrEndpoint::Node(a), fm_core::IrEndpoint::Node(b)) => {
+                    let frame = |node: fm_core::IrNodeId| {
+                        meta.frames.iter().position(|(n, _)| *n == node.0).unwrap() + 1
+                    };
+                    (frame(a), frame(b))
+                }
+                _ => panic!("node endpoints"),
+            })
+            .collect();
+        assert_eq!(edges, [(1, 2), (2, 3), (3, 4), (3, 5), (3, 7), (4, 7)]);
+    }
+
+    /// An unknown type, an undeclared source frame and an undeclared data reference are reported,
+    /// and the frames that can be drawn still are.
+    #[test]
+    fn eventmodeling_reports_what_it_cannot_draw() {
+        let parsed = parse_mermaid(
+            "eventmodeling\ntf 01 widget X\ntf 02 evt A ->> 09\ntf 03 evt B [[Nope]]\nbogus line\n",
+        );
+        let joined = parsed.warnings.join(" | ");
+        assert!(joined.contains("expected `tf NN type Name`"), "{joined}");
+        assert!(joined.contains("undeclared source frame `09`"), "{joined}");
+        assert!(joined.contains("undeclared data `Nope`"), "{joined}");
+        assert!(
+            joined.contains("unsupported eventmodeling syntax"),
+            "{joined}"
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+    }
+
     /// Mistakes are reported and the rest of the map still draws: an out-of-range coordinate is
     /// clamped, a link to an undeclared component and a pipeline of one are skipped with a reason.
     #[test]
@@ -27924,30 +28445,15 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
+    /// A header mermaid REJECTS but one suffix from a family that renders says so, instead of
+    /// blaming the author with "No parseable nodes or edges were found" (bd-8z4fk).
     ///
-    /// `treemap` renders in the incumbent. "No parseable nodes or edges were found" is true here but
-    /// misleading — it invites the author to hunt for a syntax error that does not exist.
+    /// Every upstream type is implemented now (treemap, radar, ishikawa, treeView, venn, wardley and
+    /// eventmodeling each left this test as it landed), so what remains is the bare spelling of a
+    /// `-beta`-only family, answered with the header that works.
     #[test]
     fn an_unimplemented_diagram_type_is_named_rather_than_blamed() {
-        // ⚠️ THE MESSAGE NAMES THE CANONICAL TYPE, NOT THE HEADER AS WRITTEN, which is why these are
-        // PAIRS. `unsupported_upstream_keyword` splits the header on whitespace or `-` and matches
-        // the first token, so `treemap-beta` reports `treemap`. My first version asserted the
-        // message contained the header verbatim and failed on exactly that — the implementation is
-        // right and the expectation was mine.
-        //
-        // `ishikawa` is deliberately ABSENT: it is a real mermaid 11.15.0 type we do not implement,
-        // but the surviving matcher in lib.rs does not list it yet and that file belongs to another
-        // session. Adding the case here before the entry exists would be a test asserting a feature
-        // nobody wrote. Tracked on bd-8z4fk.
-        // `treemap`/`treemap-beta` WERE HERE and are not any more: bd-9ghyo implemented the family,
-        // so naming it unimplemented is now the wrong answer. `an_implemented_type_is_never_named_
-        // as_unimplemented` in lib.rs asserts the opposite for it.
-        // `radar-beta` WAS HERE and is not any more: bd-sk4dv implemented the family. The BARE
-        // `radar` spelling is still unimplemented and still names `radar-beta` back, which is
-        // now a spelling that actually renders — asserted in lib.rs.
-        // `venn-beta` and `wardley-beta` WERE HERE and are not any more: both are implemented.
-        let parsed = parse_mermaid("eventmodeling\n  \"A\": 1\n");
+        let parsed = parse_mermaid("wardley\n  component A [0.5, 0.5]\n");
 
         // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
         // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
@@ -27956,8 +28462,8 @@ Rel_Back(db, app, "Responds")"#,
             parsed
                 .warnings
                 .iter()
-                .any(|w| w.contains("eventmodeling") && w.contains("does not implement")),
-            "`eventmodeling` was not named as unimplemented: {:?}",
+                .any(|w| w.contains("wardley-beta") && w.contains("rejected upstream")),
+            "the bare `wardley` header was not answered with `wardley-beta`: {:?}",
             parsed.warnings
         );
     }

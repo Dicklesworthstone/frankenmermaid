@@ -213,6 +213,24 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
         })
     };
     record(&mut changes, "wardley", &wardley(old), &wardley(new));
+    // An event model's lane membership and frame ORDER place every box; reordering frames moves
+    // the whole staircase without changing a node or an edge.
+    let event_model = |ir: &MermaidDiagramIr| {
+        ir.event_model_meta.clone().map(|mut meta| {
+            for (node, _) in &mut meta.frames {
+                let mut id = IrNodeId(*node);
+                remap_node(ir, &names, &mut id);
+                *node = id.0;
+            }
+            meta
+        })
+    };
+    record(
+        &mut changes,
+        "eventmodeling",
+        &event_model(old),
+        &event_model(new),
+    );
     let packet = |ir: &MermaidDiagramIr| {
         ir.packet_meta.clone().map(|mut meta| {
             for field in &mut meta.fields {

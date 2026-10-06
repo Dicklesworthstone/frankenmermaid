@@ -1,0 +1,11 @@
+eventmodeling
+tf 01 ui CartScreen
+tf 02 cmd AddItem { itemId: 42 }
+tf 03 evt ItemAdded [[ItemData]]
+tf 04 rmo CartItems
+tf 05 ui CartScreen
+tf 06 pcr Fulfilment.Shipper ->> 03
+data ItemData {
+  itemId: 42
+  quantity: 1
+}

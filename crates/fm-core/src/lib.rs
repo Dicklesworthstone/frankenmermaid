@@ -341,6 +341,9 @@ pub enum DiagramType {
     /// mermaid's `wardley-beta`: a Wardley map — components placed by evolution (x) and
     /// visibility (y), their value-chain links, evolution trends, pipelines and annotations.
     Wardley,
+    /// mermaid's `eventmodeling`: numbered timeframes (UI, command, event, read model,
+    /// processor) laid out left to right in type swimlanes, with the flow between them.
+    EventModeling,
     #[default]
     Unknown,
 }
@@ -380,6 +383,7 @@ impl DiagramType {
             Self::TreeView => "treeView-beta",
             Self::Venn => "venn-beta",
             Self::Wardley => "wardley-beta",
+            Self::EventModeling => "eventmodeling",
             Self::Unknown => "unknown",
         }
     }
@@ -427,6 +431,7 @@ impl DiagramType {
             Self::TreeView => "treeView",
             Self::Venn => "venn",
             Self::Wardley => "wardley",
+            Self::EventModeling => "eventmodeling",
             Self::GitGraph => "gitGraph",
             // Nothing upstream to match; the generic term is better than a guess at a family name.
             Self::Unknown => "diagram",
@@ -465,7 +470,8 @@ impl DiagramType {
             | Self::Ishikawa
             | Self::TreeView
             | Self::Venn
-            | Self::Wardley => MermaidSupportLevel::Supported,
+            | Self::Wardley
+            | Self::EventModeling => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -503,7 +509,8 @@ impl DiagramType {
             | Self::Ishikawa
             | Self::TreeView
             | Self::Venn
-            | Self::Wardley => "full",
+            | Self::Wardley
+            | Self::EventModeling => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -526,7 +533,8 @@ impl DiagramType {
             | Self::Ishikawa
             | Self::TreeView
             | Self::Venn
-            | Self::Wardley => MermaidParityLevel::NotApplicable,
+            | Self::Wardley
+            | Self::EventModeling => MermaidParityLevel::NotApplicable,
             Self::Unknown => MermaidParityLevel::Missing,
             // Every reference-defined family currently adjudicates Partial (see the
             // generated table in FEATURE_PARITY.md for the per-family evidence notes).
@@ -1216,6 +1224,17 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             parity: MermaidParityLevel::NotApplicable,
             notes: "Evolution × visibility map with stage dividers, anchors, components, sourcing rings, inertia, links with flows, trends, pipelines, notes, annotations and (de)accelerators; new family with no FrankenTUI reference counterpart",
         },
+        FamilyParityRow {
+            family: "eventmodeling",
+            diagram_type: Some(DiagramType::EventModeling),
+            detection: true,
+            dedicated_parser: true,
+            layout: "eventmodeling",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Timeframes in type swimlanes (namespaced lanes included), staircase placement, explicit and implied flow arrows, inline and referenced data rendered under bold names; new family with no FrankenTUI reference counterpart",
+        },
     ];
     ROWS
 }
@@ -1648,6 +1667,7 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::TreeView,
         DiagramType::Venn,
         DiagramType::Wardley,
+        DiagramType::EventModeling,
     ];
     DOCUMENTED
 }
@@ -7377,6 +7397,19 @@ pub struct IrWardleyStage {
     pub end: f32,
 }
 
+/// An `eventmodeling` diagram, read with the pinned mermaid 11.15.0 `eventmodeling` db rules.
+///
+/// Every timeframe is a box node and every swimlane a cluster; the flow between frames is ordinary
+/// edges. This meta carries what the LAYOUT needs: the lanes top to bottom and, per frame in
+/// source order, its box and lane — upstream places each box from the previous one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrEventModelMeta {
+    /// Swimlane clusters (indices into `ir.clusters`), top to bottom.
+    pub lanes: Vec<usize>,
+    /// Timeframes in source order: `(box node, index into lanes)`.
+    pub frames: Vec<(usize, usize)>,
+}
+
 /// One `wardley-beta` pipeline: its parent's point, its members' points, and its box cluster.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrWardleyPipeline {
@@ -8138,6 +8171,9 @@ pub struct MermaidDiagramIr {
     /// The `wardley-beta` map placements, when this is a Wardley map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wardley_meta: Option<Box<IrWardleyMeta>>,
+    /// The `eventmodeling` lanes and timeframe order, when this is an event model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_model_meta: Option<IrEventModelMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -8216,7 +8252,9 @@ impl MermaidDiagramIr {
             // fish head; a second banner would repeat it.
             | DiagramType::Ishikawa
             // The grammar accepts `title …` and the renderer never draws it.
-            | DiagramType::TreeView => false,
+            | DiagramType::TreeView
+            // Likewise: `eventmodeling`'s renderer draws swimlanes, boxes and arrows only.
+            | DiagramType::EventModeling => false,
             // Not a mermaid family — our own fallback when detection failed. An author who wrote a
             // title still gets it, the same best-effort contract the rest of this path keeps.
             DiagramType::Unknown => true,
@@ -8267,6 +8305,7 @@ impl MermaidDiagramIr {
             radar_meta: None,
             venn_meta: None,
             wardley_meta: None,
+            event_model_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,
@@ -14127,7 +14166,8 @@ mod tests {
                 | DiagramType::Ishikawa
                 | DiagramType::TreeView
                 | DiagramType::Venn
-                | DiagramType::Wardley => MermaidParityLevel::NotApplicable,
+                | DiagramType::Wardley
+                | DiagramType::EventModeling => MermaidParityLevel::NotApplicable,
                 _ => MermaidParityLevel::Partial,
             };
             assert_eq!(
