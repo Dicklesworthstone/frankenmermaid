@@ -595,7 +595,10 @@ pub fn parse_mermaid_with_detection_and_config(
 
     match diagram_type {
         DiagramType::Flowchart => parse_flowchart(content, &mut builder),
-        DiagramType::Sequence => parse_sequence(content, &mut builder),
+        DiagramType::Sequence => {
+            parse_sequence(content, &mut builder);
+            builder.finish_sequence_timeline();
+        }
         DiagramType::Class => parse_class(content, &mut builder),
         DiagramType::State => parse_state(content, &mut builder),
         DiagramType::Requirement => parse_requirement(content, &mut builder),

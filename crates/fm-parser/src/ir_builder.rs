@@ -229,6 +229,8 @@ pub struct IrBuilder {
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
     fragment_stack: Vec<OpenFragment>,
+    /// How many edges the sequence timeline already records as `Message` steps.
+    sequence_timeline_edges: usize,
     /// Node id of the currently open class block, resolved once when the block opens so each member add
     /// skips a `NodeIdIndex` hash+lookup+id-compare (the class name is invariant across a block's members).
     current_class_node_id: Option<IrNodeId>,
@@ -563,6 +565,7 @@ impl IrBuilder {
             activation_stacks,
             current_participant_group,
             fragment_stack,
+            sequence_timeline_edges,
             current_class_node_id,
             state_stack,
             parser_config,
@@ -587,6 +590,7 @@ impl IrBuilder {
         self.current_participant_group
             .clone_from(current_participant_group);
         self.fragment_stack.clone_from(fragment_stack);
+        self.sequence_timeline_edges = *sequence_timeline_edges;
         self.current_class_node_id = *current_class_node_id;
         self.state_stack.clone_from(state_stack);
         self.parser_config = *parser_config;
@@ -610,6 +614,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
+            sequence_timeline_edges: 0,
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
@@ -659,6 +664,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
+            sequence_timeline_edges: 0,
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
@@ -950,6 +956,40 @@ impl IrBuilder {
             .hide_footbox = true;
     }
 
+    /// Append a step to the sequence timeline, first recording every message added since the last
+    /// step, so messages need no hook of their own.
+    fn push_sequence_step(&mut self, step: fm_core::IrSequenceStep) {
+        let edges = self.ir.edges.len();
+        let recorded = self.sequence_timeline_edges;
+        let timeline = &mut self
+            .ir
+            .sequence_meta
+            .get_or_insert_with(IrSequenceMeta::default)
+            .timeline;
+        timeline.extend((recorded..edges).map(|_| fm_core::IrSequenceStep::Message));
+        timeline.push(step);
+        self.sequence_timeline_edges = edges;
+    }
+
+    /// Close the sequence timeline at the end of a parse: record the trailing messages, or drop a
+    /// timeline that holds nothing but messages (the per-message rows need no order).
+    pub(crate) fn finish_sequence_timeline(&mut self) {
+        let edges = self.ir.edges.len();
+        let recorded = self.sequence_timeline_edges;
+        if let Some(meta) = self.ir.sequence_meta.as_mut() {
+            meta.timeline
+                .extend((recorded..edges).map(|_| fm_core::IrSequenceStep::Message));
+            if meta
+                .timeline
+                .iter()
+                .all(|step| *step == fm_core::IrSequenceStep::Message)
+            {
+                meta.timeline.clear();
+            }
+        }
+        self.sequence_timeline_edges = edges;
+    }
+
     pub(crate) fn add_sequence_note(
         &mut self,
         position: NotePosition,
@@ -976,6 +1016,7 @@ impl IrBuilder {
                 text,
                 after_edge: self.ir.edges.len().saturating_sub(1),
             });
+        self.push_sequence_step(fm_core::IrSequenceStep::Note);
     }
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
@@ -1079,7 +1120,10 @@ impl IrBuilder {
         let Some(node_id) = self.node_id_index.get(normalized.as_ref(), &self.ir.nodes) else {
             return;
         };
-        let at_edge = self.ir.edges.len().saturating_sub(1);
+        // ⚠️ THE NEXT MESSAGE, like `create`. mermaid's docs write `destroy Carl` immediately BEFORE
+        // `Alice-xCarl: We are too many`, the message that ends Carl; reading the previous one put
+        // the cross on whatever Carl last said and cut his lifeline a message early.
+        let at_edge = self.ir.edges.len();
         self.ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default)
@@ -1299,6 +1343,7 @@ impl IrBuilder {
         color: Option<String>,
     ) {
         let start_edge = self.ir.edges.len();
+        self.push_sequence_step(fm_core::IrSequenceStep::Open);
         self.fragment_stack
             .push((kind, label, start_edge, Vec::new(), Vec::new()));
         if let Some((stored_kind, stored_label, _, _, _)) = self.fragment_stack.last_mut()
@@ -1310,6 +1355,9 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_fragment_alternative(&mut self, label: String) {
+        if !self.fragment_stack.is_empty() {
+            self.push_sequence_step(fm_core::IrSequenceStep::Else);
+        }
         if let Some((_, _, _, alternatives, _)) = self.fragment_stack.last_mut() {
             let start_edge = self.ir.edges.len();
             // Close the previous section's end_edge
@@ -1331,6 +1379,7 @@ impl IrBuilder {
         else {
             return false;
         };
+        self.push_sequence_step(fm_core::IrSequenceStep::Close);
 
         let end_edge = self.ir.edges.len().saturating_sub(1);
 

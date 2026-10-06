@@ -4614,48 +4614,8 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render sequence diagram notes.
-    for note in &layout.extensions.sequence_notes {
-        let nx = note.bounds.x + offset_x;
-        let ny = note.bounds.y + offset_y;
-        let nw = note.bounds.width;
-        let nh = note.bounds.height;
-
-        // Note background with rounded corners.
-        doc = doc.child(
-            Element::rect()
-                .x(nx)
-                .y(ny)
-                .width(nw)
-                .height(nh)
-                .rx(4.0)
-                .ry(4.0)
-                .fill(&theme.colors.node_fill)
-                .stroke(&theme.colors.accents[4 % theme.colors.accents.len()])
-                .stroke_width(1.0)
-                .class("fm-sequence-note"),
-        );
-
-        // Note text.
-        if !note.text.is_empty() {
-            let note_font_size = config.font_size * 0.8;
-            doc = doc.child(
-                TextBuilder::new(&note.text)
-                    .x(nx + 8.0)
-                    .y(ny + 8.0)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(note_font_size)
-                    .line_height(config.line_height)
-                    .baseline(text::DominantBaseline::Hanging)
-                    .anchor(TextAnchor::Start)
-                    .fill(&theme.colors.text)
-                    .class("fm-sequence-note-text")
-                    .build(),
-            );
-        }
-    }
-
-    // Render sequence diagram interaction fragments (loop, alt, par, etc.).
+    // Render sequence diagram interaction fragments (loop, alt, par, etc.). Notes come AFTER them:
+    // a `rect` is an opaque background band, and a note inside one was painted over by it.
     //
     // The frame is CLAMPED to the diagram's own bounds (bd-zwh3). `build_sequence_fragment_geometry`
     // anchors it at `-padding` and widens it by `2 * padding`, but the padding it uses comes from the
@@ -4833,11 +4793,17 @@ fn render_layout_to_svg(
                 .and_then(|meta| meta.fragments.get(fragment_index))
                 .and_then(|ir_fragment| message_y(ir_fragment.start_edge))
                 .map_or(0.0, |first_message_y| first_message_y - fy);
-            for alternative in alternatives {
-                let Some(branch_y) = message_y(alternative.start_edge) else {
-                    continue;
+            for (branch_index, alternative) in alternatives.iter().enumerate() {
+                // The layout's own divider row when it placed one (a branch that opens with a note
+                // or holds no message has no "first message" to derive it from).
+                let divider_y = if let Some(top) = fragment.branch_tops.get(branch_index) {
+                    top + offset_y
+                } else {
+                    let Some(branch_y) = message_y(alternative.start_edge) else {
+                        continue;
+                    };
+                    branch_y - lead
                 };
-                let divider_y = branch_y - lead;
                 // The divider spans the frame, so it inherits the same out-of-canvas hazard the
                 // frame border did (bd-zwh3) and is drawn between the SAME clamped edges.
                 doc = doc.child(
@@ -4868,6 +4834,47 @@ fn render_layout_to_svg(
                     );
                 }
             }
+        }
+    }
+
+    // Render sequence diagram notes, above the fragment frames (see the note on fragments).
+    for note in &layout.extensions.sequence_notes {
+        let nx = note.bounds.x + offset_x;
+        let ny = note.bounds.y + offset_y;
+        let nw = note.bounds.width;
+        let nh = note.bounds.height;
+
+        // Note background with rounded corners.
+        doc = doc.child(
+            Element::rect()
+                .x(nx)
+                .y(ny)
+                .width(nw)
+                .height(nh)
+                .rx(4.0)
+                .ry(4.0)
+                .fill(&theme.colors.node_fill)
+                .stroke(&theme.colors.accents[4 % theme.colors.accents.len()])
+                .stroke_width(1.0)
+                .class("fm-sequence-note"),
+        );
+
+        // Note text.
+        if !note.text.is_empty() {
+            let note_font_size = config.font_size * 0.8;
+            doc = doc.child(
+                TextBuilder::new(&note.text)
+                    .x(nx + 8.0)
+                    .y(ny + 8.0)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(note_font_size)
+                    .line_height(config.line_height)
+                    .baseline(text::DominantBaseline::Hanging)
+                    .anchor(TextAnchor::Start)
+                    .fill(&theme.colors.text)
+                    .class("fm-sequence-note-text")
+                    .build(),
+            );
         }
     }
 
@@ -15694,8 +15701,10 @@ fn write_sequence_number_into(
         return;
     };
 
+    // ON the message's start point, as mermaid's `marker-start` circle sits.
     let number_x = start.x + context.offset_x;
-    let number_y = f32::midpoint(start.y, end.y) + context.offset_y - 8.0;
+    let number_y = start.y + context.offset_y;
+    let _ = end;
 
     // Mermaid 11.15.0 anchors a filled `sequencenumber` marker behind every emitted number.  Keep
     // the decoration beside the number writer so the guard is identical: a sequence message without
@@ -15718,10 +15727,10 @@ fn write_sequence_number_into(
     // SVG default of black — invisible against a dark theme's background, on a diagram whose every
     // other text run is themed. A class with no rule behind it is not styling, it is a name.
     //
-    // `colors.text`, the same colour every other label uses, rather than a new theme field. mermaid
-    // has a dedicated `sequenceNumberColor` computed to CONTRAST with the line colour, which is not
-    // the same thing and is not claimed here: this makes the number readable and theme-consistent,
-    // not identical to the incumbent's palette.
+    // `colors.background`, NOT `colors.text`: the digits sit on a disc of the LINE colour, and text
+    // colour on line colour was dark on dark in the default theme — present, themed and unreadable.
+    // mermaid's `sequenceNumberColor` is computed to contrast with the line colour; the background
+    // does that in every theme here (light digits on a slate disc, dark digits on a light one).
     //
     // Attribute order follows `write_gantt_label_into` — text-anchor, dominant-baseline, font-size,
     // fill, class — because in this file order is output, and a sibling writer disagreeing about it
@@ -15729,7 +15738,7 @@ fn write_sequence_number_into(
     out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, context.config.font_size * 0.8);
     out.push_str("\" fill=\"");
-    let _ = crate::attributes::write_escaped_attr(out, &context.colors.text);
+    let _ = crate::attributes::write_escaped_attr(out, &context.colors.background);
     out.push_str("\" class=\"fm-sequence-number\">");
     let _ = crate::attributes::write_number_into(out, number as f32);
     out.push_str("</text>");
@@ -19063,6 +19072,7 @@ mod tests {
                         width: 120.0,
                         height: 60.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -19104,6 +19114,7 @@ mod tests {
                         width: 120.0,
                         height: 60.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -22775,6 +22786,7 @@ marker#arrow-open path {
                         width: 190.0,
                         height: 80.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },

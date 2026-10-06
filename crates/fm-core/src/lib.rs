@@ -7008,6 +7008,20 @@ pub struct FragmentAlternative {
     pub end_edge: usize,
 }
 
+/// One step of a sequence diagram in SOURCE order (see [`IrSequenceMeta::timeline`]).
+///
+/// The steps carry no indices because order implies them: the k-th `Message` is `ir.edges[k]`, the
+/// k-th `Note` is `notes[k]`, and the k-th `Close` is `fragments[k]` (fragments are stored in the
+/// order they close); an `Else` belongs to the innermost open fragment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IrSequenceStep {
+    Message,
+    Note,
+    Open,
+    Else,
+    Close,
+}
+
 /// A combined-fragment (interaction operand) spanning a range of messages.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrSequenceFragment {
@@ -7704,6 +7718,13 @@ pub struct IrSequenceMeta {
     pub participant_groups: Vec<IrParticipantGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle_events: Vec<IrLifecycleEvent>,
+    /// Messages, notes and fragment boundaries in source order, so a note gets its own row and a
+    /// fragment holding only notes still encloses them. Edge indices alone cannot say whether a
+    /// note between two messages sits inside a `rect` that closes there or the `critical` that
+    /// opens there. Empty when the diagram has no notes or fragments, or for a hand-built IR, in
+    /// which case layout falls back to one row per message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<IrSequenceStep>,
 }
 
 const fn default_sequence_autonumber_start() -> u32 {
@@ -7737,6 +7758,7 @@ impl Default for IrSequenceMeta {
             fragments: Vec::new(),
             participant_groups: Vec::new(),
             lifecycle_events: Vec::new(),
+            timeline: Vec::new(),
         }
     }
 }
@@ -14351,6 +14373,13 @@ mod tests {
                 participant: IrNodeId(3),
                 at_edge: 5,
             }],
+            timeline: vec![
+                super::IrSequenceStep::Open,
+                super::IrSequenceStep::Message,
+                super::IrSequenceStep::Note,
+                super::IrSequenceStep::Else,
+                super::IrSequenceStep::Close,
+            ],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize");

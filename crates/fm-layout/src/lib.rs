@@ -2460,6 +2460,10 @@ pub struct LayoutSequenceFragment {
     pub label: String,
     pub color: Option<String>,
     pub bounds: LayoutRect,
+    /// The y of each branch divider (`else` / `and` / `option`), in the order of the IR
+    /// fragment's `alternatives`. Empty when the layout did not place them, in which case a
+    /// renderer derives them from the branches' first messages.
+    pub branch_tops: Vec<f32>,
 }
 
 /// A sequence lifecycle marker positioned on a participant lifeline.
@@ -7047,34 +7051,51 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let first_message_y =
         header_y + node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max) + message_gap;
 
-    let mut message_y_positions: Vec<f32> = Vec::with_capacity(ir.edges.len());
-    let mut y_cursor = first_message_y;
-    for edge in &ir.edges {
-        message_y_positions.push(y_cursor);
-        let is_self = match (
-            endpoint_node_index(ir, edge.from),
-            endpoint_node_index(ir, edge.to),
-        ) {
-            (Some(s), Some(t)) => s == t,
-            _ => false,
-        };
-        // Self-messages need more vertical space for the loop.
-        let row_height = if is_self {
-            message_gap * 1.5
-        } else {
-            message_gap
-        };
-        y_cursor += row_height;
-    }
+    // With notes or fragments, the source-order timeline gives each its own rows; without them
+    // (or for a hand-built IR) every message gets one row, as it always has.
+    let timeline_rows = ir.sequence_meta.as_ref().and_then(|meta| {
+        sequence_timeline_rows(ir, meta, first_message_y - message_gap, message_gap)
+    });
+    let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
+        (rows.message_y.clone(), rows.end)
+    } else {
+        let mut message_y_positions: Vec<f32> = Vec::with_capacity(ir.edges.len());
+        let mut y_cursor = first_message_y;
+        for edge in &ir.edges {
+            message_y_positions.push(y_cursor);
+            // Self-messages need more vertical space for the loop.
+            let row_height = if is_self_message(ir, edge) {
+                message_gap * 1.5
+            } else {
+                message_gap
+            };
+            y_cursor += row_height;
+        }
+        // Total sequence content height before optional mirrored participant headers.
+        (message_y_positions, message_gap.mul_add(0.5, y_cursor))
+    };
 
-    // Total sequence content height before optional mirrored participant headers.
-    let lifeline_bottom = message_gap.mul_add(0.5, y_cursor);
+    // A participant `create`d mid-diagram is drawn where it is created, as mermaid draws it: its box
+    // centred on the creating message, which stops at the box's edge.
+    let mut creation_edge: Vec<Option<usize>> = vec![None; node_count];
+    if let Some(meta) = &ir.sequence_meta {
+        for event in &meta.lifecycle_events {
+            if event.kind == fm_core::LifecycleEventKind::Create
+                && event.at_edge < message_y_positions.len()
+                && let Some(slot) = creation_edge.get_mut(event.participant.0)
+            {
+                *slot = Some(event.at_edge);
+            }
+        }
+    }
 
     // ── Phase 3: build layout nodes (participant boxes at the top) ──────
     let nodes: Vec<LayoutNodeBox> = (0..node_count)
         .map(|participant_order| {
             let (width, height) = node_sizes[participant_order];
             let cx = participant_x_centers[participant_order];
+            let y = creation_edge[participant_order]
+                .map_or(header_y, |edge| message_y_positions[edge] - height / 2.0);
             LayoutNodeBox {
                 node_index: participant_order,
                 node_id: ir.nodes[participant_order].id.clone(),
@@ -7083,7 +7104,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 span: ir.nodes[participant_order].span_primary,
                 bounds: LayoutRect {
                     x: cx - width / 2.0,
-                    y: header_y,
+                    y,
                     width,
                     height,
                 },
@@ -7106,11 +7127,15 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 .get(source_index)
                 .copied()
                 .unwrap_or(0.0);
-            let target_x = participant_x_centers
+            let mut target_x = participant_x_centers
                 .get(target_index)
                 .copied()
                 .unwrap_or(0.0);
             let is_self_loop = source_index == target_index;
+            if !is_self_loop && creation_edge.get(target_index) == Some(&Some(edge_index)) {
+                let half_width = node_sizes[target_index].0 / 2.0;
+                target_x -= half_width.copysign(target_x - source_x);
+            }
 
             let points = if is_self_loop {
                 // Self-message: draw a loop to the right and back.
@@ -7232,8 +7257,10 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
             match event.kind {
                 fm_core::LifecycleEventKind::Create => {
+                    // Below the box drawn at the creating message, when there is one.
+                    let below_box = event_y + node_sizes[participant_index].1 / 2.0;
                     if let Some(start_y) = lifeline_start_y.get_mut(participant_index) {
-                        *start_y = (*start_y).max(event_y);
+                        *start_y = (*start_y).max(below_box);
                     }
                 }
                 fm_core::LifecycleEventKind::Destroy => {
@@ -7455,6 +7482,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                     &message_y_positions,
                     first_message_y,
                     message_gap,
+                    timeline_rows.as_ref().map(|rows| rows.note_top.as_slice()),
                 ),
                 sequence_fragments: build_sequence_fragment_geometry(
                     ir,
@@ -7464,6 +7492,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                     first_message_y,
                     diagram_bottom,
                     message_gap,
+                    timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
                 ),
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
@@ -7478,6 +7507,157 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
+/// A sequence note's height: one line fills 0.7 of a message row, each further line adds 16px.
+fn sequence_note_height(text: &str, message_gap: f32) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let line_count = text.lines().count().max(1) as f32;
+    let base_note_height = message_gap * 0.7;
+    if line_count <= 1.0 {
+        base_note_height
+    } else {
+        (line_count - 1.0).mul_add(16.0, base_note_height) + 12.0
+    }
+}
+
+/// Where the sequence timeline puts each message, note and fragment.
+struct SequenceTimelineRows {
+    message_y: Vec<f32>,
+    note_top: Vec<f32>,
+    /// Per fragment (in `meta.fragments` order): top, bottom, and the y of each branch divider.
+    fragments: Vec<(f32, f32, Vec<f32>)>,
+    /// Where the lifelines end.
+    end: f32,
+}
+
+/// Walk the source-order timeline, giving notes, fragment headers, branch rows and fragment ends
+/// their own vertical space.
+///
+/// `floor` is the bottom of everything drawn so far. A message right after a message keeps the
+/// full row pitch; after anything else it needs only room for its label above the arrow. Returns
+/// `None` when the timeline does not describe this IR (a hand-built or edited one), so the caller
+/// keeps one row per message.
+fn sequence_timeline_rows(
+    ir: &MermaidDiagramIr,
+    meta: &fm_core::IrSequenceMeta,
+    header_bottom: f32,
+    message_gap: f32,
+) -> Option<SequenceTimelineRows> {
+    use fm_core::IrSequenceStep as Step;
+    let timeline = &meta.timeline;
+    if timeline.is_empty() {
+        return None;
+    }
+    let count = |wanted: Step| timeline.iter().filter(|step| **step == wanted).count();
+    if count(Step::Message) != ir.edges.len()
+        || count(Step::Note) != meta.notes.len()
+        || count(Step::Close) != meta.fragments.len()
+    {
+        return None;
+    }
+    // Which fragment each `Open` starts: fragments are stored in the order they CLOSE.
+    let mut open_fragment = vec![usize::MAX; count(Step::Open)];
+    let (mut stack, mut opens, mut closes) = (Vec::new(), 0, 0);
+    for step in timeline {
+        match step {
+            Step::Open => {
+                stack.push(opens);
+                opens += 1;
+            }
+            Step::Close => {
+                if let Some(open) = stack.pop() {
+                    open_fragment[open] = closes;
+                }
+                closes += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let font = metrics.font_size();
+    let lead = |after_message: bool| message_gap * if after_message { 0.25 } else { 0.1 };
+    let mut rows = SequenceTimelineRows {
+        message_y: Vec::with_capacity(ir.edges.len()),
+        note_top: Vec::with_capacity(meta.notes.len()),
+        fragments: vec![(0.0, 0.0, Vec::new()); meta.fragments.len()],
+        end: 0.0,
+    };
+    let mut open: Vec<(usize, f32, Vec<f32>)> = Vec::new();
+    let (mut floor, mut after_message) = (header_bottom, true);
+    let (mut opens, mut closes) = (0, 0);
+    for step in timeline {
+        match step {
+            Step::Message => {
+                let y = floor
+                    + if after_message {
+                        message_gap
+                    } else {
+                        message_gap * 0.5
+                    };
+                let edge = &ir.edges[rows.message_y.len()];
+                rows.message_y.push(y);
+                floor = if is_self_message(ir, edge) {
+                    message_gap.mul_add(0.6, y)
+                } else {
+                    y
+                };
+                after_message = true;
+                continue;
+            }
+            Step::Note => {
+                let top = floor + lead(after_message);
+                let text = &meta.notes[rows.note_top.len()].text;
+                rows.note_top.push(top);
+                floor = top + sequence_note_height(text, message_gap);
+            }
+            Step::Open => {
+                let fragment = open_fragment
+                    .get(opens)
+                    .and_then(|&index| meta.fragments.get(index));
+                opens += 1;
+                let top = floor + lead(after_message);
+                // The keyword tab, and the condition beneath it; a `rect` draws neither.
+                let header = match fragment {
+                    Some(f) if f.kind == fm_core::FragmentKind::Rect => 0.0,
+                    Some(f) if !f.label.is_empty() => font.mul_add(1.75, 14.0),
+                    _ => font + 8.0,
+                };
+                open.push((opens - 1, top, Vec::new()));
+                floor = top + header;
+            }
+            Step::Else => {
+                // The branch label is drawn just above its divider.
+                let divider = floor + lead(after_message) + font;
+                if let Some((_, _, branches)) = open.last_mut() {
+                    branches.push(divider);
+                }
+                floor = divider;
+            }
+            Step::Close => {
+                let bottom = floor + lead(after_message);
+                if let Some((_, top, branches)) = open.pop()
+                    && let Some(slot) = rows.fragments.get_mut(closes)
+                {
+                    *slot = (top, bottom, branches);
+                }
+                closes += 1;
+                floor = bottom;
+            }
+        }
+        after_message = false;
+    }
+    rows.end = message_gap.mul_add(0.75, floor);
+    Some(rows)
+}
+
+fn is_self_message(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> bool {
+    matches!(
+        (endpoint_node_index(ir, edge.from), endpoint_node_index(ir, edge.to)),
+        (Some(s), Some(t)) if s == t
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_sequence_note_geometry(
     ir: &MermaidDiagramIr,
     participant_x_centers: &[f32],
@@ -7485,27 +7665,20 @@ fn build_sequence_note_geometry(
     message_y_positions: &[f32],
     first_message_y: f32,
     message_gap: f32,
+    timeline_tops: Option<&[f32]>,
 ) -> Vec<LayoutSequenceNote> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
     };
     let default_note_width = 120.0_f32;
-    let note_line_height = 16.0_f32;
-    let note_vertical_padding = 12.0_f32;
-    let base_note_height = message_gap * 0.7;
     // Average character width estimate for note sizing (matches FontMetrics default sans-serif).
     let avg_char_w = 8.25_f32;
 
     meta.notes
         .iter()
-        .map(|note| {
-            let line_count = note.text.lines().count().max(1) as f32;
-            let note_height = if line_count <= 1.0 {
-                base_note_height
-            } else {
-                (line_count - 1.0).mul_add(note_line_height, base_note_height)
-                    + note_vertical_padding
-            };
+        .enumerate()
+        .map(|(note_index, note)| {
+            let note_height = sequence_note_height(&note.text, message_gap);
             // Adaptive note width from content: use the widest line + padding.
             let max_line_chars = note
                 .text
@@ -7517,11 +7690,16 @@ fn build_sequence_note_geometry(
                 .mul_add(avg_char_w, 24.0)
                 .clamp(80.0, default_note_width * 2.5);
 
-            // Position the note at the edge after which it appears.
-            let y = message_y_positions
-                .get(note.after_edge)
-                .copied()
-                .unwrap_or((note.after_edge as f32).mul_add(message_gap, first_message_y));
+            // Its own row on the timeline; else centred on the message after which it appears.
+            let top =
+                timeline_tops
+                    .and_then(|tops| tops.get(note_index))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        message_y_positions.get(note.after_edge).copied().unwrap_or(
+                            (note.after_edge as f32).mul_add(message_gap, first_message_y),
+                        ) - note_height / 2.0
+                    });
 
             // Determine x position based on participants and note position.
             let first_pid = note.participants.first().map_or(0, |p| p.0);
@@ -7558,7 +7736,7 @@ fn build_sequence_note_geometry(
                 text: note.text.clone(),
                 bounds: LayoutRect {
                     x,
-                    y: y - note_height / 2.0,
+                    y: top,
                     width: w,
                     height: note_height,
                 },
@@ -7567,6 +7745,7 @@ fn build_sequence_note_geometry(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sequence_fragment_geometry(
     ir: &MermaidDiagramIr,
     participant_x_centers: &[f32],
@@ -7575,6 +7754,7 @@ fn build_sequence_fragment_geometry(
     first_message_y: f32,
     diagram_bottom: f32,
     message_gap: f32,
+    timeline_spans: Option<&[(f32, f32, Vec<f32>)]>,
 ) -> Vec<LayoutSequenceFragment> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
@@ -7591,29 +7771,46 @@ fn build_sequence_fragment_geometry(
 
     meta.fragments
         .iter()
-        .map(|fragment| {
-            let start_y = message_y_positions
-                .get(fragment.start_edge)
-                .copied()
-                .unwrap_or(first_message_y);
-            let end_y = message_y_positions
-                .get(fragment.end_edge)
-                .copied()
-                .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
-
+        .enumerate()
+        .map(|(fragment_index, fragment)| {
             let padding = message_gap * 0.35;
+            // The timeline's own rows when there are some; else spanned from the messages inside.
+            let (y, height, branch_tops) = if let Some((top, bottom, branches)) =
+                timeline_spans.and_then(|spans| spans.get(fragment_index))
+            {
+                (
+                    *top,
+                    (bottom - top).max(message_gap * 0.25),
+                    branches.clone(),
+                )
+            } else {
+                let start_y = message_y_positions
+                    .get(fragment.start_edge)
+                    .copied()
+                    .unwrap_or(first_message_y);
+                let end_y = message_y_positions
+                    .get(fragment.end_edge)
+                    .copied()
+                    .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
+                (
+                    message_gap.mul_add(-0.3, start_y),
+                    message_gap
+                        .mul_add(0.6, end_y - start_y)
+                        .max(message_gap * 0.5),
+                    Vec::new(),
+                )
+            };
             LayoutSequenceFragment {
                 kind: fragment.kind,
                 label: fragment.label.clone(),
                 color: fragment.color.clone(),
                 bounds: LayoutRect {
                     x: -padding,
-                    y: message_gap.mul_add(-0.3, start_y),
+                    y,
                     width: total_width + padding * 2.0,
-                    height: message_gap
-                        .mul_add(0.6, end_y - start_y)
-                        .max(message_gap * 0.5),
+                    height,
                 },
+                branch_tops,
             }
         })
         .collect()
@@ -26113,6 +26310,95 @@ mod tests {
             });
         }
         ir
+    }
+
+    fn sequence_layout_of(source: &str) -> DiagramLayout {
+        layout_diagram_sequence(&fm_parser::parse(source).ir)
+    }
+
+    /// A note gets its OWN row: it never overlaps the message before or after it, which it did
+    /// when notes were centred on a message's row.
+    #[test]
+    fn sequence_notes_get_their_own_rows() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  A->>B: one\n  Note over A,B: between\n  B->>A: two\n",
+        );
+        let note = layout.extensions.sequence_notes[0].bounds;
+        let (one, two) = (layout.edges[0].points[0].y, layout.edges[1].points[0].y);
+        assert!(note.y > one, "the note starts below `one`");
+        assert!(note.y + note.height < two, "and ends above `two`");
+    }
+
+    /// A `rect` holding only a note still encloses it (its message span was EMPTY, which placed
+    /// the band on the next fragment's row), and a following fragment starts below it.
+    #[test]
+    fn a_note_only_region_encloses_its_note() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  A->>B: one\n  rect rgb(1,2,3)\n    Note over A: inside\n  end\n  critical C\n    A->>B: two\n  end\n",
+        );
+        let note = layout.extensions.sequence_notes[0].bounds;
+        let rect = &layout.extensions.sequence_fragments[0];
+        assert_eq!(rect.kind, fm_core::FragmentKind::Rect);
+        let b = rect.bounds;
+        assert!(
+            b.y <= note.y && note.y + note.height <= b.y + b.height,
+            "{b:?} {note:?}"
+        );
+        let critical = layout.extensions.sequence_fragments[1].bounds;
+        assert!(
+            critical.y >= b.y + b.height,
+            "the critical block starts below the rect"
+        );
+        let two = layout.edges[1].points[0].y;
+        assert!(critical.y < two && two < critical.y + critical.height);
+    }
+
+    /// An `alt` publishes its `else` divider BETWEEN the branches' messages, below the first
+    /// branch's note.
+    #[test]
+    fn alternative_dividers_sit_between_branches() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  alt ok\n    A->>B: yes\n    Note right of B: fine\n  else bad\n    B->>A: no\n  end\n",
+        );
+        let alt = &layout.extensions.sequence_fragments[0];
+        assert_eq!(alt.branch_tops.len(), 1);
+        let divider = alt.branch_tops[0];
+        let note = layout.extensions.sequence_notes[0].bounds;
+        assert!(
+            divider > note.y + note.height,
+            "below the first branch's note"
+        );
+        assert!(
+            divider < layout.edges[1].points[0].y,
+            "above the second branch's message"
+        );
+    }
+
+    /// `destroy` takes effect at the NEXT message, as `create` does, and a created participant
+    /// is drawn at its creating message with that arrow stopping at its box.
+    #[test]
+    fn create_and_destroy_happen_at_the_next_message() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  A->>B: hi\n  create participant C\n  A->>C: make\n  destroy C\n  C->>A: bye\n  A->>B: after\n",
+        )
+        .ir;
+        let layout = layout_diagram_sequence(&ir);
+        let c = ir.nodes.iter().position(|n| n.id == "C").expect("C");
+        let make = &layout.edges[1].points;
+        let c_box = layout.nodes[c].bounds;
+        assert!(
+            (c_box.y + c_box.height / 2.0 - make[0].y).abs() < 0.01,
+            "box on its message"
+        );
+        assert!(
+            (make[1].x - c_box.x).abs() < 0.01,
+            "the arrow stops at the box edge"
+        );
+        let marker = &layout.extensions.sequence_lifecycle_markers[0];
+        assert!(
+            (marker.center.y - layout.edges[2].points[0].y).abs() < 0.01,
+            "cross at `bye`"
+        );
     }
 
     #[test]
