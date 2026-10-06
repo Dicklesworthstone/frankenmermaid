@@ -4,6 +4,8 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const MAX_SVG_UNITS = 16 * 1024 * 1024;
 const MAX_PDF_BYTES = 64 * 1024 * 1024;
+const MAX_PDF_PAGES = 64;
+const MAX_PDF_PIXELS = 128_000_000;
 const RASTER_BACKGROUNDS = { transparent: null, white: "#ffffff", dark: "#111827" };
 
 function aborted() {
@@ -163,7 +165,8 @@ export async function pngArtifact(svg, { filename = "diagram", scale = 2, backgr
 /** Paper dimensions are PDF points; image resolution is 96 * scale DPI, not source size.
  * This is deliberately a raster PDF. Download SVG for vector geometry/selectable text.
  */
-export function pdfPageLayout(width, height, { paper = "a4", orientation = "auto", margin = 24, scale = 2 } = {}) {
+export function pdfPageLayout(width, height, { paper = "a4", orientation = "auto", margin = 24, scale = 2,
+  mode = "fit" } = {}) {
   if (![width, height].every(value => typeof value === "number" && Number.isFinite(value) && value > 0) ||
       ![1, 2, 3, 4].includes(scale)) throw new RangeError("PDF needs positive finite dimensions and a scale of 1, 2, 3, or 4.");
   const papers = { a4: [595.28, 841.89], letter: [612, 792] };
@@ -173,20 +176,64 @@ export function pdfPageLayout(width, height, { paper = "a4", orientation = "auto
   if (typeof margin !== "number" || !Number.isFinite(margin) || margin < 0 || margin >= papers[paper][0] / 2) {
     throw new RangeError("PDF margin must leave a positive printable area.");
   }
+  if (!["fit", "tile"].includes(mode)) throw new RangeError("PDF mode must be fit or tile.");
   const [short, long] = papers[paper];
   const fit = (w, h) => Math.min((w - margin * 2) / width, (h - margin * 2) / height);
-  if (orientation === "auto") orientation = fit(long, short) > fit(short, long) ? "landscape" : "portrait";
-  const [pageWidth, pageHeight] = orientation === "portrait" ? [short, long] : [long, short];
-  const zoom = fit(pageWidth, pageHeight);
-  const imageWidth = width * zoom, imageHeight = height * zoom;
-  if (![imageWidth, imageHeight].every(value => Number.isFinite(value) && value >= 0.00001)) {
-    throw new RangeError("PDF aspect ratio is outside the representable range. Download SVG instead.");
+  // Poster mode prints one SVG user unit as one CSS pixel (72/96 PDF points),
+  // regardless of raster resolution. Prefer fewer sheets, then the better full-graph fit.
+  const grid = (w, h) => ({ columns: Math.ceil(width / ((w - margin * 2) / 0.75)),
+    rows: Math.ceil(height / ((h - margin * 2) / 0.75)) });
+  if (orientation === "auto") {
+    const portrait = grid(short, long), landscape = grid(long, short);
+    const difference = mode === "tile" ? landscape.columns * landscape.rows - portrait.columns * portrait.rows : 0;
+    orientation = difference < 0 || (difference === 0 && fit(long, short) > fit(short, long)) ? "landscape" : "portrait";
   }
-  const pixels = pngDimensions(imageWidth * 4 / 3, imageHeight * 4 / 3, scale);
-  return Object.freeze({ paper, orientation, width: pageWidth, height: pageHeight,
-    pages: Object.freeze([Object.freeze({ x: 0, y: 0, width, height,
-      imageX: (pageWidth - imageWidth) / 2, imageY: (pageHeight - imageHeight) / 2,
-      imageWidth, imageHeight, pixels })]) });
+  const [pageWidth, pageHeight] = orientation === "portrait" ? [short, long] : [long, short];
+  const { columns, rows } = mode === "tile" ? grid(pageWidth, pageHeight) : { columns: 1, rows: 1 };
+  if (!Number.isSafeInteger(columns * rows) || columns * rows > MAX_PDF_PAGES) {
+    throw new RangeError("PDF exceeds the 64-page limit. Choose Fit one page or download SVG instead.");
+  }
+  const zoom = mode === "tile" ? 0.75 : fit(pageWidth, pageHeight);
+  const tileWidth = mode === "tile" ? (pageWidth - margin * 2) / zoom : width;
+  const tileHeight = mode === "tile" ? (pageHeight - margin * 2) / zoom : height;
+  const pages = [];
+  let totalPixels = 0;
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x = column * tileWidth, y = row * tileHeight;
+      const sourceWidth = Math.min(tileWidth, width - x), sourceHeight = Math.min(tileHeight, height - y);
+      const imageWidth = sourceWidth * zoom, imageHeight = sourceHeight * zoom;
+      if (![imageWidth, imageHeight].every(value => Number.isFinite(value) && value >= 0.00001)) {
+        throw new RangeError("PDF aspect ratio is outside the representable range. Download SVG instead.");
+      }
+      const pixels = pngDimensions(imageWidth * 4 / 3, imageHeight * 4 / 3, scale);
+      totalPixels += pixels.width * pixels.height;
+      if (totalPixels > MAX_PDF_PIXELS) throw new RangeError("PDF exceeds the 128-megapixel document work limit. Lower the scale or choose Fit one page.");
+      pages.push(Object.freeze({ x, y, width: sourceWidth, height: sourceHeight, row, column,
+        imageX: mode === "tile" ? margin : (pageWidth - imageWidth) / 2,
+        imageY: mode === "tile" ? margin : (pageHeight - imageHeight) / 2,
+        imageWidth, imageHeight, pixels }));
+    }
+  }
+  return Object.freeze({ paper, orientation, mode, columns, rows, width: pageWidth, height: pageHeight,
+    pages: Object.freeze(pages) });
+}
+
+function tiledSvg(root, box) {
+  // Keep percentages, gradients and nested SVGs relative to the ORIGINAL diagram viewport.
+  // Changing that viewport to each crop would repeat/reflow content on every sheet. Only
+  // the outer camera changes, and only its page-sized raster is allocated by the browser.
+  const camera = root.ownerDocument.createElementNS(SVG_NS, "svg");
+  camera.setAttribute("preserveAspectRatio", "none");
+  root.setAttribute("viewBox", box.join(" "));
+  root.setAttribute("x", String(box[0])); root.setAttribute("y", String(box[1]));
+  root.setAttribute("width", String(box[2])); root.setAttribute("height", String(box[3]));
+  root.style.setProperty("width", `${box[2]}px`, "important");
+  root.style.setProperty("height", `${box[3]}px`, "important");
+  for (const name of ["max-width", "max-height"]) root.style.setProperty(name, "none", "important");
+  for (const name of ["min-width", "min-height"]) root.style.setProperty(name, "0", "important");
+  camera.append(root);
+  return camera;
 }
 
 async function deflateRaster(bytes, host, signal, timeoutMs) {
@@ -260,6 +307,10 @@ function pdfDocument(layout, images, title, host) {
     pageIds.push(object(`<< /Type /Page /Parent ${pageTree} 0 R /MediaBox [0 0 ${number(layout.width)} ${number(layout.height)}] /Resources << /XObject << /Im0 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`));
   }
   objects[pageTree - 1] = `<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map(id => `${id} 0 R`).join(" ")}] >>`;
+  if (layout.mode === "tile") {
+    const labels = layout.pages.map((page, index) => `${index} << /P ${pdfText(`Row ${page.row + 1}, column ${page.column + 1}`)} >>`).join(" ");
+    objects[catalog - 1] = `<< /Type /Catalog /Pages ${pageTree} 0 R /PageLabels << /Nums [${labels}] >> >>`;
+  }
   const info = object(`<< /Title ${pdfText(title)} /Producer (FrankenMermaid) /Subject (Lossless raster diagram; download SVG for vector geometry and source separately for editing.) >>`);
   const parts = [new host.Blob(["%PDF-1.4\n%", new Uint8Array([0xe2, 0xe3, 0xcf, 0xd3]), "\n"])];
   let position = parts[0].size;
@@ -280,23 +331,29 @@ function pdfDocument(layout, images, title, host) {
  * Page images contain no JavaScript, network references, or automatically embedded source.
  */
 export async function pdfArtifact(svg, { filename = "diagram", scale = 2, background = "white",
-  timeoutMs = 15000, paper = "a4", orientation = "auto", margin = 24 } = {}, host = globalThis, signal) {
+  timeoutMs = 15000, paper = "a4", orientation = "auto", margin = 24, mode = "fit" } = {}, host = globalThis, signal) {
   if (signal?.aborted) throw aborted();
   rasterSettings(background, timeoutMs, "PDF");
   const root = parseSvgRoot(svg, host);
   const box = intrinsicBox(root);
-  const layout = pdfPageLayout(box[2], box[3], { paper, orientation, margin, scale });
+  const layout = pdfPageLayout(box[2], box[3], { paper, orientation, margin, scale, mode });
   if (typeof host.CompressionStream !== "function") throw new Error("PDF compression is unavailable in this browser. Download PNG or SVG instead.");
+  const camera = mode === "tile" ? tiledSvg(root, box) : root;
   const images = [];
+  let compressedBytes = 0;
   for (const page of layout.pages) {
-    images.push(await withRasterCanvas(root, [box[0] + page.x, box[1] + page.y, page.width, page.height],
+    const image = await withRasterCanvas(camera, [box[0] + page.x, box[1] + page.y, page.width, page.height],
       page.pixels, background, timeoutMs, host, signal, "PDF",
-      (canvas, context) => pdfRaster(canvas, context, host, signal, timeoutMs)));
+      (canvas, context) => pdfRaster(canvas, context, host, signal, timeoutMs));
+    compressedBytes += image.rgb.size + (image.alpha?.size || 0);
+    if (compressedBytes > MAX_PDF_BYTES) throw new RangeError("PDF exceeds the 64 MiB output limit. Lower the scale or download SVG instead.");
+    images.push(image);
   }
   if (signal?.aborted) throw aborted();
   return Object.freeze({ blob: pdfDocument(layout, images, imageFilename(filename, "pdf"), host),
     mime: "application/pdf", filename: imageFilename(filename, "pdf"), pageCount: images.length,
-    paper: layout.paper, orientation: layout.orientation, rasterDpi: scale * 96 });
+    paper: layout.paper, orientation: layout.orientation, mode, columns: layout.columns, rows: layout.rows,
+    rasterDpi: scale * 96 });
 }
 
 export function imageArtifact(svg, options = {}, host = globalThis, signal) {
@@ -406,7 +463,21 @@ export function mountImageExport({ sourceEl, panelEl, backend, saveArtifact }) {
     const option = document.createElement("option");
     option.value = value; option.textContent = label; paper.append(option);
   }
-  make("p", "image-export-pdf-help", "PDF fits the full diagram on one page using lossless raster images (96 DPI × scale). Download SVG for vector output or source for editable text.");
+  const modeLabel = make("label", "image-export-pdf-mode-label", " PDF layout ");
+  const pdfMode = make("select", "image-export-pdf-mode");
+  modeLabel.htmlFor = pdfMode.id;
+  for (const [value, label] of [["fit", "Fit one page"], ["tile", "Poster: tile at original size"]]) {
+    const option = document.createElement("option");
+    option.value = value; option.textContent = label; pdfMode.append(option);
+  }
+  const orientationLabel = make("label", "image-export-orientation-label", " PDF orientation ");
+  const orientation = make("select", "image-export-orientation");
+  orientationLabel.htmlFor = orientation.id;
+  for (const [value, label] of [["auto", "Automatic"], ["portrait", "Portrait"], ["landscape", "Landscape"]]) {
+    const option = document.createElement("option");
+    option.value = value; option.textContent = label; orientation.append(option);
+  }
+  make("p", "image-export-pdf-help", "PDF uses lossless raster images (96 DPI × scale). Poster mode keeps original size (96 source units/inch), left-to-right then top-to-bottom, up to 64 pages; trim the 24-point margins to assemble. Download SVG for vector output or source for editable text.");
   const cancel = make("button", "image-export-cancel", "Cancel image export");
   svg.type = png.type = pdf.type = cancel.type = "button";
   const status = make("p", "image-export-status", "Image exports render the current source. Download source separately to preserve editable text.");
@@ -431,7 +502,7 @@ export function mountImageExport({ sourceEl, panelEl, backend, saveArtifact }) {
     saveArtifact: saveArtifact || download,
   });
   function controls() {
-    for (const control of [svg, png, pdf, filename, scale, background, paper]) control.disabled = disposed || exporter.busy;
+    for (const control of [svg, png, pdf, filename, scale, background, paper, pdfMode, orientation]) control.disabled = disposed || exporter.busy;
     cancel.disabled = disposed || !exporter.busy;
   }
   function invalidate(message) {
@@ -445,13 +516,14 @@ export function mountImageExport({ sourceEl, panelEl, backend, saveArtifact }) {
     if (disposed) return false;
     const current = ++operation;
     const pending = exporter.export({ filename: filename.value, format,
-      scale: Number(scale.value), background: background.value, paper: paper.value });
+      scale: Number(scale.value), background: background.value, paper: paper.value,
+      mode: pdfMode.value, orientation: orientation.value });
     status.textContent = `Rendering a fresh source snapshot for ${format.toUpperCase()} export…`;
     controls();
     try {
       const artifact = await pending;
       if (disposed || current !== operation) return false;
-      const detail = artifact.pageCount ? ` — ${artifact.pageCount} page(s), ${artifact.paper.toUpperCase()}, ${artifact.rasterDpi} DPI raster`
+      const detail = artifact.pageCount ? ` — ${artifact.pageCount} page(s)${artifact.mode === "tile" ? ` (${artifact.columns} × ${artifact.rows} poster)` : ""}, ${artifact.paper.toUpperCase()}, ${artifact.rasterDpi} DPI raster`
         : artifact.width ? ` — ${artifact.width} × ${artifact.height} pixels` : "";
       status.textContent = `Download requested for ${artifact.filename}${detail} (${backend.target || "renderer"}). Editable source is unchanged.`;
       return true;

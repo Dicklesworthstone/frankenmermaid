@@ -194,3 +194,48 @@ test('pre-aborted PDF operations and invalid options do not allocate browser res
   await assert.rejects(pdfArtifact('<svg/>', { timeoutMs: 0 }, forbidden), /Invalid PDF timeout/);
   await assert.rejects(pdfArtifact('<svg/>', { background: 'red' }, forbidden), /Unsupported PDF background/);
 });
+
+test('poster pages cover the diagram once, in reading order, at original physical size', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const layout = pdfPageLayout(1504, 1984, { mode: 'tile', paper: 'letter', orientation: 'portrait', scale: 1 });
+  assert.deepEqual([layout.columns, layout.rows, layout.pages.length], [2, 2, 4]);
+  assert.deepEqual(layout.pages.map(page => [page.x, page.y]), [[0, 0], [752, 0], [0, 992], [752, 992]]);
+  for (const page of layout.pages) {
+    assert.deepEqual([page.width, page.height, page.imageX, page.imageY], [752, 992, 24, 24]);
+    assert.deepEqual([page.imageWidth, page.imageHeight], [564, 744]);
+    assert.deepEqual(page.pixels, { width: 752, height: 992 });
+  }
+});
+
+test('poster last row and column retain scale and alignment rather than enlarging the remainder', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  for (const scale of [1, 2, 3, 4]) {
+    const layout = pdfPageLayout(800, 1100, { mode: 'tile', paper: 'letter', orientation: 'portrait', scale });
+    assert.equal(layout.pages.length, 4);
+    const last = layout.pages.at(-1);
+    assert.deepEqual([last.x, last.y, last.width, last.height], [752, 992, 48, 108]);
+    assert.deepEqual([last.imageX, last.imageY, last.imageWidth, last.imageHeight], [24, 24, 36, 81]);
+    assert.deepEqual(last.pixels, { width: 48 * scale, height: 108 * scale });
+    assert.equal(layout.pages.reduce((sum, page) => sum + page.width * page.height, 0), 800 * 1100);
+  }
+});
+
+test('poster orientation minimizes sheet count and small diagrams are not enlarged', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const wide = pdfPageLayout(1600, 500, { mode: 'tile', paper: 'letter' });
+  assert.equal(wide.orientation, 'landscape');
+  assert.equal(wide.pages.length, 2);
+  const small = pdfPageLayout(20, 10, { mode: 'tile', paper: 'letter', scale: 1 }).pages[0];
+  assert.deepEqual([small.imageWidth, small.imageHeight], [15, 7.5]);
+  assert.deepEqual(small.pixels, { width: 20, height: 10 });
+});
+
+test('poster page and total-pixel limits reject excessive work during planning', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const options = { mode: 'tile', paper: 'letter', orientation: 'portrait', scale: 1 };
+  assert.equal(pdfPageLayout(752 * 8, 992 * 8, options).pages.length, 64);
+  assert.throws(() => pdfPageLayout(752 * 65, 100, options), /64-page/);
+  assert.throws(() => pdfPageLayout(Number.MAX_VALUE, 100, options), /64-page/);
+  assert.throws(() => pdfPageLayout(752 * 8, 992 * 8, { ...options, scale: 2 }), /128-megapixel/);
+  assert.throws(() => pdfPageLayout(100, 100, { mode: 'typo' }), /mode/);
+});

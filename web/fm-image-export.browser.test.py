@@ -404,6 +404,109 @@ class ImageExportBrowserTests(unittest.TestCase):
         self.assertFalse(self.page.locator('#image-export-paper').is_disabled())
         self.assertIn('source changed', self.page.locator('#image-export-status').inner_text())
 
+    def test_poster_tiles_preserve_negative_origin_percentages_and_exact_page_order(self):
+        data, artifact = self.pdf_bytes(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-5 -7 1504 1984" '
+            'style="width:1px;height:1px;max-width:1px;max-height:1px">'
+            '<rect x="-5" y="-7" width="50%" height="50%" fill="red"/>'
+            '<rect x="747" y="-7" width="50%" height="50%" fill="lime"/>'
+            '<rect x="-5" y="985" width="50%" height="50%" fill="blue"/>'
+            '<rect x="747" y="985" width="50%" height="50%" fill="yellow"/></svg>',
+            {"paper": "letter", "orientation": "portrait", "mode": "tile", "scale": 1})
+        self.assertEqual(artifact['pageCount'], 4)
+        objects = self.read_pdf_objects(data)
+        images = [obj for obj in objects if b'/ColorSpace /DeviceRGB' in obj[0]]
+        self.assertEqual(len(images), 4)
+        for (header, rgb), color in zip(images, [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]):
+            self.assertIn(b'/Width 752 /Height 992', header)
+            self.assertEqual(len(rgb), 752 * 992 * 3)
+            # Check every pixel, not just a center that would miss a percentage-viewport bug.
+            self.assertEqual(rgb, bytes(color) * (752 * 992))
+        self.assertEqual(data.count(b'/MediaBox [0 0 612 792]'), 4)
+        self.assertIn(b'/Count 4 /Kids [', data)
+        self.assertIn(b'/PageLabels', data)
+        self.assertIn('Row 2, column 2'.encode('utf-16-be').hex().encode(), data)
+
+    def test_poster_cancellation_on_second_page_never_downloads_partial_results(self):
+        self.mount()
+        self.page.evaluate("""() => {
+          backend.renderSource = async () => ({svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 500"/>'});
+          const NativeCompression = CompressionStream;
+          window.pagesCompressed = 0; window.stopped = 0; window.canvases = [];
+          const getContext = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(...args) {
+            canvases.push(this); return getContext.apply(this, args);
+          };
+          window.CompressionStream = class {
+            constructor(format) {
+              if (++pagesCompressed === 1) return new NativeCompression(format);
+              this.readable = new ReadableStream({cancel() { stopped++; }});
+              this.writable = new WritableStream();
+            }
+          };
+        }""")
+        self.page.locator('#image-export-pdf-mode').select_option('tile')
+        self.page.locator('#image-export-background').select_option('white')
+        self.page.locator('#image-export-scale').select_option('1')
+        self.page.locator('#image-export-pdf').click()
+        self.page.wait_for_function('pagesCompressed === 2')
+        self.assertEqual(self.page.evaluate('canvases.map(c => [c.width, c.height])[0]'), [0, 0])
+        self.assertTrue(self.page.locator('#image-export-orientation').is_disabled())
+        self.page.locator('#image-export-cancel').click()
+        self.page.wait_for_function('stopped === 1')
+        self.assertEqual(self.page.evaluate('canvases.map(c => [c.width, c.height])'), [[0, 0], [0, 0]])
+        self.assertEqual(self.page.evaluate('saved.length'), 0)
+        self.assertFalse(self.page.locator('#image-export-pdf-mode').is_disabled())
+
+    def test_poster_partial_last_sheet_is_cropped_not_rescaled(self):
+        data, artifact = self.pdf_bytes(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1100">'
+            '<rect x="752" y="992" width="48" height="108" fill="magenta"/></svg>',
+            {"paper": "letter", "orientation": "portrait", "mode": "tile", "scale": 1})
+        self.assertEqual(artifact['pageCount'], 4)
+        images = [obj for obj in self.read_pdf_objects(data) if b'/ColorSpace /DeviceRGB' in obj[0]]
+        self.assertIn(b'/Width 48 /Height 108', images[-1][0])
+        self.assertEqual(images[-1][1], bytes([255, 0, 255]) * (48 * 108))
+        self.assertIn(b'36 0 0 81 24 687 cm', data)
+
+    def test_poster_rejects_excessive_work_before_allocating_any_page_image(self):
+        result = self.page.evaluate("""async () => {
+          let allocations = 0; const errors = [];
+          const host = { DOMParser, CompressionStream, Image: class { constructor() { allocations++; } } };
+          for (const [width, height, scale] of [[50000, 100, 1], [6016, 7936, 2]]) {
+            try { await exports.pdfArtifact(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}"/>`,
+              {mode: 'tile', paper: 'letter', orientation: 'portrait', scale}, host); }
+            catch (error) { errors.push(error.message); }
+          }
+          return {errors, allocations};
+        }""")
+        self.assertEqual(result['allocations'], 0)
+        self.assertIn('64-page', result['errors'][0])
+        self.assertIn('128-megapixel', result['errors'][1])
+
+    def test_poster_output_limit_stops_before_allocating_the_next_page(self):
+        result = self.page.evaluate("""async () => {
+          let allocations = 0;
+          const getContext = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(...args) {
+            allocations++; return getContext.apply(this, args);
+          };
+          // An adversarial compressor emits a real oversized byte stream, not a fake size.
+          window.CompressionStream = class {
+            constructor() {
+              this.readable = new ReadableStream({start(c) {
+                c.enqueue(new Uint8Array(64 * 1024 * 1024 + 1)); c.close();
+              }});
+              this.writable = new WritableStream();
+            }
+          };
+          try { await exports.pdfArtifact('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 100"/>',
+            {mode: 'tile', scale: 1, background: 'white'}); }
+          catch (error) { return {error: error.message, allocations}; }
+        }""")
+        self.assertIn('64 MiB output limit', result['error'])
+        self.assertEqual(result['allocations'], 1)
+
 
     def mount_playground_with_transport_fixtures(self):
         """Execute the actual page/module with explicit renderer and document transport fixtures."""
@@ -470,6 +573,26 @@ class ImageExportBrowserTests(unittest.TestCase):
         self.page.evaluate('dispatchEvent(new PageTransitionEvent("pagehide", {persisted: false}))')
         self.assertEqual(self.page.evaluate('imageDisposals'), 1)
         self.assertTrue(self.page.locator('#image-export-svg').is_disabled())
+
+    def test_actual_playground_downloads_pdf_with_poster_controls_and_shared_source(self):
+        self.mount_playground_with_transport_fixtures()
+        source = 'flowchart LR\n Source --> PDF'
+        self.page.locator('#src').fill(source)
+        self.page.locator('#image-export-pdf-mode').select_option('tile')
+        self.page.locator('#image-export-paper').select_option('letter')
+        self.page.locator('#image-export-orientation').select_option('portrait')
+        self.page.locator('#image-export-scale').select_option('1')
+        with self.page.expect_download() as received:
+            self.page.locator('#image-export-pdf').click()
+        data = Path(received.value.path()).read_bytes()
+        objects = self.read_pdf_objects(data)
+        header, _ = next(obj for obj in objects if b'/ColorSpace /DeviceRGB' in obj[0])
+        self.assertIn(b'/Width 100 /Height 50', header)
+        self.assertIn(b'/MediaBox [0 0 612 792]', data)
+        self.assertIn('1 × 1 poster', self.page.locator('#image-export-status').inner_text())
+        self.assertEqual(self.page.evaluate('imageSources'), [source])
+        self.assertEqual(self.page.locator('#src').input_value(), source)
+        self.assertEqual(self.page.locator('#normal-preview').count(), 1)
 
     def test_actual_playground_document_callbacks_invalidate_equal_source_exports(self):
         self.mount_playground_with_transport_fixtures()
