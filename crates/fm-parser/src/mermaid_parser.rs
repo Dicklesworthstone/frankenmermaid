@@ -2190,15 +2190,120 @@ fn byte_lines(input: &str) -> ByteLines<'_> {
     ByteLines { input, start: 0 }
 }
 
+/// Where a flowchart line leaves the string lexer: outside any string, inside a `"…"` string, or
+/// inside a markdown ``"`…`"`` string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlowQuoteState {
+    Closed,
+    Plain,
+    Markdown,
+}
+
+/// Run the incumbent's string lexer states over one line, starting from `state`.
+fn scan_flow_quotes(line: &str, mut state: FlowQuoteState) -> FlowQuoteState {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            FlowQuoteState::Closed if byte == b'"' => {
+                if next == Some(b'`') {
+                    state = FlowQuoteState::Markdown;
+                    index += 1;
+                } else {
+                    state = FlowQuoteState::Plain;
+                }
+            }
+            FlowQuoteState::Plain if byte == b'"' => state = FlowQuoteState::Closed,
+            FlowQuoteState::Markdown if byte == b'`' && next == Some(b'"') => {
+                state = FlowQuoteState::Closed;
+                index += 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    state
+}
+
+/// The flowchart's logical lines: physical lines, except that a quoted label still open at a line's
+/// end continues through the line that closes it.
+///
+/// ⚠️ A LABEL SPANNING LINES WAS SPLIT INTO NODES. Mermaid's string lexer (`["][`]` … `` [`]["] ``
+/// and `["]` … `["]`) runs across newlines, and its docs show markdown strings written over
+/// several lines; `markdownToLines` / `nonMarkdownToLines` then draw each source line as a line of
+/// the label. Read line by line, ``B["`Line 1`` ended the statement mid-label and every following
+/// line became a node of its own (`Line_2`, …), with a DROPPED-syntax warning for the tail.
+///
+/// A joined line is one contiguous slice of `input` (its newlines included) carrying the first
+/// line's number. A string that never closes is NOT joined — that stays the recovery path it was —
+/// and once one is found, joining stops, so a stray quote cannot make this quadratic. Comment lines
+/// and the body of a multi-line `accDescr { … }` are opaque to the lexer, as upstream.
+fn flowchart_logical_lines(input: &str, line_offset: usize) -> Vec<(usize, &str)> {
+    let lines: Vec<(usize, &str)> = byte_lines(input)
+        .enumerate()
+        .map(|(i, line)| (line_offset + i + 1, line))
+        .collect();
+    // Fast path: without a `"` there is no string to leave open.
+    if memchr::memchr(b'"', input.as_bytes()).is_none() {
+        return lines;
+    }
+    let base = input.as_ptr() as usize;
+    let offset_of = |line: &str| line.as_ptr() as usize - base;
+    let mut merged = Vec::with_capacity(lines.len());
+    let mut in_acc_descr_block = false;
+    let mut joining = true;
+    let mut index = 0;
+    while index < lines.len() {
+        let (number, line) = lines[index];
+        index += 1;
+        let trimmed = trim_fast(line);
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.contains('}');
+            merged.push((number, line));
+            continue;
+        }
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            merged.push((number, line));
+            continue;
+        }
+        if !joining || is_comment(trimmed) || memchr::memchr(b'"', line.as_bytes()).is_none() {
+            merged.push((number, line));
+            continue;
+        }
+        let mut state = scan_flow_quotes(line, FlowQuoteState::Closed);
+        if state == FlowQuoteState::Closed {
+            merged.push((number, line));
+            continue;
+        }
+        let mut end = index;
+        while end < lines.len() && state != FlowQuoteState::Closed {
+            state = scan_flow_quotes(lines[end].1, state);
+            end += 1;
+        }
+        if state != FlowQuoteState::Closed {
+            joining = false;
+            merged.push((number, line));
+            continue;
+        }
+        let last = lines[end - 1].1;
+        merged.push((
+            number,
+            &input[offset_of(line)..offset_of(last) + last.len()],
+        ));
+        index = end;
+    }
+    merged
+}
+
 fn parse_flowchart_document<'a>(
     input: &'a str,
     line_offset: usize,
     config: &ParserConfig,
 ) -> FlowDocumentParseResult<'a> {
-    let lines: Vec<(usize, &str)> = byte_lines(input)
-        .enumerate()
-        .map(|(i, line)| (line_offset + i + 1, line))
-        .collect();
+    let lines = flowchart_logical_lines(input, line_offset);
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let mut header_direction = None;
@@ -6670,16 +6775,9 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
             return Some(parsed);
         }
 
-        // Circle shape: id((text)) - reuse existing double-circle parser
-        if let Some(parsed) = parse_double_circle_with_config(core, config) {
-            // For mindmap, (( )) is just a circle, not double-circle
-            return Some(NodeToken {
-                id: parsed.id,
-                label: parsed.label,
-                icon: parsed.icon,
-                shape: NodeShape::Circle,
-                classes: Vec::new(),
-            });
+        // Circle shape: id((text)); mindmap has no `(((…)))` double circle.
+        if let Some(parsed) = parse_circle_with_config(core, config, false) {
+            return Some(parsed);
         }
 
         // Rounded shape: id(text)
@@ -14281,7 +14379,7 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         .iter()
         .any(|&b| matches!(b, b'(' | b'[' | b'{' | b'>'))
     {
-        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+        if let Some(parsed) = parse_circle_with_config(core, config, true) {
             return Some(parsed);
         }
         if let Some(parsed) =
@@ -14361,6 +14459,15 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         {
             return Some(parsed);
         }
+        // Hexagon `{{…}}` before the diamond, which would otherwise take it as a Diamond labelled
+        // `{…}` — the chumsky grammar always had this rule; this path never did. Only when the
+        // token's FIRST brace opens the pair, so a diamond whose quoted label holds `{{` stays one.
+        if memchr::memchr(b'{', core.as_bytes()).is_some_and(|at| core[at..].starts_with("{{"))
+            && let Some(parsed) =
+                parse_wrapped_str_with_config(core, "{{", "}}", NodeShape::Hexagon, config)
+        {
+            return Some(parsed);
+        }
         if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
         {
             return Some(parsed);
@@ -14393,19 +14500,38 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     })
 }
 
-fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+/// `id((text))` → Circle and, when `triple_is_double`, `id(((text)))` → DoubleCircle.
+///
+/// ⚠️ THIS IS THE TOKEN PATH, NOT THE CHUMSKY GRAMMAR, and it had drifted from it. It read `((x))`
+/// as a DOUBLE circle and `(((x)))` as a double circle labelled `(x)`, so the grammar's bd-vfxu fix
+/// never reached the statements that land here — text-form edges (`a -- x --> b((c))`) and 3+-hop
+/// chains drew a circle as a double circle. Mindmap reuses this for its own `((…))` and has no
+/// triple form, so it passes `false` and keeps reading the inner paren as label text.
+fn parse_circle_with_config(
+    raw: &str,
+    config: &ParserConfig,
+    triple_is_double: bool,
+) -> Option<NodeToken> {
     let start = raw.find("((")?;
-    if !raw.ends_with("))") && !config.auto_close_delimiters {
+    let (open_len, close, shape) = if triple_is_double && raw[start..].starts_with("(((") {
+        (3, ")))", NodeShape::DoubleCircle)
+    } else {
+        (2, "))", NodeShape::Circle)
+    };
+    if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
 
     let id_raw = raw[..start].trim();
-    let label_end = if raw.ends_with("))") {
-        raw.len().saturating_sub(2)
+    let label_end = if raw.ends_with(close) {
+        raw.len().saturating_sub(close.len())
     } else {
         raw.len()
     };
-    let label_raw = raw[start + 2..label_end].trim();
+    if start + open_len > label_end {
+        return None;
+    }
+    let label_raw = raw[start + open_len..label_end].trim();
     let mut id = normalize_identifier(id_raw);
     if id.is_empty() {
         id = normalize_identifier(label_raw);
@@ -14421,7 +14547,7 @@ fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<N
         id,
         label,
         icon,
-        shape: NodeShape::DoubleCircle,
+        shape,
         classes: Vec::new(),
     })
 }
@@ -14769,9 +14895,11 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     // `one<br/>two` verbatim and the conversion below is never reached — the guard would have made
     // the fix inert in the common case while every slow-path test passed. `<` in a label is rare
     // enough that the fast path still fires for essentially every real label.
+    // `\n` joins for labels written over several source lines, whose lines are trimmed below — a
+    // caller that already stripped the quotes (a quoted subgraph title) arrives here without them.
     if !raw
         .bytes()
-        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#' | b'<'))
+        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#' | b'<' | b'\n'))
     {
         // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
         // When the caller already trimmed (`pretrimmed`), `trim_fast(raw) == raw`, so skip it entirely
@@ -14794,7 +14922,8 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
         .strip_prefix('`')
         .and_then(|value| value.strip_suffix('`'))
     {
-        let normalized = replace_br_with_newlines(markdown_body.trim());
+        let markdown_body = trim_label_source_lines(markdown_body.trim(), true);
+        let normalized = replace_br_with_newlines(&markdown_body);
         let decoded = decode_mermaid_entities(&normalized);
         let segments = parse_markdown_label_segments(&decoded);
         let text = flatten_label_segments(&segments);
@@ -14813,13 +14942,35 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     //
     // Measured in Chromium 151 against the pinned mermaid 11.15.0 bundle: `<br/>` was drawn as
     // literal text in 17 of 18 label sites, and the reference joins it in 9 of them.
-    let with_line_breaks = replace_br_with_newlines(without_quotes.trim());
+    let source_lines = trim_label_source_lines(without_quotes.trim(), false);
+    let with_line_breaks = replace_br_with_newlines(&source_lines);
     let decoded = decode_mermaid_entities(&with_line_breaks);
     if decoded.is_empty() {
         None
     } else {
         Some(ParsedLabel::plain(decoded))
     }
+}
+
+/// A label written over several source lines (see [`flowchart_logical_lines`]): each line is drawn
+/// as a line of the label with its indentation trimmed, as upstream's `nonMarkdownToLines` trims and
+/// `markdownToLines` dedents. A markdown string also folds blank lines (`\n{2,}` → `\n`).
+fn trim_label_source_lines(text: &str, fold_blank_lines: bool) -> Cow<'_, str> {
+    if !text.contains('\n') {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let lines = text
+        .split('\n')
+        .map(trim_fast)
+        .filter(|line| !(fold_blank_lines && line.is_empty()));
+    for (index, line) in lines.enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    Cow::Owned(out)
 }
 
 fn parse_markdown_label_segments(text: &str) -> Vec<IrLabelSegment> {
@@ -18857,6 +19008,117 @@ mod tests {
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|value| value.text.as_str());
         assert_eq!(label, Some("Research & Dev"));
+    }
+
+    /// Labels written over several source lines (mermaid's string lexer runs across newlines): each
+    /// line becomes a line of the label, indentation trimmed, and NO node is minted from a
+    /// continuation line. Markdown strings fold blank lines, as upstream's `preprocessMarkdown` does.
+    #[test]
+    fn flowchart_labels_may_span_source_lines() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[\"`**Line 1**\n  Line 2\n\n  Line 3`\"] -- \"edge\n    label\" --> B(\"plain\n   quoted\")\n  B --> C\n",
+        );
+        let label_of = |id: &str| {
+            let node = parsed.ir.nodes.iter().find(|node| node.id == id)?;
+            node.label
+                .map(|label| parsed.ir.labels[label.0].text.clone())
+        };
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["A", "B", "C"], "a continuation line became a node");
+        assert_eq!(label_of("A").as_deref(), Some("Line 1\nLine 2\nLine 3"));
+        assert_eq!(label_of("B").as_deref(), Some("plain\nquoted"));
+        let edge_label = parsed.ir.edges[0]
+            .label
+            .map(|label| parsed.ir.labels[label.0].text.clone());
+        assert_eq!(edge_label.as_deref(), Some("edge\nlabel"));
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        // The bold run survives the join.
+        let markup = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .and_then(|node| node.label)
+            .and_then(|label| parsed.ir.label_markup.get(&label))
+            .expect("markdown runs");
+        assert!(markup.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text { text, bold: true, .. } if text == "Line 1"
+        )));
+    }
+
+    /// CONTROL: a quote that never closes is NOT joined — the following lines parse as before — and
+    /// quotes on comment lines do not open a string.
+    #[test]
+    fn an_unclosed_flowchart_quote_does_not_swallow_the_document() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  %% a \"stray quote\n  A --> B\n  B --> C[\"oops]\n  C --> D\n",
+        );
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert!(ids.starts_with(&["A", "B", "C"]), "{ids:?}");
+        assert!(ids.contains(&"D"), "{ids:?}");
+    }
+
+    /// The token path (text-form edge labels, 3+-hop chains) reads circle, double circle and hexagon
+    /// exactly as the grammar does.
+    #[test]
+    fn token_path_shapes_match_the_grammar() {
+        for (source, expected) in [
+            (
+                "flowchart LR\n  a -- x --> b((c))",
+                (NodeShape::Circle, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b(((c)))",
+                (NodeShape::DoubleCircle, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b{{c}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a -. x .-> b{{\"`**c**`\"}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a --> z --> y --> b{{c}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b{\"{{c}}\"}",
+                (NodeShape::Diamond, "{{c}}"),
+            ),
+        ] {
+            let parsed = parse_mermaid(source);
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| node.id == "b")
+                .unwrap_or_else(|| panic!("no node b for {source}"));
+            let label = node
+                .label
+                .map(|label| parsed.ir.labels[label.0].text.as_str());
+            assert_eq!(
+                (node.shape, label),
+                (expected.0, Some(expected.1)),
+                "{source}"
+            );
+        }
+        // Mindmap keeps its own reading: no triple form there.
+        let mindmap = parse_mermaid("mindmap\n  root((r))\n");
+        assert_eq!(mindmap.ir.nodes[0].shape, NodeShape::Circle);
     }
 
     #[test]

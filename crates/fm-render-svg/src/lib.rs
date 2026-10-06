@@ -10960,6 +10960,11 @@ fn render_node(
     let sankey_label = sankey_node_label(ir, node_box.node_index);
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    // Markdown runs describe the UNTRUNCATED text, so they apply only while truncation left it
+    // whole. Gating on whether a cap was CONFIGURED instead dropped bold and italics from every
+    // diagram small enough for the auto tier to pick `Normal` (a 48-char cap) — i.e. most of them —
+    // while two shapes passed the runs even for a truncated label.
+    let label_id = label_id.filter(|_| matches!(label_text, Cow::Borrowed(_)));
     let node_font_size = detail.node_font_size;
     // ⚠️ A PACKET FIELD IS NEVER ELLIPSIZED, because its box width is the PROTOCOL, not a layout
     // choice. `fit_node_label_text` shrinks a label to 10px and then cuts it, which is right for a
@@ -12420,11 +12425,7 @@ fn render_node(
             // Main label
             let text_elem = render_node_label_text(
                 ir,
-                if detail.node_label_max_chars.is_none() {
-                    label_id
-                } else {
-                    None
-                },
+                label_id,
                 &label_text,
                 cx,
                 text_y,
@@ -12648,11 +12649,7 @@ fn render_node(
 
             let text_elem = render_node_label_text(
                 ir,
-                if detail.node_label_max_chars.is_none() {
-                    label_id
-                } else {
-                    None
-                },
+                label_id,
                 &label_text,
                 content_left + (content_width / 2.0),
                 start_y,
@@ -14014,9 +14011,13 @@ fn render_node_label_text(
     emit_classdef_classes: bool,
 ) -> Element {
     let fitted = fit_node_label_text(label_text, max_width, max_height, font_size, config);
+    // Markup survives a smaller font; only a wrapped or ellipsized text has lost the segment
+    // boundaries and must fall back to plain. Gating on `changed` alone dropped a label's bold and
+    // italics whenever it was merely shrunk to fit.
+    let markup_survives = !fitted.changed || fitted.text.as_ref() == label_text;
     let label_text = fitted.text.as_ref();
     let font_size = fitted.font_size;
-    if !fitted.changed
+    if markup_survives
         && let Some(label_id) = label_id
         && let Some(segments) = ir.label_markup.get(&label_id)
         && !segments.is_empty()
@@ -14105,12 +14106,15 @@ fn render_markdown_text_segments(
                 code,
                 strike,
             } => {
-                let dy = if first_in_line {
-                    if line_index == 0 { 0.0 } else { line_height_px }
-                } else {
-                    0.0
-                };
-                let mut tspan = Element::tspan().x(x).attr_num("dy", dy).content(value);
+                // Only a line's FIRST run is positioned; the rest flow on from it. Giving every run
+                // `x` restarted each one at the anchor, so `The **cat**` drew `The ` and `cat` on
+                // top of each other.
+                let mut tspan = Element::tspan();
+                if first_in_line {
+                    let dy = if line_index == 0 { 0.0 } else { line_height_px };
+                    tspan = tspan.x(x).attr_num("dy", dy);
+                }
+                let mut tspan = tspan.content(value);
                 if *bold {
                     tspan = tspan.attr("font-weight", "700");
                 }
@@ -23019,6 +23023,36 @@ marker#arrow-open path {
             }
         }
         out
+    }
+
+    /// Markdown runs reach the SVG in a SMALL diagram (the auto tier's `Normal`, with its 48-char
+    /// cap that this label does not hit), and a line's later runs flow on from its first instead of
+    /// each restarting at the anchor `x`.
+    #[test]
+    fn markdown_label_runs_flow_within_a_line_in_a_small_diagram() {
+        let svg = render_source("flowchart LR\n  a(\"`The **cat** sat`\")\n");
+        let text = svg
+            .split("<text")
+            .find(|text| text.contains(">cat</tspan>"))
+            .unwrap_or_else(|| panic!("the bold run was dropped: {svg}"));
+        assert!(
+            text.contains(r#"<tspan font-weight="700">cat</tspan>"#),
+            "{text}"
+        );
+        assert_eq!(text.matches("<tspan x=").count(), 1, "{text}");
+    }
+
+    /// CONTROL: a label the tier's cap DOES truncate draws its truncated plain text, not the full
+    /// markdown runs it no longer matches.
+    #[test]
+    fn truncated_markdown_label_falls_back_to_its_plain_text() {
+        let long = "word ".repeat(14);
+        let svg = render_source(&format!("flowchart LR\n  a(\"`**{}**`\")\n", long.trim()));
+        assert!(
+            svg.contains('…'),
+            "the 48-char cap should truncate this label"
+        );
+        assert!(!svg.contains(r#"font-weight="700""#), "{svg}");
     }
 
     #[test]
