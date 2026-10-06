@@ -91,7 +91,23 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # warning formatter. Measured function-by-function against the pre-venn build with names kept, the
 # remainder is the family's own inlined layout (~8.4K pre-opt) and parser (~6.6K pre-opt).
 # Headroom after raise: 857 bytes.
-MAX_GZIP_BYTES=$((706 * 1024))
+#
+# Raised 706K -> 712K on 2026-10-06 for four syntax gaps in existing families, measured the same
+# way from the committed pkg/ (c9ad966, 722087 gzip):
+#   728708 gzip  + `xychart-beta horizontal`, gitGraph `branch … order:`, quadrant point styling
+#                  (`radius`/`color`/`stroke-*`, `classDef` + `:::class`), requirement `style`
+#                  statements                                                    (+6621, 5764 over)
+#   727729 gzip  after shrink levers                                             (+5642, 4785 over)
+# The levers: a hand-rolled stable insertion sort for the branch-order remap instead of a `sort_by`
+# instantiation (~3.3K pre-opt of drift/quicksort/smallsort monomorphs), and `strip_suffix("px")`
+# instead of `trim_end_matches("px")`, which pulled in a reverse `StrSearcher` (~1.2K pre-opt).
+# Function-by-function against c9ad966 with names kept, what remains is the features' own code:
+# the parser (~4.9K pre-opt: quadrant classDef/`:::` resolution and node styling, the branch-order
+# remap), the horizontal axis furniture in `render_xychart_svg` (~3.5K pre-opt; the vertical path
+# is the hand-streamed hot path and was deliberately not refactored for bytes), the xychart layout
+# branch and plot-bounds helpers (~1.0K), and quadrant point style parse/serialise/paint (~1.6K).
+# Headroom after raise: 1359 bytes.
+MAX_GZIP_BYTES=$((712 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

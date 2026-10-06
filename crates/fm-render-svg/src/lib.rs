@@ -6592,7 +6592,11 @@ fn render_quadrant_svg(
         for (i, node_box) in layout.nodes.iter().enumerate() {
             let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
             let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
-            let color = accent_colors[i % accent_colors.len()];
+            let paint = QuadrantPointPaint::resolve(
+                quad_meta.points.get(i),
+                accent_colors[i % accent_colors.len()],
+                &theme.colors.background,
+            );
             let label = quad_meta
                 .points
                 .get(i)
@@ -6607,9 +6611,8 @@ fn render_quadrant_svg(
                 &mut points_svg,
                 cx,
                 cy,
-                color,
-                &theme.colors.background,
-                cx + 10.0,
+                &paint,
+                cx + paint.radius + 4.0,
                 cy + 4.0,
                 config.font_size * 0.75,
                 &theme.colors.text,
@@ -6626,14 +6629,18 @@ fn render_quadrant_svg(
     for (i, node_box) in layout.nodes.iter().enumerate() {
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
-        let color = accent_colors[i % accent_colors.len()];
+        let paint = QuadrantPointPaint::resolve(
+            quad_meta.points.get(i),
+            accent_colors[i % accent_colors.len()],
+            &theme.colors.background,
+        );
         let point_circle = Element::circle()
             .cx(cx)
             .cy(cy)
-            .r(6.0)
-            .fill(color)
-            .stroke(&theme.colors.background)
-            .stroke_width(1.5)
+            .r(paint.radius)
+            .fill(paint.fill)
+            .stroke(paint.stroke)
+            .stroke_width(paint.stroke_width)
             .class("fm-quadrant-point");
         // Same accessible name the streaming path emits (bd-0eoa6); this is the non-embedded-CSS
         // export, and the two must not disagree about what a point is called.
@@ -6655,7 +6662,7 @@ fn render_quadrant_svg(
             .unwrap_or(&node_box.node_id);
         doc = doc.child(
             Element::text()
-                .x(cx + 10.0)
+                .x(cx + paint.radius + 4.0)
                 .y(cy + 4.0)
                 .content(label)
                 .attr("text-anchor", "start")
@@ -6699,13 +6706,45 @@ fn quadrant_point_accessible_name(point: &fm_core::IrQuadrantPoint, labels: &[St
 /// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
 /// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
 /// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
+/// How one quadrant point is painted: the theme's accent dot unless the point (or its class)
+/// declared `radius`, `color`, `stroke-color` or `stroke-width`.
+struct QuadrantPointPaint<'a> {
+    radius: f32,
+    fill: &'a str,
+    stroke: &'a str,
+    stroke_width: f32,
+}
+
+impl<'a> QuadrantPointPaint<'a> {
+    const DEFAULT_RADIUS: f32 = 6.0;
+    const DEFAULT_STROKE_WIDTH: f32 = 1.5;
+
+    fn resolve(point: Option<&'a fm_core::IrQuadrantPoint>, accent: &'a str, bg: &'a str) -> Self {
+        let style = point.and_then(|point| point.style.as_ref());
+        Self {
+            radius: style
+                .and_then(|style| style.radius)
+                .filter(|radius| *radius > 0.0)
+                .unwrap_or(Self::DEFAULT_RADIUS),
+            fill: style
+                .and_then(|style| style.color.as_deref())
+                .unwrap_or(accent),
+            stroke: style
+                .and_then(|style| style.stroke_color.as_deref())
+                .unwrap_or(bg),
+            stroke_width: style
+                .and_then(|style| style.stroke_width)
+                .unwrap_or(Self::DEFAULT_STROKE_WIDTH),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_quadrant_point_into(
     f: &mut String,
     cx: f32,
     cy: f32,
-    color: &str,
-    bg: &str,
+    paint: &QuadrantPointPaint<'_>,
     label_x: f32,
     label_y: f32,
     label_font_size: f32,
@@ -6718,11 +6757,24 @@ fn write_quadrant_point_into(
     let _ = crate::attributes::write_number_into(f, cx);
     f.push_str("\" cy=\"");
     let _ = crate::attributes::write_number_into(f, cy);
-    f.push_str("\" r=\"6\" fill=\"");
-    let _ = write_escaped_attr(f, color);
+    // The default dot keeps its fixed serialisation byte for byte (`r="6"`, `stroke-width="1.50"`).
+    f.push_str("\" r=\"");
+    if (paint.radius - QuadrantPointPaint::DEFAULT_RADIUS).abs() < f32::EPSILON {
+        f.push('6');
+    } else {
+        let _ = crate::attributes::write_number_into(f, paint.radius);
+    }
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, paint.fill);
     f.push_str("\" stroke=\"");
-    let _ = write_escaped_attr(f, bg);
-    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"");
+    let _ = write_escaped_attr(f, paint.stroke);
+    f.push_str("\" stroke-width=\"");
+    if (paint.stroke_width - QuadrantPointPaint::DEFAULT_STROKE_WIDTH).abs() < f32::EPSILON {
+        f.push_str("1.50");
+    } else {
+        let _ = crate::attributes::write_number_into(f, paint.stroke_width);
+    }
+    f.push_str("\" class=\"fm-quadrant-point\"");
     match accessible_name {
         Some(name) => {
             f.push_str("><title>");
@@ -7821,7 +7873,7 @@ fn render_xychart_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let plot_bounds = xychart_plot_bounds(layout);
+    let plot_bounds = fm_layout::xychart_plot_bounds(xy_chart_meta, layout.bounds);
     let plot_x = plot_bounds.x + offset_x;
     let plot_y = plot_bounds.y + offset_y;
     let plot_bottom = plot_y + plot_bounds.height;
@@ -7861,242 +7913,260 @@ fn render_xychart_svg(
             .class("fm-xychart-plot"),
     );
 
-    // Nice tick values, not quarter points (see `xychart_nice_step`).
-    for tick_value in xychart_y_ticks(y_min, y_max) {
-        let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
-            (tick_value - y_min) / (y_max - y_min)
-        } else {
-            0.0
-        };
-        let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
-        doc = doc.child(
-            Element::line()
-                .x1(plot_x)
-                .y1(tick_y)
-                .x2(plot_right)
-                .y2(tick_y)
-                .stroke("rgba(148,163,184,0.35)")
-                .stroke_width(1.0)
-                .stroke_dasharray("4,4")
-                .class("fm-xychart-gridline"),
+    if xy_chart_meta.horizontal {
+        doc = write_xychart_horizontal_axes(
+            doc,
+            ir,
+            layout,
+            xy_chart_meta,
+            &categories,
+            (plot_x, plot_y, plot_bounds.width, plot_bounds.height),
+            (y_min, y_max),
+            offset_x,
+            config,
+            theme,
         );
-        doc = doc.child(
-            TextBuilder::new(&format_xychart_tick_value(tick_value))
-                .x(plot_x - 10.0)
-                .y(tick_y + 4.0)
-                .anchor(TextAnchor::End)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.72,
-                    config.min_font_size,
-                ))
-                // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
-                // LINE colour — a category error that is nearly invisible in review because both
-                // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
-                // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
-                //
-                // Measured contrast against the theme background, before this change:
-                //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
-                //                                              the 3:1 large-text floor
-                //   dark     #94a3b8 on #0f172a  =  6.96:1
-                // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
-                // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
-                // was not, on the SHIPPED default theme.
-                .fill(mermaid_default_primary_text_color(config, &theme.colors))
-                .class("fm-xychart-y-tick")
-                .build(),
-        );
-    }
-
-    doc = doc.child(
-        Element::line()
-            .x1(plot_x)
-            .y1(plot_bottom)
-            .x2(plot_right)
-            .y2(plot_bottom)
-            .stroke(&theme.colors.edge)
-            .stroke_width(1.5)
-            .class("fm-xychart-axis fm-xychart-axis-x"),
-    );
-    doc = doc.child(
-        Element::line()
-            .x1(plot_x)
-            .y1(plot_y)
-            .x2(plot_x)
-            .y2(plot_bottom)
-            .stroke(&theme.colors.edge)
-            .stroke_width(1.5)
-            .class("fm-xychart-axis fm-xychart-axis-y"),
-    );
-
-    let band_width = plot_bounds.width / categories.len().max(1) as f32;
-    // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
-    // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
-    // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
-    // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
-    // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
-    // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
-    // (element.rs). Any other config falls back to the TextBuilder path below.
-    let labels_streamable = config.embed_theme_css
-        && categories
-            .iter()
-            .all(|c| !c.contains('\n') && !c.contains('\r'));
-    if labels_streamable {
-        use crate::attributes::{write_escaped_attr, write_escaped_text};
-        let mut y_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
-        let mut fs_text = String::new();
-        let _ = crate::attributes::write_number_into(
-            &mut fs_text,
-            clamp_font_size(config.font_size * 0.74, config.min_font_size),
-        );
-        let mut esc_fill = String::new();
-        let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
-        let mut x_text = String::new();
-        let mut label_svg = String::new();
-        for (index, category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
-            x_text.clear();
-            let _ = crate::attributes::write_number_into(&mut x_text, x);
-            label_svg.push_str("<text x=\"");
-            label_svg.push_str(&x_text);
-            label_svg.push_str("\" y=\"");
-            label_svg.push_str(&y_text);
-            label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
-            label_svg.push_str(&fs_text);
-            label_svg.push_str("\" fill=\"");
-            label_svg.push_str(&esc_fill);
-            label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
-            let _ = write_escaped_text(&mut label_svg, category);
-            label_svg.push_str("</text>");
-        }
-        doc = doc.child(Element::raw_svg(label_svg));
     } else {
-        for (index, category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
+        // Nice tick values, not quarter points (see `xychart_nice_step`).
+        for tick_value in xychart_y_ticks(y_min, y_max) {
+            let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
+                (tick_value - y_min) / (y_max - y_min)
+            } else {
+                0.0
+            };
+            let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
             doc = doc.child(
-                TextBuilder::new(category)
-                    .x(x)
-                    .y(plot_bottom + 24.0)
-                    .anchor(TextAnchor::Middle)
+                Element::line()
+                    .x1(plot_x)
+                    .y1(tick_y)
+                    .x2(plot_right)
+                    .y2(tick_y)
+                    .stroke("rgba(148,163,184,0.35)")
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,4")
+                    .class("fm-xychart-gridline"),
+            );
+            doc = doc.child(
+                TextBuilder::new(&format_xychart_tick_value(tick_value))
+                    .x(plot_x - 10.0)
+                    .y(tick_y + 4.0)
+                    .anchor(TextAnchor::End)
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(clamp_font_size(
-                        config.font_size * 0.74,
+                        config.font_size * 0.72,
                         config.min_font_size,
                     ))
-                    .fill(&theme.colors.text)
-                    .class("fm-xychart-x-tick")
+                    // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
+                    // LINE colour — a category error that is nearly invisible in review because both
+                    // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
+                    // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
+                    //
+                    // Measured contrast against the theme background, before this change:
+                    //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
+                    //                                              the 3:1 large-text floor
+                    //   dark     #94a3b8 on #0f172a  =  6.96:1
+                    // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
+                    // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
+                    // was not, on the SHIPPED default theme.
+                    .fill(mermaid_default_primary_text_color(config, &theme.colors))
+                    .class("fm-xychart-y-tick")
                     .build(),
             );
         }
-    }
 
-    if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
-        doc = doc.child(
-            TextBuilder::new(title)
-                .x((layout.bounds.width / 2.0) + offset_x)
-                .y(plot_y - 34.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 1.18,
-                    config.min_font_size,
-                ))
-                .font_weight("600")
-                .fill(&theme.colors.text)
-                .class("fm-xychart-title")
-                .build(),
-        );
-    }
-
-    if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
-        doc = doc.child(
-            TextBuilder::new(y_label)
-                .x(plot_x - 52.0)
-                .y(plot_y - 12.0)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.76,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-y-label")
-                .build(),
-        );
-    }
-
-    // X-axis label (centered below category labels).
-    if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
-        doc = doc.child(
-            TextBuilder::new(x_label)
-                .x(plot_x + plot_bounds.width / 2.0)
-                .y(plot_bottom + 48.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.76,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-x-label")
-                .build(),
-        );
-    }
-
-    // Tick marks at axis edges (small lines at each grid level and category center).
-    let tick_len = 5.0_f32;
-    // The SAME values the labels use — a tick mark beside a different set of labels is worse than
-    // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
-    for tick_value in xychart_y_ticks(y_min, y_max) {
-        let frac = if (y_max - y_min).abs() > f32::EPSILON {
-            (tick_value - y_min) / (y_max - y_min)
-        } else {
-            0.0
-        };
-        let y = plot_bottom - frac * plot_bounds.height;
         doc = doc.child(
             Element::line()
-                .x1(plot_x - tick_len)
-                .y1(y)
-                .x2(plot_x)
-                .y2(y)
-                .stroke(&theme.colors.text)
-                .stroke_width(1.0)
-                .class("fm-xychart-tick"),
+                .x1(plot_x)
+                .y1(plot_bottom)
+                .x2(plot_right)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-x"),
         );
-    }
-    {
-        // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
-        // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
-        // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
-        // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
-        // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
-        use crate::attributes::write_escaped_attr;
-        let mut y1_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
-        let mut y2_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
-        let mut esc_stroke = String::new();
-        let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
-        let mut x_text = String::new();
-        let mut tick_svg = String::new();
-        for (index, _category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
-            x_text.clear();
-            let _ = crate::attributes::write_number_into(&mut x_text, x);
-            tick_svg.push_str("<line x1=\"");
-            tick_svg.push_str(&x_text);
-            tick_svg.push_str("\" y1=\"");
-            tick_svg.push_str(&y1_text);
-            tick_svg.push_str("\" x2=\"");
-            tick_svg.push_str(&x_text);
-            tick_svg.push_str("\" y2=\"");
-            tick_svg.push_str(&y2_text);
-            tick_svg.push_str("\" stroke=\"");
-            tick_svg.push_str(&esc_stroke);
-            tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+        doc = doc.child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_x)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-y"),
+        );
+
+        let band_width = plot_bounds.width / categories.len().max(1) as f32;
+        // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
+        // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
+        // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
+        // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
+        // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
+        // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
+        // (element.rs). Any other config falls back to the TextBuilder path below.
+        let labels_streamable = config.embed_theme_css
+            && categories
+                .iter()
+                .all(|c| !c.contains('\n') && !c.contains('\r'));
+        if labels_streamable {
+            use crate::attributes::{write_escaped_attr, write_escaped_text};
+            let mut y_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
+            let mut fs_text = String::new();
+            let _ = crate::attributes::write_number_into(
+                &mut fs_text,
+                clamp_font_size(config.font_size * 0.74, config.min_font_size),
+            );
+            let mut esc_fill = String::new();
+            let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
+            let mut x_text = String::new();
+            let mut label_svg = String::new();
+            for (index, category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                x_text.clear();
+                let _ = crate::attributes::write_number_into(&mut x_text, x);
+                label_svg.push_str("<text x=\"");
+                label_svg.push_str(&x_text);
+                label_svg.push_str("\" y=\"");
+                label_svg.push_str(&y_text);
+                label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
+                label_svg.push_str(&fs_text);
+                label_svg.push_str("\" fill=\"");
+                label_svg.push_str(&esc_fill);
+                label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
+                let _ = write_escaped_text(&mut label_svg, category);
+                label_svg.push_str("</text>");
+            }
+            doc = doc.child(Element::raw_svg(label_svg));
+        } else {
+            for (index, category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                doc = doc.child(
+                    TextBuilder::new(category)
+                        .x(x)
+                        .y(plot_bottom + 24.0)
+                        .anchor(TextAnchor::Middle)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .font_size(clamp_font_size(
+                            config.font_size * 0.74,
+                            config.min_font_size,
+                        ))
+                        .fill(&theme.colors.text)
+                        .class("fm-xychart-x-tick")
+                        .build(),
+                );
+            }
         }
-        doc = doc.child(Element::raw_svg(tick_svg));
+
+        if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
+            doc = doc.child(
+                TextBuilder::new(title)
+                    .x((layout.bounds.width / 2.0) + offset_x)
+                    .y(plot_y - 34.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 1.18,
+                        config.min_font_size,
+                    ))
+                    .font_weight("600")
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-title")
+                    .build(),
+            );
+        }
+
+        if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
+            doc = doc.child(
+                TextBuilder::new(y_label)
+                    .x(plot_x - 52.0)
+                    .y(plot_y - 12.0)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.76,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-y-label")
+                    .build(),
+            );
+        }
+
+        // X-axis label (centered below category labels).
+        if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
+            doc = doc.child(
+                TextBuilder::new(x_label)
+                    .x(plot_x + plot_bounds.width / 2.0)
+                    .y(plot_bottom + 48.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.76,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-label")
+                    .build(),
+            );
+        }
+
+        // Tick marks at axis edges (small lines at each grid level and category center).
+        let tick_len = 5.0_f32;
+        // The SAME values the labels use — a tick mark beside a different set of labels is worse than
+        // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
+        for tick_value in xychart_y_ticks(y_min, y_max) {
+            let frac = if (y_max - y_min).abs() > f32::EPSILON {
+                (tick_value - y_min) / (y_max - y_min)
+            } else {
+                0.0
+            };
+            let y = plot_bottom - frac * plot_bounds.height;
+            doc = doc.child(
+                Element::line()
+                    .x1(plot_x - tick_len)
+                    .y1(y)
+                    .x2(plot_x)
+                    .y2(y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
+        }
+        {
+            // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
+            // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
+            // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
+            // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
+            // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
+            use crate::attributes::write_escaped_attr;
+            let mut y1_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
+            let mut y2_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
+            let mut esc_stroke = String::new();
+            let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
+            let mut x_text = String::new();
+            let mut tick_svg = String::new();
+            for (index, _category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                x_text.clear();
+                let _ = crate::attributes::write_number_into(&mut x_text, x);
+                tick_svg.push_str("<line x1=\"");
+                tick_svg.push_str(&x_text);
+                tick_svg.push_str("\" y1=\"");
+                tick_svg.push_str(&y1_text);
+                tick_svg.push_str("\" x2=\"");
+                tick_svg.push_str(&x_text);
+                tick_svg.push_str("\" y2=\"");
+                tick_svg.push_str(&y2_text);
+                tick_svg.push_str("\" stroke=\"");
+                tick_svg.push_str(&esc_stroke);
+                tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+            }
+            doc = doc.child(Element::raw_svg(tick_svg));
+        }
     }
 
     // ⚠️ NO LEGEND FOR NAMED SERIES (bd-b33ab). The pinned 11.15.0 incumbent renders no xychart
@@ -8228,11 +8298,28 @@ fn render_xychart_svg(
                     .collect();
 
                 if matches!(series.kind, IrXySeriesKind::Area) {
-                    let first_x = points.first().map_or(plot_x, |point| point.0);
-                    let last_x = points.last().map_or(plot_x, |point| point.0);
-                    let mut fill_points = vec![(first_x, baseline_y)];
-                    fill_points.extend(points.iter().copied());
-                    fill_points.push((last_x, baseline_y));
+                    // The area closes onto the value BASELINE: a horizontal line under a vertical
+                    // chart, a vertical one beside a horizontal chart.
+                    let mut fill_points = Vec::with_capacity(points.len() + 2);
+                    if xy_chart_meta.horizontal {
+                        let baseline_x = fm_layout::xychart_value_to_x(
+                            baseline_value,
+                            y_min,
+                            y_max,
+                            plot_bounds,
+                        ) + offset_x;
+                        let first_y = points.first().map_or(plot_y, |point| point.1);
+                        let last_y = points.last().map_or(plot_y, |point| point.1);
+                        fill_points.push((baseline_x, first_y));
+                        fill_points.extend(points.iter().copied());
+                        fill_points.push((baseline_x, last_y));
+                    } else {
+                        let first_x = points.first().map_or(plot_x, |point| point.0);
+                        let last_x = points.last().map_or(plot_x, |point| point.0);
+                        fill_points.push((first_x, baseline_y));
+                        fill_points.extend(points.iter().copied());
+                        fill_points.push((last_x, baseline_y));
+                    }
                     let mut area_path =
                         PathBuilder::new().move_to(fill_points[0].0, fill_points[0].1);
                     for point in fill_points.iter().skip(1) {
@@ -8344,20 +8431,171 @@ fn render_xychart_svg(
     doc
 }
 
-fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
-    const LEFT_MARGIN: f32 = 88.0;
-    const TOP_MARGIN: f32 = 84.0;
-    const RIGHT_MARGIN: f32 = 36.0;
-    const BOTTOM_MARGIN: f32 = 76.0;
-    // No legend column is reserved: the incumbent renders no legend (bd-b33ab).
-    let right_margin = RIGHT_MARGIN;
+/// The axes, gridlines, labels and title of a HORIZONTAL xychart.
+///
+/// Upstream's horizontal orchestrator puts the category (x) axis on the LEFT and the value (y) axis
+/// along the TOP, title above both. This mirrors the vertical furniture with the roles exchanged —
+/// same classes, colours and font steps — so a stylesheet written for one orientation styles both.
+#[allow(clippy::too_many_arguments)]
+fn write_xychart_horizontal_axes(
+    mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    xy_chart_meta: &IrXyChartMeta,
+    categories: &[String],
+    (plot_x, plot_y, plot_width, plot_height): (f32, f32, f32, f32),
+    (y_min, y_max): (f32, f32),
+    offset_x: f32,
+    config: &SvgRenderConfig,
+    theme: &Theme,
+) -> SvgDocument {
+    let plot_bottom = plot_y + plot_height;
+    let plot_right = plot_x + plot_width;
+    let tick_len = 5.0_f32;
+    let tick_font = clamp_font_size(config.font_size * 0.72, config.min_font_size);
+    let label_font = clamp_font_size(config.font_size * 0.74, config.min_font_size);
+    let axis_title_font = clamp_font_size(config.font_size * 0.76, config.min_font_size);
 
-    fm_layout::LayoutRect {
-        x: layout.bounds.x + LEFT_MARGIN,
-        y: layout.bounds.y + TOP_MARGIN,
-        width: (layout.bounds.width - LEFT_MARGIN - right_margin).max(1.0),
-        height: (layout.bounds.height - TOP_MARGIN - BOTTOM_MARGIN).max(1.0),
+    // Value ticks: vertical gridlines, labels and tick marks along the TOP edge.
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let ratio = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
+        let x = ratio.mul_add(plot_width, plot_x);
+        doc = doc
+            .child(
+                Element::line()
+                    .x1(x)
+                    .y1(plot_y)
+                    .x2(x)
+                    .y2(plot_bottom)
+                    .stroke("rgba(148,163,184,0.35)")
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,4")
+                    .class("fm-xychart-gridline"),
+            )
+            .child(
+                TextBuilder::new(&format_xychart_tick_value(tick_value))
+                    .x(x)
+                    .y(plot_y - tick_len - 6.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(tick_font)
+                    .fill(mermaid_default_primary_text_color(config, &theme.colors))
+                    .class("fm-xychart-y-tick")
+                    .build(),
+            )
+            .child(
+                Element::line()
+                    .x1(x)
+                    .y1(plot_y - tick_len)
+                    .x2(x)
+                    .y2(plot_y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
     }
+
+    // The value axis along the top, the category axis down the left.
+    doc = doc
+        .child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_right)
+                .y2(plot_y)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-y"),
+        )
+        .child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_x)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-x"),
+        );
+
+    // Category labels, right-aligned against the left axis at each row's centre.
+    let band_height = plot_height / categories.len().max(1) as f32;
+    for (index, category) in categories.iter().enumerate() {
+        let y = band_height.mul_add(index as f32 + 0.5, plot_y);
+        doc = doc
+            .child(
+                TextBuilder::new(category)
+                    .x(plot_x - tick_len - 6.0)
+                    .y(y + label_font * 0.35)
+                    .anchor(TextAnchor::End)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(label_font)
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-tick")
+                    .build(),
+            )
+            .child(
+                Element::line()
+                    .x1(plot_x - tick_len)
+                    .y1(y)
+                    .x2(plot_x)
+                    .y2(y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
+    }
+
+    // Axis titles: the value axis's centred above its tick labels, the category axis's above the
+    // category column, right-aligned like its labels.
+    if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(y_label)
+                .x(plot_x + plot_width / 2.0)
+                .y(plot_y - 34.0)
+                .anchor(TextAnchor::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(axis_title_font)
+                .fill(&theme.colors.text)
+                .class("fm-xychart-y-label")
+                .build(),
+        );
+    }
+    if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(x_label)
+                .x(plot_x - tick_len - 6.0)
+                .y(plot_y - 34.0)
+                .anchor(TextAnchor::End)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(axis_title_font)
+                .fill(&theme.colors.text)
+                .class("fm-xychart-x-label")
+                .build(),
+        );
+    }
+    if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x((layout.bounds.width / 2.0) + offset_x)
+                .y(plot_y - 70.0)
+                .anchor(TextAnchor::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(clamp_font_size(
+                    config.font_size * 1.18,
+                    config.min_font_size,
+                ))
+                .font_weight("600")
+                .fill(&theme.colors.text)
+                .class("fm-xychart-title")
+                .build(),
+        );
+    }
+    doc
 }
 
 fn xychart_categories(xy_chart_meta: &IrXyChartMeta) -> Vec<String> {
@@ -18043,6 +18281,7 @@ mod tests {
             ..Default::default()
         });
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: Some("Sales Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -18516,6 +18755,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
         ir.meta.title = Some(String::from("Shared Title"));
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: None,
             ..IrXyChartMeta::default()
         });
@@ -22799,6 +23039,36 @@ marker#arrow-open path {
         );
     }
 
+    /// A styled point is drawn with its own radius and colours and its label clears the larger
+    /// dot; an unstyled point keeps the theme's accent dot byte for byte.
+    #[test]
+    fn quadrant_point_style_reaches_the_svg() {
+        let svg = render_source(
+            "quadrantChart\n  A: [0.3, 0.6] radius: 12, color: #ff3300, stroke-color: #000000, stroke-width: 3px\n  B: [0.7, 0.2]\n",
+        );
+        let circles: Vec<&str> = svg
+            .split("<circle")
+            .skip(1)
+            .filter(|tag| tag.contains("fm-quadrant-point"))
+            .collect();
+        assert_eq!(circles.len(), 2, "{svg}");
+        assert!(circles[0].contains(r#"r="12""#), "{}", circles[0]);
+        assert!(circles[0].contains(r##"fill="#ff3300""##), "{}", circles[0]);
+        assert!(
+            circles[0].contains(r##"stroke="#000000""##),
+            "{}",
+            circles[0]
+        );
+        assert!(circles[0].contains(r#"stroke-width="3""#), "{}", circles[0]);
+        assert!(circles[1].contains(r#"r="6""#), "{}", circles[1]);
+        assert!(
+            circles[1].contains(r#"stroke-width="1.50""#),
+            "{}",
+            circles[1]
+        );
+        assert!(!circles[1].contains("#ff3300"), "{}", circles[1]);
+    }
+
     #[test]
     fn smoke_xychart() {
         smoke_test_diagram(
@@ -22999,6 +23269,36 @@ marker#arrow-open path {
             "xychart bar series should render rects"
         );
         assert!(svg.contains("Revenue"), "xychart should render title");
+    }
+
+    #[test]
+    fn horizontal_xychart_puts_categories_left_and_value_ticks_on_top() {
+        let svg = render_sequence_e2e(
+            "xychart-beta horizontal\n  title Revenue\n  x-axis [Jan, Feb, Mar]\n  y-axis 0 --> 300\n  bar [100, 200, 150]",
+        );
+        // Category labels hang off the left axis, right-aligned against it.
+        let jan = svg
+            .split("<text")
+            .find(|text| text.contains(">Jan<"))
+            .expect("the Jan category label is drawn");
+        assert!(jan.contains(r#"text-anchor="end""#), "{jan}");
+        // Bars lie flat: wider than tall, all starting at the same x.
+        let bars: Vec<&str> = svg
+            .split("<rect")
+            .filter(|rect| rect.contains("fm-xychart-bar"))
+            .collect();
+        assert_eq!(bars.len(), 3);
+        let attr = |rect: &str, name: &str| -> f32 {
+            let start = rect.find(&format!(" {name}=\"")).unwrap() + name.len() + 3;
+            rect[start..].split('"').next().unwrap().parse().unwrap()
+        };
+        let x0 = attr(bars[0], "x");
+        for bar in &bars {
+            assert!((attr(bar, "x") - x0).abs() < 0.01);
+            assert!(attr(bar, "width") > attr(bar, "height") || attr(bar, "width") < 1.5);
+        }
+        assert!(attr(bars[1], "width") > attr(bars[0], "width"));
+        assert!(attr(bars[1], "y") > attr(bars[0], "y"));
     }
 
     #[test]

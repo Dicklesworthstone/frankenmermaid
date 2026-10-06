@@ -4062,6 +4062,11 @@ fn render_xychart_cell(
         buffer.set_string(tx, 0, title);
     }
 
+    if xy_meta.horizontal {
+        render_xychart_horizontal_cell(buffer, xy_meta, cell_width, chart_top, chart_bottom);
+        return;
+    }
+
     // Y axis (vertical line).
     for row in chart_top..=chart_bottom {
         buffer.set(chart_left, row, '\u{2502}'); // │
@@ -4105,6 +4110,77 @@ fn render_xychart_cell(
                 if y >= chart_top && x < chart_right {
                     buffer.set(x, y, bar_ch);
                 }
+            }
+        }
+    }
+}
+
+/// A HORIZONTAL xychart in cells: one row band per category, its label left of the axis and each
+/// series' bar growing rightward from it, as `xychart-beta horizontal` draws upstream.
+fn render_xychart_horizontal_cell(
+    buffer: &mut CellBuffer,
+    xy_meta: &fm_core::IrXyChartMeta,
+    cell_width: usize,
+    chart_top: usize,
+    chart_bottom: usize,
+) {
+    let categories = &xy_meta.x_axis.categories;
+    let rows = xy_meta
+        .series
+        .iter()
+        .map(|series| series.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(categories.len())
+        .max(1);
+    let label_width = categories
+        .iter()
+        .map(|category| category.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(1, cell_width / 3);
+    let axis_x = label_width + 1;
+    let chart_right = cell_width.saturating_sub(2);
+    let chart_w = chart_right.saturating_sub(axis_x + 1);
+    if chart_w < 2 {
+        return;
+    }
+    for row in chart_top..=chart_bottom {
+        buffer.set(axis_x, row, '\u{2502}'); // │
+    }
+
+    let max_val = xy_meta
+        .series
+        .iter()
+        .flat_map(|series| series.values.iter().copied())
+        .fold(0.0_f32, f32::max)
+        .max(f32::EPSILON);
+    let series_count = xy_meta.series.len().max(1);
+    let band = (chart_bottom.saturating_sub(chart_top) + 1) / rows;
+    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
+    for index in 0..rows {
+        let band_top = chart_top + index * band.max(1);
+        if band_top > chart_bottom {
+            break;
+        }
+        if let Some(category) = categories.get(index) {
+            let label: String = category.chars().take(label_width).collect();
+            let x = axis_x.saturating_sub(label.chars().count() + 1);
+            buffer.set_string(x, band_top, &label);
+        }
+        for (series_idx, series) in xy_meta.series.iter().enumerate() {
+            let Some(&value) = series.values.get(index) else {
+                continue;
+            };
+            let row = band_top + series_idx.min(band.saturating_sub(1).max(series_count - 1));
+            if row > chart_bottom {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let length = ((value.max(0.0) / max_val) * chart_w as f32) as usize;
+            let bar_ch = bar_chars[series_idx % bar_chars.len()];
+            for col in 0..length.min(chart_w) {
+                buffer.set(axis_x + 1 + col, row, bar_ch);
             }
         }
     }

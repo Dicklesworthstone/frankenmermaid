@@ -8219,36 +8219,47 @@ fn layout_diagram_xychart_from_meta(
         0,
     );
 
-    const LEFT_MARGIN: f32 = 88.0;
-    const TOP_MARGIN: f32 = 84.0;
-    const RIGHT_MARGIN: f32 = 36.0;
-    const BOTTOM_MARGIN: f32 = 76.0;
     const PLOT_HEIGHT: f32 = 320.0;
     const MIN_PLOT_WIDTH: f32 = 240.0;
     const CATEGORY_STEP: f32 = 88.0;
+    /// A horizontal chart's category ROWS: bars lie flat, so a row needs less room than a column.
+    const HORIZONTAL_CATEGORY_STEP: f32 = 48.0;
+    const HORIZONTAL_PLOT_WIDTH: f32 = 480.0;
     const POINT_DIAMETER: f32 = 12.0;
 
+    let horizontal = xy_chart_meta.horizontal;
     let category_count = xy_chart_category_count(xy_chart_meta).max(1);
-    let plot_width = (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH);
-    // No legend column: the incumbent renders no xychart legend (bd-b33ab).
-    let right_margin = RIGHT_MARGIN;
-    let plot_bounds = LayoutRect {
-        x: LEFT_MARGIN,
-        y: TOP_MARGIN,
-        width: plot_width,
-        height: PLOT_HEIGHT,
+    let (plot_width, plot_height) = if horizontal {
+        (
+            HORIZONTAL_PLOT_WIDTH,
+            (category_count as f32 * HORIZONTAL_CATEGORY_STEP).max(MIN_PLOT_WIDTH),
+        )
+    } else {
+        (
+            (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH),
+            PLOT_HEIGHT,
+        )
     };
+    // No legend column: the incumbent renders no xychart legend (bd-b33ab).
+    let (left_margin, top_margin, right_margin, bottom_margin) = xychart_margins(xy_chart_meta);
     let bounds = LayoutRect {
         x: 0.0,
         y: 0.0,
-        width: LEFT_MARGIN + plot_width + right_margin,
-        height: TOP_MARGIN + PLOT_HEIGHT + BOTTOM_MARGIN,
+        width: left_margin + plot_width + right_margin,
+        height: top_margin + plot_height + bottom_margin,
     };
+    let plot_bounds = xychart_plot_bounds(xy_chart_meta, bounds);
 
     let (y_min, y_max) = resolve_xychart_y_domain(xy_chart_meta);
     let baseline_value = y_min.min(0.0).max(y_max.min(0.0));
     let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds);
-    let band_width = plot_bounds.width / category_count as f32;
+    let baseline_x = xychart_value_to_x(baseline_value, y_min, y_max, plot_bounds);
+    // The category axis runs ACROSS a vertical chart and DOWN a horizontal one.
+    let band_width = if horizontal {
+        plot_bounds.height
+    } else {
+        plot_bounds.width
+    } / category_count as f32;
     let bar_series_count = xy_chart_meta
         .series
         .iter()
@@ -8274,6 +8285,40 @@ fn layout_diagram_xychart_from_meta(
             let Some(&value) = series.values.get(point_index) else {
                 continue;
             };
+            if horizontal {
+                // Same construction with the axes exchanged: the band is a ROW from the top, the
+                // value runs from the baseline rightward, and grouped bars stack downward.
+                let y_band_start = (point_index as f32).mul_add(band_width, plot_bounds.y);
+                let value_x = xychart_value_to_x(value, y_min, y_max, plot_bounds);
+                let node_bounds = if is_bar {
+                    let bar_thickness = (band_width * 0.72 / bar_series_count as f32)
+                        .clamp(10.0, (band_width * 0.78).max(10.0));
+                    let group_height = bar_thickness * bar_series_count as f32;
+                    let group_start = y_band_start + (band_width - group_height) / 2.0;
+                    LayoutRect {
+                        x: value_x.min(baseline_x),
+                        y: (local_bar_slot as f32).mul_add(bar_thickness, group_start),
+                        width: (value_x - baseline_x).abs().max(1.0),
+                        height: bar_thickness,
+                    }
+                } else {
+                    LayoutRect {
+                        x: value_x - POINT_DIAMETER / 2.0,
+                        y: y_band_start + band_width / 2.0 - POINT_DIAMETER / 2.0,
+                        width: POINT_DIAMETER,
+                        height: POINT_DIAMETER,
+                    }
+                };
+                nodes.push(LayoutNodeBox {
+                    node_index: node_id.0,
+                    node_id: ir.nodes[node_id.0].id.clone(),
+                    rank: point_index,
+                    order: series_index,
+                    span: ir.nodes[node_id.0].span_primary,
+                    bounds: node_bounds,
+                });
+                continue;
+            }
             let x_band_start = (point_index as f32).mul_add(band_width, plot_bounds.x);
             let x_center = x_band_start + band_width / 2.0;
             let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
@@ -8437,6 +8482,49 @@ fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRec
     let range = (y_max - y_min).max(f32::EPSILON);
     let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+}
+
+/// A value's x position on a HORIZONTAL chart's value axis: minimum at the left edge.
+#[must_use]
+pub fn xychart_value_to_x(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
+    let range = (y_max - y_min).max(f32::EPSILON);
+    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    ratio.mul_add(plot_bounds.width, plot_bounds.x)
+}
+
+/// `(left, top, right, bottom)` margins around an xychart's plot area.
+///
+/// A vertical chart keeps the fixed margins every renderer has always used. A horizontal one puts
+/// the category labels on the LEFT, so that margin grows to the widest label, and the value ticks,
+/// value-axis title and chart title stack above the plot, as upstream's horizontal orchestrator
+/// places them.
+fn xychart_margins(meta: &IrXyChartMeta) -> (f32, f32, f32, f32) {
+    if !meta.horizontal {
+        return (88.0, 84.0, 36.0, 76.0);
+    }
+    // Labels are drawn at ~3/4 of the node font; measuring at full size over-reserves slightly,
+    // which reads as padding, where under-reserving would clip the text.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let widest = meta
+        .x_axis
+        .categories
+        .iter()
+        .map(|category| metrics.estimate_width(category))
+        .fold(0.0_f32, f32::max);
+    ((widest * 0.8 + 28.0).max(88.0), 112.0, 36.0, 48.0)
+}
+
+/// The plot rectangle of an xychart laid out in `bounds` — the ONE derivation layout and every
+/// renderer share, so the axes a renderer draws are the axes the marks were placed against.
+#[must_use]
+pub fn xychart_plot_bounds(meta: &IrXyChartMeta, bounds: LayoutRect) -> LayoutRect {
+    let (left, top, right, bottom) = xychart_margins(meta);
+    LayoutRect {
+        x: bounds.x + left,
+        y: bounds.y + top,
+        width: (bounds.width - left - right).max(1.0),
+        height: (bounds.height - top - bottom).max(1.0),
+    }
 }
 
 /// Epoch day number for an ISO `YYYY-MM-DD` date, or `None` if it is not a real calendar date.
@@ -21862,6 +21950,7 @@ mod tests {
             ..IrEdge::default()
         });
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: Some("Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -22948,6 +23037,52 @@ mod tests {
         assert!(revenue_3.bounds.height > revenue_1.bounds.height);
         assert!(target_3.bounds.center().y < target_1.bounds.center().y);
         assert!(revenue_3.bounds.center().x > revenue_1.bounds.center().x);
+    }
+
+    #[test]
+    fn horizontal_xychart_lays_categories_down_and_values_across() {
+        let mut ir = sample_xychart_ir();
+        ir.xy_chart_meta.as_mut().unwrap().horizontal = true;
+        let layout = layout_diagram_xychart(&ir);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        let plot = crate::xychart_plot_bounds(meta, layout.bounds);
+        let node = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == id)
+                .unwrap_or_else(|| panic!("{id} should exist"))
+                .bounds
+        };
+        let (revenue_1, revenue_3) = (node("Revenue_1"), node("Revenue_3"));
+        // Bars grow RIGHTWARD from the plot's left edge (the values are non-negative)...
+        assert!(
+            (revenue_1.x - plot.x).abs() < 0.01,
+            "{revenue_1:?} vs plot {plot:?}"
+        );
+        assert!(revenue_3.width > revenue_1.width);
+        // ...in category ROWS from the top, so a later category sits lower, not further right.
+        assert!(revenue_3.center().y > revenue_1.center().y);
+        assert!((revenue_3.x - revenue_1.x).abs() < 0.01);
+        // Line points sit at their value's x and their row's centre.
+        let (target_1, target_3) = (node("Target_1"), node("Target_3"));
+        assert!(target_3.center().y > target_1.center().y);
+        for bounds in [revenue_1, revenue_3, target_1, target_3] {
+            assert!(
+                bounds.x >= plot.x - 6.01 && bounds.x + bounds.width <= plot.x + plot.width + 6.01
+            );
+            assert!(
+                bounds.y >= plot.y - 0.01
+                    && bounds.y + bounds.height <= plot.y + plot.height + 0.01
+            );
+        }
+        // The vertical chart's geometry is untouched by the flag's existence.
+        let vertical = layout_diagram_xychart(&sample_xychart_ir());
+        let vertical_plot = crate::xychart_plot_bounds(
+            sample_xychart_ir().xy_chart_meta.as_ref().unwrap(),
+            vertical.bounds,
+        );
+        assert_eq!((vertical_plot.x, vertical_plot.y), (88.0, 84.0));
     }
 
     #[test]

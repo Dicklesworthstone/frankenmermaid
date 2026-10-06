@@ -6448,6 +6448,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) {
             continue;
         }
+        // ⚠️ AND SO ARE THE STYLING STATEMENTS. mermaid's requirement grammar accepts `style`,
+        // `classDef` and `class`, and `extract_style_directives` already applies all three to the
+        // requirement nodes — the fill reached the SVG while this loop reported the line as
+        // unsupported, the same working-directive-called-broken shape as bd-xym5x.
+        if is_non_graph_statement(trimmed)
+            || trimmed
+                .strip_prefix("class")
+                .is_some_and(|rest| rest.starts_with([' ', '\t']))
+        {
+            continue;
+        }
 
         builder.add_warning(format!(
             "Line {line_number}: unsupported requirement syntax: {trimmed}"
@@ -10398,6 +10409,12 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
 fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrQuadrantMeta::default();
+    // `classDef name color: …, radius: …`, and each point's `:::name` (by point index). A class can
+    // be declared after the point that uses it, so both resolve once every line is read.
+    let mut class_styles: Vec<(String, fm_core::IrQuadrantPointStyle)> = Vec::new();
+    let mut point_classes: Vec<(usize, String)> = Vec::new();
+    // Each point's node, so a resolved style can reach the backends that paint nodes generically.
+    let mut point_nodes: Vec<Option<IrNodeId>> = Vec::new();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -10406,6 +10423,22 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed == "quadrantChart" {
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("classDef")
+            .filter(|rest| rest.starts_with([' ', '\t']))
+        {
+            let rest = rest.trim_start();
+            let (names, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let style = parse_quadrant_point_style(body);
+            for name in names
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                class_styles.push((name.to_string(), style.clone()));
+            }
             continue;
         }
 
@@ -10470,7 +10503,25 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Data point: "Label: [x, y]"
+        // Data point: "Label: [x, y]", optionally "Label:::class: [x, y] radius: 12, …".
+        // The class suffix is split off FIRST: its `:::` would otherwise be read as the colon that
+        // ends the name.
+        let (trimmed, point_class) = match trimmed.find(":::") {
+            Some(at) => {
+                let after = &trimmed[at + 3..];
+                let class_end = after.find(':').unwrap_or(after.len());
+                let class = after[..class_end].trim();
+                // Re-join name and the rest of the line without the class, so everything below
+                // reads a plain `Label: [x, y] …` line.
+                let rebuilt = format!("{}{}", &trimmed[..at], &after[class_end..]);
+                (
+                    Cow::Owned(rebuilt),
+                    (!class.is_empty()).then(|| class.to_string()),
+                )
+            }
+            None => (Cow::Borrowed(trimmed), None),
+        };
+        let trimmed: &str = &trimmed;
         let Some(point_name) = parse_name_before_colon(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported quadrant syntax: {trimmed}"
@@ -10512,15 +10563,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
                 "",
             ),
         };
-        if !point_style.is_empty() {
-            // NAMED, not swallowed: per-point radius/colour/stroke have nowhere to go —
-            // `IrQuadrantPoint` carries a label and a position and nothing else — so a field here
-            // would be dead IR. What matters is that the point now lands where it was written.
-            builder.add_warning(format!(
-                "Line {line_number}: quadrant point styling `{point_style}` is parsed but not \
-                 applied; the point keeps the theme's appearance"
-            ));
-        }
+        let style = (!point_style.is_empty()).then(|| parse_quadrant_point_style(point_style));
         let (x, y) = if let Some((xs, ys)) = coords.split_once(',') {
             (
                 xs.trim().parse::<f32>().unwrap_or(0.5),
@@ -10532,16 +10575,69 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             (x, 0.5)
         };
 
+        if let Some(class) = point_class {
+            point_classes.push((meta.points.len(), class));
+        }
         meta.points.push(fm_core::IrQuadrantPoint {
             // Entity codes decode here as in every other label position (bd-j06n2); the pinned
             // mermaid-11.15.0 draws `#35;` as `#` in a quadrant point label.
             label: decode_mermaid_entities(point_name),
             x: x.clamp(0.0, 1.0),
             y: y.clamp(0.0, 1.0),
+            style,
         });
 
         let span = span_for(line_number, line);
-        let _ = builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span);
+        point_nodes.push(builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span));
+    }
+
+    // A class fills in only what the point's own clause left unset, key by key.
+    for (point_index, class) in point_classes {
+        let Some((_, class_style)) = class_styles.iter().rev().find(|(name, _)| *name == class)
+        else {
+            builder.add_warning(format!(
+                "quadrant point `{}` names class `{class}`, which no classDef declares",
+                meta.points
+                    .get(point_index)
+                    .map_or("", |point| point.label.as_str())
+            ));
+            continue;
+        };
+        if let Some(point) = meta.points.get_mut(point_index) {
+            let own = point.style.take().unwrap_or_default();
+            point.style = Some(fm_core::IrQuadrantPointStyle {
+                radius: own.radius.or(class_style.radius),
+                color: own.color.or_else(|| class_style.color.clone()),
+                stroke_color: own
+                    .stroke_color
+                    .or_else(|| class_style.stroke_color.clone()),
+                stroke_width: own.stroke_width.or(class_style.stroke_width),
+            });
+        }
+    }
+    // The canvas and GPU backends paint a quadrant point as its node, so the resolved colours ride
+    // on the node's inline style too — through the shared sanitiser, like every author style.
+    for (point, node) in meta.points.iter().zip(&point_nodes) {
+        let (Some(style), Some(node)) = (point.style.as_ref(), node) else {
+            continue;
+        };
+        let mut css = String::new();
+        if let Some(color) = &style.color {
+            css.push_str("fill:");
+            css.push_str(color);
+            css.push(',');
+        }
+        if let Some(stroke) = &style.stroke_color {
+            css.push_str("stroke:");
+            css.push_str(stroke);
+            css.push(',');
+        }
+        let inline = fm_core::parse_style_string(&css);
+        if !inline.is_empty()
+            && let Some(node) = builder.node_mut(*node)
+        {
+            node.inline_style = Some(Box::new(inline));
+        }
     }
 
     if !meta.points.is_empty()
@@ -10551,6 +10647,40 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     {
         builder.set_quadrant_meta(meta);
     }
+}
+
+/// `radius: 12, color: #f30, stroke-color: #000, stroke-width: 2px` — the four keys upstream's
+/// quadrant grammar accepts, in a point's clause or a `classDef` body. Colours pass through the
+/// shared style sanitiser; an unknown key or an unreadable number is skipped rather than guessed.
+fn parse_quadrant_point_style(text: &str) -> fm_core::IrQuadrantPointStyle {
+    let mut style = fm_core::IrQuadrantPointStyle::default();
+    let number = |value: &str| {
+        let value = value.trim();
+        value
+            .strip_suffix("px")
+            .unwrap_or(value)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    let colour = |value: &str| {
+        let style = fm_core::parse_style_string(&format!("fill:{}", value.trim()));
+        style.properties.get("fill").cloned()
+    };
+    for field in text.split(',') {
+        let Some((key, value)) = field.split_once(':') else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "radius" => style.radius = number(value),
+            "color" => style.color = colour(value),
+            "stroke-color" => style.stroke_color = colour(value),
+            "stroke-width" => style.stroke_width = number(value),
+            _ => {}
+        }
+    }
+    style
 }
 
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
@@ -10566,19 +10696,9 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
 
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("xychart") {
-            // `xychart-beta horizontal` swaps the axes. The whole header line was skipped, so the
-            // orientation was dropped in SILENCE and the reader got a vertical chart with no hint
-            // that the directive had been seen — the chart simply looked wrong (bd-8dk0m).
-            //
-            // NAMED rather than stored: `IrXyChartMeta` has no orientation field and no renderer
-            // reads one, so a flag here would be dead IR of the kind docs/IR_FIELD_SWEEP.md exists
-            // to catch. Drawing it horizontally is a renderer change, not a parser one.
-            if lower.split_whitespace().any(|token| token == "horizontal") {
-                builder.add_warning(
-                    "xychart `horizontal` orientation is parsed but not applied; the chart is \
-                     drawn vertically",
-                );
-            }
+            // `xychart-beta horizontal` swaps the axes (bd-8dk0m). Stored, not just named: layout
+            // and every renderer read `horizontal`, so the flag is live IR.
+            xy_chart_meta.horizontal = lower.split_whitespace().any(|token| token == "horizontal");
             continue;
         }
 
@@ -11291,6 +11411,9 @@ struct GitGraphState {
     /// Lane index per commit node, keyed by node index. Handed to the IR so layout can turn branch
     /// membership into a position instead of drawing every branch in one column.
     commit_lanes: BTreeMap<usize, usize>,
+    /// `branch dev order: 2` values, by branch name. Applied once parsing ends, because a later
+    /// branch can sort in front of an earlier one.
+    explicit_orders: Vec<(String, f64)>,
 }
 
 impl GitGraphState {
@@ -11301,6 +11424,7 @@ impl GitGraphState {
             commit_counter: 0,
             branch_order: vec!["main".to_string()],
             commit_lanes: BTreeMap::new(),
+            explicit_orders: Vec::new(),
         }
     }
 
@@ -11859,19 +11983,23 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
         if let Some(command) = parse_gitgraph_command(trimmed) {
             match command {
                 Ok(command) => {
-                    // The NAME is now correct; the ORDER VALUE still is not applied, and saying so
-                    // is the point — a silently ignored lane order is the invisible-nothing this
-                    // change is about. Lane placement lives in fm-layout, not here, so honouring it
-                    // is a layout change rather than a parser one (bd-p6sgt).
-                    if matches!(command, GitGraphCommand::Branch(_))
-                        && let Some((_, order)) = split_git_branch_order(trimmed)
-                    {
-                        builder.add_warning(format!(
-                            "Line {line_number}: gitGraph branch order `{order}` is parsed but not \
-                             applied; branches keep declaration order"
-                        ));
-                    }
+                    // `branch dev order: 2` (bd-p6sgt): the name is split off by the command parser;
+                    // the order is recorded here and applied to every lane once parsing ends.
+                    let explicit_order = match &command {
+                        GitGraphCommand::Branch(name) => split_git_branch_order(trimmed)
+                            .map(|(_, order)| (normalize_identifier(name), order.to_string())),
+                        _ => None,
+                    };
                     lower_gitgraph_command(command, line_number, line, &mut state, builder);
+                    if let Some((name, order)) = explicit_order {
+                        match parse_git_branch_order_value(&order) {
+                            Some(value) => state.explicit_orders.push((name, value)),
+                            None => builder.add_warning(format!(
+                                "Line {line_number}: gitGraph branch order `{order}` is not a \
+                                 number; the branch keeps its declaration position"
+                            )),
+                        }
+                    }
                 }
                 Err(message) => builder.add_warning(format!("Line {line_number}: {message}")),
             }
@@ -11891,10 +12019,102 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
         ));
     }
 
+    apply_git_branch_order(&mut state, builder);
     builder.set_git_graph_meta(fm_core::IrGitGraphMeta {
         branches: state.branch_order,
         commit_lanes: state.commit_lanes,
     });
+}
+
+/// `order:`'s value as upstream reads it — `parseInt`, so the leading integer of the text.
+fn parse_git_branch_order_value(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let end = text
+        .char_indices()
+        .find(|&(index, c)| !(c.is_ascii_digit() || (index == 0 && c == '-')))
+        .map_or(text.len(), |(index, _)| index);
+    text[..end].parse::<i64>().ok().map(|value| value as f64)
+}
+
+/// Re-sort branch lanes by their `order:` exactly as the pinned 11.15.0 `getBranchesAsObjArray`
+/// does, then renumber every commit's lane and palette class to match.
+///
+/// Upstream gives `main` order 0, every branch WITHOUT an explicit order the fraction `0.i` (`i`
+/// being its declaration index, so `0.1`, `0.2`, …), and sorts stably by that key. An explicit
+/// integer order therefore moves a branch past every implicitly ordered one, and two explicit
+/// orders sort among themselves. Lane and colour both follow the sorted position, as upstream's
+/// `branchPos` index does.
+fn apply_git_branch_order(state: &mut GitGraphState, builder: &mut IrBuilder) {
+    if state.explicit_orders.is_empty() {
+        return;
+    }
+    let key = |index: usize, name: &str| -> f64 {
+        if let Some((_, value)) = state
+            .explicit_orders
+            .iter()
+            .rev()
+            .find(|(branch, _)| branch == name)
+        {
+            return *value;
+        }
+        if index == 0 {
+            return 0.0;
+        }
+        // `parseFloat("0." + i)`: the declaration index read as a decimal fraction.
+        let mut scale = 1.0;
+        let mut rest = index;
+        while rest > 0 {
+            scale *= 10.0;
+            rest /= 10;
+        }
+        index as f64 / scale
+    };
+    let mut sorted: Vec<usize> = (0..state.branch_order.len()).collect();
+    let keys: Vec<f64> = state
+        .branch_order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| key(index, name))
+        .collect();
+    // Stable insertion sort: a chart has a handful of branches, and this keeps another `sort_by`
+    // instantiation (several KiB of WASM) out of the bundle.
+    for i in 1..sorted.len() {
+        let mut j = i;
+        while j > 0 && keys[sorted[j - 1]] > keys[sorted[j]] {
+            sorted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    if sorted
+        .iter()
+        .enumerate()
+        .all(|(position, &old)| position == old)
+    {
+        return;
+    }
+    let mut new_lane = vec![0_usize; sorted.len()];
+    for (position, &old) in sorted.iter().enumerate() {
+        new_lane[old] = position;
+    }
+    state.branch_order = sorted
+        .iter()
+        .map(|&old| state.branch_order[old].clone())
+        .collect();
+    for (&node_index, lane) in &mut state.commit_lanes {
+        let old = *lane;
+        let Some(&new) = new_lane.get(old) else {
+            continue;
+        };
+        *lane = new;
+        if let Some(node) = builder.node_mut(IrNodeId(node_index)) {
+            let old_class = format!("git-branch-{}", old % 8);
+            for class in &mut node.classes {
+                if *class == old_class {
+                    *class = format!("git-branch-{}", new % 8);
+                }
+            }
+        }
+    }
 }
 
 fn parse_gitgraph_command(line: &str) -> Option<Result<GitGraphCommand, String>> {
@@ -25885,9 +26105,74 @@ Rel_Back(db, app, "Responds")"#,
             (point.x - 0.3).abs() < 1e-6 && (point.y - 0.6).abs() < 1e-6,
             "the styling clause moved the point: {point:?}"
         );
+        let style = point.style.as_ref().expect("the styling clause is applied");
+        assert_eq!(style.radius, Some(10.0));
+        assert_eq!(style.color.as_deref(), Some("#ff0000"));
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("point styling")),
-            "the unapplied styling was dropped in silence: {:?}",
+            parsed.warnings.is_empty(),
+            "applied styling is not a warning: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// `classDef` + `:::class` on a quadrant point: the class fills only the keys the point's own
+    /// clause left unset, the class may be declared after its first use, and the resolved fill and
+    /// stroke reach the point's node for the backends that paint nodes generically.
+    #[test]
+    fn quadrant_point_classes_merge_under_the_points_own_style() {
+        let parsed = parse_mermaid(
+            "quadrantChart\n  Campaign A:::hot: [0.3, 0.6]\n  Campaign B:::hot: [0.45, 0.23] radius: 12\n  Campaign C: [0.7, 0.8]\n  classDef hot color: #109060, radius : 9, stroke-color: #000000, stroke-width: 3px\n",
+        );
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+        let labels: Vec<&str> = meta.points.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Campaign A", "Campaign B", "Campaign C"]);
+
+        let a = meta.points[0].style.as_ref().expect("class style applied");
+        assert_eq!(a.radius, Some(9.0));
+        assert_eq!(a.color.as_deref(), Some("#109060"));
+        assert_eq!(a.stroke_color.as_deref(), Some("#000000"));
+        assert_eq!(a.stroke_width, Some(3.0));
+        let b = meta.points[1].style.as_ref().expect("own + class style");
+        assert_eq!(b.radius, Some(12.0), "the point's own radius wins");
+        assert_eq!(b.color.as_deref(), Some("#109060"));
+        assert!(
+            meta.points[2].style.is_none(),
+            "an unstyled point stays unstyled"
+        );
+        assert!((meta.points[1].x - 0.45).abs() < 1e-6);
+
+        let fills: Vec<Option<&str>> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| {
+                node.inline_style
+                    .as_ref()
+                    .and_then(|style| style.properties.get("fill"))
+                    .map(String::as_str)
+            })
+            .collect();
+        assert_eq!(fills, [Some("#109060"), Some("#109060"), None]);
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("hot") || w.contains("unsupported")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    /// A point naming a class nobody declares is reported, and the point is still drawn.
+    #[test]
+    fn quadrant_point_with_an_undeclared_class_is_reported() {
+        let parsed = parse_mermaid("quadrantChart\n  A:::ghost: [0.3, 0.6]\n");
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+        assert_eq!(meta.points.len(), 1);
+        assert!(meta.points[0].style.is_none());
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("ghost")),
+            "{:?}",
             parsed.warnings
         );
     }
@@ -25923,14 +26208,23 @@ Rel_Back(db, app, "Responds")"#,
         }
     }
 
-    /// `xychart-beta horizontal` swaps the axes and we draw vertically — say so (bd-8dk0m).
+    /// `xychart-beta horizontal` swaps the axes, and the orientation reaches the IR (bd-8dk0m).
     #[test]
-    fn xychart_horizontal_orientation_is_reported_as_unapplied() {
+    fn xychart_horizontal_orientation_is_stored() {
         let parsed = parse_mermaid("xychart-beta horizontal\n  x-axis [a, b]\n  bar [1, 2]\n");
 
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("horizontal")),
-            "the orientation was dropped in silence: {:?}",
+            parsed
+                .ir
+                .xy_chart_meta
+                .as_ref()
+                .is_some_and(|meta| meta.horizontal),
+            "the orientation was dropped: {:?}",
+            parsed.ir.xy_chart_meta
+        );
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("horizontal")),
+            "an applied orientation must not be reported as unapplied: {:?}",
             parsed.warnings
         );
         // NON-VACUITY: the chart itself must still parse, or the warning is all there is.
@@ -25944,10 +26238,17 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// CONTROL: an ordinary vertical chart raises no orientation warning.
+    /// CONTROL: an ordinary vertical chart stays vertical and raises no orientation warning.
     #[test]
     fn xychart_without_an_orientation_is_silent() {
         let parsed = parse_mermaid("xychart-beta\n  x-axis [a, b]\n  bar [1, 2]\n");
+        assert!(
+            parsed
+                .ir
+                .xy_chart_meta
+                .as_ref()
+                .is_some_and(|meta| !meta.horizontal)
+        );
 
         assert!(
             !parsed.warnings.iter().any(|w| w.contains("horizontal")),
@@ -26293,6 +26594,28 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    #[test]
+    fn requirement_styling_statements_are_applied_not_reported_unsupported() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement r {\n  id: 1\n  }\n  classDef hot fill:#f96\n  class r hot\n  style r fill:#ffa\n",
+        );
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("unsupported")),
+            "{:?}",
+            parsed.warnings
+        );
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|class| class == "hot")
+        );
+        assert!(
+            !parsed.ir.style_refs.is_empty(),
+            "the style statement was not recorded"
+        );
+    }
+
     /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
     ///
     /// `treemap` renders in the incumbent. "No parseable nodes or edges were found" is true here but
@@ -26391,15 +26714,60 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// The order VALUE is not applied, and says so rather than vanishing.
+    /// The order VALUE sorts the lanes the way upstream's `getBranchesAsObjArray` does: `main` is 0,
+    /// an unordered branch is `0.i`, an explicit order is its integer, and the sort is stable.
     #[test]
-    fn gitgraph_branch_order_value_is_reported_as_unapplied() {
-        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev order: 2\n  commit\n");
-
+    fn gitgraph_branch_order_value_sorts_lanes_and_colours() {
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch late order: 1\n  commit\n  branch first\n  commit\n  branch zero order: 0\n  commit\n",
+        );
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("branch order")),
-            "an unapplied lane order was dropped in silence: {:?}",
+            !parsed.warnings.iter().any(|w| w.contains("branch order")),
+            "{:?}",
             parsed.warnings
+        );
+        let meta = parsed.ir.git_graph_meta.as_ref().expect("git meta");
+        // main 0 and zero 0 tie (stable: main first); first is 0.2 (third declared); late is 1.
+        assert_eq!(meta.branches, ["main", "zero", "first", "late"]);
+        let lane_of = |label: &str| {
+            let index = parsed
+                .ir
+                .nodes
+                .iter()
+                .position(|node| parsed.ir.node_display_text(node) == label || node.id == label)
+                .unwrap_or_else(|| panic!("no commit {label}"));
+            (index, meta.lane_of(index))
+        };
+        // Commits are numbered in creation order: 1 on main, 2 on late, 3 on first, 4 on zero.
+        for (commit, lane) in [
+            ("commit_1", 0),
+            ("commit_2", 3),
+            ("commit_3", 2),
+            ("commit_4", 1),
+        ] {
+            let (index, actual) = lane_of(commit);
+            assert_eq!(actual, lane, "{commit}");
+            let class = format!("git-branch-{lane}");
+            assert!(
+                parsed.ir.nodes[index].classes.contains(&class),
+                "{commit} keeps a stale colour: {:?}",
+                parsed.ir.nodes[index].classes
+            );
+        }
+    }
+
+    /// A non-numeric order is reported and leaves declaration order alone.
+    #[test]
+    fn gitgraph_branch_order_that_is_not_a_number_is_reported() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev order: soon\n  commit\n");
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("not a number")),
+            "{:?}",
+            parsed.warnings
+        );
+        assert_eq!(
+            parsed.ir.git_graph_meta.as_ref().unwrap().branches,
+            ["main", "dev"]
         );
     }
 

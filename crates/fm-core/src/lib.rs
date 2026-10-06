@@ -7510,6 +7510,11 @@ pub struct IrXyChartMeta {
     pub y_axis: IrXyAxis,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series: Vec<IrXySeries>,
+    /// `xychart-beta horizontal`: categories run DOWN the left side and values ACROSS, so bars grow
+    /// rightward. Upstream's horizontal orchestrator puts the category (x) axis on the left and the
+    /// value (y) axis along the top; every backend reads this one flag so they agree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub horizontal: bool,
 }
 
 /// One directive-scoped range of numbered sequence messages.
@@ -7883,6 +7888,25 @@ pub struct IrQuadrantPoint {
     pub label: String,
     pub x: f32,
     pub y: f32,
+    /// Per-point styling: `A: [0.3, 0.6] radius: 12, color: #f30, stroke-color: #000,
+    /// stroke-width: 2px`, or the same keys from a `classDef` the point names with `:::class`.
+    /// `None` keeps the theme's appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<IrQuadrantPointStyle>,
+}
+
+/// The four styling keys a quadrant point accepts upstream. The point's own clause wins over its
+/// class, key by key, as upstream merges them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrQuadrantPointStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<f32>,
 }
 
 /// Quadrant-chart-specific metadata.
@@ -14325,6 +14349,7 @@ mod tests {
     #[test]
     fn xy_chart_meta_serde_round_trip() {
         let meta = IrXyChartMeta {
+            horizontal: false,
             title: Some("Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -14361,6 +14386,7 @@ mod tests {
     fn ir_with_xy_chart_meta_round_trip() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             x_axis: IrXyAxis {
                 categories: vec!["Q1".to_string(), "Q2".to_string()],
                 ..Default::default()
