@@ -231,7 +231,9 @@ test("a newer edit cancels an in-flight multi-diagram render atomically", async 
   const h = previewHarness({ yieldToHost: () => new Promise((resolve) => pauses.push(resolve)) });
   await h.controller.start();
   h.send(["old A", "old B"], 1);
+  await settle(); // Reach the inter-diagram boundary through the asynchronous worker calls.
   h.send(["new"], 2);
+  await settle();
   assert.deepEqual(h.calls, ["old A", "new"]);
   pauses[1](); await settle();
   assert.equal(h.root.children.length, 1);
@@ -582,7 +584,9 @@ test("extension selection events use current host-validated bindings and clear i
 test("SVG export buttons reuse the sanitized undecorated render and reject obsolete UI", async () => {
   const h = previewHarness(); await h.controller.start(); h.send(["A"]); await settle();
   const tools = h.root.children[0].children[2];
-  assert.deepEqual(tools.children.map((button) => button.textContent), ["Show source", "Save SVG", "Copy SVG"]);
+  assert.deepEqual(tools.children.map((button) => button.textContent),
+    ["Show source", "Save SVG", "Copy SVG", "Edit selected source fragment"]);
+  assert.equal(tools.children[3].disabled, true, "an engine without bindings must not enable editing");
   for (const [index, action] of [[1, "save"], [2, "copy"]]) {
     tools.children[index].listeners.get("click")();
     assert.deepEqual(h.messages.at(-1), { type: "export-svg", action, requestId: 1,

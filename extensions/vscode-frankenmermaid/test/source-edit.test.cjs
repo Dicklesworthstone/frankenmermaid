@@ -118,7 +118,7 @@ test("Markdown fence escape and incompatible native line endings cannot change t
   assert.throws(() => plan(mixed, "A --> B", "A\nB"), /line endings/u);
 });
 
-async function hostHarness(t, doc = makeDocument("flowchart LR\nA --> B\n")) {
+async function hostHarness(t, doc = makeDocument("flowchart LR\nA --> B\n"), debounceMs = 0) {
   const messages = [], errors = [], editCalls = [], listeners = new Map();
   const disposable = { dispose() {} };
   let receive, onDispose, command;
@@ -154,7 +154,7 @@ async function hostHarness(t, doc = makeDocument("flowchart LR\nA --> B\n")) {
       showWarningMessage: (value) => errors.push(value), showErrorMessage: (value) => errors.push(value),
       onDidChangeTextEditorSelection: () => disposable },
     workspace: { fs: { stat: async () => ({ type: 1 }) }, asRelativePath: () => doc.fileName,
-      getConfiguration: () => ({ get: () => 0 }),
+      getConfiguration: () => ({ get: () => debounceMs }),
       onDidChangeTextDocument: (fn) => { listeners.set("change", fn); return disposable; },
       onDidChangeConfiguration: () => disposable, onDidCloseTextDocument: () => disposable },
   };
@@ -250,6 +250,7 @@ class Element {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((node) => node !== this); }
   focus() { this.focused = true; }
   addEventListener(type, fn) { this.listeners.set(type, fn); }
+  removeEventListener(type, fn) { if (this.listeners.get(type) === fn) this.listeners.delete(type); }
   querySelectorAll(selector) {
     return this.children.flatMap((node) => [
       ...(selector === "*" || node.localName === selector || (selector === "[id]" && node.id) ? [node] : []), ...node.querySelectorAll(selector),
@@ -259,15 +260,17 @@ class Element {
   click() { return this.listeners.get("click")?.({ preventDefault() {}, stopPropagation() {} }); }
 }
 async function controllerHarness(t, source = "flowchart LR\nA --> B\n",
-  fragments = [{ snippet: "A --> B", id: "fm-node-a-0" }]) {
+  fragments = [{ snippet: "A --> B", id: "fm-node-a-0" }], engineOverride) {
   const root = new Element("main"), status = new Element("div"), messages = [], calls = [], listeners = new Map();
-  const engine = { default: async () => {}, renderSvg: () => "<svg/>",
+  const stopButton = new Element("button"), retryButton = new Element("button");
+  const engine = engineOverride || { default: async () => {}, renderSvg: () => "<svg/>",
     parseLens(input) { return { parsed: { warnings: [] }, bindings: fragments.map((item) => bindingFor(input, item.snippet, item.id)) }; },
     applyParseLensEdit(input, id, replacement) { calls.push({ input, id, replacement });
       return receipt(input, bindingFor(input, fragments.find((item) => item.id === id).snippet, id), replacement); },
   };
   const document = { body: { dataset: { wasmModule: "module", wasmBinary: "bytes", styleNonce: "nonce" } },
-    getElementById: (id) => id === "preview" ? root : status, createElement: (tag) => new Element(tag), importNode: (node) => node };
+    getElementById: (id) => ({ preview: root, status, "stop-render": stopButton, "retry-render": retryButton })[id] || null,
+    createElement: (tag) => new Element(tag), importNode: (node) => node };
   const window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name),
     DOMParser: class { parseFromString() { const svg = new Element("svg"); svg.namespaceURI = "http://www.w3.org/2000/svg";
       for (const fragment of fragments) { const node = new Element("g"); node.setAttribute("id", fragment.id); svg.append(node); }
@@ -286,7 +289,7 @@ async function controllerHarness(t, source = "flowchart LR\nA --> B\n",
     root.children[0].children[1].shadowRoot.querySelectorAll("[id]")[index].click();
     button("Edit selected source fragment").click();
   };
-  return { root, status, messages, calls, engine, send, render, button, open, controller };
+  return { root, status, messages, calls, engine, send, render, button, open, controller, stopButton, retryButton };
 }
 
 test("production webview calls Rust with the captured source and waits for host acknowledgement", async (t) => {
@@ -709,4 +712,261 @@ test("disposal interrupts initialization and failed initialization releases its 
   await retrying.start();
   assert.deepEqual(messages, [{ type: "ready" }]);
   retrying.dispose();
+});
+
+test("source changes invalidate the webview before debounce; retry reads fresh host source only once", async (t) => {
+  const h = await hostHarness(t, undefined, 30);
+  const original = h.render();
+  h.change("flowchart LR\nA --> newly_typed\n");
+  const invalidation = h.messages.at(-1);
+  assert.equal(invalidation.type, "invalidate");
+  assert.ok(invalidation.requestId > original.requestId);
+  assert.equal(invalidation.documentVersion, h.doc.version);
+  assert.equal(h.render(), original); // No debounced render has run yet.
+  await h.receive({ type: "retry-render", requestId: original.requestId });
+  assert.equal(h.messages.at(-1), invalidation);
+  await h.receive({ type: "retry-render", requestId: invalidation.requestId, source: "untrusted cached source", path: "/other" });
+  assert.equal(h.render().diagrams[0].source, h.doc.text);
+  assert.ok(h.render().requestId > invalidation.requestId);
+  const count = h.messages.filter((m) => m.type === "render").length;
+  await h.receive({ type: "retry-render", requestId: invalidation.requestId });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(h.messages.filter((m) => m.type === "render").length, count);
+});
+
+test("retry cannot invalidate an in-flight native transaction", async (t) => {
+  const h = await hostHarness(t); const binding = await h.report();
+  const gate = deferred(); h.openEditor = () => gate.promise;
+  const pending = h.receive(messageFor(h, binding, "A --> C"));
+  const snapshot = h.render();
+  await h.receive({ type: "retry-render", requestId: snapshot.requestId });
+  assert.equal(h.render(), snapshot);
+  gate.resolve(h.editor); await pending;
+  assert.equal(h.doc.text, "flowchart LR\nA --> C\n");
+  assert.equal(h.editCalls.length, 1);
+});
+
+test("Stop fences late results; Retry requests a fresh snapshot and coalesces double clicks", async (t) => {
+  const h = await controllerHarness(t), gate = deferred();
+  h.engine.renderSvg = () => gate.promise;
+  let cancellations = 0;
+  h.engine.cancelPending = () => { cancellations += 1; };
+  h.render(2); await settle();
+  assert.equal(h.stopButton.disabled, false);
+  assert.equal(h.retryButton.disabled, true);
+  assert.match(h.status.textContent, /diagram 1 of 1/u);
+  h.stopButton.click();
+  assert.equal(h.stopButton.disabled, true);
+  assert.equal(h.retryButton.disabled, false);
+  assert.equal(h.root.getAttribute("aria-busy"), "false");
+  assert.match(h.status.textContent, /Rendering stopped/u);
+  gate.resolve("<svg/>"); await settle();
+  assert.deepEqual(h.messages.filter((m) => m.type === "rendered").map((m) => m.requestId), [1]);
+  assert.equal(cancellations, 2); // New render admission, then explicit Stop.
+  h.retryButton.click(); h.retryButton.click();
+  assert.deepEqual(h.messages.filter((m) => m.type === "retry-render"), [{ type: "retry-render", requestId: 2 }]);
+  assert.equal(h.retryButton.disabled, true);
+  h.render(3); await settle();
+  assert.equal(h.messages.at(-1).requestId, 3);
+  assert.equal(h.retryButton.disabled, false);
+  h.controller.dispose();
+  assert.equal(h.stopButton.listeners.size, 0);
+  assert.equal(h.retryButton.listeners.size, 0);
+});
+
+test("immediate invalidation rejects old source actions, queued renders and malformed notices", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "keep my draft";
+  const count = h.messages.length;
+  for (const message of [{ type: "invalidate", requestId: 0, documentVersion: 3 },
+    { type: "invalidate", requestId: 2, documentVersion: -1 }, { type: "invalidate", requestId: 2 }]) h.send(message);
+  assert.equal(h.button("Apply source edit").disabled, undefined);
+  h.send({ type: "invalidate", requestId: 3, documentVersion: 4 });
+  assert.equal(h.button("Apply source edit").disabled, true);
+  assert.equal(input.value, "keep my draft");
+  h.button("Show source").click(); h.button("Save SVG").click();
+  h.render(2); await settle();
+  assert.equal(h.messages.length, count);
+  assert.match(h.status.textContent, /Source changed/u);
+  h.retryButton.click(); assert.equal(h.messages.at(-1).requestId, 3);
+});
+
+test("retry stays disabled through engine computation and native acknowledgement, then unlocks", async (t) => {
+  const h = await controllerHarness(t); h.open();
+  h.root.querySelectorAll("textarea")[0].value = "A --> C";
+  const gate = deferred(), original = h.engine.applyParseLensEdit;
+  let result;
+  h.engine.applyParseLensEdit = (...args) => { result = original(...args); return gate.promise; };
+  const pending = h.button("Apply source edit").click();
+  assert.equal(h.retryButton.disabled, true);
+  h.retryButton.click(); assert.equal(h.messages.some((m) => m.type === "retry-render"), false);
+  gate.resolve(result); await pending;
+  assert.equal(h.retryButton.disabled, true);
+  const request = h.messages.at(-1);
+  h.send({ type: "invalidate", requestId: 2, documentVersion: 4 });
+  assert.equal(h.retryButton.disabled, true);
+  h.send({ type: "source-edit-result", requestId: 1, documentVersion: 3,
+    editId: request.editId, ok: true, message: "Applied" });
+  assert.equal(h.retryButton.disabled, false);
+  assert.equal(h.root.querySelectorAll("textarea")[0].readOnly, true);
+});
+
+test("obsolete optional inspection cannot launch fallback parsing after invalidation", async (t) => {
+  const h = await controllerHarness(t), gate = deferred();
+  let fallbacks = 0, renders = 0;
+  h.engine.parseLens = () => gate.promise;
+  h.engine.parse = () => { fallbacks += 1; return {}; };
+  h.engine.renderSvg = () => { renders += 1; return "<svg/>"; };
+  h.render(2); await settle();
+  h.send({ type: "invalidate", requestId: 3, documentVersion: 4 });
+  gate.resolve(undefined); await settle();
+  assert.equal(fallbacks, 0);
+  assert.equal(renders, 0);
+});
+
+// Browser/VS Code boundaries remain doubles, but worker execution here is real: production
+// create() assembles the actual module, production attach() dispatches it, and a non-returning
+// WebAssembly loop occupies a separate Node worker thread until the controller terminates it.
+function isolatedWorker(t) {
+  const { Worker } = require("node:worker_threads");
+  const { create } = require("../media/engine-worker.js");
+  const workerSource = fs.readFileSync(path.join(__dirname, "../media/engine-worker.js"), "utf8");
+  const bytes = Uint8Array.from([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,
+    7,8,1,4,115,112,105,110,0,0,10,9,1,7,0,3,64,12,0,11,11]);
+  const fixture = `
+    let wasm;
+    async function __wbg_init({module_or_path}) { wasm = (await WebAssembly.instantiate(module_or_path)).instance; }
+    function hang(method) { self.postMessage({entered:method}); wasm.exports.spin(); }
+    function renderSvg(source) { if(source === 'HANG') hang('render'); return '<svg/>'; }
+    function parseLens(source) {
+      if(source === 'HANG_PARSE') hang('parse');
+      return {parsed:{warnings:[]}, bindings:[{elementId:'fm-node-a-0',snippet:source,
+        textRange:{startByte:0,endByte:new TextEncoder().encode(source).length}}]};
+    }
+    function applyParseLensEdit(source,id,replacement) {
+      if(replacement === 'HANG_EDIT') hang('edit');
+      return {result:{elementId:id,previousSnippet:source,replacement,updatedSource:replacement,
+        replacedRange:{startByte:0,endByte:new TextEncoder().encode(source).length}},snapshot:parseLens(replacement)};
+    }
+    export {__wbg_init as default,renderSvg,parseLens,applyParseLensEdit};
+  `;
+  const blobs = new Map(), threads = [], fetches = [], timers = new Map(), revoked = [];
+  let timerId = 0;
+  class BlobBoundary { constructor(parts) { this.source = parts.join(""); } }
+  class WorkerBoundary {
+    constructor(url) {
+      this.listeners = new Map(); this.entered = deferred(); this.exited = deferred(); this.terminations = 0;
+      const bridge = `import {parentPort} from 'node:worker_threads';
+        globalThis.self = {postMessage:(data)=>parentPort.postMessage(data),
+          addEventListener:(name,fn)=>parentPort.on(name,(data)=>fn({data}))};\n`;
+      this.worker = new Worker(new URL("data:text/javascript;base64," + Buffer.from(bridge + blobs.get(url)).toString("base64")));
+      this.worker.on("message", (data) => {
+        if (data.entered) this.entered.resolve(data.entered);
+        for (const listener of this.listeners.get("message") || []) listener({ data });
+      });
+      this.worker.on("error", (error) => {
+        for (const listener of this.listeners.get("error") || []) listener({ message: error.message, preventDefault() {} });
+      });
+      this.worker.on("exit", (code) => this.exited.resolve(code));
+      threads.push(this);
+    }
+    addEventListener(name, fn) {
+      if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+      this.listeners.get(name).add(fn);
+    }
+    removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
+    postMessage(data, transfers) { this.worker.postMessage(data, transfers); }
+    terminate() { this.terminations += 1; return this.worker.terminate(); }
+  }
+  const api = create({ moduleUrl: "module", binaryUrl: "binary", workerUrl: "worker",
+    WorkerType: WorkerBoundary, BlobType: BlobBoundary,
+    urls: { createObjectURL(blob) { const url = `blob:${blobs.size}`; blobs.set(url, blob.source); return url; },
+      revokeObjectURL(url) { revoked.push(url); blobs.delete(url); } },
+    fetchFile: async (url) => { fetches.push(url); return { ok: true,
+      text: async () => url === "module" ? fixture : workerSource, arrayBuffer: async () => bytes.slice().buffer }; },
+    setTimer: (fn) => { const id = ++timerId; timers.set(id, fn); return id; },
+    clearTimer: (id) => timers.delete(id), timeoutMs: 15000,
+  });
+  t.after(async () => { api.destroy(); await Promise.all(threads.map((thread) => thread.worker.terminate())); });
+  return { api, threads, fetches, timers, revoked };
+}
+async function waitForReport(h, id) {
+  const deadline = Date.now() + 3000;
+  while (!h.messages.some((m) => m.type === "rendered" && m.requestId === id)) {
+    assert.ok(Date.now() < deadline, `render ${id} did not finish: ${h.status.textContent}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  return h.messages.find((m) => m.type === "rendered" && m.requestId === id);
+}
+function sourceRequest(h, source, requestId) {
+  h.send({ type: "render", requestId, documentVersion: requestId + 2, title: "actual-worker.mmd",
+    diagrams: [{ id: 0, source, startLine: 0 }] });
+}
+
+test("real WASM work is interrupted by Stop and Retry restarts cached engine assets", { timeout: 5000 }, async (t) => {
+  const w = isolatedWorker(t), h = await controllerHarness(t, undefined, undefined, w.api);
+  await waitForReport(h, 1);
+  sourceRequest(h, "HANG", 2);
+  assert.equal(await w.threads[0].entered.promise, "render");
+  await settle(); // The controller thread is still responsive while WASM executes indefinitely.
+  assert.equal(h.stopButton.disabled, false);
+  h.stopButton.click(); await w.threads[0].exited.promise;
+  assert.equal(w.threads[0].terminations, 1);
+  assert.equal(h.messages.some((m) => m.type === "rendered" && m.requestId === 2), false);
+  h.retryButton.click();
+  assert.equal(h.messages.at(-1).type, "retry-render");
+  sourceRequest(h, "recovered source", 3);
+  await waitForReport(h, 3);
+  assert.equal(w.threads.length, 2);
+  assert.equal(w.fetches.length, 3); // Restart uses the retained exact JS and WASM, not new downloads.
+  assert.equal(h.status.textContent, "1 diagram.");
+  h.controller.dispose(); await w.threads[1].exited.promise;
+  assert.equal(w.revoked.length, 1);
+  assert.equal(w.timers.size, 0);
+});
+
+test("pre-debounce invalidation terminates real WASM inspection and rejects the queued source", { timeout: 5000 }, async (t) => {
+  const w = isolatedWorker(t), h = await controllerHarness(t, undefined, undefined, w.api);
+  await waitForReport(h, 1);
+  sourceRequest(h, "HANG_PARSE", 2);
+  assert.equal(await w.threads[0].entered.promise, "parse");
+  h.send({ type: "invalidate", requestId: 3, documentVersion: 4 });
+  await w.threads[0].exited.promise;
+  assert.equal(w.threads[0].terminations, 1);
+  assert.equal(h.root.getAttribute("aria-busy"), "false");
+  sourceRequest(h, "queued obsolete source", 2); await settle();
+  assert.equal(w.threads.length, 1);
+  sourceRequest(h, "current source", 4); await waitForReport(h, 4);
+  assert.deepEqual(h.messages.filter((m) => m.type === "rendered").map((m) => m.requestId), [1, 4]);
+});
+
+test("a real WASM edit interrupted by typing keeps the draft and never reaches the native host", { timeout: 5000 }, async (t) => {
+  const w = isolatedWorker(t), h = await controllerHarness(t, undefined, undefined, w.api);
+  await waitForReport(h, 1); h.open();
+  const input = h.root.querySelectorAll("textarea")[0]; input.value = "HANG_EDIT";
+  const pending = h.button("Apply source edit").click();
+  assert.equal(await w.threads[0].entered.promise, "edit");
+  h.send({ type: "invalidate", requestId: 2, documentVersion: 4 });
+  await pending; await w.threads[0].exited.promise;
+  assert.equal(input.value, "HANG_EDIT");
+  assert.equal(input.readOnly, false);
+  assert.equal(h.button("Apply source edit").disabled, true);
+  assert.equal(h.button("Discard draft").disabled, false);
+  assert.equal(h.messages.some((m) => m.type.startsWith("apply-source")), false);
+});
+
+test("worker watchdog failure surfaces a retryable error and recovers without reopening the preview", { timeout: 5000 }, async (t) => {
+  const w = isolatedWorker(t), h = await controllerHarness(t, undefined, undefined, w.api);
+  await waitForReport(h, 1);
+  sourceRequest(h, "HANG", 2); await w.threads[0].entered.promise;
+  assert.equal(w.timers.size, 1);
+  // Fire the production watchdog only after the worker confirms it entered non-returning WASM.
+  [...w.timers.values()][0]();
+  const failed = await waitForReport(h, 2); await w.threads[0].exited.promise;
+  assert.equal(failed.reports[0].diagnostics.some((d) => /time budget/u.test(d.message)), true);
+  assert.equal(h.stopButton.disabled, true);
+  assert.equal(h.retryButton.disabled, false);
+  h.retryButton.click(); sourceRequest(h, "fixed source", 3); await waitForReport(h, 3);
+  assert.equal(h.status.textContent, "1 diagram.");
+  assert.equal(w.fetches.length, 3);
 });

@@ -6,6 +6,11 @@ function createPreviewController({ document, window, vscode,
 }) {
   const root = document.getElementById("preview");
   const status = document.getElementById("status");
+  const control = (id) => {
+    const node = document.getElementById(id);
+    return node?.localName === "button" ? node : undefined;
+  };
+  const stopButton = control("stop-render"), retryButton = control("retry-render");
   const { wasmModule, wasmBinary, engineWorker, styleNonce } = document.body.dataset;
   if (!root || !status) throw new Error("FrankenMermaid preview roots are missing");
   let engine;
@@ -20,6 +25,42 @@ function createPreviewController({ document, window, vscode,
   let sourceEditor;
   let stagedBatch;
   let nextEditId = 0;
+  let rendering = false;
+  let retryRequested = false;
+
+  function updateControls() {
+    if (stopButton) stopButton.disabled = disposed || !rendering;
+    if (retryButton) retryButton.disabled = disposed || !engine || latestRequestId < 0
+      || rendering || retryRequested || Boolean(sourceEditor?.pending || stagedBatch?.pending);
+  }
+
+  function invalidateView() {
+    revision += 1;
+    engine?.cancelPending?.();
+    invalidateSourceEditor();
+    committedMessage = undefined;
+    elementRegistry = new Map();
+    highlight([]);
+    rendering = false;
+    retryRequested = false;
+    root.setAttribute("aria-busy", "false");
+    updateControls();
+  }
+
+  function stop() {
+    if (disposed || !rendering) return;
+    invalidateView();
+    status.textContent = "Rendering stopped. Retry preview to render the current source.";
+  }
+
+  function retry() {
+    if (disposed || !engine || latestRequestId < 0 || rendering || retryRequested
+      || sourceEditor?.pending || stagedBatch?.pending) return;
+    retryRequested = true;
+    updateControls();
+    status.textContent = "Requesting the current source…";
+    vscode.postMessage({ type: "retry-render", requestId: latestRequestId });
+  }
 
   function highlight(nodes) {
     for (const node of selectedNodes) node.removeAttribute("aria-current");
@@ -55,6 +96,7 @@ function createPreviewController({ document, window, vscode,
     draft.input.readOnly = true;
     draft.apply.disabled = true; draft.stage.disabled = true; draft.cancel.disabled = true;
     draft.notice.textContent = "Checking source edit in the engine…";
+    updateControls();
   }
 
   function finishDraftComputation(draft) {
@@ -64,6 +106,7 @@ function createPreviewController({ document, window, vscode,
     draft.apply.disabled = draft.stale || draft.applied;
     draft.stage.disabled = draft.stale || draft.applied;
     draft.cancel.disabled = false;
+    updateControls();
   }
 
   function currentDraft(draft, current) {
@@ -147,6 +190,7 @@ function createPreviewController({ document, window, vscode,
           }
           batch.editId = ++nextEditId;
           batch.pending = true; cancel.disabled = true; refreshBatch(batch);
+          updateControls();
           notice.textContent = "Applying all staged fragments through the source editor…";
           vscode.postMessage({ type: "apply-source-batch", requestId: batch.message.requestId,
             documentVersion: batch.message.documentVersion, editId: batch.editId, edits: [...batch.edits.values()] });
@@ -261,6 +305,7 @@ function createPreviewController({ document, window, vscode,
     } finally {
       initializingEngine = undefined;
       starting = false;
+      updateControls();
     }
   }
 
@@ -295,8 +340,9 @@ function createPreviewController({ document, window, vscode,
     return { host, svgElement, svg: exportSvg };
   }
 
-  async function sourceInsight(source) {
+  async function sourceInsight(source, current) {
     const lens = typeof engine.parseLens === "function" ? await engine.parseLens(source) : undefined;
+    if (disposed || current !== revision) return { bindings: [], diagnostics: [] };
     const parsed = lens?.parsed || (typeof engine.parse === "function" ? await engine.parse(source) : undefined);
     const diagnostics = [];
     const seen = new Set();
@@ -392,11 +438,10 @@ function createPreviewController({ document, window, vscode,
   async function render(message) {
     if (!engine || disposed || message.requestId <= latestRequestId) return;
     latestRequestId = message.requestId;
-    const current = ++revision;
-    engine.cancelPending?.();
-    invalidateSourceEditor();
-    committedMessage = undefined;
-    elementRegistry = new Map();
+    invalidateView();
+    const current = revision;
+    rendering = true;
+    updateControls();
     root.setAttribute("aria-busy", "true");
     status.textContent = "Rendering…";
     const cards = [];
@@ -405,12 +450,13 @@ function createPreviewController({ document, window, vscode,
     let failed = 0;
     for (const diagram of message.diagrams) {
       if (disposed || current !== revision) return;
+      status.textContent = `Rendering diagram ${diagram.id + 1} of ${message.diagrams.length}…`;
       const card = element("section");
       card.append(element("h2", `${message.title} — diagram ${diagram.id + 1} (line ${diagram.startLine + 1})`));
       let view;
       let insight = { bindings: [], diagnostics: [] };
       // Failure of optional inspection must never suppress an otherwise renderable diagram.
-      try { insight = await sourceInsight(diagram.source); }
+      try { insight = await sourceInsight(diagram.source, current); }
       catch (error) { insight.diagnostics.push({ severity: "warning", message: `Source inspection failed: ${errorText(error)}` }); }
       if (disposed || current !== revision) return;
       try {
@@ -435,6 +481,8 @@ function createPreviewController({ document, window, vscode,
     highlight([]);
     committedMessage = message;
     elementRegistry = registry;
+    rendering = false;
+    updateControls();
     root.setAttribute("aria-busy", "false");
     status.textContent = cards.length === 0 ? "No Mermaid code fences found in this document."
       : `${cards.length} diagram${cards.length === 1 ? "" : "s"}${failed ? `; ${failed} could not render` : ""}.`;
@@ -468,6 +516,7 @@ function createPreviewController({ document, window, vscode,
       sourceEditor.apply.disabled = message.ok || sourceEditor.stale;
       sourceEditor.stage.disabled = message.ok || sourceEditor.stale;
       sourceEditor.notice.textContent = message.message;
+      updateControls();
     } else if (message?.type === "source-edit-result" && stagedBatch?.pending
       && message.editId === stagedBatch.editId && message.requestId === stagedBatch.message.requestId
       && message.documentVersion === stagedBatch.message.documentVersion && typeof message.ok === "boolean"
@@ -477,6 +526,7 @@ function createPreviewController({ document, window, vscode,
       stagedBatch.cancel.disabled = false;
       stagedBatch.notice.textContent = message.message;
       refreshBatch(stagedBatch);
+      updateControls();
     } else if (message && committedMessage && message.requestId === committedMessage.requestId
       && message.documentVersion === committedMessage.documentVersion && message.type === "select-source"
       && Array.isArray(message.targets) && message.targets.length <= 256
@@ -485,15 +535,16 @@ function createPreviewController({ document, window, vscode,
     } else if (message?.type === "export-complete" && committedMessage
       && message.requestId === committedMessage.requestId && message.documentVersion === committedMessage.documentVersion) {
       status.textContent = message.action === "save" ? "SVG saved." : "SVG copied to clipboard.";
+    } else if (message?.type === "invalidate" && Number.isSafeInteger(message.requestId)
+      && message.requestId > latestRequestId && Number.isSafeInteger(message.documentVersion)
+      && message.documentVersion >= 0) {
+      latestRequestId = message.requestId;
+      invalidateView();
+      status.textContent = "Source changed. Waiting for updated preview…";
     } else if (message?.type === "preview-error" && Number.isSafeInteger(message.requestId)
       && message.requestId > latestRequestId && typeof message.message === "string") {
       latestRequestId = message.requestId;
-      revision += 1;
-      engine?.cancelPending?.();
-      invalidateSourceEditor();
-      committedMessage = undefined;
-      elementRegistry = new Map();
-      highlight([]);
+      invalidateView();
       root.replaceChildren(...(sourceEditor ? [sourceEditor.panel] : []), ...(stagedBatch ? [stagedBatch.panel] : []));
       root.setAttribute("aria-busy", "false");
       status.textContent = message.message;
@@ -511,12 +562,18 @@ function createPreviewController({ document, window, vscode,
     committedMessage = undefined;
     elementRegistry = new Map();
     highlight([]);
+    updateControls();
+    stopButton?.removeEventListener("click", stop);
+    retryButton?.removeEventListener("click", retry);
     window.removeEventListener("message", onMessage);
     window.removeEventListener("pagehide", dispose);
   }
   window.addEventListener("message", onMessage);
   window.addEventListener("pagehide", dispose, { once: true });
-  return { start, dispose };
+  stopButton?.addEventListener("click", stop);
+  retryButton?.addEventListener("click", retry);
+  updateControls();
+  return { start, dispose, stop, retry };
 }
 
 if (typeof module === "object" && module.exports) {

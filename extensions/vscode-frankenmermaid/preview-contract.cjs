@@ -357,12 +357,16 @@ class DebouncedRenderScheduler {
     }, this.delayMs);
   }
 
-  dispose() {
-    this.disposed = true;
+  cancel() {
     if (this.timer !== undefined) {
       this.clearTimer(this.timer);
       this.timer = undefined;
     }
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.cancel();
   }
 }
 
@@ -395,6 +399,10 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, workerUri, wasmModuleUr
 </head>
 <body data-wasm-module="${escapeAttribute(wasmModuleUri)}" data-wasm-binary="${escapeAttribute(wasmBinaryUri)}" data-engine-worker="${escapeAttribute(workerUri)}" data-style-nonce="${safeNonce}">
   <div id="status" role="status" aria-live="polite">Loading FrankenMermaid…</div>
+  <div role="group" aria-label="Preview rendering controls">
+    <button id="stop-render" type="button" disabled>Stop rendering</button>
+    <button id="retry-render" type="button" disabled>Retry preview</button>
+  </div>
   <main id="preview" aria-label="Mermaid diagrams"></main>
   <script nonce="${safeNonce}" src="${escapeAttribute(workerUri)}"></script>
   <script nonce="${safeNonce}" type="module" src="${escapeAttribute(scriptUri)}"></script>

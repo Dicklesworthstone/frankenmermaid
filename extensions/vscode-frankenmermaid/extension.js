@@ -46,6 +46,7 @@ async function previewResources(context, panel) {
 
 function postRender(entry) {
   if (!entry.ready || entry.disposed || entry.document.isClosed) return;
+  entry.scheduler.cancel();
   const requestId = ++entry.requestId;
   entry.reports = undefined;
   diagnostics?.delete(entry.document.uri);
@@ -57,6 +58,18 @@ function postRender(entry) {
     entry.snapshot = undefined;
     void entry.panel.webview.postMessage({ type: "preview-error", requestId,
       message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function invalidateRender(entry) {
+  entry.snapshot = undefined;
+  entry.reports = undefined;
+  diagnostics?.delete(entry.document.uri);
+  // Source changes must interrupt executing WASM now, not after the render debounce.
+  // A fresh host-owned sequence token also fences late renders and queued UI actions.
+  if (entry.ready && !entry.disposed && !entry.document.isClosed) {
+    void entry.panel.webview.postMessage({ type: "invalidate", requestId: ++entry.requestId,
+      documentVersion: entry.document.version });
   }
 }
 
@@ -193,9 +206,7 @@ async function applySourceEdit(entry, message) {
     reply(true, "Source updated. Use the editor's Undo to restore it.");
     // Source-change events normally invalidate first. Do so here as well before another queued
     // webview message can reuse this receipt, including hosts which deliver that event later.
-    entry.snapshot = undefined;
-    entry.reports = undefined;
-    diagnostics?.delete(entry.document.uri);
+    if (entry.snapshot) invalidateRender(entry);
     entry.scheduler.schedule(() => postRender(entry));
   } catch (error) {
     reply(false, error instanceof Error ? error.message : String(error));
@@ -205,6 +216,11 @@ async function applySourceEdit(entry, message) {
 async function receiveMessage(entry, message) {
   if (entry.disposed) return;
   if (message?.type === "ready") { entry.ready = true; postRender(entry); }
+  else if (message?.type === "retry-render" && entry.ready && !entry.editing
+    && Number.isSafeInteger(message.requestId) && message.requestId === entry.requestId) {
+    // Re-read the bound document; never replay source text or accept a path from the webview.
+    postRender(entry);
+  }
   else if (message?.type === "rendered") acceptRenderReport(entry, message);
   else if (message?.type === "reveal") await revealSource(entry, message);
   else if (message?.type === "export-svg") await exportSvg(entry, message);
@@ -276,9 +292,7 @@ function activate(context) {
       if (entry) {
         entry.document = event.document;
         // Invalidate source-bound actions immediately, not after the debounce expires.
-        entry.snapshot = undefined;
-        entry.reports = undefined;
-        diagnostics.delete(entry.document.uri);
+        invalidateRender(entry);
         entry.scheduler.schedule(() => postRender(entry));
       }
     }),
