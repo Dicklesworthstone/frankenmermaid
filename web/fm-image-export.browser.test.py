@@ -8,8 +8,10 @@ backend is injected so the tests exercise export/browser behavior independently 
 import base64
 import os
 from pathlib import Path
+import re
 import shutil
 import unittest
+import zlib
 
 from playwright.sync_api import sync_playwright
 
@@ -242,6 +244,165 @@ class ImageExportBrowserTests(unittest.TestCase):
         self.assertEqual(struct.unpack('>II', content[16:24]), (300, 150))
         self.assertIn('300 × 150 pixels', self.page.locator('#image-export-status').inner_text())
         self.assertEqual(self.page.locator('#source').input_value(), source)
+
+    def pdf_bytes(self, svg, options=None):
+        result = self.page.evaluate("""async ({svg, options}) => {
+          const artifact = await exports.pdfArtifact(svg, options);
+          return {bytes: [...new Uint8Array(await artifact.blob.arrayBuffer())],
+            filename: artifact.filename, mime: artifact.blob.type, pageCount: artifact.pageCount};
+        }""", {"svg": svg, "options": options or {}})
+        return bytes(result.pop("bytes")), result
+
+    def read_pdf_objects(self, data):
+        """Check actual byte offsets/stream lengths, including the binary header and UTF-16 title."""
+        self.assertTrue(data.startswith(b'%PDF-1.4\n%'))
+        start = int(re.search(rb'startxref\n(\d+)\n%%EOF\n$', data).group(1))
+        xref = data[start:]
+        self.assertTrue(xref.startswith(b'xref\n0 '))
+        lines = xref.splitlines()
+        count = int(lines[1].split()[1])
+        self.assertEqual(lines[2], b'0000000000 65535 f ')
+        offsets = [int(line[:10]) for line in lines[3:count + 2]]
+        objects = []
+        for index, offset in enumerate(offsets):
+            self.assertTrue(data[offset:].startswith(f'{index + 1} 0 obj\n'.encode()))
+            end = offsets[index + 1] if index + 1 < len(offsets) else start
+            value = data[offset:end]
+            self.assertTrue(value.endswith(b'\nendobj\n'))
+            if b'\nstream\n' in value:
+                header, body = value.split(b'\nstream\n', 1)
+                length = int(re.search(rb'/Length (\d+)', header).group(1))
+                self.assertEqual(body[length:], b'\nendstream\nendobj\n')
+                payload = body[:length]
+                if b'/FlateDecode' in header:
+                    payload = zlib.decompress(payload)
+                objects.append((header, payload))
+            else:
+                objects.append((value, None))
+        return objects
+
+    def test_pdf_is_a_real_document_with_exact_lossless_pixels_and_alpha(self):
+        data, artifact = self.pdf_bytes(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-5 -7 10 10">'
+            '<rect x="-5" y="-7" width="5" height="5" fill="red"/></svg>',
+            {"paper": "letter", "scale": 1, "background": "transparent", "filename": "雪 🙂.mmd"})
+        self.assertEqual(artifact, {"filename": "雪 🙂.pdf", "mime": "application/pdf", "pageCount": 1})
+        objects = self.read_pdf_objects(data)
+        image_header, rgb = next(obj for obj in objects if b'/ColorSpace /DeviceRGB' in obj[0])
+        _, alpha = next(obj for obj in objects if b'/ColorSpace /DeviceGray' in obj[0])
+        width = int(re.search(rb'/Width (\d+)', image_header).group(1))
+        height = int(re.search(rb'/Height (\d+)', image_header).group(1))
+        self.assertEqual((width, height), (752, 752))
+        self.assertEqual(len(rgb), width * height * 3)
+        self.assertEqual(len(alpha), width * height)
+        self.assertEqual(rgb[:3], bytes([255, 0, 0]))
+        self.assertEqual((alpha[0], alpha[-1]), (255, 0))
+        self.assertIn(b'/SMask ', image_header)
+        self.assertIn(b'/MediaBox [0 0 612 792]', data)
+        self.assertIn(b'<feff' + '雪 🙂.pdf'.encode('utf-16-be').hex().encode() + b'>', data)
+        self.assertNotIn(b'/JavaScript', data)
+        self.assertNotIn(b'/EmbeddedFile', data)
+
+    def test_pdf_opaque_background_does_not_need_an_alpha_mask(self):
+        for background, expected in [('white', bytes([255, 255, 255])), ('dark', bytes([17, 24, 39]))]:
+            data, _ = self.pdf_bytes('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>',
+                                     {"background": background, "scale": 1})
+            objects = self.read_pdf_objects(data)
+            header, rgb = next(obj for obj in objects if b'/ColorSpace /DeviceRGB' in obj[0])
+            self.assertNotIn(b'/SMask', header)
+            self.assertEqual(rgb[:3], expected)
+            self.assertEqual(rgb[-3:], expected)
+
+    def test_pdf_external_images_and_unavailable_compression_fail_without_downloads(self):
+        result = self.page.evaluate("""async () => {
+          let allocations = 0; const errors = [];
+          const host = { DOMParser, CompressionStream, URL: { createObjectURL() { allocations++; } } };
+          for (const svg of [
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"><image href="https://example.invalid/x.png"/></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"/>',
+          ]) {
+            try { await exports.pdfArtifact(svg, {}, host); }
+            catch (error) { errors.push(error.message); }
+            host.CompressionStream = undefined;
+          }
+          return {errors, allocations};
+        }""")
+        self.assertEqual(result['allocations'], 0)
+        self.assertIn('external image', result['errors'][0])
+        self.assertIn('compression is unavailable', result['errors'][1])
+
+    def install_blocked_pdf_compression(self):
+        self.page.evaluate("""() => {
+          window.compressions = 0; window.compressionCancelled = 0;
+          window.createdUrls = []; window.revokedUrls = [];
+          const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+          URL.createObjectURL = value => { const url = create(value); createdUrls.push(url); return url; };
+          URL.revokeObjectURL = url => { revokedUrls.push(url); revoke(url); };
+          const getContext = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function(...args) {
+            window.pdfCanvas = this; return getContext.apply(this, args);
+          };
+          window.CompressionStream = class {
+            constructor() {
+              compressions++;
+              this.readable = new ReadableStream({cancel() { compressionCancelled++; }});
+              this.writable = new WritableStream();
+            }
+          };
+        }""")
+
+    def test_pdf_cancellation_stops_compression_and_releases_browser_resources(self):
+        self.install_blocked_pdf_compression()
+        self.page.evaluate("""() => {
+          window.abortPdf = new AbortController();
+          window.pendingPdf = exports.pdfArtifact('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"/>',
+            {scale: 1}, window, abortPdf.signal).then(() => 'unexpected success', error => error.name);
+        }""")
+        self.page.wait_for_function('compressions === 1')
+        self.page.evaluate('abortPdf.abort()')
+        self.assertEqual(self.page.evaluate('pendingPdf'), 'AbortError')
+        self.assertEqual(self.page.evaluate('[pdfCanvas.width, pdfCanvas.height]'), [0, 0])
+        self.assertEqual(self.page.evaluate('createdUrls'), self.page.evaluate('revokedUrls'))
+        self.page.wait_for_function('compressionCancelled === 1')
+
+    def test_pdf_compression_timeout_releases_the_canvas(self):
+        self.install_blocked_pdf_compression()
+        error = self.page.evaluate("""async () => {
+          try { await exports.pdfArtifact('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"/>',
+            {scale: 1, timeoutMs: 100}); }
+          catch (error) { return error.message; }
+        }""")
+        self.assertIn('PDF compression timed out', error)
+        self.assertEqual(self.page.evaluate('[pdfCanvas.width, pdfCanvas.height]'), [0, 0])
+        self.assertEqual(self.page.evaluate('createdUrls'), self.page.evaluate('revokedUrls'))
+
+    def test_real_pdf_download_uses_selected_paper_and_leaves_source_unchanged(self):
+        self.mount(injected_save=False)
+        source = self.page.locator('#source').input_value()
+        self.page.locator('#image-export-paper').select_option('letter')
+        self.page.locator('#image-export-scale').select_option('1')
+        with self.page.expect_download() as received:
+            self.page.locator('#image-export-pdf').click()
+        self.assertEqual(received.value.suggested_filename, 'diagram.pdf')
+        data = Path(received.value.path()).read_bytes()
+        self.read_pdf_objects(data)
+        self.assertIn(b'/MediaBox [0 0 792 612]', data)
+        self.assertIn('96 DPI raster', self.page.locator('#image-export-status').inner_text())
+        self.assertEqual(self.page.locator('#source').input_value(), source)
+        self.assertEqual(self.page.locator('#stale-preview').count(), 1)
+
+    def test_editing_during_pdf_compression_cannot_download_stale_source(self):
+        self.mount()
+        self.install_blocked_pdf_compression()
+        self.page.locator('#image-export-scale').select_option('1')
+        self.page.locator('#image-export-pdf').click()
+        self.page.wait_for_function('compressions === 1')
+        self.page.locator('#source').fill('flowchart LR\n changed --> newer')
+        self.page.wait_for_function('compressionCancelled === 1')
+        self.assertEqual(self.page.evaluate('saved.length'), 0)
+        self.assertFalse(self.page.locator('#image-export-pdf').is_disabled())
+        self.assertFalse(self.page.locator('#image-export-paper').is_disabled())
+        self.assertIn('source changed', self.page.locator('#image-export-status').inner_text())
 
 
     def mount_playground_with_transport_fixtures(self):
