@@ -203,6 +203,9 @@ function isCurrentSnapshot(entry, message) {
 // The host owns document identity and ranges; the webview returns only a Rust lens receipt.
 // Do not accept a document URI, arbitrary editor range, or a whole-document replacement from it.
 function planSourceEdit(document, snapshot, reports, message) {
+  if (message.operation !== undefined && message.operation !== "replace") {
+    return planStructuralEdit(document, snapshot, reports, message);
+  }
   const before = document.getText();
   if (before !== snapshot.documentSource) throw new Error("Source changed; select the element again.");
   const block = snapshot.blocks[message.diagramId];
@@ -251,6 +254,100 @@ function planSourceEdit(document, snapshot, reports, message) {
   return { before, after, range: binding.range, newText, changed: before !== after };
 }
 
+// Authorize the engine's structural receipt against the HOST'S binding, not a range supplied by
+// the webview. These are the text-boundary rules of fm-core::apply_lens_delete/insert_line_after;
+// Mermaid parsing and the actual edit still happen in Rust. In particular, deleting an element
+// does not imply deleting its references elsewhere or the other content on a shared statement.
+function planStructuralEdit(document, snapshot, reports, message) {
+  const { operation, replacement: text, result } = message;
+  if (operation !== "insert-after" && operation !== "delete") throw new Error("Unknown source edit operation.");
+  const before = document.getText();
+  if (before !== snapshot.documentSource) throw new Error("Source changed; select the element again.");
+  const block = snapshot.blocks[message.diagramId];
+  const binding = reports?.get(message.diagramId)?.bindings.get(message.elementId);
+  if (!Number.isSafeInteger(message.diagramId) || !block || !binding) {
+    throw new Error("This element has no current editable source fragment.");
+  }
+  if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > MAX_PREVIEW_BYTES
+    || (operation === "delete" && text !== "")) throw new Error("Invalid structural edit text (2 MiB limit).");
+  utf8Boundaries(text, new Set());
+  const source = block.source;
+  const offsets = utf8Boundaries(source, new Set([binding.startByte, binding.endByte]));
+  let start = offsets.get(binding.startByte), end = offsets.get(binding.endByte);
+  if (start === undefined || end === undefined || source.slice(start, end) !== binding.snippet) {
+    throw new Error("Structural edit binding does not match the source.");
+  }
+  const lineStart = start === 0 ? 0 : source.lastIndexOf("\n", start - 1) + 1;
+  const nextNewline = source.indexOf("\n", end);
+  const lineEnd = nextNewline < 0 ? source.length : nextNewline;
+  let fullLine = false, replacement;
+  if (operation === "delete") {
+    // Rust str::trim uses Unicode White_Space, not JS trim's BOM-inclusive character set.
+    fullLine = /^\p{White_Space}*$/u.test(source.slice(lineStart, start))
+      && /^\p{White_Space}*$/u.test(source.slice(end, lineEnd));
+    if (fullLine) { start = lineStart; end = nextNewline < 0 ? lineEnd : lineEnd + 1; }
+    replacement = "";
+  } else {
+    const indent = /^[ \t]*/u.exec(source.slice(lineStart, lineEnd))[0];
+    const newline = source.includes("\r\n") ? "\r\n" : "\n";
+    start = end = nextNewline < 0 ? source.length : lineEnd + 1;
+    replacement = (nextNewline < 0 ? newline : "") + indent + text + newline;
+  }
+  const sourceSplice = { startByte: Buffer.byteLength(source.slice(0, start), "utf8"),
+    endByte: Buffer.byteLength(source.slice(0, end), "utf8"), replacement };
+  const updated = source.slice(0, start) + replacement + source.slice(end);
+  if (!result || result.elementId !== binding.elementId
+    || result.replacedRange?.startByte !== sourceSplice.startByte
+    || result.replacedRange?.endByte !== sourceSplice.endByte
+    || result.previousSnippet !== source.slice(start, end)
+    || result.replacement !== replacement || result.updatedSource !== updated) {
+    throw new Error("The Rust structural receipt does not match the selected source fragment.");
+  }
+
+  const markdown = !isMermaidDocument(document);
+  const sourceStarts = lineStarts(source), starts = lineStarts(before);
+  const range = { start: documentPosition(block, sourceStarts, start),
+    end: documentPosition(block, sourceStarts, end) };
+  if (!range.start || !range.end) throw new Error("Structural edit does not resolve to document positions.");
+  const last = block.lineMap.at(-1);
+  // A closed Markdown fence contributes a native line terminator that is not part of the
+  // LF-joined engine input. Reuse it for EOF insertion, or remove it with an EOF whole-line
+  // deletion. Do NOT consume a pre-existing blank content line or alter an unclosed EOF fence.
+  const normalizeTerminal = markdown && nextNewline < 0
+    && (operation === "insert-after" || fullLine) && starts[last.line + 1] !== undefined;
+  let nativeText = replacement;
+  let firstLineIndent = false;
+  if (operation === "insert-after") {
+    if (nextNewline >= 0) {
+      range.start.character = range.end.character = 0;
+      firstLineIndent = true;
+    } else if (normalizeTerminal) nativeText = nativeText.slice(0, -1);
+  } else if (fullLine) {
+    range.start.character = 0;
+    if (nextNewline >= 0) range.end.character = 0;
+    else if (normalizeTerminal) range.end = { line: last.line + 1, character: 0 };
+  }
+  const eol = document.eol === 2 ? "\r\n" : document.eol === 1 ? "\n"
+    : before.match(/\r\n|\n|\r/u)?.[0] || "\n";
+  const prefix = markdown ? " ".repeat(block.fenceIndent) : "";
+  const parts = nativeText.split(/\r\n|\n|\r/u);
+  const newText = parts.map((part, index) =>
+    (index > 0 || firstLineIndent) && (index < parts.length - 1 || part !== "")
+      ? prefix + part : part).join(eol);
+  const from = starts[range.start.line] + range.start.character;
+  const to = starts[range.end.line] + range.end.character;
+  const after = before.slice(0, from) + newText + before.slice(to);
+  if (Buffer.byteLength(after, "utf8") > MAX_PREVIEW_BYTES) throw new Error("Edited document exceeds the 2 MiB limit.");
+  const expected = normalizeTerminal && updated.endsWith("\n") ? updated.slice(0, -1) : updated;
+  const next = extractMermaidBlocks({ fileName: document.fileName, languageId: document.languageId,
+    getText: () => after });
+  if (next.length !== snapshot.blocks.length || next.some((item, index) =>
+    item.source !== (index === message.diagramId ? expected : snapshot.blocks[index].source))) {
+    throw new Error("Structural edit changes a Markdown fence or cannot preserve the source's line endings.");
+  }
+  return { before, after, range, newText, changed: before !== after, sourceSplice, normalizeTerminal };
+}
+
 // Each receipt addresses the SAME original render, not an intermediate edited source. Check all
 // receipts before constructing one native transaction; aliases of a shared statement overlap too.
 function planSourceBatch(document, snapshot, reports, message) {
@@ -266,6 +363,9 @@ function planSourceBatch(document, snapshot, reports, message) {
     if (payloadBytes > 16 * 1024 * 1024) throw new Error("Source batch exceeds the 16 MiB receipt limit.");
     if (!edit || typeof edit.elementId !== "string" || !Number.isSafeInteger(edit.diagramId)) {
       throw new Error("Invalid batch fragment identity.");
+    }
+    if (edit.operation !== undefined && edit.operation !== "replace") {
+      throw new Error("Structural edits must be applied individually.");
     }
     const key = `${edit.diagramId}:${edit.elementId}`;
     if (ids.has(key)) throw new Error("A source batch cannot repeat an element.");

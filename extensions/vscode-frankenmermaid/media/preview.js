@@ -27,6 +27,7 @@ function createPreviewController({ document, window, vscode,
   let nextEditId = 0;
   let rendering = false;
   let retryRequested = false;
+  const editMethods = { replace: "applyParseLensEdit", "insert-after": "applyParseLensInsertLineAfter", delete: "applyParseLensDelete" };
 
   function updateControls() {
     if (stopButton) stopButton.disabled = disposed || !rendering;
@@ -102,9 +103,9 @@ function createPreviewController({ document, window, vscode,
   function finishDraftComputation(draft) {
     if (!draft.computing) return;
     draft.computing = false; draft.pending = false;
-    draft.input.readOnly = draft.applied;
+    draft.input.readOnly = draft.applied || draft.operation === "delete";
     draft.apply.disabled = draft.stale || draft.applied;
-    draft.stage.disabled = draft.stale || draft.applied;
+    draft.stage.disabled = draft.stale || draft.applied || draft.operation !== "replace";
     draft.cancel.disabled = false;
     updateControls();
   }
@@ -118,19 +119,23 @@ function createPreviewController({ document, window, vscode,
     const { diagram, binding, input } = draft;
     // Textarea.value uses LF. Match the engine input before asking Rust for the edit.
     const eol = diagram.source.match(/\r\n|\n|\r/u)?.[0] || "\n";
-    const replacement = input.value.replace(/\r\n|\n|\r/gu, eol);
+    const replacement = draft.operation === "delete" ? "" : input.value.replace(/\r\n|\n|\r/gu, eol);
     if (new TextEncoder().encode(replacement).length > 2 * 1024 * 1024) throw new Error("Replacement exceeds the 2 MiB limit.");
     for (const character of replacement) {
       const code = character.codePointAt(0);
       if (code >= 0xd800 && code <= 0xdfff) throw new Error("Replacement contains an unpaired surrogate.");
     }
-    const response = await engine.applyParseLensEdit(diagram.source, binding.elementId, replacement);
+    const method = editMethods[draft.operation];
+    const response = draft.operation === "delete"
+      ? await engine[method](diagram.source, binding.elementId)
+      : await engine[method](diagram.source, binding.elementId, replacement);
     const result = response?.result;
     if (!result || !Array.isArray(response.snapshot?.bindings) || typeof result.updatedSource !== "string") {
       throw new Error("Engine did not return a complete source-edit receipt.");
     }
     // Retain scalar values only, never a mutable engine response/snapshot as a later write token.
     return { diagramId: diagram.id, elementId: binding.elementId, replacement,
+      ...(draft.operation === "replace" ? {} : { operation: draft.operation }),
       result: { elementId: result.elementId, previousSnippet: result.previousSnippet,
         replacement: result.replacement, updatedSource: result.updatedSource,
         replacedRange: { startByte: result.replacedRange?.startByte, endByte: result.replacedRange?.endByte } } };
@@ -155,6 +160,7 @@ function createPreviewController({ document, window, vscode,
   }
 
   async function stageSourceEdit(draft, current) {
+    if (draft.operation !== "replace") return;
     if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
     if (committedMessage !== draft.message || current !== revision) { invalidateSourceEditor(); return; }
     try {
@@ -185,7 +191,7 @@ function createPreviewController({ document, window, vscode,
           if (disposed || stagedBatch !== batch || batch.pending || batch.stale || batch.applied || !batch.edits.size) return;
           if (committedMessage !== batch.message) { invalidateSourceEditor(); return; }
           if (sourceEditor && (sourceEditor.pending || (!sourceEditor.applied
-            && sourceEditor.input.value !== sourceEditor.originalInput))) {
+            && (sourceEditor.operation === "delete" || sourceEditor.input.value !== sourceEditor.originalInput)))) {
             notice.textContent = "Stage or discard the open fragment draft before applying the batch."; return;
           }
           batch.editId = ++nextEditId;
@@ -219,33 +225,42 @@ function createPreviewController({ document, window, vscode,
     } finally { finishDraftComputation(draft); }
   }
 
-  function openSourceEditor(message, diagram, binding, current) {
+  function openSourceEditor(message, diagram, binding, current, operation = "replace") {
     if (disposed || current !== revision || committedMessage !== message) return;
     if (stagedBatch?.pending) { stagedBatch.notice.textContent = "Staged edits are being applied; another fragment cannot be opened yet."; return; }
     if (sourceEditor && (sourceEditor.pending || (!sourceEditor.applied
-      && sourceEditor.input.value !== sourceEditor.originalInput))) {
+      && (sourceEditor.operation === "delete" || sourceEditor.input.value !== sourceEditor.originalInput)))) {
       sourceEditor.notice.textContent = "An unapplied draft is already open. Apply it or discard it before editing another fragment.";
       sourceEditor.input.focus();
       return;
     }
-    if (typeof engine.applyParseLensEdit !== "function" || typeof binding.snippet !== "string") {
+    if (typeof engine[editMethods[operation]] !== "function" || typeof binding.snippet !== "string") {
       status.textContent = "This engine build does not provide editable source fragments.";
       return;
     }
     sourceEditor?.panel.remove();
     const panel = element("section");
     const input = element("textarea");
-    input.setAttribute("aria-label", "Source fragment replacement");
+    input.setAttribute("aria-label", operation === "insert-after" ? "New source after selected line"
+      : operation === "delete" ? "Source fragment to delete" : "Source fragment replacement");
     input.spellcheck = false;
-    input.value = binding.snippet;
-    const apply = element("button", "Apply source edit");
+    input.value = operation === "insert-after" ? "" : binding.snippet;
+    input.readOnly = operation === "delete";
+    const apply = element("button", operation === "insert-after" ? "Insert source"
+      : operation === "delete" ? "Delete source fragment" : "Apply source edit");
     const stage = element("button", "Stage fragment");
+    stage.hidden = stage.disabled = operation !== "replace";
     const cancel = element("button", "Discard draft");
     const notice = element("p"); notice.setAttribute("role", "status");
-    panel.append(element("h2", `Edit source fragment — diagram ${diagram.id + 1}`),
-      element("p", "This is the complete engine-owned source fragment, not a label rename. A statement may include multiple nodes and edges. Applying makes one undoable editor change; it does not save the file."),
+    panel.append(element("h2", `${operation === "insert-after" ? "Insert source" : operation === "delete" ? "Delete source fragment" : "Edit source fragment"} — diagram ${diagram.id + 1}`),
+      element("p", operation === "insert-after"
+        ? "Insert Mermaid source after the last line of the selected fragment. The engine copies its indentation onto the first new line; additional lines keep your indentation. This is one undoable editor change and does not save the file."
+        : operation === "delete"
+          ? "Review the complete source fragment below before deleting it. It may contain several nodes or edges. The engine also removes an otherwise empty line, but does not remove references elsewhere. Deletion is undoable and does not save the file."
+          : "This is the complete engine-owned source fragment, not a label rename. A statement may include multiple nodes and edges. Applying makes one undoable editor change; it does not save the file."),
+      ...(operation === "insert-after" ? [element("pre", `Selected source:\n${binding.snippet}`)] : []),
       input, apply, stage, cancel, notice);
-    const draft = { panel, input, apply, stage, cancel, notice, message, diagram, binding,
+    const draft = { panel, input, apply, stage, cancel, notice, message, diagram, binding, operation,
       originalInput: input.value, stale: false, pending: false, applied: false };
     sourceEditor = draft;
     stage.addEventListener("click", () => stageSourceEdit(draft, current));
@@ -257,7 +272,8 @@ function createPreviewController({ document, window, vscode,
       if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
       if (committedMessage !== message || current !== revision) { invalidateSourceEditor(); return; }
       if (stagedBatch && !stagedBatch.applied && stagedBatch.edits.size) {
-        notice.textContent = "Stage this fragment, then apply all staged edits together."; return;
+        notice.textContent = operation === "replace" ? "Stage this fragment, then apply all staged edits together."
+          : "Apply or discard the existing batch before applying a structural edit."; return;
       }
       try {
         beginDraftComputation(draft);
@@ -397,6 +413,16 @@ function createPreviewController({ document, window, vscode,
         if (selectedBinding) openSourceEditor(message, diagram, selectedBinding, current);
       });
       tools.append(edit);
+      const structuralButtons = [];
+      for (const [operation, label] of [["insert-after", "Insert after selected source"], ["delete", "Delete selected source fragment"]]) {
+        if (typeof engine[editMethods[operation]] !== "function") continue;
+        const button = element("button", label);
+        button.disabled = true;
+        button.addEventListener("click", () => {
+          if (selectedBinding) openSourceEditor(message, diagram, selectedBinding, current, operation);
+        });
+        structuralButtons.push(button); tools.append(button);
+      }
       for (const node of view.svgElement.querySelectorAll("[id]")) {
         const binding = bindings.get(node.id);
         if (!binding) continue;
@@ -410,6 +436,7 @@ function createPreviewController({ document, window, vscode,
           highlight([node]);
           selectedBinding = binding;
           edit.disabled = typeof engine.applyParseLensEdit !== "function" || typeof binding.snippet !== "string";
+          for (const button of structuralButtons) button.disabled = typeof binding.snippet !== "string";
           send({ elementId: binding.elementId });
         };
         node.addEventListener("click", select);
@@ -512,9 +539,9 @@ function createPreviewController({ document, window, vscode,
       sourceEditor.pending = false;
       sourceEditor.cancel.disabled = false;
       sourceEditor.applied = message.ok;
-      sourceEditor.input.readOnly = message.ok;
+      sourceEditor.input.readOnly = message.ok || sourceEditor.operation === "delete";
       sourceEditor.apply.disabled = message.ok || sourceEditor.stale;
-      sourceEditor.stage.disabled = message.ok || sourceEditor.stale;
+      sourceEditor.stage.disabled = message.ok || sourceEditor.stale || sourceEditor.operation !== "replace";
       sourceEditor.notice.textContent = message.message;
       updateControls();
     } else if (message?.type === "source-edit-result" && stagedBatch?.pending

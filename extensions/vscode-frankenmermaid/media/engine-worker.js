@@ -5,7 +5,8 @@
 ((root) => {
   "use strict";
   const MAX_INPUT_BYTES = 2 * 1024 * 1024;
-  const METHODS = ["renderSvg", "parseLens", "parse", "applyParseLensEdit"];
+  const EDIT_METHODS = ["applyParseLensEdit", "applyParseLensDelete", "applyParseLensInsertLineAfter"];
+  const METHODS = ["renderSvg", "parseLens", "parse", ...EDIT_METHODS];
   const encoder = new TextEncoder();
   const abortError = () => Object.assign(new Error("Diagram operation cancelled."), { name: "AbortError" });
   const errorText = (error) => String(error?.message || error).slice(0, 16000);
@@ -39,11 +40,14 @@
         await initialization;
         const source = checkedText(message.source, MAX_INPUT_BYTES, "Diagram source");
         let value;
-        if (message.method === "applyParseLensEdit") {
+        if (EDIT_METHODS.includes(message.method)) {
           const id = checkedText(message.elementId, 4096, "Element ID");
           if (!id) throw new Error("Missing element ID.");
-          const replacement = checkedText(message.replacement, MAX_INPUT_BYTES, "Replacement");
-          value = engine.applyParseLensEdit(source, id, replacement);
+          if (message.method === "applyParseLensDelete") value = engine.applyParseLensDelete(source, id);
+          else {
+            const replacement = checkedText(message.replacement, MAX_INPUT_BYTES, "Replacement");
+            value = engine[message.method](source, id, replacement);
+          }
           // The native host verifies the entire receipt and exact source splice before writing.
           value = { result: value?.result, snapshot: { bindings: value?.snapshot?.bindings,
             parsed: inspected(value?.snapshot?.parsed) } };
@@ -96,7 +100,9 @@
           const bootstrap = "\n;globalThis.FmPreviewEngineWorker.attach(self, {init: __wbg_init, renderSvg, " +
             "parseLens: typeof parseLens === 'function' ? parseLens : undefined, " +
             "parse: typeof parse === 'function' ? parse : undefined, " +
-            "applyParseLensEdit: typeof applyParseLensEdit === 'function' ? applyParseLensEdit : undefined});\n";
+            "applyParseLensEdit: typeof applyParseLensEdit === 'function' ? applyParseLensEdit : undefined, " +
+            "applyParseLensDelete: typeof applyParseLensDelete === 'function' ? applyParseLensDelete : undefined, " +
+            "applyParseLensInsertLineAfter: typeof applyParseLensInsertLineAfter === 'function' ? applyParseLensInsertLineAfter : undefined});\n";
           const url = urls.createObjectURL(new BlobType([moduleSource, "\n", workerSource, bootstrap], { type: "text/javascript" }));
           resources = { url, bytes };
           return resources;
@@ -165,7 +171,7 @@
       const loaded = await loadResources(); assertLive(generation);
       const capabilities = await ensureWorker(loaded).ready; assertLive(generation);
       for (const method of capabilities) {
-        if (method === "applyParseLensEdit") api[method] = (source, elementId, replacement) => call(method, { source, elementId, replacement });
+        if (EDIT_METHODS.includes(method)) api[method] = (source, elementId, replacement) => call(method, { source, elementId, replacement });
         else api[method] = (source) => call(method, { source });
       }
     }
@@ -173,6 +179,10 @@
       const generation = epoch;
       assertLive(generation);
       checkedText(payload.source, MAX_INPUT_BYTES, "Diagram source");
+      if (EDIT_METHODS.includes(method)) {
+        if (!checkedText(payload.elementId, 4096, "Element ID")) throw new Error("Missing element ID.");
+        if (method !== "applyParseLensDelete") checkedText(payload.replacement, MAX_INPUT_BYTES, "Replacement");
+      }
       const loaded = await loadResources(); assertLive(generation);
       const workerState = ensureWorker(loaded);
       const capabilities = await workerState.ready; assertLive(generation);
