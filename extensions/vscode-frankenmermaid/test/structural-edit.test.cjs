@@ -189,10 +189,13 @@ test("fence escapes, native EOL mismatches, and final document size overflow fai
   assert.throws(() => planned(large, "A-->B", "insert-after", more, insertBefore("%%%", more + "\n")), /2 MiB/u);
 });
 
-test("replacement batches cannot silently reinterpret a structural receipt", () => {
+test("a structural batch uses the actual expanded deletion range, not the selected snippet", () => {
   const doc = documentFor("flowchart LR\nA-->B\nC-->D\n");
   const f = fixture(doc, "A-->B", "delete", "", remove("A-->B\n"));
-  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, { edits: [f.message] }), /individually/u);
+  const p = planSourceBatch(doc, f.snapshot, f.reports, { edits: [f.message] });
+  assert.equal(p.after, "flowchart LR\nC-->D\n");
+  assert.equal(p.edits.length, 1);
+  assert.deepEqual(p.edits[0].range, { start: { line: 1, character: 0 }, end: { line: 2, character: 0 } });
 });
 
 class Element {
@@ -225,12 +228,16 @@ class Element {
 async function controllerHarness(t, options = {}) {
   const doc = options.doc || documentFor("flowchart LR\nA-->B\nC-->D\n");
   const message = options.message || createRenderSnapshot(doc, 7, "diagram").message;
-  const raw = bindingFor(message.diagrams[0].source, "A-->B");
+  const raw = options.raw || bindingFor(message.diagrams[0].source, "A-->B");
+  const renderBindings = options.renderBindings || new Map([[0, [raw]]]);
+  let nextDiagram = 0;
   const root = new Element("main"), status = new Element("div"), listeners = new Map(), messages = [], calls = [];
   const window = { addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name),
     DOMParser: class { parseFromString() {
       const svg = new Element("svg"); svg.namespaceURI = "http://www.w3.org/2000/svg";
-      const bound = new Element("g"); bound.setAttribute("id", raw.elementId); svg.append(bound);
+      for (const binding of renderBindings.get(nextDiagram++ % message.diagrams.length) || []) {
+        const bound = new Element("g"); bound.setAttribute("id", binding.elementId); svg.append(bound);
+      }
       return { documentElement: svg, querySelector: () => null };
     } }, XMLSerializer: class { serializeToString() { return '<svg xmlns="http://www.w3.org/2000/svg"/>'; } } };
   const document = { body: { dataset: { wasmModule: "module", wasmBinary: "binary", engineWorker: "worker", styleNonce: "nonce" } },
@@ -251,10 +258,13 @@ async function controllerHarness(t, options = {}) {
   await controller.start();
   const send = (m) => listeners.get("message")?.({ data: m });
   send(message); await settle();
-  const button = (label) => root.querySelectorAll("button").find((node) => node.textContent === label);
-  const select = () => root.children[0].children[1].shadowRoot.querySelectorAll("[id]")[0].click();
-  const open = (operation) => { select(); button(operation === "insert-after" ? "Insert after selected source"
-    : operation === "delete" ? "Delete selected source fragment" : "Edit selected source fragment").click(); };
+  const button = (label, scope = root) => scope.querySelectorAll("button").find((node) => node.textContent === label);
+  const open = (operation, bindingIndex = 0, diagramId = 0) => {
+    const card = root.children[diagramId];
+    card.children[1].shadowRoot.querySelectorAll("[id]")[bindingIndex].click();
+    button(operation === "insert-after" ? "Insert after selected source"
+      : operation === "delete" ? "Delete selected source fragment" : "Edit selected source fragment", card).click();
+  };
   const applyMessages = () => messages.filter((m) => m.type.startsWith("apply-source"));
   return { doc, message, raw, engine, root, status, messages, calls, send, controller, button, open, applyMessages };
 }
@@ -263,7 +273,7 @@ test("preview insertion calls the structural engine API and preserves its receip
   const h = await controllerHarness(t); h.open("insert-after");
   const input = h.root.querySelectorAll("textarea")[0];
   assert.equal(input.value, ""); input.value = "N[😀]-->Q";
-  assert.equal(h.button("Stage fragment").hidden, true);
+  assert.notEqual(h.button("Stage fragment").hidden, true);
   await h.button("Insert source").click();
   assert.deepEqual(h.calls, [{ method: "insert-after", source: h.message.diagrams[0].source, id: h.raw.elementId, text: "N[😀]-->Q" }]);
   const request = h.applyMessages()[0];
@@ -530,4 +540,259 @@ test("native host rejects a forged structural receipt without creating any edito
   await host.receive(request);
   assert.equal(host.transactions.length,0);assert.equal(host.doc.text,"flowchart LR\nA-->B\nC-->D\n");
   assert.equal(host.messages.at(-1).ok,false);assert.match(host.messages.at(-1).message,/structural receipt/u);
+});
+
+function batchFixture(doc, changes) {
+  const snapshot = createRenderSnapshot(doc, 7, "mixed edits");
+  const raw = new Map(snapshot.blocks.map((block) => [block.id, []]));
+  const edits = changes.map(({ snippet, operation = "replace", text = "", patch, diagramId = 0, id }, index) => {
+    const source = snapshot.blocks[diagramId].source;
+    const binding = bindingFor(source, snippet, id || `fm-node-${index}`);
+    raw.get(diagramId).push(binding);
+    const at = source.indexOf(snippet);
+    const specified = patch ? patch(source) : { start: at, end: at + snippet.length, replacement: text };
+    const result = receipt(source, binding.elementId, specified.start, specified.end, specified.replacement).result;
+    return { diagramId, elementId: binding.elementId, operation, replacement: text, result };
+  });
+  const reports = new Map(snapshot.blocks.map((block) => [block.id,
+    { bindings: checkedSourceBindings(block, raw.get(block.id)), diagnostics: [] }]));
+  const message = { type: "apply-source-batch", requestId: 7, documentVersion: doc.version, editId: 1, edits };
+  return { snapshot, raw, reports, message };
+}
+function batchPlanned(doc, changes) {
+  const f = batchFixture(doc, changes);
+  const result = planSourceBatch(doc, f.snapshot, f.reports, f.message);
+  assert.equal(doc.text, result.before);
+  return result;
+}
+
+test("mixed batches compose original UTF-8 offsets across replacement, insertion and expanded deletion", () => {
+  const source = "%% café 😀\nflowchart LR\nA[😀]-->B\nC-->D\nE-->F\nG-->H\n";
+  const changes = [
+    { snippet: "G-->H", operation: "delete", patch: remove("G-->H\n") },
+    { snippet: "C-->D", operation: "insert-after", text: "N[東京]-->Q", patch: insertBefore("E-->", "N[東京]-->Q\n") },
+    { snippet: "A[😀]-->B", text: "A[longer]-->B\nB-->Z" },
+  ];
+  for (const ordering of [changes, [...changes].reverse(), [changes[1], changes[0], changes[2]]]) {
+    const p = batchPlanned(documentFor(source), ordering);
+    assert.equal(p.after, "%% café 😀\nflowchart LR\nA[longer]-->B\nB-->Z\nC-->D\nN[東京]-->Q\nE-->F\n");
+    assert.equal(p.edits.length, 3);
+  }
+});
+
+test("mixed batches preserve multiple Markdown containers, CRLF, prose, and per-diagram EOF normalization", () => {
+  const source = "# keep 😀\r\n  ```mermaid\r\n  flowchart LR\r\n    A-->B\r\n    C-->D\r\n  ```\r\nKeep this prose\r\n~~~mermaid\r\nflowchart LR\r\nE-->F\r\nG-->H\r\n~~~\r\nFooter";
+  const p = batchPlanned(documentFor(source, true), [
+    { snippet: "C-->D", operation: "insert-after", text: "N[東京]-->Q", patch: append("\n  N[東京]-->Q\n") },
+    { snippet: "A-->B", text: "A[changed]-->B" },
+    { snippet: "G-->H", diagramId: 1, operation: "delete", patch: remove("G-->H") },
+    { snippet: "E-->F", diagramId: 1, text: "E[changed]-->F" },
+  ]);
+  assert.equal(p.after, "# keep 😀\r\n  ```mermaid\r\n  flowchart LR\r\n    A[changed]-->B\r\n    C-->D\r\n    N[東京]-->Q\r\n  ```\r\nKeep this prose\r\n~~~mermaid\r\nflowchart LR\r\nE[changed]-->F\r\n~~~\r\nFooter");
+  assert.equal(p.edits.length, 4);
+});
+
+test("adjacent whole-line deletions remove no extra separator and can empty a closed fence", () => {
+  const doc = documentFor("# before\n  ```mermaid\n  A-->B\n  C-->D\n  ```\n# after", true);
+  assert.equal(batchPlanned(doc, [
+    { snippet: "A-->B", operation: "delete", patch: remove("A-->B\n") },
+    { snippet: "C-->D", operation: "delete", patch: remove("C-->D") },
+  ]).after, "# before\n  ```mermaid\n  ```\n# after");
+  const blank = documentFor("```mermaid\nA-->B\nC-->D\n\n```", true);
+  assert.equal(batchPlanned(blank, [
+    { snippet: "A-->B", operation: "delete", patch: remove("A-->B\n") },
+    { snippet: "C-->D", operation: "delete", patch: remove("C-->D\n") },
+  ]).after, "```mermaid\n\n```");
+});
+
+test("mixed batches retain an unclosed EOF and never shift earlier source ranges", () => {
+  const doc = documentFor("before\n  ~~~mermaid\n  flowchart LR\n  A[😀]-->B\n  C-->D", true);
+  assert.equal(batchPlanned(doc, [
+    { snippet: "A[😀]-->B", text: "A[changed]-->B" },
+    { snippet: "C-->D", operation: "insert-after", text: "E-->F", patch: append("\nE-->F\n") },
+  ]).after, "before\n  ~~~mermaid\n  flowchart LR\n  A[changed]-->B\n  C-->D\n  E-->F\n");
+});
+
+test("actual patch overlap and shared insertion points abort independent of operation order", () => {
+  const doc = documentFor("flowchart LR\n  A-->B\n  C-->D\nE-->F\n");
+  const cases = [
+    [ { snippet: "A-->B", operation: "delete", patch: remove("  A-->B\n") }, { snippet: "B", text: "Z" } ],
+    [ { snippet: "A", operation: "insert-after", text: "N", patch: insertBefore("  C", "  N\n") },
+      { snippet: "B", operation: "insert-after", text: "Q", patch: insertBefore("  C", "  Q\n") } ],
+    [ { snippet: "A-->B", operation: "insert-after", text: "N", patch: insertBefore("  C", "  N\n") },
+      { snippet: "C-->D", operation: "delete", patch: remove("  C-->D\n") } ],
+  ];
+  for (const changes of cases) for (const order of [changes, [...changes].reverse()]) {
+    assert.throws(() => batchPlanned(doc, order), /overlap|insertion point/u);
+  }
+});
+
+test("inserting after an anchor simultaneously changed or deleted is not silently accepted", () => {
+  const doc = documentFor("flowchart LR\nA-->B\nC-->D\n");
+  for (const edit of [ { snippet: "A-->B", operation: "delete", patch: remove("A-->B\n") },
+    { snippet: "B", text: "Z" } ]) {
+    const changes = [ { snippet: "A-->B", operation: "insert-after", text: "N", patch: insertBefore("C-->", "N\n") }, edit ];
+    for (const order of [changes, [...changes].reverse()]) assert.throws(() => batchPlanned(doc, order), /anchor/u);
+  }
+});
+
+test("combined fence escapes fail even when each individual receipt is valid", () => {
+  const doc = documentFor("```mermaid\nA-->B\n`X``\n```\nprose", true);
+  const f = batchFixture(doc, [
+    { snippet: "A-->B", operation: "insert-after", text: "N", patch: insertBefore("`X", "N\n") },
+    { snippet: "X", operation: "delete", patch: remove("X") },
+  ]);
+  // This delete alone closes the fence, so it must already fail its individual check.
+  assert.throws(() => planSourceEdit(doc, f.snapshot, f.reports, f.message.edits[1]), /fence/u);
+  const combined = documentFor("```mermaid\nA-->B\nXY\n```\nprose", true);
+  const g = batchFixture(combined, [
+    { snippet: "A-->B", operation: "insert-after", text: "N", patch: insertBefore("XY", "N\n") },
+    { snippet: "X", text: "``" }, { snippet: "Y", text: "`" },
+  ]);
+  // Insertion shares X's native start, so put X after a preserved leading space to make every
+  // patch disjoint while the two replacements still jointly form a Markdown closer.
+  const padded = documentFor("```mermaid\nA-->B\n XY\n```\nprose", true);
+  const p = batchFixture(padded, [
+    { snippet: "A-->B", operation: "insert-after", text: "N", patch: insertBefore(" XY", "N\n") },
+    { snippet: "X", text: "``" }, { snippet: "Y", text: "`" },
+  ]);
+  for (const edit of p.message.edits) assert.doesNotThrow(() => planSourceEdit(padded, p.snapshot, p.reports, edit));
+  assert.throws(() => planSourceBatch(padded, p.snapshot, p.reports, p.message), /Combined edits/u);
+  assert.throws(() => planSourceBatch(combined, g.snapshot, g.reports, g.message), /overlap/u);
+});
+
+test("mixed batch payload, document size, no-op and malformed-last-receipt checks remain atomic", () => {
+  const doc = documentFor("flowchart LR\nA-->B\nC-->D\nE-->F\n");
+  const changes = [ { snippet: "A-->B", text: "A-->B" },
+    { snippet: "C-->D", operation: "insert-after", text: "N", patch: insertBefore("E-->", "N\n") } ];
+  assert.equal(batchPlanned(doc, changes).edits.length, 1);
+  const f = batchFixture(doc, changes);
+  f.message.edits[1].result.updatedSource += "foreign";
+  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, f.message), /structural receipt/u);
+  f.message.edits[1].result.updatedSource = "x".repeat(16 * 1024 * 1024);
+  assert.throws(() => planSourceBatch(doc, f.snapshot, f.reports, f.message), /16 MiB/u);
+  const large = "x".repeat(1100000);
+  assert.throws(() => batchPlanned(doc, [ { snippet: "A-->B", text: large },
+    { snippet: "C-->D", operation: "insert-after", text: large, patch: insertBefore("E-->", large + "\n") } ]), /2 MiB/u);
+});
+
+async function batchUiHarness(t, doc, changes, message) {
+  const f = batchFixture(doc, changes), calls = [];
+  const call = (operation, source, id, text = "") => {
+    const edit = f.message.edits.find((entry) => entry.elementId === id);
+    assert.ok(edit, "the UI must call an actual selected element");
+    assert.equal(operation, edit.operation); assert.equal(text, edit.replacement);
+    assert.equal(source, f.snapshot.blocks[edit.diagramId].source, "all operations must address the original render");
+    calls.push({ operation, source, id, text });
+    return { result: structuredClone(edit.result), snapshot: { bindings: [] } };
+  };
+  const engine = { default:async()=>{}, renderSvg:async()=>"<svg/>",
+    parseLens:async(source)=>({bindings: f.raw.get(f.snapshot.blocks.find((block)=>block.source===source).id),parsed:{warnings:[]}}),
+    applyParseLensEdit:async(...args)=>call("replace",...args),
+    applyParseLensDelete:async(...args)=>call("delete",...args),
+    applyParseLensInsertLineAfter:async(...args)=>call("insert-after",...args),
+  };
+  const ui = await controllerHarness(t, {doc, message:message || f.snapshot.message, engine,
+    raw:f.raw.get(0)[0], renderBindings:f.raw});
+  ui.stage = async(index) => {
+    const edit = f.message.edits[index], bindings = f.raw.get(edit.diagramId);
+    ui.open(edit.operation, bindings.findIndex((binding)=>binding.elementId===edit.elementId), edit.diagramId);
+    if (edit.operation!=="delete") ui.root.querySelectorAll("textarea")[0].value=edit.replacement;
+    await ui.button("Stage fragment").click();
+  };
+  return { ...ui, fixture:f, engineCalls:calls };
+}
+
+const mixedSource = "flowchart LR\nA-->B\nC-->D\nE-->F\nG-->H\n";
+const mixedChanges = () => [
+  { snippet:"A-->B",text:"A[東京]-->B" },
+  { snippet:"C-->D",operation:"insert-after",text:"N[😀]-->Q",patch:insertBefore("E-->","N[😀]-->Q\n") },
+  { snippet:"G-->H",operation:"delete",patch:remove("G-->H\n") },
+];
+const mixedExpected = "flowchart LR\nA[東京]-->B\nC-->D\nN[😀]-->Q\nE-->F\n";
+
+test("preview stages every operation with exact before/after text and sends just one atomic batch", async(t)=>{
+  const h=await batchUiHarness(t,documentFor(mixedSource),mixedChanges());
+  await h.stage(2);await h.stage(0);await h.stage(1);
+  assert.equal(h.applyMessages().length,0);assert.equal(h.engineCalls.length,3);
+  assert.match(h.root.textContent,/Delete —/u);assert.match(h.root.textContent,/Replace —/u);assert.match(h.root.textContent,/Insert after —/u);
+  assert.match(h.root.textContent,/Selected source:\nC-->D/u);assert.match(h.root.textContent,/After:\nN\[😀\]-->Q\n/u);
+  await h.button("Apply staged edits").click();const request=h.applyMessages()[0];
+  assert.equal(request.type,"apply-source-batch");assert.equal(request.edits.length,3);
+  assert.deepEqual(request.edits.map((e)=>e.operation||"replace"),["delete","replace","insert-after"]);
+  const p=planSourceBatch(h.doc,h.fixture.snapshot,h.fixture.reports,request);assert.equal(p.after,mixedExpected);
+  await h.button("Apply staged edits").click();assert.equal(h.applyMessages().length,1);
+});
+
+test("staging rejects the real expanded overlap and invalidated anchors without discarding pending source", async(t)=>{
+  for (const changes of [
+    [ {snippet:"A-->B",operation:"delete",patch:remove("A-->B\n")}, {snippet:"B",text:"Z"} ],
+    [ {snippet:"A-->B",operation:"insert-after",text:"N",patch:insertBefore("C-->","N\n")},
+      {snippet:"B",text:"Z"} ],
+  ]) for(const order of [changes,[...changes].reverse()]) {
+    const h=await batchUiHarness(t,documentFor("flowchart LR\nA-->B\nC-->D\n"),order);
+    await h.stage(0);await h.stage(1);
+    assert.match(h.root.textContent,/overlaps|anchor/u);
+    assert.equal(h.root.querySelectorAll("textarea").length,1);
+    assert.equal(h.applyMessages().length,0);
+    assert.equal(h.root.querySelectorAll("summary").filter((n)=>/— diagram/u.test(n.textContent)).length,1);
+  }
+});
+
+test("staging removal releases the anchor reservation and refused mixed batches remain editable", async(t)=>{
+  const h=await batchUiHarness(t,documentFor(mixedSource),mixedChanges());
+  await h.stage(1);await h.button("Remove staged fragment").click();
+  assert.equal(h.button("Apply staged edits").disabled,true);
+  await h.stage(1);await h.stage(2);await h.button("Apply staged edits").click();
+  const request=h.applyMessages()[0];h.send({...request,type:"source-edit-result",ok:false,message:"Read only"});
+  assert.match(h.root.textContent,/N\[😀\]-->Q/u);assert.match(h.root.textContent,/G-->H/u);
+  assert.equal(h.button("Apply staged edits").disabled,false);
+  await h.button("Remove staged fragment").click();await h.button("Apply staged edits").click();
+  assert.equal(h.applyMessages()[1].edits.length,1);assert.equal(h.applyMessages()[1].edits[0].operation,"delete");
+});
+
+test("a deletion review cannot be bypassed by applying an existing batch, and invalidation keeps staged text", async(t)=>{
+  const h=await batchUiHarness(t,documentFor(mixedSource),mixedChanges());
+  await h.stage(0);h.open("delete",2);
+  await h.button("Apply staged edits").click();assert.match(h.root.textContent,/Stage or discard/u);
+  assert.equal(h.applyMessages().length,0);
+  await h.button("Stage fragment").click();
+  h.send({type:"invalidate",requestId:8,documentVersion:2});
+  assert.match(h.root.textContent,/A\[東京\]-->B/u);assert.match(h.root.textContent,/G-->H/u);
+  assert.equal(h.button("Apply staged edits").disabled,true);
+  await h.button("Apply staged edits").click();assert.equal(h.applyMessages().length,0);
+});
+
+test("native host applies a mixed batch as one editor transaction and one complete undo", async(t)=>{
+  const host=await hostHarness(t,documentFor(mixedSource));
+  const ui=await batchUiHarness(t,host.doc,mixedChanges(),host.render());
+  await host.receive(ui.messages.find((m)=>m.type==="rendered"));
+  await ui.stage(2);await ui.stage(0);await ui.stage(1);await ui.button("Apply staged edits").click();
+  const request=ui.applyMessages()[0];await host.receive(request);
+  assert.equal(host.doc.text,mixedExpected);assert.equal(host.transactions.length,1);
+  assert.equal(host.transactions[0].changes.length,3);
+  assert.equal(host.transactions[0].options.undoStopBefore,true);assert.equal(host.transactions[0].options.undoStopAfter,true);
+  assert.equal(host.messages.find((m)=>m.type==="source-edit-result").ok,true);
+  await host.receive(request);assert.equal(host.transactions.length,1);
+  host.undo();assert.equal(host.doc.text,mixedSource);host.redo();assert.equal(host.doc.text,mixedExpected);
+});
+
+test("native mixed batches have no partial effects after a bad last receipt, refusal, or typing race", async(t)=>{
+  for(const failure of ["receipt","refused","race"]) {
+    const host=await hostHarness(t,documentFor(mixedSource));
+    const ui=await batchUiHarness(t,host.doc,mixedChanges(),host.render());
+    await host.receive(ui.messages.find((m)=>m.type==="rendered"));
+    await ui.stage(0);await ui.stage(1);await ui.stage(2);await ui.button("Apply staged edits").click();
+    const request=ui.applyMessages()[0];
+    if(failure==="receipt")request.edits[2].result.updatedSource+="forged";
+    if(failure==="refused")host.refused=true;
+    const opening=deferred();if(failure==="race")host.openEditor=()=>opening.promise;
+    const pending=host.receive(request);
+    if(failure==="race"){host.change(mixedSource+"%% external typing\n");opening.resolve(host.editor);}
+    await pending;
+    assert.equal(host.doc.text,mixedSource+(failure==="race"?"%% external typing\n":""));
+    assert.equal(host.transactions.length,failure==="refused"?1:0);
+    const reply=host.messages.find((m)=>m.type==="source-edit-result");assert.equal(reply.ok,false);ui.send(reply);
+    assert.match(ui.root.textContent,/N\[😀\]-->Q/u);assert.match(ui.root.textContent,/G-->H/u);
+  }
 });

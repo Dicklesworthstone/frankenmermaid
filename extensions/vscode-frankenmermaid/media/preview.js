@@ -105,7 +105,7 @@ function createPreviewController({ document, window, vscode,
     draft.computing = false; draft.pending = false;
     draft.input.readOnly = draft.applied || draft.operation === "delete";
     draft.apply.disabled = draft.stale || draft.applied;
-    draft.stage.disabled = draft.stale || draft.applied || draft.operation !== "replace";
+    draft.stage.disabled = draft.stale || draft.applied;
     draft.cancel.disabled = false;
     updateControls();
   }
@@ -147,20 +147,21 @@ function createPreviewController({ document, window, vscode,
     batch.list.replaceChildren();
     for (const [key, edit] of batch.edits) {
       const row = element("details");
-      row.append(element("summary", `Diagram ${edit.diagramId + 1}: ${edit.elementId}`),
-        element("pre", `Before:\n${edit.result.previousSnippet}\n\nAfter:\n${edit.replacement}`));
+      const action = edit.operation === "insert-after" ? "Insert after" : edit.operation === "delete" ? "Delete" : "Replace";
+      row.append(element("summary", `${action} — diagram ${edit.diagramId + 1}: ${edit.elementId}`));
+      if (edit.operation === "insert-after") row.append(element("pre", `Selected source:\n${batch.anchors.get(key).snippet}`));
+      row.append(element("pre", `Before:\n${edit.result.previousSnippet}\n\nAfter:\n${edit.result.replacement}`));
       const remove = element("button", "Remove staged fragment");
       remove.disabled = batch.pending || batch.applied;
       remove.addEventListener("click", () => {
         if (disposed || stagedBatch !== batch || batch.pending || batch.applied) return;
-        batch.edits.delete(key); refreshBatch(batch);
+        batch.edits.delete(key); batch.anchors.delete(key); refreshBatch(batch);
       });
       row.append(remove); batch.list.append(row);
     }
   }
 
   async function stageSourceEdit(draft, current) {
-    if (draft.operation !== "replace") return;
     if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
     if (committedMessage !== draft.message || current !== revision) { invalidateSourceEditor(); return; }
     try {
@@ -171,7 +172,7 @@ function createPreviewController({ document, window, vscode,
       beginDraftComputation(draft);
       const edit = await captureSourceEdit(draft);
       if (!currentDraft(draft, current)) return;
-      if (edit.replacement === draft.binding.snippet) throw new Error("This fragment has no changes to stage.");
+      if (edit.result.updatedSource === draft.diagram.source) throw new Error("This fragment has no changes to stage.");
       if (!stagedBatch || stagedBatch.applied) {
         stagedBatch?.panel.remove();
         const panel = element("section"), title = element("h2"), list = element("div");
@@ -180,7 +181,7 @@ function createPreviewController({ document, window, vscode,
         const notice = element("p", "Review each fragment below. The entire batch applies as one undoable editor change.");
         notice.setAttribute("role", "status");
         const batch = { panel, title, list, apply, cancel, notice, message: draft.message,
-          edits: new Map(), pending: false, stale: false, applied: false };
+          edits: new Map(), anchors: new Map(), pending: false, stale: false, applied: false };
         stagedBatch = batch;
         panel.append(title, list, apply, cancel, notice); root.append(panel);
         cancel.addEventListener("click", () => {
@@ -206,18 +207,27 @@ function createPreviewController({ document, window, vscode,
       const key = `${edit.diagramId}:${edit.elementId}`;
       if (batch.edits.has(key)) throw new Error("This fragment is already staged. Remove it from the batch before replacing it.");
       if (batch.edits.size >= 64) throw new Error("A batch supports at most 64 source fragments.");
-      const range = draft.binding.textRange;
-      for (const previous of batch.edits.values()) {
+      const range = edit.result.replacedRange;
+      const overlaps = (a, b) => a.startByte === b.startByte
+        || (a.startByte < b.endByte && b.startByte < a.endByte);
+      for (const [previousKey, previous] of batch.edits) {
+        if (previous.diagramId !== edit.diagramId) continue;
         const other = previous.result.replacedRange;
-        if (previous.diagramId === edit.diagramId && (range.startByte === other.startByte
-          || (range.startByte < other.endByte && other.startByte < range.endByte))) {
+        if (overlaps(range, other)) {
           throw new Error("This fragment overlaps a staged statement. Edit the shared statement only once.");
+        }
+        if ((edit.operation === "insert-after" && overlaps(draft.binding.textRange, other))
+          || (previous.operation === "insert-after" && overlaps(batch.anchors.get(previousKey), range))) {
+          throw new Error("An insertion anchor is changed by a staged edit. Apply those changes separately.");
         }
       }
       const encoder = new TextEncoder();
       const bytes = [...batch.edits.values(), edit].reduce((sum, item) => sum + encoder.encode(JSON.stringify(item)).length, 0);
       if (bytes > 16 * 1024 * 1024) throw new Error("Staged receipts exceed the 16 MiB limit.");
-      batch.edits.set(key, edit); refreshBatch(batch);
+      batch.edits.set(key, edit);
+      batch.anchors.set(key, { startByte: draft.binding.textRange.startByte, endByte: draft.binding.textRange.endByte,
+        snippet: draft.binding.snippet });
+      refreshBatch(batch);
       draft.panel.remove(); sourceEditor = undefined;
       batch.notice.textContent = "Fragment staged. Select another diagram element, or apply the batch together.";
     } catch (error) {
@@ -249,7 +259,6 @@ function createPreviewController({ document, window, vscode,
     const apply = element("button", operation === "insert-after" ? "Insert source"
       : operation === "delete" ? "Delete source fragment" : "Apply source edit");
     const stage = element("button", "Stage fragment");
-    stage.hidden = stage.disabled = operation !== "replace";
     const cancel = element("button", "Discard draft");
     const notice = element("p"); notice.setAttribute("role", "status");
     panel.append(element("h2", `${operation === "insert-after" ? "Insert source" : operation === "delete" ? "Delete source fragment" : "Edit source fragment"} — diagram ${diagram.id + 1}`),
@@ -272,8 +281,7 @@ function createPreviewController({ document, window, vscode,
       if (disposed || sourceEditor !== draft || draft.pending || draft.applied || draft.stale) return;
       if (committedMessage !== message || current !== revision) { invalidateSourceEditor(); return; }
       if (stagedBatch && !stagedBatch.applied && stagedBatch.edits.size) {
-        notice.textContent = operation === "replace" ? "Stage this fragment, then apply all staged edits together."
-          : "Apply or discard the existing batch before applying a structural edit."; return;
+        notice.textContent = "Stage this fragment, then apply all staged edits together."; return;
       }
       try {
         beginDraftComputation(draft);
@@ -541,7 +549,7 @@ function createPreviewController({ document, window, vscode,
       sourceEditor.applied = message.ok;
       sourceEditor.input.readOnly = message.ok || sourceEditor.operation === "delete";
       sourceEditor.apply.disabled = message.ok || sourceEditor.stale;
-      sourceEditor.stage.disabled = message.ok || sourceEditor.stale || sourceEditor.operation !== "replace";
+      sourceEditor.stage.disabled = message.ok || sourceEditor.stale;
       sourceEditor.notice.textContent = message.message;
       updateControls();
     } else if (message?.type === "source-edit-result" && stagedBatch?.pending

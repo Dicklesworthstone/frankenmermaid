@@ -364,17 +364,34 @@ function planSourceBatch(document, snapshot, reports, message) {
     if (!edit || typeof edit.elementId !== "string" || !Number.isSafeInteger(edit.diagramId)) {
       throw new Error("Invalid batch fragment identity.");
     }
-    if (edit.operation !== undefined && edit.operation !== "replace") {
-      throw new Error("Structural edits must be applied individually.");
-    }
     const key = `${edit.diagramId}:${edit.elementId}`;
     if (ids.has(key)) throw new Error("A source batch cannot repeat an element.");
     ids.add(key);
     const plan = planSourceEdit(document, snapshot, reports, edit);
     const binding = reports.get(edit.diagramId).bindings.get(edit.elementId);
-    plans.push({ ...plan, edit, binding,
+    const sourceSplice = plan.sourceSplice || { startByte: binding.startByte,
+      endByte: binding.endByte, replacement: edit.replacement };
+    plans.push({ ...plan, edit, binding, sourceSplice,
       from: starts[plan.range.start.line] + plan.range.start.character,
       to: starts[plan.range.end.line] + plan.range.end.character });
+  }
+  // Structural operations change a different range from the selected fragment: delete may
+  // consume its whole line, and insertion writes at a later empty point. Compare the actual
+  // patches in BOTH coordinate systems, then protect insertion anchors from concurrent edits.
+  const conflicts = (a, b) => a.startByte === b.startByte
+    || (a.startByte < b.endByte && b.startByte < a.endByte);
+  for (let index = 0; index < plans.length; index += 1) {
+    const a = plans[index];
+    for (const b of plans.slice(index + 1)) {
+      if (a.edit.diagramId !== b.edit.diagramId) continue;
+      if (conflicts(a.sourceSplice, b.sourceSplice)) {
+        throw new Error("Source edit ranges overlap or share an insertion point.");
+      }
+      if ((a.edit.operation === "insert-after" && b.changed && conflicts(a.binding, b.sourceSplice))
+        || (b.edit.operation === "insert-after" && a.changed && conflicts(b.binding, a.sourceSplice))) {
+        throw new Error("An insertion anchor is changed by another edit. Apply those changes separately.");
+      }
+    }
   }
   plans.sort((a, b) => a.from - b.from || a.to - b.to);
   for (let index = 1; index < plans.length; index += 1) {
@@ -385,13 +402,22 @@ function planSourceBatch(document, snapshot, reports, message) {
   const before = document.getText();
   let after = before;
   const expected = snapshot.blocks.map((block) => Buffer.from(block.source, "utf8"));
+  const normalizeTerminal = new Set();
   for (const plan of [...plans].reverse()) {
     if (!plan.changed) continue;
     after = after.slice(0, plan.from) + plan.newText + after.slice(plan.to);
-    const { diagramId, replacement } = plan.edit;
+    const { diagramId } = plan.edit;
+    const { startByte, endByte, replacement } = plan.sourceSplice;
     const bytes = expected[diagramId];
-    expected[diagramId] = Buffer.concat([bytes.subarray(0, plan.binding.startByte),
-      Buffer.from(replacement, "utf8"), bytes.subarray(plan.binding.endByte)]);
+    expected[diagramId] = Buffer.concat([bytes.subarray(0, startByte),
+      Buffer.from(replacement, "utf8"), bytes.subarray(endByte)]);
+    if (plan.normalizeTerminal) normalizeTerminal.add(diagramId);
+  }
+  // Strip only the implicit separator of a closed fence, and only once per changed diagram.
+  // Applying this after all original-offset splices avoids shifting the byte ranges of a sibling.
+  for (const diagramId of normalizeTerminal) {
+    const bytes = expected[diagramId];
+    if (bytes.at(-1) === 10) expected[diagramId] = bytes.subarray(0, -1);
   }
   // Two individually harmless replacements can jointly form a fence closer. Validate the
   // COMBINED document, not just the individual receipts, before any native edit is dispatched.
