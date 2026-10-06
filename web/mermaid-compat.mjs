@@ -2,12 +2,17 @@ import { checkRenderId, prepareSvg } from "./mermaid-svg.mjs";
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
+const activeNodes = new WeakMap();
+let nextDocumentId = 0;
+const MAX_DOCUMENT_DIAGRAMS = 64;
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 const TYPES = Object.freeze({ Flowchart: "flowchart-v2", Sequence: "sequence", State: "stateDiagram",
   Gantt: "gantt", Class: "class", Er: "er", Mindmap: "mindmap", Pie: "pie", GitGraph: "gitGraph",
   Journey: "journey", Requirement: "requirement", Timeline: "timeline", QuadrantChart: "quadrantChart",
   Sankey: "sankey", XyChart: "xychart", BlockBeta: "block", PacketBeta: "packet", ArchitectureBeta: "architecture",
   C4Context: "c4", C4Container: "c4", C4Component: "c4", C4Dynamic: "c4", C4Deployment: "c4",
-  Kanban: "kanban", Treemap: "treemap", Radar: "radar", Info: "info" });
+  Kanban: "kanban", Treemap: "treemap", Radar: "radar", Info: "info",
+  Ishikawa: "ishikawa", TreeView: "treeView" });
 
 export class MermaidError extends Error {
   constructor(message, code, diagnostics = []) {
@@ -66,13 +71,17 @@ function configuration(config = {}) {
  * loadEngine returns the wasm-bindgen module (optionally already initialized). This factory
  * allows applications to own loading/caching and gives independent widgets isolated config.
  */
-export function createMermaid({ loadEngine, document = globalThis.document, wasmInput,
+export function createMermaid({ loadEngine, document = globalThis.document, wasmInput, autoStart = false,
   reportError = (error) => globalThis.console?.error(error),
 } = {}) {
   if (typeof loadEngine !== "function") throw new TypeError("createMermaid requires an engine module loader.");
   let site = configuration();
   let loading;
   let disposed = false;
+  let startupTimer;
+  let startupFinished = false;
+  const owner = {};
+  const window = document?.defaultView;
   const checkedConfigs = new WeakMap();
   function assertLive() {
     if (disposed) throw new MermaidError("This Mermaid instance has been disposed.", "disposed");
@@ -110,7 +119,8 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     await validate(module, snapshot);
     const parsed = await module.parse(source);
     assertLive();
-    const diagramType = TYPES[parsed?.ir?.diagram_type];
+    const type = parsed?.ir?.diagram_type;
+    const diagramType = Object.hasOwn(TYPES, type) ? TYPES[type] : undefined;
     const diagnostics = parsed?.ir?.diagnostics;
     if (!Array.isArray(diagnostics) || !Array.isArray(parsed?.warnings)) {
       throw new MermaidError("Engine returned an invalid parse report.", "engine-contract");
@@ -124,7 +134,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   function notify(error) {
     if (typeof api.parseError === "function") {
       try { api.parseError(error, { diagnostics: error?.diagnostics || [] }); }
-      catch (hookError) { reportError(hookError); }
+      catch (hookError) { report(hookError); }
     }
   }
   async function renderSnapshot(id, source, snapshot, ownerDocument = document) {
@@ -134,6 +144,130 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     assertLive();
     const output = prepareSvg(svg, id, ownerDocument);
     return { ...output, diagramType: parsed.diagramType, diagnostics: parsed.diagnostics, warnings: parsed.warnings };
+  }
+  function report(error) {
+    // A host error reporter is observational; it must not turn a suppressed failure into an
+    // unhandled rejection or prevent processing the remaining independent diagrams.
+    try { reportError(error); } catch { /* The original failure remains available to parseError. */ }
+  }
+  function selectedSources(options) {
+    assertLive();
+    if (!options || typeof options !== "object" || Array.isArray(options)) throw new TypeError("run expects an options object.");
+    if (options.postRenderCallback !== undefined && typeof options.postRenderCallback !== "function") {
+      throw new TypeError("postRenderCallback must be a function.");
+    }
+    let collection = options.nodes;
+    if (collection === undefined) {
+      if (!document?.querySelectorAll) throw new Error("run requires a browser Document or explicit nodes.");
+      const selector = options.querySelector ?? ".mermaid";
+      if (typeof selector !== "string" || !selector || selector.length > 4096) throw new TypeError("Invalid Mermaid query selector.");
+      collection = document.querySelectorAll(selector);
+    }
+    const length = collection?.length;
+    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_DOCUMENT_DIAGRAMS) {
+      throw new RangeError("run supports at most 64 diagram elements per call.");
+    }
+    const nodes = [...new Set(Array.from({ length }, (_, index) => collection[index]))];
+    for (const node of nodes) {
+      if (!node || node.nodeType !== 1 || node.namespaceURI !== "http://www.w3.org/1999/xhtml"
+        || !node.ownerDocument?.defaultView || typeof node.replaceChildren !== "function") {
+        throw new TypeError("run nodes must be HTML elements with an owning browser Document.");
+      }
+      if (nodes.some((other) => other !== node && node.contains(other))) {
+        throw new Error("Mermaid target elements must not contain one another.");
+      }
+    }
+    let totalBytes = 0;
+    // Snapshot ALL source nodes before the first await. A slow first render cannot authorize
+    // overwriting later elements which the application edits while the engine is loading.
+    return nodes.filter((node) => node.getAttribute("data-processed") !== "true").map((node) => {
+      const source = node.textContent || "";
+      totalBytes += encoder.encode(source).length;
+      if (totalBytes > MAX_DOCUMENT_BYTES) throw new RangeError("Mermaid document sources exceed the 16 MiB limit.");
+      return { node, source, markup: node.innerHTML, children: [...node.childNodes],
+        document: node.ownerDocument, root: node.getRootNode(), connected: node.isConnected };
+    });
+  }
+  function unchanged(item) {
+    const { node } = item;
+    return node.ownerDocument === item.document && node.getRootNode() === item.root
+      && node.isConnected === item.connected && node.textContent === item.source
+      && node.innerHTML === item.markup && node.childNodes.length === item.children.length
+      && item.children.every((child, index) => node.childNodes[index] === child);
+  }
+  async function renderNode(item, snapshot) {
+    assertLive();
+    const { node } = item;
+    // Another run may have completed this node since our selection snapshot. Never reparse
+    // its SVG as Mermaid source. Removing data-processed is the caller's explicit retry/edit.
+    if (node.getAttribute("data-processed") === "true") return undefined;
+    const existing = activeNodes.get(node);
+    if (existing) {
+      if (existing.owner !== owner || existing.snapshot !== snapshot || existing.markup !== item.markup
+        || existing.source !== item.source) throw new MermaidError("A different render already owns this element.", "element-busy");
+      await existing.promise;
+      return undefined; // The owning run performs the callback exactly once.
+    }
+    const job = { owner, snapshot, markup: item.markup, source: item.source };
+    job.promise = Promise.resolve().then(async () => {
+      if (!unchanged(item)) throw new MermaidError("Diagram source changed before rendering; it was not replaced.", "stale-source");
+      let id;
+      do { id = `fm-mermaid-${++nextDocumentId}`; }
+      while (item.document.getElementById(id) || item.root.getElementById?.(id));
+      const result = await renderSnapshot(id, item.source, snapshot, item.document);
+      assertLive();
+      if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
+        throw new MermaidError("Diagram source changed while rendering; it was not replaced.", "stale-source");
+      }
+      if (item.document.getElementById(id) || item.root.getElementById?.(id)) {
+        throw new MermaidError("The generated SVG ID was claimed while rendering. Retry this element.", "id-conflict");
+      }
+      // Nothing changes in the host DOM until parsing, rendering, SVG validation, and the
+      // source-generation checks all succeed. Failed nodes retain their original source.
+      node.replaceChildren(result.element);
+      node.setAttribute("data-processed", "true");
+      return id;
+    });
+    activeNodes.set(node, job);
+    try { return await job.promise; }
+    finally { if (activeNodes.get(node) === job) activeNodes.delete(node); }
+  }
+  async function run(options = {}) {
+    const snapshot = site;
+    const suppress = options?.suppressErrors === true;
+    const callback = options?.postRenderCallback;
+    let items;
+    try { items = selectedSources(options); }
+    catch (error) {
+      if (suppress) { report(error); return; }
+      notify(error); throw error;
+    }
+    const failures = [];
+    for (const item of items) {
+      try {
+        const id = await renderNode(item, snapshot);
+        if (id && callback) await callback(id);
+      } catch (error) {
+        if (suppress) report(error);
+        else { notify(error); failures.push(error); }
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, `${failures.length} Mermaid diagram(s) could not be processed.`);
+  }
+  function clearStartup() {
+    document?.removeEventListener?.("DOMContentLoaded", scheduleStartup);
+    if (startupTimer !== undefined) window?.clearTimeout(startupTimer);
+    startupTimer = undefined;
+  }
+  function scheduleStartup() {
+    clearStartup();
+    if (disposed || startupFinished || !window) return;
+    // A macrotask lets the importing module's synchronous initialize({startOnLoad:false})
+    // run first, including dynamically imported modules after DOMContentLoaded has fired.
+    startupTimer = window.setTimeout(() => {
+      startupTimer = undefined;
+      void api.contentLoaded().catch(report);
+    }, 0);
   }
   const api = {
     initialize(config) { assertLive(); site = configuration(config); },
@@ -155,8 +289,19 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
         return result;
       } catch (error) { notify(error); throw error; }
     },
+    run,
+    async contentLoaded() {
+      if (disposed || startupFinished) return;
+      startupFinished = true;
+      clearStartup();
+      if (site.value.startOnLoad !== false) await run();
+    },
     parseError: undefined,
-    dispose() { disposed = true; },
+    dispose() { disposed = true; clearStartup(); },
   };
+  if (autoStart && document && window) {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scheduleStartup, { once: true });
+    else scheduleStartup();
+  }
   return api;
 }

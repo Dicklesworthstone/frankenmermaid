@@ -1,6 +1,6 @@
 # Mermaid-shaped browser API
 
-`web/mermaid.mjs` provides a browser-facing `initialize`, `render`, and `parse` API on top of the existing Rust WASM engine. The raw `pkg/frankenmermaid.js` API is unchanged. Serve the checkout over HTTP with its built `pkg/` assets:
+`web/mermaid.mjs` provides a browser-facing `initialize`, `render`, `run`, and `parse` API on top of the existing Rust WASM engine. The raw `pkg/frankenmermaid.js` API is unchanged. Serve the checkout over HTTP with its built `pkg/` assets:
 
 ```html
 <div id="graph"></div>
@@ -19,6 +19,35 @@
 `initialize` is synchronous and replaces the instance's configuration. Each async operation captures its own deep snapshot: caller mutations and later initialization cannot change an already submitted render. The Rust `validateConfig` export validates each configuration before parsing/rendering; unsupported keys fail explicitly rather than becoming silent defaults. WASM loading is lazy, shared by concurrent calls, and retryable after initialization failure. No call mutates the raw engine's global `init` configuration.
 
 `render(id, source, container?)` returns a promise with `{ svg, diagramType, diagnostics, warnings }`. The optional element supplies its owning document; it is never cleared or populated by `render`. Render IDs must start with an ASCII letter or underscore and contain at most 128 letters, digits, underscores, or hyphens. Use different IDs for diagrams that coexist. Source is limited to 2 MiB of UTF-8; returned SVG is limited to 16 MiB.
+
+## Render documents automatically or explicitly
+
+The default browser entry scans `.mermaid` elements once after DOM readiness. Its startup is deferred so the importing script can first call `initialize({ startOnLoad: false })`. That disables automatic startup, not explicit rendering:
+
+```html
+<pre class="mermaid">flowchart LR
+Order--&gt;Payment</pre>
+<script type="module">
+  import mermaid from './web/mermaid.mjs';
+  mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+  await mermaid.run({
+    querySelector: '.mermaid',
+    postRenderCallback: async (svgId) => {
+      console.log(document.getElementById(svgId));
+    },
+  });
+</script>
+```
+
+`run({ nodes })` accepts an array-like collection of HTML elements and overrides `querySelector`. Duplicate targets are deduplicated. A call is limited to 64 targets and 16 MiB of aggregate source text, with the existing 2 MiB per-diagram limit. Nested targets are rejected before any rendering, because replacing a parent would destroy the selected child. An empty selection does not load WASM.
+
+Each successful node receives `data-processed="true"`; later runs skip it rather than parse the generated SVG as source. To render a changed diagram, replace the element's text with its new Mermaid source, remove `data-processed`, and call `run` again. The element itself and its existing attributes are retained; only its children are replaced after validation succeeds.
+
+The adapter snapshots all selected sources before waiting for the engine. Source edits, replaced child nodes, attachment changes, disposal, or a competing render cannot authorize a stale replacement. Overlapping runs with the same instance/configuration coalesce in-flight work. Each newly inserted diagram invokes its owning run's callback once, after insertion; callbacks may call `run` again without deadlocking. A callback failure does not roll back an already inserted diagram.
+
+Failures do not erase their source or mark it processed, and independent siblings continue rendering. The returned promise rejects with an `AggregateError` containing each failure. `run({ suppressErrors: true })` instead sends failures to the instance's error reporter and resolves after processing the remaining diagrams. `parseError` receives unsuppressed per-diagram failures. Native recoveries remain warnings, not strict Mermaid.js syntax validation.
+
+`createMermaid` instances are manual by default. Pass `autoStart: true` to opt a custom instance into the same one-shot startup, or call `contentLoaded()` explicitly. `dispose()` removes pending startup listeners/timers and prevents in-flight results from replacing source. It does not destroy a shared engine or interrupt synchronous Rust WASM execution.
 
 ## Multiple diagrams and safety
 
