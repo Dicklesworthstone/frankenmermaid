@@ -1430,13 +1430,16 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // it tells an author their working diagram is unsupported. Same rule the shape tables live
         // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it.
         "eventmodeling" => Some("eventmodeling"),
-        // Accepted bare only, once it has content. Reported by BeigeHill and re-verified here.
-        "ishikawa" => Some("ishikawa"),
+        // ⚠️ `ishikawa` WAS HERE and is not any more: the family is implemented, and
+        // `an_implemented_type_is_never_named_as_unimplemented` pins that it is never reported as
+        // unimplemented again.
         // ONLY the `-beta` spelling is real mermaid. Naming the bare form here would tell an author
         // that `radar` is a diagram type they can use, and the incumbent rejects it.
         "radar" => Some("radar-beta"),
         "venn" => Some("venn-beta"),
         "wardley" => Some("wardley-beta"),
+        // A bare `treeView` is rejected upstream; only `treeView-beta` (implemented) parses, so the
+        // bare spelling is still answered with the name that works.
         "treeview" => Some("treeView-beta"),
         _ => None,
     }
@@ -1534,6 +1537,19 @@ fn exact_diagram_type_with(
         // `block`/`block-beta`. Both spellings PARSE upstream and both report `treemap` from
         // `detectType`, measured against the pinned 11.15.0 bundle.
         Some(DiagramType::Treemap)
+    } else if line
+        .trim_start()
+        .get(..13)
+        .is_some_and(|head| head.eq_ignore_ascii_case("treeview-beta"))
+    {
+        // `treeView-beta` ONLY, for the reason `radar-beta` is: the incumbent's detector is
+        // `/^\s*treeView-beta/` and a bare `treeView` is rejected, which
+        // `unsupported_upstream_keyword` still answers by naming the spelling that works.
+        Some(DiagramType::TreeView)
+    } else if matches(line, "ishikawa") {
+        // The incumbent's detector is `/^\s*ishikawa(-beta)?\b/i`; `matches` already accepts the
+        // `-beta` suffix, so both spellings land here, exactly as they both parse upstream.
+        Some(DiagramType::Ishikawa)
     } else {
         None
     }
@@ -1574,6 +1590,8 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("treemap", DiagramType::Treemap),
     ("info", DiagramType::Info),
     ("radar-beta", DiagramType::Radar),
+    ("ishikawa", DiagramType::Ishikawa),
+    ("treeview-beta", DiagramType::TreeView),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -4294,9 +4312,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn an_unimplemented_upstream_type_is_named_rather_than_blamed_on_syntax() {
         for (source, expected) in [
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
-            ("ishikawa\n  Problem\n", "ishikawa"),
             ("eventmodeling\n  x\n", "eventmodeling"),
-            ("treeView-beta\n  root\n", "treeView"),
+            ("treeView\n  root\n", "treeView"),
             ("venn-beta\n  a\n", "venn"),
             ("wardley-beta\n  a\n", "wardley"),
         ] {
@@ -4336,6 +4353,9 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 fm_core::DiagramType::Radar,
             ),
             ("info\n", fm_core::DiagramType::Info),
+            ("ishikawa\n  Problem\n", fm_core::DiagramType::Ishikawa),
+            ("ishikawa-beta\n  Problem\n", fm_core::DiagramType::Ishikawa),
+            ("treeView-beta\n  \"src\"\n", fm_core::DiagramType::TreeView),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);
@@ -4805,8 +4825,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("radar\n  Item\n", "radar-beta"),
             ("venn-beta\n  Item\n", "venn-beta"),
             ("wardley-beta\n  Item\n", "wardley-beta"),
-            ("treeView-beta\n  Item\n", "treeView-beta"),
-            ("ishikawa\n  Item\n", "ishikawa"),
+            // Bare `treeView` is rejected upstream; the message must name the `-beta` spelling.
+            ("treeView\n  Item\n", "treeView-beta"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert!(

@@ -621,6 +621,8 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::Treemap => parse_treemap(content, &mut builder),
         DiagramType::Radar => parse_radar(content, &mut builder),
         DiagramType::Info => parse_info(content, &mut builder),
+        DiagramType::Ishikawa => parse_ishikawa(content, &mut builder),
+        DiagramType::TreeView => parse_tree_view(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -7757,6 +7759,239 @@ fn parse_info(content: &str, builder: &mut IrBuilder) {
             "info line {} is not part of an info diagram: {trimmed}",
             line_number + 1
         ));
+    }
+}
+
+/// Strip an `ishikawa` / `ishikawa-beta` header, returning whatever follows it on the same line.
+///
+/// `None` when the line is not a header. The incumbent's lexer matches `ishikawa-beta\b` and
+/// `ishikawa\b` case-insensitively and then lexes the rest of the line as an ordinary statement,
+/// so `ishikawa Late delivery` is a header FOLLOWED BY the effect, not a malformed header.
+fn strip_ishikawa_header(trimmed: &str) -> Option<&str> {
+    let head = trimmed.get(..8)?;
+    if !head.eq_ignore_ascii_case("ishikawa") {
+        return None;
+    }
+    let mut rest = &trimmed[8..];
+    if rest
+        .get(..5)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("-beta"))
+    {
+        rest = &rest[5..];
+    }
+    // `\b`: the keyword must end at a non-word character, or `ishikawas` would be a header.
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(trim_fast(rest))
+}
+
+/// Parse an `ishikawa` (fishbone) document: an indentation tree whose FIRST line is the effect.
+///
+/// Mirrors the pinned 11.15.0 `IshikawaDB::addNode` exactly, because indentation is the whole
+/// syntax and any other reading would hang causes off different parents than the author sees:
+///
+/// - the first statement is the root (the effect, drawn in the fish head) whatever its indent;
+/// - the indent of the FIRST CAUSE becomes the base level, so a document whose effect line is
+///   indented deeper than its causes still nests correctly;
+/// - every later line's level is `indent - base + 1`, clamped to at least 1, and it attaches to
+///   the nearest preceding line with a STRICTLY smaller level.
+///
+/// Indentation counts characters, as the incumbent's `SPACELIST.length` does — a tab is one.
+///
+/// Edges run cause → effect (child → parent): every bone in a fishbone points at what it causes.
+///
+/// `accTitle`/`accDescr` are consumed as directives rather than drawn as a bone. The incumbent's
+/// grammar has no accessibility rule for this family, so it would draw them as causes; drawing an
+/// author's own directive as diagram content is the phantom-node class of defect this repository
+/// refuses everywhere else (bd-yfcfv), and the shared accessibility pass already records them.
+fn parse_ishikawa(content: &str, builder: &mut IrBuilder) {
+    let mut header_seen = false;
+    let mut root: Option<fm_core::IrNodeId> = None;
+    let mut base_level: Option<usize> = None;
+    // (level, node) — the incumbent's StackEntry list. The root sits at level 0 and is never popped.
+    let mut stack: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
+    let mut ordinal = 0_usize;
+    let mut in_acc_descr_block = false;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let (indent, text) = if header_seen {
+            (indent, trimmed)
+        } else if let Some(rest) = strip_ishikawa_header(trimmed) {
+            header_seen = true;
+            if rest.is_empty() {
+                continue;
+            }
+            // Text on the header line: the incumbent lexes the whitespace before it as the
+            // statement's SPACELIST, so its level is that whitespace's length.
+            let after_keyword = &trimmed[..trimmed.len() - rest.len()];
+            let gap = after_keyword.len() - after_keyword.trim_end().len();
+            (gap, rest)
+        } else {
+            header_seen = true;
+            (indent, trimmed)
+        };
+        if in_acc_descr_block {
+            in_acc_descr_block = !text.ends_with('}');
+            continue;
+        }
+        if let Some(rest) = flowchart_accessibility_directive(text) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        // `<br>` is a line break upstream (`splitLines`), in the effect and in every cause.
+        let text = replace_br_with_newlines(text);
+        let Some(&(_, root_id)) = stack.first() else {
+            let Some(node_id) = builder.intern_fresh_node_owned_label(
+                "effect".to_string(),
+                text.into_owned(),
+                NodeShape::HalfRoundedRect,
+                span,
+            ) else {
+                continue;
+            };
+            builder.add_class_to_node_id(node_id, "ishikawa-head");
+            root = Some(node_id);
+            stack.push((0, node_id));
+            continue;
+        };
+
+        let base = *base_level.get_or_insert(indent);
+        let level = (indent + 1).saturating_sub(base).max(1);
+        while stack.len() > 1 && stack.last().is_some_and(|(top, _)| *top >= level) {
+            stack.pop();
+        }
+        let (parent_level, parent_id) = stack.last().copied().unwrap_or((0, root_id));
+        // Only the first ring of causes is boxed upstream; a bone below it carries its text alone.
+        let (shape, class) = if parent_level == 0 {
+            (NodeShape::Rect, "ishikawa-cause")
+        } else {
+            (NodeShape::TextBlock, "ishikawa-sub-cause")
+        };
+        ordinal += 1;
+        let Some(node_id) = builder.intern_fresh_node_owned_label(
+            format!("cause_{ordinal}"),
+            text.into_owned(),
+            shape,
+            span,
+        ) else {
+            continue;
+        };
+        builder.add_class_to_node_id(node_id, class);
+        builder.push_edge(node_id, parent_id, ArrowType::Arrow, None, span);
+        stack.push((level, node_id));
+    }
+
+    if root.is_none() {
+        builder.add_warning("ishikawa declared no effect (the first line names the problem)");
+    }
+}
+
+/// Is this line the `treeView-beta` header?
+///
+/// The incumbent's detector is `/^\s*treeView-beta/` and its grammar keyword is the same literal; a
+/// bare `treeView` is rejected upstream, so it is not a header here either.
+fn is_tree_view_header(trimmed: &str) -> bool {
+    trimmed
+        .get(..13)
+        .is_some_and(|head| head.eq_ignore_ascii_case("treeview-beta"))
+        && trimmed[13..].chars().next().is_none_or(char::is_whitespace)
+}
+
+/// Parse a `treeView-beta` document: one quoted name per line, nested by indentation.
+///
+/// Mirrors the pinned 11.15.0 `treeView` db: an implicit root named `/` at level -1 that the
+/// renderer always draws, and every line attaching to the nearest preceding line whose indent is
+/// STRICTLY smaller (`while level <= top.level: pop`). Indentation is a character count, as the
+/// grammar's `INDENTATION` value converter returns it.
+///
+/// Names are `"…"` or `'…'` upstream (`STRING2`). An unquoted name is accepted best-effort with a
+/// warning, because the incumbent rejects the whole document over it and an author deserves to know
+/// why their diagram would not render there.
+fn parse_tree_view(content: &str, builder: &mut IrBuilder) {
+    // Upstream draws the `/` root even for a document with no entries, so it exists unconditionally.
+    let Some(root_id) = builder.intern_fresh_node_owned_label(
+        "root".to_string(),
+        "/".to_string(),
+        NodeShape::TextBlock,
+        Span::default(),
+    ) else {
+        return;
+    };
+    builder.add_class_to_node_id(root_id, "tree-view-root");
+    // The root sits at level 0 here and every real line at `indent + 1`, which keeps upstream's
+    // `level <= top.level` pop rule against a level -1 root without a signed level.
+    let mut stack: Vec<(usize, fm_core::IrNodeId)> = vec![(0, root_id)];
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+    let mut ordinal = 0_usize;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen && is_tree_view_header(trimmed) {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        if is_diagram_level_directive_statement(trimmed) {
+            continue;
+        }
+
+        let bytes = trimmed.as_bytes();
+        let quoted = bytes.len() >= 2
+            && matches!(bytes[0], b'"' | b'\'')
+            && bytes[bytes.len() - 1] == bytes[0];
+        let name = if quoted {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            builder.add_warning(format!(
+                "Line {line_number}: treeView-beta names are quoted upstream; accepted unquoted: \
+                 {trimmed}"
+            ));
+            trimmed
+        };
+        let level = line.len() - line.trim_start().len() + 1;
+        while stack.len() > 1 && stack.last().is_some_and(|(top, _)| level <= *top) {
+            stack.pop();
+        }
+        let parent_id = stack.last().map_or(root_id, |&(_, id)| id);
+        let span = span_for(line_number, line);
+        ordinal += 1;
+        let Some(node_id) = builder.intern_fresh_node_owned_label(
+            format!("entry_{ordinal}"),
+            name.to_string(),
+            NodeShape::TextBlock,
+            span,
+        ) else {
+            continue;
+        };
+        builder.add_class_to_node_id(node_id, "tree-view-node");
+        builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
+        stack.push((level, node_id));
     }
 }
 
@@ -25238,6 +25473,233 @@ Rel_Back(db, app, "Responds")"#,
             !parsed.warnings.iter().any(|w| w.contains("horizontal")),
             "an ordinary chart produced an orientation warning: {:?}",
             parsed.warnings
+        );
+    }
+
+    /// Parent of each non-root ishikawa node, read off its cause → effect edge, by label.
+    fn ishikawa_parents(source: &str) -> Vec<(String, String)> {
+        let parsed = parse_mermaid(source);
+        let label = |index: usize| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[index])
+                .to_string()
+        };
+        parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(child), IrEndpoint::Node(parent)) = (edge.from, edge.to)
+                else {
+                    panic!("ishikawa edges join two nodes");
+                };
+                (label(child.0), label(parent.0))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ishikawa_builds_the_cause_tree_from_indentation() {
+        let source = "ishikawa\n  Late launch\n    People\n      Understaffed\n    Process\n      Slow approvals\n        Too many sign-offs\n    Tools\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Ishikawa);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 7);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::HalfRoundedRect);
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|c| c == "ishikawa-head")
+        );
+        assert_eq!(
+            ishikawa_parents(source),
+            [
+                ("People", "Late launch"),
+                ("Understaffed", "People"),
+                ("Process", "Late launch"),
+                ("Slow approvals", "Process"),
+                ("Too many sign-offs", "Slow approvals"),
+                ("Tools", "Late launch"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        // First-ring causes are boxed; everything below them is text on a bone.
+        let shape_of = |text: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| parsed.ir.node_display_text(node) == text)
+                .map(|node| node.shape)
+        };
+        assert_eq!(shape_of("People"), Some(NodeShape::Rect));
+        assert_eq!(shape_of("Understaffed"), Some(NodeShape::TextBlock));
+        assert!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .all(|edge| edge.arrow == ArrowType::Arrow)
+        );
+    }
+
+    #[test]
+    fn ishikawa_takes_its_base_level_from_the_first_cause_not_the_effect() {
+        // The effect is indented DEEPER than its causes; upstream still nests by the causes'
+        // relative indentation, and an over-dedented line clamps to level 1 instead of escaping.
+        let source = "ishikawa\n        Effect\n  A\n    A1\n  B\nC\n";
+        assert_eq!(
+            ishikawa_parents(source),
+            [
+                ("A", "Effect"),
+                ("A1", "A"),
+                ("B", "Effect"),
+                ("C", "Effect"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+    }
+
+    #[test]
+    fn ishikawa_header_variants_and_inline_effect() {
+        for header in ["ishikawa", "ishikawa-beta", "ISHIKAWA", "Ishikawa-Beta"] {
+            let parsed = parse_mermaid(&format!("{header}\n  Effect\n    Cause\n"));
+            assert_eq!(parsed.ir.diagram_type, DiagramType::Ishikawa, "{header}");
+            assert_eq!(parsed.ir.nodes.len(), 2, "{header}");
+        }
+        // Text after the header on the same line is the effect itself.
+        let parsed = parse_mermaid("ishikawa Effect on header\n    Cause\n");
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "Effect on header"
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn ishikawa_skips_comments_and_accessibility_and_honours_br() {
+        let source =
+            "ishikawa\n%% a comment\n  accTitle: Why we slipped\n  Effect<br>line two\n    Cause\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.nodes.len(), 2, "{:?}", parsed.ir.nodes);
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "Effect\nline two"
+        );
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Why we slipped"));
+    }
+
+    #[test]
+    fn ishikawa_duplicate_labels_stay_distinct_nodes() {
+        let parsed = parse_mermaid("ishikawa\n  Effect\n    Same\n    Same\n");
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_ishikawa_warns_rather_than_inventing_an_effect() {
+        let parsed = parse_mermaid("ishikawa\n");
+        assert!(parsed.ir.nodes.is_empty());
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("ishikawa")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    /// (child, parent) label pairs of a tree view, read off its parent → child edges.
+    fn tree_view_pairs(source: &str) -> Vec<(String, String)> {
+        let parsed = parse_mermaid(source);
+        let label = |id: fm_core::IrNodeId| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[id.0])
+                .to_string()
+        };
+        parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(parent), IrEndpoint::Node(child)) = (edge.from, edge.to)
+                else {
+                    panic!("tree edges join two nodes");
+                };
+                (label(child), label(parent))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tree_view_nests_quoted_names_under_an_implicit_root() {
+        let source = "treeView-beta\n    \"src\"\n        \"main.rs\"\n        'lib.rs'\n    \"Cargo.toml\"\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::TreeView);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.node_display_text(&parsed.ir.nodes[0]), "/");
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .all(|node| node.shape == NodeShape::TextBlock)
+        );
+        assert_eq!(
+            tree_view_pairs(source),
+            [
+                ("src", "/"),
+                ("main.rs", "src"),
+                ("lib.rs", "src"),
+                ("Cargo.toml", "/"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        assert!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .all(|edge| edge.arrow == ArrowType::Line)
+        );
+    }
+
+    #[test]
+    fn tree_view_pops_to_the_nearest_strictly_shallower_line() {
+        // Upstream pops while `level <= top.level`: a sibling at the SAME indent is a sibling, and a
+        // line shallower than every open ancestor attaches to the root.
+        let source = "treeView-beta\n  \"a\"\n      \"deep\"\n    \"mid\"\n\"top\"\n";
+        assert_eq!(
+            tree_view_pairs(source),
+            [("a", "/"), ("deep", "a"), ("mid", "a"), ("top", "/")]
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+    }
+
+    #[test]
+    fn tree_view_skips_title_accessibility_and_comments() {
+        let source = "treeView-beta\ntitle Repo layout\naccTitle: Files\naccDescr {\n  \"not a node\"\n}\n%% note\n  \"src\"\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.nodes.len(), 2, "{:?}", parsed.ir.nodes);
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Files"));
+    }
+
+    #[test]
+    fn tree_view_accepts_unquoted_names_with_a_warning_and_draws_an_empty_root() {
+        let parsed = parse_mermaid("treeView-beta\n  bare\n");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("quoted")),
+            "{:?}",
+            parsed.warnings
+        );
+        let empty = parse_mermaid("treeView-beta\n");
+        assert_eq!(empty.ir.nodes.len(), 1);
+        assert!(
+            !empty.warnings.iter().any(|w| w.contains("No parseable")),
+            "{:?}",
+            empty.warnings
         );
     }
 

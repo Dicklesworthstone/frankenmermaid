@@ -266,7 +266,9 @@ impl NodeSelection {
         };
         let target = selectable_nodes(ir, layout)
             .filter(|node| node.id != current.id)
-            .filter_map(|node| navigation_score(current, node, direction).map(|score| (node, score)))
+            .filter_map(|node| {
+                navigation_score(current, node, direction).map(|score| (node, score))
+            })
             .min_by(|(left, ls), (right, rs)| {
                 ls.0.cmp(&rs.0)
                     .then_with(|| ls.1.total_cmp(&rs.1))
@@ -509,7 +511,10 @@ impl CanvasSession {
             for points in edge.points.windows(2) {
                 let start = points[0];
                 let end = points[1];
-                if ![start.x, start.y, end.x, end.y].iter().all(|value| value.is_finite()) {
+                if ![start.x, start.y, end.x, end.y]
+                    .iter()
+                    .all(|value| value.is_finite())
+                {
                     continue;
                 }
                 let distance = CgaLineSegment::new(
@@ -538,9 +543,9 @@ impl CanvasSession {
 
     /// Select a placed node. Unknown IDs and repeated selection leave state unchanged.
     pub fn select_node(&mut self, id: &str) -> bool {
-        self.frame.as_ref().is_some_and(|frame| {
-            self.selection.select_node(&frame.ir, &frame.layout, id)
-        })
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| self.selection.select_node(&frame.ir, &frame.layout, id))
     }
 
     /// Select at a rendered canvas point. Empty space clears focus; invalid/stale points do not.
@@ -548,16 +553,16 @@ impl CanvasSession {
         let Some((x, y)) = self.layout_point(x, y, canvas_size) else {
             return false;
         };
-        self.frame.as_ref().is_some_and(|frame| {
-            self.selection.select_at(&frame.ir, &frame.layout, x, y)
-        })
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| self.selection.select_at(&frame.ir, &frame.layout, x, y))
     }
 
     /// Navigate spatially without reparsing or relayout. Returns whether focus moved.
     pub fn navigate_selection(&mut self, direction: NavigationDirection) -> bool {
-        self.frame.as_ref().is_some_and(|frame| {
-            self.selection.navigate(&frame.ir, &frame.layout, direction)
-        })
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| self.selection.navigate(&frame.ir, &frame.layout, direction))
     }
 
     /// Clear focus, retaining the diagram.
@@ -695,9 +700,11 @@ mod selection_tests {
         layout
             .nodes
             .retain(|node| matches!(ir.nodes[node.node_index].id.as_str(), "A" | "B"));
-        layout
-            .nodes
-            .sort_by(|left, right| ir.nodes[left.node_index].id.cmp(&ir.nodes[right.node_index].id));
+        layout.nodes.sort_by(|left, right| {
+            ir.nodes[left.node_index]
+                .id
+                .cmp(&ir.nodes[right.node_index].id)
+        });
         place(&ir, &mut layout, "B", 0.0, 0.0);
         let mut selection = NodeSelection::default();
         assert!(selection.select_at(&ir, &layout, 0.0, 0.0));
@@ -818,10 +825,19 @@ mod session_tests {
         let mut layout = fm_layout::layout_diagram(&ir);
         assert_eq!(layout.nodes.len(), 2);
         assert_eq!(layout.edges.len(), 1);
-        layout.bounds = LayoutRect { x: -100.0, y: -50.0, width: 400.0, height: 200.0 };
+        layout.bounds = LayoutRect {
+            x: -100.0,
+            y: -50.0,
+            width: 400.0,
+            height: 200.0,
+        };
         for node in &mut layout.nodes {
             node.bounds = LayoutRect {
-                x: if ir.nodes[node.node_index].id == "A" { -80.0 } else { 200.0 },
+                x: if ir.nodes[node.node_index].id == "A" {
+                    -80.0
+                } else {
+                    200.0
+                },
                 y: -20.0,
                 width: 40.0,
                 height: 30.0,
@@ -830,32 +846,47 @@ mod session_tests {
         layout.edges[0].points = vec![
             LayoutPoint { x: -40.0, y: -5.0 },
             LayoutPoint { x: 200.0, y: -5.0 },
-        ];
+        ]
+        .into();
         (ir, Arc::new(layout))
     }
 
     fn session(auto_fit: bool) -> CanvasSession {
         let (ir, layout) = diagram();
         let mut session = CanvasSession::default();
-        session.set_diagram(ir, layout, CanvasRenderConfig {
-            auto_fit,
-            padding: if auto_fit { 0.0 } else { 7.0 },
-            ..CanvasRenderConfig::default()
-        });
+        session.set_diagram(
+            ir,
+            layout,
+            CanvasRenderConfig {
+                auto_fit,
+                padding: if auto_fit { 0.0 } else { 7.0 },
+                ..CanvasRenderConfig::default()
+            },
+        );
         session
     }
 
     // Independent observation of what the renderer issued, not a round trip through the reported
     // viewport (a mutually wrong forward/inverse pair would pass such a test).
     fn drawn_label(context: &MockCanvas2dContext, label: &str) -> (f64, f64) {
-        let transform = context.operations().iter().find_map(|operation| match *operation {
-            DrawOperation::SetTransform(a, b, c, d, e, f) => Some(ViewportTransform { a, b, c, d, e, f }),
-            _ => None,
-        }).expect("the real renderer sets a viewport transform");
-        let (x, y) = context.operations().iter().find_map(|operation| match operation {
-            DrawOperation::FillText(text, x, y) if text == label => Some((*x, *y)),
-            _ => None,
-        }).expect("the real renderer draws the parsed label");
+        let transform = context
+            .operations()
+            .iter()
+            .find_map(|operation| match *operation {
+                DrawOperation::SetTransform(a, b, c, d, e, f) => {
+                    Some(ViewportTransform { a, b, c, d, e, f })
+                }
+                _ => None,
+            })
+            .expect("the real renderer sets a viewport transform");
+        let (x, y) = context
+            .operations()
+            .iter()
+            .find_map(|operation| match operation {
+                DrawOperation::FillText(text, x, y) if text == label => Some((*x, *y)),
+                _ => None,
+            })
+            .expect("the real renderer draws the parsed label");
         transform.apply(x, y)
     }
 
@@ -868,7 +899,9 @@ mod session_tests {
             let (x, y) = drawn_label(&context, "Alpha");
             assert!((x - expected.0).abs() < 1e-6 && (y - expected.1).abs() < 1e-6);
             assert_eq!(session.hit_test_node(x, y, [200.0, 120.0]), Some("A"));
-            let hit = session.hit_test_interaction(x, y, [200.0, 120.0]).expect("link");
+            let hit = session
+                .hit_test_interaction(x, y, [200.0, 120.0])
+                .expect("link");
             assert_eq!(hit.href.as_deref(), Some("https://example.com"));
             assert_eq!(hit.tooltip.as_deref(), Some("Alpha tip"));
             assert!(session.select_at(x, y, [200.0, 120.0]));
@@ -883,15 +916,24 @@ mod session_tests {
         let mut small = MockCanvas2dContext::new(200.0, 120.0);
         session.redraw(&mut small).unwrap();
         let small_point = drawn_label(&small, "Alpha");
-        assert_eq!(session.hit_test_node(small_point.0, small_point.1, [400.0, 240.0]), None);
+        assert_eq!(
+            session.hit_test_node(small_point.0, small_point.1, [400.0, 240.0]),
+            None
+        );
         assert!(!session.select_at(small_point.0, small_point.1, [400.0, 240.0]));
         let mut large = MockCanvas2dContext::new(400.0, 240.0);
         session.redraw(&mut large).unwrap();
         let large_point = drawn_label(&large, "Alpha");
         assert_ne!(small_point, large_point);
-        assert_eq!(session.hit_test_node(large_point.0, large_point.1, [400.0, 240.0]), Some("A"));
+        assert_eq!(
+            session.hit_test_node(large_point.0, large_point.1, [400.0, 240.0]),
+            Some("A")
+        );
         assert!(session.last_result([200.0, 120.0]).is_none());
-        assert!(Arc::ptr_eq(&original, &session.frame.as_ref().unwrap().layout));
+        assert!(Arc::ptr_eq(
+            &original,
+            &session.frame.as_ref().unwrap().layout
+        ));
     }
 
     #[test]
@@ -901,10 +943,19 @@ mod session_tests {
         session.redraw(&mut context).unwrap();
         // The horizontal edge is at y=32.5 after 0.5x fit: the query is 3 screen pixels away,
         // but 6 layout units away. Passing the unscaled tolerance to layout-space distance fails.
-        assert_eq!(session.hit_test_edge(90.0, 35.5, 3.01, [200.0, 120.0]), Some(0));
-        assert_eq!(session.hit_test_edge(90.0, 35.5, 2.99, [200.0, 120.0]), None);
+        assert_eq!(
+            session.hit_test_edge(90.0, 35.5, 3.01, [200.0, 120.0]),
+            Some(0)
+        );
+        assert_eq!(
+            session.hit_test_edge(90.0, 35.5, 2.99, [200.0, 120.0]),
+            None
+        );
         for tolerance in [-1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(session.hit_test_edge(90.0, 32.5, tolerance, [200.0, 120.0]), None);
+            assert_eq!(
+                session.hit_test_edge(90.0, 32.5, tolerance, [200.0, 120.0]),
+                None
+            );
         }
     }
 
@@ -917,40 +968,65 @@ mod session_tests {
         layout.edges.insert(0, duplicate);
         let mut session = CanvasSession::default();
         let mut context = MockCanvas2dContext::new(200.0, 120.0);
-        let config = CanvasRenderConfig { padding: 0.0, ..CanvasRenderConfig::default() };
+        let config = CanvasRenderConfig {
+            padding: 0.0,
+            ..CanvasRenderConfig::default()
+        };
         session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
         session.redraw(&mut context).unwrap();
-        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), Some(0));
+        assert_eq!(
+            session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]),
+            Some(0)
+        );
         layout.edges[1].bundled = true;
         session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
         session.redraw(&mut context).unwrap();
-        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), Some(7));
+        assert_eq!(
+            session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]),
+            Some(7)
+        );
         layout.edges[0].points[0].x = f32::NAN;
         session.set_diagram(ir, Arc::new(layout), config);
         session.redraw(&mut context).unwrap();
-        assert_eq!(session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]), None);
+        assert_eq!(
+            session.hit_test_edge(90.0, 32.5, 0.01, [200.0, 120.0]),
+            None
+        );
     }
 
     #[test]
     fn session_never_clicks_through_an_unlinked_node_and_uses_half_open_bounds() {
         let (ir, original) = diagram();
         let mut layout = (*original).clone();
-        layout.nodes.sort_by(|a, b| ir.nodes[a.node_index].id.cmp(&ir.nodes[b.node_index].id));
+        layout
+            .nodes
+            .sort_by(|a, b| ir.nodes[a.node_index].id.cmp(&ir.nodes[b.node_index].id));
         layout.nodes[1].bounds = layout.nodes[0].bounds;
-        let config = CanvasRenderConfig { padding: 0.0, ..CanvasRenderConfig::default() };
+        let config = CanvasRenderConfig {
+            padding: 0.0,
+            ..CanvasRenderConfig::default()
+        };
         let mut session = CanvasSession::default();
         let mut context = MockCanvas2dContext::new(200.0, 120.0);
         session.set_diagram(ir.clone(), Arc::new(layout.clone()), config.clone());
         session.redraw(&mut context).unwrap();
         assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), Some("B"));
-        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_none());
+        assert!(
+            session
+                .hit_test_interaction(20.0, 32.5, [200.0, 120.0])
+                .is_none()
+        );
         assert_eq!(session.hit_test_node(30.0, 32.5, [200.0, 120.0]), None);
         assert_eq!(session.hit_test_node(20.0, 40.0, [200.0, 120.0]), None);
         layout.nodes.reverse();
         session.set_diagram(ir, Arc::new(layout), config);
         session.redraw(&mut context).unwrap();
         assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), Some("A"));
-        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_some());
+        assert!(
+            session
+                .hit_test_interaction(20.0, 32.5, [200.0, 120.0])
+                .is_some()
+        );
     }
 
     #[test]
@@ -1002,7 +1078,12 @@ mod session_tests {
         let mut context = MockCanvas2dContext::new(200.0, 120.0);
         session.redraw(&mut context).unwrap();
         assert!(session.select_node("A"));
-        for (x, y) in [(f64::NAN, 32.5), (20.0, f64::INFINITY), (-1.0, 32.5), (200.0, 32.5)] {
+        for (x, y) in [
+            (f64::NAN, 32.5),
+            (20.0, f64::INFINITY),
+            (-1.0, 32.5),
+            (200.0, 32.5),
+        ] {
             assert_eq!(session.hit_test_node(x, y, [200.0, 120.0]), None);
             assert!(!session.select_at(x, y, [200.0, 120.0]));
             assert_eq!(session.selected_node_id(), Some("A"));
@@ -1022,7 +1103,11 @@ mod session_tests {
         session.redraw(&mut context).unwrap();
         session.select_node("A");
         session.invalidate();
-        assert!(session.hit_test_interaction(20.0, 32.5, [200.0, 120.0]).is_none());
+        assert!(
+            session
+                .hit_test_interaction(20.0, 32.5, [200.0, 120.0])
+                .is_none()
+        );
         assert_eq!(session.selected_node_id(), Some("A"));
         assert!(session.redraw(&mut context).is_some());
         session.clear();

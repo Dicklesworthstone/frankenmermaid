@@ -329,6 +329,12 @@ pub enum DiagramType {
     Treemap,
     Radar,
     Info,
+    /// mermaid's `ishikawa` (fishbone / cause-and-effect) diagram: an indentation tree whose first
+    /// line is the EFFECT (the fish head) and whose deeper lines are causes and sub-causes.
+    Ishikawa,
+    /// mermaid's `treeView-beta`: a file-explorer style indented tree of quoted names under an
+    /// implicit `/` root.
+    TreeView,
     #[default]
     Unknown,
 }
@@ -364,6 +370,8 @@ impl DiagramType {
             Self::Treemap => "treemap",
             Self::Radar => "radar-beta",
             Self::Info => "info",
+            Self::Ishikawa => "ishikawa",
+            Self::TreeView => "treeView-beta",
             Self::Unknown => "unknown",
         }
     }
@@ -407,6 +415,8 @@ impl DiagramType {
             Self::Treemap => "treemap",
             Self::Radar => "radar",
             Self::Info => "info",
+            Self::Ishikawa => "ishikawa",
+            Self::TreeView => "treeView",
             Self::GitGraph => "gitGraph",
             // Nothing upstream to match; the generic term is better than a guess at a family name.
             Self::Unknown => "diagram",
@@ -441,7 +451,9 @@ impl DiagramType {
             | Self::Kanban
             | Self::Treemap
             | Self::Radar
-            | Self::Info => MermaidSupportLevel::Supported,
+            | Self::Info
+            | Self::Ishikawa
+            | Self::TreeView => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -475,7 +487,9 @@ impl DiagramType {
             | Self::Kanban
             | Self::Treemap
             | Self::Radar
-            | Self::Info => "full",
+            | Self::Info
+            | Self::Ishikawa
+            | Self::TreeView => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -492,7 +506,9 @@ impl DiagramType {
     #[must_use]
     pub const fn parity_level(self) -> MermaidParityLevel {
         match self {
-            Self::Treemap | Self::Radar | Self::Info => MermaidParityLevel::NotApplicable,
+            Self::Treemap | Self::Radar | Self::Info | Self::Ishikawa | Self::TreeView => {
+                MermaidParityLevel::NotApplicable
+            }
             Self::Unknown => MermaidParityLevel::Missing,
             // Every reference-defined family currently adjudicates Partial (see the
             // generated table in FEATURE_PARITY.md for the per-family evidence notes).
@@ -1138,6 +1154,28 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             parity: MermaidParityLevel::NotApplicable,
             notes: "Title banner; routes through the general graph selector",
         },
+        FamilyParityRow {
+            family: "ishikawa",
+            diagram_type: Some(DiagramType::Ishikawa),
+            detection: true,
+            dedicated_parser: true,
+            layout: "ishikawa",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Fishbone cause-and-effect: effect head, alternating cause bones, nested sub-causes; new family with no FrankenTUI reference counterpart",
+        },
+        FamilyParityRow {
+            family: "treeView-beta",
+            diagram_type: Some(DiagramType::TreeView),
+            detection: true,
+            dedicated_parser: true,
+            layout: "treeview",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart",
+        },
     ];
     ROWS
 }
@@ -1566,6 +1604,8 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::Treemap,
         DiagramType::Radar,
         DiagramType::Info,
+        DiagramType::Ishikawa,
+        DiagramType::TreeView,
     ];
     DOCUMENTED
 }
@@ -7951,7 +7991,12 @@ impl MermaidDiagramIr {
             DiagramType::Mindmap
             | DiagramType::ArchitectureBeta
             | DiagramType::Sankey
-            | DiagramType::Info => false,
+            | DiagramType::Info
+            // The effect line IS the title upstream (`setDiagramTitle(root)`), drawn once inside the
+            // fish head; a second banner would repeat it.
+            | DiagramType::Ishikawa
+            // The grammar accepts `title …` and the renderer never draws it.
+            | DiagramType::TreeView => false,
             // Not a mermaid family — our own fallback when detection failed. An author who wrote a
             // title still gets it, the same best-effort contract the rest of this path keeps.
             DiagramType::Unknown => true,
@@ -13849,9 +13894,11 @@ mod tests {
         // parity change a conscious, evidence-carrying edit rather than doc drift.
         for family in documented_diagram_types() {
             let expected = match family {
-                DiagramType::Treemap | DiagramType::Radar | DiagramType::Info => {
-                    MermaidParityLevel::NotApplicable
-                }
+                DiagramType::Treemap
+                | DiagramType::Radar
+                | DiagramType::Info
+                | DiagramType::Ishikawa
+                | DiagramType::TreeView => MermaidParityLevel::NotApplicable,
                 _ => MermaidParityLevel::Partial,
             };
             assert_eq!(

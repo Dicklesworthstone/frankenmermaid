@@ -1348,6 +1348,8 @@ impl TermRenderer {
                     buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
+            // No border: a text block is drawn as its label alone on every surface.
+            NodeShape::TextBlock => {}
             _ => {
                 // Standard rectangle (Rect and any unhandled shapes).
                 buffer.set(x, y, glyphs.top_left);
@@ -1638,6 +1640,10 @@ impl TermRenderer {
                 canvas.draw_line(right, bottom, left, bottom);
                 canvas.draw_line(left, bottom, left, top);
             }
+            // A text block is its label alone — no outline — exactly as fm-render-svg draws it
+            // (an empty group) and the canvas backend skips it. Outlining it here boxed every
+            // flowchart `text` node, every fishbone sub-cause and every tree-view entry.
+            NodeShape::TextBlock => {}
             _ => {
                 canvas.draw_rect(x, y, w.max(1), h.max(1));
             }

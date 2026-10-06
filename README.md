@@ -94,6 +94,8 @@ all seven.
 | `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+| `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
+| `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
 <!-- END GENERATED: layout-algorithms -->
 
 ## Quick example
@@ -210,6 +212,8 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | `treemap` | Implemented |
 | `radar-beta` | Implemented |
 | `info` | Implemented |
+| `ishikawa` | Implemented |
+| `treeView-beta` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
 The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md), generated from the same pinned Rust sources as the tables above. Runtime status and reference parity are separate axes there: a family can render end to end (`Runtime: Full`) while still owing documented reference behavior (`Parity: Partial`) — the two columns never collapse into one status.

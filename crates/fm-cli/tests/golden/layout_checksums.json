@@ -241,6 +241,16 @@
       "node_count": 0,
       "nodes_checksum": "cbf29ce484222325"
     },
+    "ishikawa_basic": {
+      "edge_count": 10,
+      "edges_checksum": "453219cf30be940b",
+      "layout_algorithm": "auto",
+      "layout_checksum": "f09f2080b5d20abc",
+      "layout_height": 684.134033,
+      "layout_width": 650.917114,
+      "node_count": 11,
+      "nodes_checksum": "a6a7bcecf704baa3"
+    },
     "journey_basic": {
       "edge_count": 6,
       "edges_checksum": "cbe1f0861d4a426a",
@@ -420,6 +430,16 @@
       "layout_width": 1000.0,
       "node_count": 0,
       "nodes_checksum": "cbf29ce484222325"
+    },
+    "treeview_basic": {
+      "edge_count": 9,
+      "edges_checksum": "c8f24497c629a94c",
+      "layout_algorithm": "auto",
+      "layout_checksum": "093b226c9ece96bc",
+      "layout_height": 439.0,
+      "layout_width": 241.449997,
+      "node_count": 10,
+      "nodes_checksum": "00f678b53f2e76a1"
     },
     "xychart_basic": {
       "edge_count": 0,

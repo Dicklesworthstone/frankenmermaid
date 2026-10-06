@@ -65,6 +65,8 @@ Current status in this file is grounded in:
 | treemap | Yes | Yes | `treemap` | Yes | Full | N/A | Squarified treemap; new family with no FrankenTUI reference counterpart (bd-dw450 certified terminal/canvas/WebGPU draw) |
 | radar-beta | Yes | Yes | `radar` | Yes | Full | N/A | Polar layout with cardinal-spline wedges; new family with no FrankenTUI reference counterpart (bd-sk4dv) |
 | info | Yes | Yes | `auto` | Yes | Full | N/A | Title banner; routes through the general graph selector |
+| ishikawa | Yes | Yes | `ishikawa` | Yes | Full | N/A | Fishbone cause-and-effect: effect head, alternating cause bones, nested sub-causes; new family with no FrankenTUI reference counterpart |
+| treeView-beta | Yes | Yes | `treeview` | Yes | Full | N/A | Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart |
 <!-- END GENERATED: feature-parity-families -->
 
 ### Layout Algorithms
@@ -91,6 +93,8 @@ Current status in this file is grounded in:
 | `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+| `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
+| `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
 <!-- END GENERATED: feature-parity-layouts -->
 
 ### Cross-Cutting Features
