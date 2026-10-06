@@ -418,6 +418,7 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
     target.treemap_meta.clone_from(&source.treemap_meta);
     target.radar_meta.clone_from(&source.radar_meta);
     target.venn_meta.clone_from(&source.venn_meta);
+    target.wardley_meta.clone_from(&source.wardley_meta);
     target.pie_meta.clone_from(&source.pie_meta);
     target.quadrant_meta.clone_from(&source.quadrant_meta);
     target.packet_meta.clone_from(&source.packet_meta);
@@ -519,6 +520,7 @@ impl IrBuilder {
         self.ir.treemap_meta.clone_from(&source.ir.treemap_meta);
         self.ir.radar_meta.clone_from(&source.ir.radar_meta);
         self.ir.venn_meta.clone_from(&source.ir.venn_meta);
+        self.ir.wardley_meta.clone_from(&source.ir.wardley_meta);
         self.ir.pie_meta.clone_from(&source.ir.pie_meta);
         self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
         self.ir.packet_meta.clone_from(&source.ir.packet_meta);

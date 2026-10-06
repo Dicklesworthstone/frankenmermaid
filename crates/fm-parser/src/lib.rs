@@ -1439,6 +1439,7 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // Bare `venn` is rejected upstream; `venn-beta` is implemented, so only the bare spelling
         // still lands here and is answered with the name that works.
         "venn" => Some("venn-beta"),
+        // Likewise `wardley-beta`: implemented, and only the rejected bare spelling lands here.
         "wardley" => Some("wardley-beta"),
         // A bare `treeView` is rejected upstream; only `treeView-beta` (implemented) parses, so the
         // bare spelling is still answered with the name that works.
@@ -1556,6 +1557,13 @@ fn exact_diagram_type_with(
         // `venn-beta` ONLY: the incumbent's detector is `/^\s*venn-beta/` and a bare `venn` is
         // rejected, which `unsupported_upstream_keyword` still answers by naming this spelling.
         Some(DiagramType::Venn)
+    } else if line
+        .trim_start()
+        .get(..12)
+        .is_some_and(|head| head.eq_ignore_ascii_case("wardley-beta"))
+    {
+        // `wardley-beta` ONLY, for the same reason: a bare `wardley` is rejected upstream.
+        Some(DiagramType::Wardley)
     } else if matches(line, "ishikawa") {
         // The incumbent's detector is `/^\s*ishikawa(-beta)?\b/i`; `matches` already accepts the
         // `-beta` suffix, so both spellings land here, exactly as they both parse upstream.
@@ -1603,6 +1611,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("ishikawa", DiagramType::Ishikawa),
     ("treeview-beta", DiagramType::TreeView),
     ("venn-beta", DiagramType::Venn),
+    ("wardley-beta", DiagramType::Wardley),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -4326,7 +4335,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("eventmodeling\n  x\n", "eventmodeling"),
             ("treeView\n  root\n", "treeView"),
             ("venn\n  a\n", "venn"),
-            ("wardley-beta\n  a\n", "wardley"),
+            ("wardley\n  a\n", "wardley"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
@@ -4368,6 +4377,10 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("ishikawa-beta\n  Problem\n", fm_core::DiagramType::Ishikawa),
             ("treeView-beta\n  \"src\"\n", fm_core::DiagramType::TreeView),
             ("venn-beta\n  set A\n", fm_core::DiagramType::Venn),
+            (
+                "wardley-beta\n  component A [0.5, 0.5]\n",
+                fm_core::DiagramType::Wardley,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);
@@ -4836,7 +4849,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         for (source, expected) in [
             ("radar\n  Item\n", "radar-beta"),
             ("venn\n  Item\n", "venn-beta"),
-            ("wardley-beta\n  Item\n", "wardley-beta"),
+            ("wardley\n  Item\n", "wardley-beta"),
             // Bare `treeView` is rejected upstream; the message must name the `-beta` spelling.
             ("treeView\n  Item\n", "treeView-beta"),
         ] {

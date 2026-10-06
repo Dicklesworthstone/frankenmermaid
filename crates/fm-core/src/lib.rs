@@ -338,6 +338,9 @@ pub enum DiagramType {
     /// mermaid's `venn-beta`: sets drawn as area-proportional circles, the regions where they
     /// overlap, and text placed inside a region.
     Venn,
+    /// mermaid's `wardley-beta`: a Wardley map — components placed by evolution (x) and
+    /// visibility (y), their value-chain links, evolution trends, pipelines and annotations.
+    Wardley,
     #[default]
     Unknown,
 }
@@ -376,6 +379,7 @@ impl DiagramType {
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeView-beta",
             Self::Venn => "venn-beta",
+            Self::Wardley => "wardley-beta",
             Self::Unknown => "unknown",
         }
     }
@@ -422,6 +426,7 @@ impl DiagramType {
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeView",
             Self::Venn => "venn",
+            Self::Wardley => "wardley",
             Self::GitGraph => "gitGraph",
             // Nothing upstream to match; the generic term is better than a guess at a family name.
             Self::Unknown => "diagram",
@@ -459,7 +464,8 @@ impl DiagramType {
             | Self::Info
             | Self::Ishikawa
             | Self::TreeView
-            | Self::Venn => MermaidSupportLevel::Supported,
+            | Self::Venn
+            | Self::Wardley => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -496,7 +502,8 @@ impl DiagramType {
             | Self::Info
             | Self::Ishikawa
             | Self::TreeView
-            | Self::Venn => "full",
+            | Self::Venn
+            | Self::Wardley => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -518,7 +525,8 @@ impl DiagramType {
             | Self::Info
             | Self::Ishikawa
             | Self::TreeView
-            | Self::Venn => MermaidParityLevel::NotApplicable,
+            | Self::Venn
+            | Self::Wardley => MermaidParityLevel::NotApplicable,
             Self::Unknown => MermaidParityLevel::Missing,
             // Every reference-defined family currently adjudicates Partial (see the
             // generated table in FEATURE_PARITY.md for the per-family evidence notes).
@@ -1197,6 +1205,17 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             parity: MermaidParityLevel::NotApplicable,
             notes: "Area-proportional set circles placed from pairwise overlaps, region labels at the point of largest margin, text grids, set styles; new family with no FrankenTUI reference counterpart",
         },
+        FamilyParityRow {
+            family: "wardley-beta",
+            diagram_type: Some(DiagramType::Wardley),
+            detection: true,
+            dedicated_parser: true,
+            layout: "wardley",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Evolution × visibility map with stage dividers, anchors, components, sourcing rings, inertia, links with flows, trends, pipelines, notes, annotations and (de)accelerators; new family with no FrankenTUI reference counterpart",
+        },
     ];
     ROWS
 }
@@ -1628,6 +1647,7 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::Ishikawa,
         DiagramType::TreeView,
         DiagramType::Venn,
+        DiagramType::Wardley,
     ];
     DOCUMENTED
 }
@@ -7278,6 +7298,93 @@ pub struct IrVennText {
     pub node: usize,
 }
 
+/// A `wardley-beta` map, read with the pinned mermaid 11.15.0 `wardleyDb` rules.
+///
+/// Every drawn piece is an ordinary IR node — component dots, pipeline squares, sourcing rings,
+/// inertia bars, labels, notes, annotation markers, stage and axis captions — and links, trends,
+/// pipeline evolution links and (de)accelerators are ordinary edges, so every backend draws the map
+/// from node boxes and edge routes alone. This meta is only what the LAYOUT needs to put each piece
+/// where upstream's `wardleyRenderer` does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrWardleyMeta {
+    /// Canvas size: `size [w, h]`, else upstream's 900 × 600.
+    pub width: f32,
+    pub height: f32,
+    /// Map positions: evolution (`x`) and visibility (`y`) as percentages, 0–100.
+    pub points: Vec<IrWardleyPoint>,
+    /// Every placed node, and the point it hangs off.
+    pub marks: Vec<IrWardleyMark>,
+    /// Stage captions in order, with each stage's span along evolution as fractions 0–1.
+    pub stages: Vec<IrWardleyStage>,
+    /// Pipelines; upstream re-centres the parent over its members.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipelines: Vec<IrWardleyPipeline>,
+    /// Index in `ir.clusters` of the chart frame.
+    pub frame_cluster: usize,
+    /// Indices in `ir.nodes` of the `Evolution` and `Visibility` axis captions.
+    pub axis_nodes: [usize; 2],
+}
+
+/// A position on a `wardley-beta` map, in percent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// One node placed relative to a [`IrWardleyPoint`]; `dx`/`dy` are pixel offsets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyMark {
+    pub node: usize,
+    pub point: usize,
+    pub kind: IrWardleyMarkKind,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+/// How a [`IrWardleyMark`] sits on its point.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IrWardleyMarkKind {
+    /// A component dot (radius 6), centred.
+    Dot,
+    /// A pipeline parent's square, centred.
+    Square,
+    /// A sourcing-strategy ring (radius 12), centred.
+    Ring,
+    /// The market symbol inside its ring, centred.
+    Market,
+    /// An inertia bar, centred `dx` to the right.
+    Inertia,
+    /// Text whose START sits at the offset point, on its baseline.
+    Label,
+    /// Text CENTRED on the offset point.
+    Caption,
+    /// A numbered annotation marker (radius 10), centred.
+    Annotation,
+    /// The annotations list box: top-left at the point, kept inside the chart.
+    AnnotationsBox,
+    /// An invisible edge endpoint at the offset point.
+    Ghost,
+    /// An evolution trend's end: invisible, and its arrow stops 8px short, as upstream's does.
+    Target,
+}
+
+/// One `wardley-beta` evolution stage caption.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyStage {
+    pub node: usize,
+    pub start: f32,
+    pub end: f32,
+}
+
+/// One `wardley-beta` pipeline: its parent's point, its members' points, and its box cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyPipeline {
+    pub point: usize,
+    pub members: Vec<usize>,
+    pub cluster: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrRadarMeta {
     /// Axis names in declaration order, which is also the order they are placed clockwise.
@@ -8028,6 +8135,9 @@ pub struct MermaidDiagramIr {
     /// The `venn-beta` sets and regions, when this is a Venn diagram.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venn_meta: Option<IrVennMeta>,
+    /// The `wardley-beta` map placements, when this is a Wardley map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wardley_meta: Option<Box<IrWardleyMeta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -8079,6 +8189,8 @@ impl MermaidDiagramIr {
             | DiagramType::Radar
             // `title …` is drawn above the circles upstream (`venn-title`).
             | DiagramType::Venn
+            // Upstream draws it centred in the top padding (`wardley-title`).
+            | DiagramType::Wardley
             | DiagramType::Journey
             | DiagramType::Gantt
             | DiagramType::XyChart
@@ -8154,6 +8266,7 @@ impl MermaidDiagramIr {
             treemap_meta: None,
             radar_meta: None,
             venn_meta: None,
+            wardley_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,
@@ -8290,6 +8403,11 @@ impl MermaidDiagramIr {
     pub fn is_textless_ornament_node(&self, node: &IrNode) -> bool {
         if self.diagram_type == DiagramType::GitGraph {
             return false;
+        }
+        // Every unlabelled node of a Wardley map is a mark — a dot, ring, bar or edge endpoint —
+        // whose generated id is plumbing; its text is a separate label node.
+        if self.diagram_type == DiagramType::Wardley {
+            return node.label.is_none();
         }
         match node.shape {
             NodeShape::FilledCircle | NodeShape::HorizontalBar => true,
@@ -14008,7 +14126,8 @@ mod tests {
                 | DiagramType::Info
                 | DiagramType::Ishikawa
                 | DiagramType::TreeView
-                | DiagramType::Venn => MermaidParityLevel::NotApplicable,
+                | DiagramType::Venn
+                | DiagramType::Wardley => MermaidParityLevel::NotApplicable,
                 _ => MermaidParityLevel::Partial,
             };
             assert_eq!(

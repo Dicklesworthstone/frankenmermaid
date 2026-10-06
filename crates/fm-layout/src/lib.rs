@@ -28,9 +28,11 @@ mod ishikawa;
 pub mod layout_lens;
 mod tree_view;
 mod venn;
+mod wardley;
 use ishikawa::layout_diagram_ishikawa_traced;
 use tree_view::layout_diagram_tree_view_traced;
 use venn::layout_diagram_venn_traced;
+use wardley::layout_diagram_wardley_traced;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -784,6 +786,7 @@ pub enum LayoutAlgorithm {
     Ishikawa,
     TreeView,
     Venn,
+    Wardley,
 }
 
 impl LayoutAlgorithm {
@@ -813,6 +816,7 @@ impl LayoutAlgorithm {
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeview",
             Self::Venn => "venn",
+            Self::Wardley => "wardley",
         }
     }
 }
@@ -827,7 +831,7 @@ pub struct LayoutAlgorithmRow {
     pub notes: &'static str,
 }
 
-/// All 21 concrete algorithms plus `Auto`, one row each. Pinned by
+/// All 22 concrete algorithms plus `Auto`, one row each. Pinned by
 /// `tests::layout_algorithm_rows_cover_every_variant` — the pin's variant list is a
 /// compiler-checked match surface, so adding a `LayoutAlgorithm` variant without a row
 /// fails the build, not the docs.
@@ -943,6 +947,11 @@ pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
             algorithm: LayoutAlgorithm::Venn,
             serves: "Venn-beta",
             notes: "Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Wardley,
+            serves: "Wardley-beta",
+            notes: "Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links",
         },
     ];
     ROWS
@@ -2129,6 +2138,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         treemap_meta,
         radar_meta,
         venn_meta,
+        wardley_meta,
         pie_meta,
         quadrant_meta,
         packet_meta,
@@ -2157,6 +2167,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *treemap_meta == current.treemap_meta
         && *radar_meta == current.radar_meta
         && *venn_meta == current.venn_meta
+        && *wardley_meta == current.wardley_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
         && *packet_meta == current.packet_meta
@@ -3925,6 +3936,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Ishikawa => layout_diagram_ishikawa_traced(ir),
         LayoutAlgorithm::TreeView => layout_diagram_tree_view_traced(ir),
         LayoutAlgorithm::Venn => layout_diagram_venn_traced(ir),
+        LayoutAlgorithm::Wardley => layout_diagram_wardley_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -4657,6 +4669,7 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::Ishikawa => return "auto_diagram_type_ishikawa",
         DiagramType::TreeView => return "auto_diagram_type_tree_view",
         DiagramType::Venn => return "auto_diagram_type_venn",
+        DiagramType::Wardley => return "auto_diagram_type_wardley",
         _ => {}
     }
     match selected {
@@ -4695,6 +4708,7 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::Ishikawa => LayoutAlgorithm::Ishikawa,
         DiagramType::TreeView => LayoutAlgorithm::TreeView,
         DiagramType::Venn => LayoutAlgorithm::Venn,
+        DiagramType::Wardley => LayoutAlgorithm::Wardley,
         // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
         // direction-aware placement has nothing to honour when no edge declares a side, so an
         // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
@@ -4936,6 +4950,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Ishikawa => matches!(diagram_type, DiagramType::Ishikawa),
         LayoutAlgorithm::TreeView => matches!(diagram_type, DiagramType::TreeView),
         LayoutAlgorithm::Venn => matches!(diagram_type, DiagramType::Venn),
+        LayoutAlgorithm::Wardley => matches!(diagram_type, DiagramType::Wardley),
     }
 }
 
@@ -5168,6 +5183,18 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
                 .saturating_add(6),
             iterations: nodes.saturating_add(2),
             route_ops: edges.saturating_mul(6).saturating_add(nodes),
+        },
+        // A pure projection — every mark, box and straight link placed once — priced by its linear
+        // work, as the directed-path tree is. At the generic three milliseconds a node a 34-node
+        // tea-shop map cost more than Sugiyama, so a loaded host's budget "fell back" to laying the
+        // map out as a graph, discarding every coordinate the author wrote.
+        LayoutAlgorithm::Wardley => LayoutCostEstimate {
+            time_ms: nodes
+                .div_ceil(16)
+                .saturating_add(edges.div_ceil(16))
+                .saturating_add(1),
+            iterations: 1,
+            route_ops: edges.saturating_add(nodes),
         },
         LayoutAlgorithm::Sankey => LayoutCostEstimate {
             time_ms: nodes
@@ -19306,7 +19333,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Radar
                 | LayoutAlgorithm::Ishikawa
                 | LayoutAlgorithm::TreeView
-                | LayoutAlgorithm::Venn => 900,
+                | LayoutAlgorithm::Venn
+                | LayoutAlgorithm::Wardley => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
@@ -19798,7 +19826,7 @@ mod tests {
     /// (and the row table) fails the build rather than drifting the published contract.
     #[test]
     fn layout_algorithm_rows_cover_every_variant() {
-        const ALL: [LayoutAlgorithm; 22] = [
+        const ALL: [LayoutAlgorithm; 23] = [
             LayoutAlgorithm::Auto,
             LayoutAlgorithm::Sugiyama,
             LayoutAlgorithm::Force,
@@ -19821,6 +19849,7 @@ mod tests {
             LayoutAlgorithm::Ishikawa,
             LayoutAlgorithm::TreeView,
             LayoutAlgorithm::Venn,
+            LayoutAlgorithm::Wardley,
         ];
         let rows = super::layout_algorithm_rows();
         assert_eq!(rows.len(), ALL.len(), "row count must match variant count");
@@ -19837,7 +19866,7 @@ mod tests {
     /// rename here must never strand a stale spelling in the generated parity table.
     #[test]
     fn family_parity_layout_spellings_are_real_algorithms() {
-        const SPELLINGS: [&str; 22] = [
+        const SPELLINGS: [&str; 23] = [
             "auto",
             "sugiyama",
             "force",
@@ -19860,6 +19889,7 @@ mod tests {
             "ishikawa",
             "treeview",
             "venn",
+            "wardley",
         ];
         for row in fm_core::family_parity_rows() {
             assert!(

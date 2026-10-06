@@ -451,6 +451,16 @@
       "node_count": 6,
       "nodes_checksum": "dcfd7634f35d0596"
     },
+    "wardley_basic": {
+      "edge_count": 6,
+      "edges_checksum": "5001a065b328d8c7",
+      "layout_algorithm": "auto",
+      "layout_checksum": "43ce64b50b0b5601",
+      "layout_height": 609.25,
+      "layout_width": 900.0,
+      "node_count": 26,
+      "nodes_checksum": "4be16c20744c2cf9"
+    },
     "xychart_basic": {
       "edge_count": 0,
       "edges_checksum": "cbf29ce484222325",

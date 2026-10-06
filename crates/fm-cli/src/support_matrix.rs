@@ -91,6 +91,7 @@ const fn family_fixture_case(family: DiagramType) -> Option<&'static str> {
         DiagramType::Ishikawa => Some("ishikawa_basic"),
         DiagramType::TreeView => Some("treeview_basic"),
         DiagramType::Venn => Some("venn_basic"),
+        DiagramType::Wardley => Some("wardley_basic"),
         DiagramType::Unknown => None,
     }
 }

@@ -624,6 +624,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::Ishikawa => parse_ishikawa(content, &mut builder),
         DiagramType::TreeView => parse_tree_view(content, &mut builder),
         DiagramType::Venn => parse_venn(content, &mut builder),
+        DiagramType::Wardley => parse_wardley(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -8582,6 +8583,915 @@ fn apply_venn_styles(builder: &mut IrBuilder, meta: &fm_core::IrVennMeta, styles
             paint_text(builder, text.node, color);
         }
     }
+}
+
+/// One `wardley-beta` anchor, component or pipeline component, as written.
+struct WardleyComponent<'a> {
+    name: &'a str,
+    anchor: bool,
+    /// Evolution (x) and visibility (y), in percent.
+    x: f32,
+    y: f32,
+    label: Option<(f32, f32)>,
+    strategy: Option<&'a str>,
+    inertia: bool,
+    /// The pipeline parent's index, for a pipeline component.
+    parent: Option<usize>,
+    span: Span,
+}
+
+/// A link's flow decoration, from its port or `+…` arrow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WardleyFlow {
+    None,
+    Forward,
+    Backward,
+    Both,
+}
+
+struct WardleyLink<'a> {
+    from: &'a str,
+    to: &'a str,
+    dashed: bool,
+    flow: WardleyFlow,
+    label: Option<&'a str>,
+    span: Span,
+}
+
+/// A map coordinate in upstream's `toPercent`: a value up to 1 is a fraction, anything larger a
+/// percentage. Out of range is an error upstream (the whole map fails); here it is clamped and
+/// reported.
+fn wardley_percent(value: f32, builder: &mut IrBuilder, line_number: usize) -> f32 {
+    let percent = if value <= 1.0 { value * 100.0 } else { value };
+    if !(0.0..=100.0).contains(&percent) {
+        builder.add_warning(format!(
+            "Line {line_number}: wardley-beta coordinates are 0-1 or 0-100; clamped {value}"
+        ));
+    }
+    percent.clamp(0.0, 100.0)
+}
+
+/// The numbers inside the first `[…]` of `text`, and the text after the `]`.
+fn wardley_bracket(text: &str) -> Option<(Vec<f32>, &str)> {
+    let open = text.find('[')?;
+    let close = open + text[open..].find(']')?;
+    let numbers = text[open + 1..close]
+        .split(',')
+        .map(|value| trim_fast(value).parse::<f32>().ok())
+        .collect::<Option<Vec<f32>>>()?;
+    Some((numbers, trim_fast(&text[close + 1..])))
+}
+
+/// A name as the grammar spells it: a quoted string, or bare words.
+fn wardley_name(text: &str) -> &str {
+    let text = trim_fast(text);
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'"' | b'\'') && bytes[bytes.len() - 1] == bytes[0] {
+        &text[1..text.len() - 1]
+    } else {
+        text
+    }
+}
+
+/// Split a link body at its operator: `->`, `-->`, `-.->`, `>`, a flow port `+<>` / `+<` / `+>`,
+/// or a labelled flow `+'label'>` (also `<` / `<>`). Quoted names are skipped over.
+fn split_wardley_link(body: &str) -> Option<(&str, &str, WardleyLink<'_>)> {
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'') && (index == 0 || bytes[index - 1] != b'+') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        let rest = &body[index..];
+        let mut link = WardleyLink {
+            from: "",
+            to: "",
+            dashed: false,
+            flow: WardleyFlow::None,
+            label: None,
+            span: Span::default(),
+        };
+        let mut len = 0;
+        if let Some(after) = rest.strip_prefix("+'") {
+            let end = after.find('\'')?;
+            link.label = Some(&after[..end]);
+            let tail = &after[end + 1..];
+            let (flow, arrow_len) = wardley_port(tail)?;
+            link.flow = flow;
+            len = 2 + end + 1 + arrow_len;
+        } else if byte == b'+' {
+            let (flow, port_len) = wardley_port(&rest[1..])?;
+            link.flow = flow;
+            len = 1 + port_len;
+        } else if rest.starts_with("-.->") {
+            link.dashed = true;
+            len = 4;
+        } else if rest.starts_with("-->") {
+            len = 3;
+        } else if rest.starts_with("->") {
+            len = 2;
+        } else if byte == b'>' {
+            len = 1;
+        }
+        if len > 0 {
+            // A port may be followed by a plain arrow (`A +> -> B` is grammatical).
+            let mut after = trim_start_fast(&rest[len..]);
+            for arrow in ["-.->", "-->", "->"] {
+                if let Some(tail) = after.strip_prefix(arrow) {
+                    link.dashed |= arrow == "-.->";
+                    after = tail;
+                    break;
+                }
+            }
+            return Some((&body[..index], after, link));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `<>`, `<` or `>` at the start of `text`: the flow it names and its length.
+fn wardley_port(text: &str) -> Option<(WardleyFlow, usize)> {
+    if text.starts_with("<>") {
+        Some((WardleyFlow::Both, 2))
+    } else if text.starts_with('<') {
+        Some((WardleyFlow::Backward, 1))
+    } else if text.starts_with('>') {
+        Some((WardleyFlow::Forward, 1))
+    } else {
+        None
+    }
+}
+
+fn wardley_warning(builder: &mut IrBuilder, line_number: usize, problem: &str, line: &str) {
+    builder.add_warning(format!("Line {line_number}: {problem}: {line}"));
+}
+
+/// Parse a `wardley-beta` map.
+///
+/// Mirrors the pinned 11.15.0 grammar and `wardleyParser`:
+///
+/// - `size [w, h]`; `evolution A -> B@0.4 -> C / D -> …` (stage captions, optional END boundaries,
+///   used only when every stage has one, and a second name joined as `C / D`);
+/// - `anchor Name [visibility, evolution]` and
+///   `component Name [visibility, evolution] label [dx, dy] (build|buy|outsource|market) inertia`;
+/// - links `A -> B`, dashed `A -.-> B`, flows `A +> B`, `A +< B`, `A +<> B`, `A +'label'> B`, and a
+///   trailing `; annotation` as the link's label;
+/// - `evolve Name 0.8`; `pipeline Name { component Member [evolution] … }`;
+/// - `note "text" [v, e]`, `annotations [v, e]`, `annotation 1,[v, e] "text"`,
+///   `accelerator Name [v, e]`, `deaccelerator Name [v, e]`.
+///
+/// Coordinates are visibility first, then evolution, as upstream's `toCoordinates` reads them.
+#[allow(clippy::too_many_lines)]
+fn parse_wardley(content: &str, builder: &mut IrBuilder) {
+    let mut components: Vec<WardleyComponent<'_>> = Vec::new();
+    let mut links: Vec<WardleyLink<'_>> = Vec::new();
+    let mut evolves: Vec<(&str, f32, Span)> = Vec::new();
+    let mut notes: Vec<(&str, f32, f32, Span)> = Vec::new();
+    let mut annotations: Vec<(u32, f32, f32, Option<&str>, Span)> = Vec::new();
+    let mut annotations_box: Option<(f32, f32)> = None;
+    let mut accelerators: Vec<(&str, f32, f32, bool, Span)> = Vec::new();
+    let mut stages: Vec<(String, Option<f32>)> = Vec::new();
+    let mut size = None;
+    let mut pipelines: Vec<(usize, Vec<usize>, Span)> = Vec::new();
+    let mut open_pipeline: Option<usize> = None;
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen
+            && trimmed
+                .get(..12)
+                .is_some_and(|head| head.eq_ignore_ascii_case("wardley-beta"))
+        {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        if trimmed.starts_with("title")
+            && trimmed[5..].chars().next().is_none_or(char::is_whitespace)
+        {
+            // Taken by the generic title pass.
+            continue;
+        }
+        let span = span_for(line_number, line);
+        let (keyword, rest) = trimmed
+            .split_once(char::is_whitespace)
+            .map_or((trimmed, ""), |(keyword, rest)| (keyword, trim_fast(rest)));
+
+        if let Some(parent) = open_pipeline {
+            if trimmed == "}" {
+                open_pipeline = None;
+                continue;
+            }
+            // `component Name [evolution] label [dx, dy]`, at the parent's visibility.
+            let parsed = (keyword == "component")
+                .then(|| rest.find('[').zip(wardley_bracket(rest)))
+                .flatten();
+            let Some((open, (numbers, tail))) = parsed.filter(|(_, (n, _))| n.len() == 1) else {
+                wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `component Name [evolution]`",
+                    trimmed,
+                );
+                continue;
+            };
+            let x = wardley_percent(numbers[0], builder, line_number);
+            let label = tail
+                .strip_prefix("label")
+                .and_then(wardley_bracket)
+                .filter(|(n, _)| n.len() == 2)
+                .map(|(n, _)| (n[0], n[1]));
+            components.push(WardleyComponent {
+                name: wardley_name(&rest[..open]),
+                anchor: false,
+                x,
+                y: components[parent].y,
+                label,
+                strategy: None,
+                inertia: false,
+                parent: Some(parent),
+                span,
+            });
+            if let Some((_, members, _)) = pipelines.last_mut() {
+                members.push(components.len() - 1);
+            }
+            continue;
+        }
+
+        match keyword {
+            "size" => match wardley_bracket(rest) {
+                Some((numbers, _)) if numbers.len() == 2 && numbers.iter().all(|v| *v > 0.0) => {
+                    size = Some((numbers[0], numbers[1]));
+                }
+                _ => wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `size [width, height]`",
+                    trimmed,
+                ),
+            },
+            "evolution" => {
+                stages.clear();
+                for stage in rest.split("->") {
+                    let (stage, second) = stage
+                        .split_once('/')
+                        .map_or((stage, None), |(first, second)| (first, Some(second)));
+                    let (name, boundary) = stage.split_once('@').map_or((stage, None), |(n, b)| {
+                        (n, trim_fast(b).parse::<f32>().ok())
+                    });
+                    let mut caption = wardley_name(name).to_string();
+                    if let Some(second) = second {
+                        caption.push_str(" / ");
+                        caption.push_str(wardley_name(second));
+                    }
+                    stages.push((
+                        caption,
+                        boundary.map(|b| if b > 1.0 { b / 100.0 } else { b }),
+                    ));
+                }
+            }
+            "anchor" | "component" | "note" | "accelerator" | "deaccelerator" => {
+                let Some((open, (numbers, mut tail))) = rest
+                    .find('[')
+                    .zip(wardley_bracket(rest))
+                    .filter(|(_, (n, _))| n.len() == 2)
+                else {
+                    wardley_warning(
+                        builder,
+                        line_number,
+                        "expected `Name [visibility, evolution]`",
+                        trimmed,
+                    );
+                    continue;
+                };
+                let y = wardley_percent(numbers[0], builder, line_number);
+                let x = wardley_percent(numbers[1], builder, line_number);
+                let name = wardley_name(&rest[..open]);
+                match keyword {
+                    "note" => {
+                        notes.push((name, x, y, span));
+                        continue;
+                    }
+                    "accelerator" | "deaccelerator" => {
+                        accelerators.push((name, x, y, keyword == "deaccelerator", span));
+                        continue;
+                    }
+                    _ => {}
+                }
+                let mut component = WardleyComponent {
+                    name,
+                    anchor: keyword == "anchor",
+                    x,
+                    y,
+                    label: None,
+                    strategy: None,
+                    inertia: false,
+                    parent: None,
+                    span,
+                };
+                while !tail.is_empty() {
+                    if let Some((n, after)) = tail
+                        .strip_prefix("label")
+                        .and_then(wardley_bracket)
+                        .filter(|(n, _)| n.len() == 2)
+                    {
+                        component.label = Some((n[0], n[1]));
+                        tail = after;
+                    } else if let Some(after) = tail.strip_prefix("inertia") {
+                        component.inertia = true;
+                        tail = trim_fast(after);
+                    } else if let Some((word, after)) =
+                        tail.strip_prefix('(').and_then(|t| t.split_once(')'))
+                    {
+                        match trim_fast(word) {
+                            "inertia" => component.inertia = true,
+                            strategy @ ("build" | "buy" | "outsource" | "market") => {
+                                component.strategy = Some(strategy);
+                            }
+                            _ => wardley_warning(builder, line_number, "unknown decorator", word),
+                        }
+                        tail = trim_fast(after);
+                    } else {
+                        wardley_warning(builder, line_number, "unrecognised component text", tail);
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+            "pipeline" => {
+                let name = wardley_name(rest.trim_end_matches('{'));
+                let parent = components
+                    .iter()
+                    .position(|c| c.parent.is_none() && c.name == name);
+                match parent {
+                    Some(parent) if rest.ends_with('{') => {
+                        open_pipeline = Some(parent);
+                        pipelines.push((parent, Vec::new(), span));
+                    }
+                    _ => wardley_warning(
+                        builder,
+                        line_number,
+                        "a pipeline needs an already-declared component and `{`",
+                        trimmed,
+                    ),
+                }
+            }
+            "evolve" => {
+                let target = rest
+                    .rsplit_once(char::is_whitespace)
+                    .and_then(|(name, value)| Some((name, value.parse::<f32>().ok()?)));
+                match target {
+                    Some((name, value)) => {
+                        let value = wardley_percent(value, builder, line_number);
+                        evolves.push((wardley_name(name), value, span));
+                    }
+                    None => {
+                        wardley_warning(builder, line_number, "expected `evolve Name 0.8`", trimmed)
+                    }
+                }
+            }
+            "annotations" => match wardley_bracket(rest).filter(|(n, _)| n.len() == 2) {
+                Some((n, _)) => {
+                    let y = wardley_percent(n[0], builder, line_number);
+                    annotations_box = Some((wardley_percent(n[1], builder, line_number), y));
+                }
+                None => wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `annotations [v, e]`",
+                    trimmed,
+                ),
+            },
+            "annotation" => {
+                let parsed = rest.split_once(',').and_then(|(number, tail)| {
+                    let number = trim_fast(number).parse::<u32>().ok()?;
+                    let (n, text) = wardley_bracket(tail).filter(|(n, _)| n.len() == 2)?;
+                    Some((number, n[0], n[1], text))
+                });
+                match parsed {
+                    Some((number, v, e, text)) => {
+                        let y = wardley_percent(v, builder, line_number);
+                        let x = wardley_percent(e, builder, line_number);
+                        let text = (!text.is_empty()).then(|| wardley_name(text));
+                        annotations.push((number, x, y, text, span));
+                    }
+                    None => wardley_warning(
+                        builder,
+                        line_number,
+                        "expected `annotation 1,[v, e] \"text\"`",
+                        trimmed,
+                    ),
+                }
+            }
+            _ => {
+                let (body, label) = trimmed
+                    .split_once(';')
+                    .map_or((trimmed, None), |(body, label)| {
+                        (body, Some(trim_fast(label)))
+                    });
+                match split_wardley_link(body) {
+                    Some((from, to, mut link)) => {
+                        link.from = wardley_name(from);
+                        // A flow port may also close the link (`A -> B +>`).
+                        let to = trim_fast(to);
+                        let (to, port) = ["+<>", "+<", "+>"]
+                            .iter()
+                            .find_map(|port| to.strip_suffix(port).map(|t| (t, port)))
+                            .map_or((to, None), |(t, port)| (t, Some(port)));
+                        link.to = wardley_name(to);
+                        if link.flow == WardleyFlow::None
+                            && let Some(port) = port
+                        {
+                            link.flow = wardley_port(&port[1..]).map_or(WardleyFlow::None, |p| p.0);
+                        }
+                        if link.label.is_none() {
+                            link.label = label.filter(|label| !label.is_empty());
+                        }
+                        link.span = span;
+                        links.push(link);
+                    }
+                    None => {
+                        wardley_warning(builder, line_number, "unsupported wardley syntax", trimmed)
+                    }
+                }
+            }
+        }
+    }
+    if open_pipeline.is_some() {
+        builder.add_warning("wardley-beta pipeline block was never closed with `}`".to_string());
+    }
+
+    build_wardley_ir(
+        builder,
+        WardleyDocument {
+            components,
+            links,
+            evolves,
+            notes,
+            annotations,
+            annotations_box,
+            accelerators,
+            stages,
+            size,
+            pipelines,
+        },
+    );
+}
+
+struct WardleyDocument<'a> {
+    components: Vec<WardleyComponent<'a>>,
+    links: Vec<WardleyLink<'a>>,
+    evolves: Vec<(&'a str, f32, Span)>,
+    notes: Vec<(&'a str, f32, f32, Span)>,
+    annotations: Vec<(u32, f32, f32, Option<&'a str>, Span)>,
+    annotations_box: Option<(f32, f32)>,
+    accelerators: Vec<(&'a str, f32, f32, bool, Span)>,
+    stages: Vec<(String, Option<f32>)>,
+    size: Option<(f32, f32)>,
+    pipelines: Vec<(usize, Vec<usize>, Span)>,
+}
+
+/// Lower a read `wardley-beta` document into nodes, edges, clusters and `ir.wardley_meta`, in
+/// upstream's draw order: frame, stages, pipeline boxes and their evolution links, links, trends,
+/// then per component its ring, dot / square / market mark, inertia bar and label, then notes,
+/// annotations and (de)accelerators.
+#[allow(clippy::too_many_lines)]
+fn build_wardley_ir(builder: &mut IrBuilder, doc: WardleyDocument<'_>) {
+    use fm_core::{IrWardleyMarkKind as Kind, IrWardleyPoint};
+    let mut meta = fm_core::IrWardleyMeta {
+        width: doc.size.map_or(900.0, |s| s.0),
+        height: doc.size.map_or(600.0, |s| s.1),
+        ..fm_core::IrWardleyMeta::default()
+    };
+    let mut ordinal = 0_usize;
+    // Every node gets a fresh generated id; the component's own name is its dot's LABEL-less id.
+    let mut add = |builder: &mut IrBuilder,
+                   meta: &mut fm_core::IrWardleyMeta,
+                   label: Option<&str>,
+                   shape: NodeShape,
+                   style: &str,
+                   place: Option<(usize, Kind, f32, f32)>,
+                   span: Span|
+     -> Option<IrNodeId> {
+        ordinal += 1;
+        let node = builder.intern_node(&format!("wardley_{ordinal}"), label, shape, span)?;
+        if !style.is_empty()
+            && let Some(ir_node) = builder.node_mut(node)
+        {
+            ir_node.inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+        }
+        if let Some((point, kind, dx, dy)) = place {
+            meta.marks.push(fm_core::IrWardleyMark {
+                node: node.0,
+                point,
+                kind,
+                dx,
+                dy,
+            });
+        }
+        Some(node)
+    };
+    let point = |meta: &mut fm_core::IrWardleyMeta, x: f32, y: f32| {
+        meta.points.push(IrWardleyPoint { x, y });
+        meta.points.len() - 1
+    };
+
+    meta.frame_cluster = builder
+        .ensure_cluster("wardley-frame", None, Span::default())
+        .unwrap_or(0);
+    // Solid chart axes and pipeline outlines, as upstream draws them, not dashed subgraph frames.
+    let solid = |builder: &mut IrBuilder, cluster: usize, css: &str| {
+        builder.push_style_ref(
+            fm_core::IrStyleTarget::Cluster(cluster),
+            css.to_string(),
+            Span::default(),
+        );
+    };
+    solid(
+        builder,
+        meta.frame_cluster,
+        "fill:none,stroke:#333333,stroke-dasharray:none",
+    );
+    let default_stages = ["Genesis", "Custom Built", "Product", "Commodity"];
+    let stages: Vec<(String, Option<f32>)> = if doc.stages.is_empty() {
+        default_stages
+            .iter()
+            .map(|s| ((*s).to_string(), None))
+            .collect()
+    } else {
+        doc.stages
+    };
+    let all_bounded = stages.iter().all(|(_, b)| b.is_some());
+    #[allow(clippy::cast_precision_loss)]
+    let stage_width = 1.0 / stages.len() as f32;
+    let mut start = 0.0;
+    for (index, (caption, boundary)) in stages.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let end = if all_bounded {
+            boundary.unwrap_or(1.0).clamp(start, 1.0)
+        } else {
+            (index + 1) as f32 * stage_width
+        };
+        if let Some(node) = add(
+            builder,
+            &mut meta,
+            Some(caption),
+            NodeShape::TextBlock,
+            "",
+            None,
+            Span::default(),
+        ) {
+            meta.stages.push(fm_core::IrWardleyStage {
+                node: node.0,
+                start,
+                end,
+            });
+        }
+        start = end;
+    }
+    for (slot, caption) in ["Evolution", "Visibility"].into_iter().enumerate() {
+        if let Some(node) = add(
+            builder,
+            &mut meta,
+            Some(caption),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            None,
+            Span::default(),
+        ) {
+            meta.axis_nodes[slot] = node.0;
+        }
+    }
+
+    // One point per component; a pipeline parent's is re-centred by the layout.
+    let points: Vec<usize> = doc
+        .components
+        .iter()
+        .map(|c| point(&mut meta, c.x, c.y))
+        .collect();
+    let is_parent = |index: usize| doc.pipelines.iter().any(|(parent, _, _)| *parent == index);
+    // The node every link and trend attaches to, per component.
+    let mut marks: Vec<Option<IrNodeId>> = vec![None; doc.components.len()];
+
+    // Pipeline boxes, before anything drawn inside them.
+    let mut pipeline_clusters = Vec::with_capacity(doc.pipelines.len());
+    for (parent, members, span) in &doc.pipelines {
+        let cluster = builder.ensure_cluster(&format!("wardley-pipeline-{parent}"), None, *span);
+        if let Some(cluster) = cluster {
+            solid(
+                builder,
+                cluster,
+                "fill:none,stroke:#000000,stroke-width:1.5px,stroke-dasharray:none",
+            );
+            meta.pipelines.push(fm_core::IrWardleyPipeline {
+                point: points[*parent],
+                members: members.iter().map(|&m| points[m]).collect(),
+                cluster,
+            });
+        }
+        pipeline_clusters.push(cluster);
+    }
+
+    // Component marks: ring, dot / square / market, inertia, label.
+    for (index, component) in doc.components.iter().enumerate() {
+        let at = points[index];
+        let span = component.span;
+        if component.anchor {
+            let (dx, dy) = component.label.unwrap_or((0.0, -3.0));
+            marks[index] = add(
+                builder,
+                &mut meta,
+                Some(component.name),
+                NodeShape::TextBlock,
+                "font-weight:bold",
+                Some((at, Kind::Caption, dx, dy)),
+                span,
+            );
+            continue;
+        }
+        let parent = is_parent(index);
+        if let Some(strategy) = component.strategy {
+            let fill = match strategy {
+                "build" => "#eeeeee",
+                "buy" => "#cccccc",
+                "outsource" => "#666666",
+                _ => "#ffffff",
+            };
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::Circle,
+                &format!("fill:{fill},stroke:#000000"),
+                Some((at, Kind::Ring, 0.0, 0.0)),
+                span,
+            );
+        }
+        let (shape, kind) = if parent {
+            (NodeShape::Rect, Kind::Square)
+        } else if component.strategy == Some("market") {
+            (NodeShape::Triangle, Kind::Market)
+        } else {
+            (NodeShape::Circle, Kind::Dot)
+        };
+        marks[index] = add(
+            builder,
+            &mut meta,
+            None,
+            shape,
+            "fill:#ffffff,stroke:#000000",
+            Some((at, kind, 0.0, 0.0)),
+            span,
+        );
+        let ring = if component.strategy.is_some() {
+            16.0
+        } else {
+            0.0
+        };
+        if component.inertia {
+            let reach = if parent { 4.8 + 15.0 } else { 6.0 + 15.0 };
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::Rect,
+                "fill:#000000,stroke:#000000",
+                Some((at, Kind::Inertia, reach + ring, 0.0)),
+                span,
+            );
+        }
+        let lift = if component.strategy.is_some() {
+            10.0
+        } else {
+            0.0
+        };
+        let (dx, dy) = component.label.unwrap_or((8.0 + lift, -8.0 - lift));
+        add(
+            builder,
+            &mut meta,
+            Some(component.name),
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Label, dx, dy)),
+            span,
+        );
+    }
+    for (cluster, (_, members, _)) in pipeline_clusters.iter().zip(&doc.pipelines) {
+        for &member in members {
+            if let (Some(cluster), Some(node)) = (cluster, marks[member]) {
+                builder.add_node_to_cluster(*cluster, node);
+            }
+        }
+        // Evolution links between neighbouring members, left to right, dashed.
+        let mut ordered: Vec<usize> = members.clone();
+        for i in 1..ordered.len() {
+            let mut j = i;
+            while j > 0 && doc.components[ordered[j - 1]].x > doc.components[ordered[j]].x {
+                ordered.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        for pair in ordered.windows(2) {
+            if let (Some(a), Some(b)) = (marks[pair[0]], marks[pair[1]]) {
+                builder.push_edge(
+                    a,
+                    b,
+                    ArrowType::DottedLine,
+                    None,
+                    doc.components[pair[0]].span,
+                );
+            }
+        }
+    }
+
+    // Links resolve a name to a component's own name first, then to a pipeline member's.
+    let resolve = |name: &str| {
+        doc.components
+            .iter()
+            .position(|c| c.parent.is_none() && c.name == name)
+            .or_else(|| doc.components.iter().position(|c| c.name == name))
+    };
+    for link in &doc.links {
+        let (Some(from), Some(to)) = (resolve(link.from), resolve(link.to)) else {
+            builder.add_warning(format!(
+                "wardley-beta link {} -> {} names a component that is not declared; not drawn",
+                link.from, link.to
+            ));
+            continue;
+        };
+        // Upstream drops a link from a pipeline member to its own parent.
+        if doc.components[from].parent == Some(to) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (marks[from], marks[to]) else {
+            continue;
+        };
+        let (a, b, arrow) = match (link.flow, link.dashed) {
+            (WardleyFlow::None, false) => (a, b, ArrowType::Line),
+            (WardleyFlow::None, true) => (a, b, ArrowType::DottedLine),
+            (WardleyFlow::Forward, false) => (a, b, ArrowType::Arrow),
+            (WardleyFlow::Forward, true) => (a, b, ArrowType::DottedArrow),
+            (WardleyFlow::Backward, false) => (b, a, ArrowType::Arrow),
+            (WardleyFlow::Backward, true) => (b, a, ArrowType::DottedArrow),
+            (WardleyFlow::Both, false) => (a, b, ArrowType::DoubleArrow),
+            (WardleyFlow::Both, true) => (a, b, ArrowType::DoubleDottedArrow),
+        };
+        builder.push_edge(a, b, arrow, link.label, link.span);
+    }
+
+    // Trends: a dashed red arrow to the evolved position; a later `evolve` of one component wins.
+    for (position, (name, target, span)) in doc.evolves.iter().enumerate() {
+        if doc.evolves[position + 1..]
+            .iter()
+            .any(|(later, _, _)| later == name)
+        {
+            continue;
+        }
+        let Some(owner) = resolve(name).filter(|&c| marks[c].is_some()) else {
+            builder.add_warning(format!(
+                "wardley-beta evolve names an undeclared component: {name}"
+            ));
+            continue;
+        };
+        let at = point(&mut meta, *target, doc.components[owner].y);
+        if let (Some(from), Some(ghost)) = (
+            marks[owner],
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::TextBlock,
+                "",
+                Some((at, Kind::Target, 0.0, 0.0)),
+                *span,
+            ),
+        ) {
+            builder.push_edge(from, ghost, ArrowType::DottedArrow, None, *span);
+            builder.set_last_edge_inline_style("stroke:#dc3545");
+        }
+    }
+
+    for (text, x, y, span) in &doc.notes {
+        let at = point(&mut meta, *x, *y);
+        add(
+            builder,
+            &mut meta,
+            Some(text),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            Some((at, Kind::Label, 0.0, 0.0)),
+            *span,
+        );
+    }
+    for (number, x, y, _, span) in &doc.annotations {
+        let at = point(&mut meta, *x, *y);
+        add(
+            builder,
+            &mut meta,
+            Some(&number.to_string()),
+            NodeShape::Circle,
+            "fill:#ffffff,stroke:#000000,font-weight:bold",
+            Some((at, Kind::Annotation, 0.0, 0.0)),
+            *span,
+        );
+    }
+    if let Some((x, y)) = doc.annotations_box {
+        let mut listed: Vec<(u32, &str)> = doc
+            .annotations
+            .iter()
+            .filter_map(|(number, _, _, text, _)| Some((*number, (*text)?)))
+            .collect();
+        for i in 1..listed.len() {
+            let mut j = i;
+            while j > 0 && listed[j - 1].0 > listed[j].0 {
+                listed.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        if !listed.is_empty() {
+            let text = listed
+                .iter()
+                .map(|(number, text)| format!("{number}. {text}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let at = point(&mut meta, x, y);
+            add(
+                builder,
+                &mut meta,
+                Some(&text),
+                NodeShape::Rect,
+                "fill:#ffffff,stroke:#000000",
+                Some((at, Kind::AnnotationsBox, 0.0, 0.0)),
+                Span::default(),
+            );
+        }
+    }
+    for (name, x, y, decelerate, span) in &doc.accelerators {
+        let at = point(&mut meta, *x, *y);
+        let tail = add(
+            builder,
+            &mut meta,
+            None,
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Ghost, 0.0, 0.0)),
+            *span,
+        );
+        let head = add(
+            builder,
+            &mut meta,
+            None,
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Ghost, 60.0, 0.0)),
+            *span,
+        );
+        if let (Some(tail), Some(head)) = (tail, head) {
+            let (a, b) = if *decelerate {
+                (head, tail)
+            } else {
+                (tail, head)
+            };
+            builder.push_edge(a, b, ArrowType::ThickArrow, None, *span);
+        }
+        add(
+            builder,
+            &mut meta,
+            Some(name),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            Some((at, Kind::Caption, 30.0, 26.0)),
+            *span,
+        );
+    }
+
+    builder.ir_mut().wardley_meta = Some(Box::new(meta));
 }
 
 fn parse_radar(content: &str, builder: &mut IrBuilder) {
@@ -26746,6 +27656,142 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    fn wardley_marks(parsed: &crate::ParseResult, kind: fm_core::IrWardleyMarkKind) -> Vec<String> {
+        let meta = parsed.ir.wardley_meta.as_deref().expect("wardley meta");
+        meta.marks
+            .iter()
+            .filter(|mark| mark.kind == kind)
+            .map(|mark| {
+                let node = &parsed.ir.nodes[mark.node];
+                node.label
+                    .map(|label| parsed.ir.labels[label.0].text.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The statements of the pinned grammar each land as the right marks, coordinates are read
+    /// visibility-first, and no well-formed line is reported.
+    #[test]
+    fn wardley_parses_components_links_and_decorations() {
+        use fm_core::IrWardleyMarkKind as Kind;
+        let parsed = parse_mermaid(
+            "wardley-beta\ntitle Tea Shop\nsize [1100, 800]\nevolution Genesis -> Custom@0.5 -> Product / Rental -> Commodity\nanchor Business [0.95, 0.63]\ncomponent Cup of Tea [0.79, 0.61] label [19, -4]\ncomponent Kettle [0.43, 35] (build) inertia\ncomponent Stall [0.3, 0.9] (market)\nBusiness -> Cup of Tea\nCup of Tea -.-> Kettle; limited by\nKettle +<> Stall\nStall +'cash'< Business\nevolve Kettle 0.62\nnote \"A note\" [0.3, 0.5]\naccelerator Push [0.2, 0.5]\n",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Wardley);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Tea Shop"));
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!((meta.width, meta.height), (1100.0, 800.0));
+        let stages: Vec<String> = meta
+            .stages
+            .iter()
+            .map(|stage| {
+                let node = &parsed.ir.nodes[stage.node];
+                parsed.ir.labels[node.label.unwrap().0].text.clone()
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            ["Genesis", "Custom", "Product / Rental", "Commodity"]
+        );
+        assert_eq!(wardley_marks(&parsed, Kind::Caption), ["Business", "Push"]);
+        assert_eq!(
+            wardley_marks(&parsed, Kind::Label),
+            ["Cup of Tea", "Kettle", "Stall", "A note"]
+        );
+        assert_eq!(wardley_marks(&parsed, Kind::Ring).len(), 2);
+        assert_eq!(wardley_marks(&parsed, Kind::Market).len(), 1);
+        assert_eq!(wardley_marks(&parsed, Kind::Inertia).len(), 1);
+        // `[0.43, 35]`: visibility 43%, evolution 35% (a value above 1 is already a percentage).
+        let kettle_dot = meta
+            .marks
+            .iter()
+            .filter(|mark| mark.kind == Kind::Dot)
+            .nth(1)
+            .expect("kettle dot");
+        let point = meta.points[kettle_dot.point];
+        assert!(
+            (point.x - 35.0).abs() < 1e-4 && (point.y - 43.0).abs() < 1e-4,
+            "{point:?}"
+        );
+
+        let arrows: Vec<ArrowType> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        assert_eq!(
+            arrows,
+            [
+                ArrowType::Line,
+                ArrowType::DottedLine,
+                ArrowType::DoubleArrow,
+                ArrowType::Arrow,
+                ArrowType::DottedArrow,
+                ArrowType::ThickArrow,
+            ]
+        );
+        let label = |index: usize| {
+            parsed.ir.edges[index]
+                .label
+                .map(|label| parsed.ir.labels[label.0].text.as_str())
+        };
+        assert_eq!(label(1), Some("limited by"));
+        assert_eq!(label(3), Some("cash"));
+        // A backward flow points at the link's SOURCE: the edge runs Business -> Stall.
+        let fm_core::IrEndpoint::Node(target) = parsed.ir.edges[3].to else {
+            panic!("a node endpoint");
+        };
+        assert!(
+            parsed.ir.nodes[target.0].label.is_none(),
+            "the arrow lands on the stall's mark"
+        );
+        // The trend is red.
+        let trend = parsed.ir.edges[4]
+            .inline_style
+            .as_ref()
+            .expect("trend colour");
+        assert_eq!(
+            trend.properties.get("stroke").map(String::as_str),
+            Some("#dc3545")
+        );
+    }
+
+    /// A pipeline's members take the parent's visibility, resolve by their own names in links,
+    /// are chained left to right, and a member's link to its own parent is dropped as upstream
+    /// drops it.
+    #[test]
+    fn wardley_pipelines_resolve_members_and_chain_them() {
+        use fm_core::IrWardleyMarkKind as Kind;
+        let parsed = parse_mermaid(
+            "wardley-beta\ncomponent Kettle [0.45, 0.57]\ncomponent Power [0.1, 0.7]\npipeline Kettle {\n  component Electric [0.75] label [5, 5]\n  component Campfire [0.35]\n}\nElectric -> Power\nCampfire -> Kettle\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!(wardley_marks(&parsed, Kind::Square).len(), 1);
+        let pipeline = &meta.pipelines[0];
+        let ys: Vec<f32> = pipeline.members.iter().map(|&p| meta.points[p].y).collect();
+        assert_eq!(ys, [45.0, 45.0]);
+        let arrows: Vec<ArrowType> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        // The chain (Campfire -> Electric, sorted by evolution), then Electric -> Power; the
+        // member-to-parent link is not drawn.
+        assert_eq!(arrows, [ArrowType::DottedLine, ArrowType::Line]);
+        assert_eq!(parsed.ir.clusters.len(), 2, "frame and pipeline box");
+    }
+
+    /// Mistakes are reported and the rest of the map still draws: an out-of-range coordinate is
+    /// clamped, a link to an undeclared component and a pipeline of one are skipped with a reason.
+    #[test]
+    fn wardley_reports_what_it_cannot_draw() {
+        let parsed = parse_mermaid(
+            "wardley-beta\ncomponent A [1.5, 120]\nA -> Ghost\npipeline Nobody {\n}\nwhat is this\n",
+        );
+        let joined = parsed.warnings.join(" | ");
+        assert!(joined.contains("clamped"), "{joined}");
+        assert!(joined.contains("not declared"), "{joined}");
+        assert!(joined.contains("pipeline"), "{joined}");
+        assert!(joined.contains("unsupported wardley syntax"), "{joined}");
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!(meta.points[0].x, 100.0);
+    }
+
     #[test]
     fn venn_parses_sets_unions_sizes_and_labels() {
         let source = "venn-beta\n  title Team overlap\n  set A\n  set B[\"Backend\"]:20\n  set \"C\":5\n  union B,A[\"APIs\"]\n  union A,B,C:0.5\n";
@@ -26900,25 +27946,20 @@ Rel_Back(db, app, "Responds")"#,
         // `radar-beta` WAS HERE and is not any more: bd-sk4dv implemented the family. The BARE
         // `radar` spelling is still unimplemented and still names `radar-beta` back, which is
         // now a spelling that actually renders — asserted in lib.rs.
-        // `venn-beta` WAS HERE and is not any more: the family is implemented.
-        for (header, canonical) in [
-            ("wardley-beta", "wardley"),
-            ("eventmodeling", "eventmodeling"),
-        ] {
-            let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
+        // `venn-beta` and `wardley-beta` WERE HERE and are not any more: both are implemented.
+        let parsed = parse_mermaid("eventmodeling\n  \"A\": 1\n");
 
-            // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
-            // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
-            // test survives that implementation moving, and fails if it is deleted.
-            assert!(
-                parsed
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains(canonical) && w.contains("does not implement")),
-                "`{header}` was not named as unimplemented: {:?}",
-                parsed.warnings
-            );
-        }
+        // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
+        // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
+        // test survives that implementation moving, and fails if it is deleted.
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("eventmodeling") && w.contains("does not implement")),
+            "`eventmodeling` was not named as unimplemented: {:?}",
+            parsed.warnings
+        );
     }
 
     /// CONTROL: an unrecognisable document is NOT claimed as an unimplemented upstream type.

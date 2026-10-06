@@ -2946,7 +2946,9 @@ impl TermRenderer {
         fallback_id: &str,
     ) -> Option<String> {
         let node = ir_node?;
-        if is_block_beta_space_node(node) {
+        // A pure mark (state `[*]`, a fork bar, a Wardley dot) carries a generated id that the
+        // shared rule says is never displayed; falling back to it printed `__state_start`.
+        if is_block_beta_space_node(node) || ir.is_textless_ornament_node(node) {
             return None;
         }
 

@@ -3139,11 +3139,20 @@ fn resolve_node_inline_styles(
     ir: &MermaidDiagramIr,
     node_index: usize,
 ) -> (Option<String>, Option<String>) {
+    use fm_core::IrStyleTarget;
     let node = ir.nodes.get(node_index);
-    let properties = if ir.style_refs.is_empty() {
-        node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
-    } else {
+    // `inline_style` is DERIVED from `Node` and `Class` refs (`populate_structured_styles`), and
+    // classDefs reach the SVG as CSS classes, so with such refs only the `style` directives are
+    // inlined. Without them the field is the parser's own — a Venn set's colour, a Wardley dot —
+    // and a ref aimed only at a cluster or a link must not erase it.
+    let derived = ir
+        .style_refs
+        .iter()
+        .any(|sr| matches!(sr.target, IrStyleTarget::Node(_) | IrStyleTarget::Class(_)));
+    let properties = if derived {
         collect_node_style_directives(ir, node_index)
+    } else {
+        node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
     };
 
     if let Some(props) = properties {

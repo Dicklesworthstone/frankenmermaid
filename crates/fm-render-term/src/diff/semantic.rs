@@ -201,6 +201,18 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
         })
     };
     record(&mut changes, "venn", &venn(old), &venn(new));
+    // A Wardley map's content IS its coordinates: moving a component changes no node or edge.
+    let wardley = |ir: &MermaidDiagramIr| {
+        ir.wardley_meta.clone().map(|mut meta| {
+            for mark in &mut meta.marks {
+                let mut id = IrNodeId(mark.node);
+                remap_node(ir, &names, &mut id);
+                mark.node = id.0;
+            }
+            meta
+        })
+    };
+    record(&mut changes, "wardley", &wardley(old), &wardley(new));
     let packet = |ir: &MermaidDiagramIr| {
         ir.packet_meta.clone().map(|mut meta| {
             for field in &mut meta.fields {

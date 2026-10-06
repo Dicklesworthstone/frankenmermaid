@@ -107,7 +107,20 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # is the hand-streamed hot path and was deliberately not refactored for bytes), the xychart layout
 # branch and plot-bounds helpers (~1.0K), and quadrant point style parse/serialise/paint (~1.6K).
 # Headroom after raise: 1359 bytes.
-MAX_GZIP_BYTES=$((712 * 1024))
+#
+# Raised 712K -> 726K on 2026-10-06 for the `wardley-beta` family, measured the same way from the
+# committed pkg/ (6b8e3ea, 728519 gzip):
+#   742177 gzip  + wardley-beta: grammar, IR meta + serialisation, projection layout,
+#                  linear guardrail pricing, renderer inline-style fix        (+13658, 13089 over)
+#   742134 gzip  after merging the four `Name [v, e]` statement arms        (-43)
+# Function-by-function against 6b8e3ea with names kept: `parse_wardley` with its inlined builder
+# and link splitter ~15.4K pre-opt (the whole statement grammar — size, evolution stages and
+# boundaries, anchors, components with labels / sourcing / inertia, pipelines, six link spellings
+# with flows and annotations, evolve, notes, annotations, (de)accelerators — plus lowering to
+# ~10 kinds of marks), the projection inlined into `compute_traced_layout_with_config_and_guardrails`
+# ~4.4K, and serde for the five new IR structs ~2.5K. No shared machinery was added; the remainder
+# is the family. Headroom after raise: 1290 bytes.
+MAX_GZIP_BYTES=$((726 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

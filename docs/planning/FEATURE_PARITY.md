@@ -68,6 +68,7 @@ Current status in this file is grounded in:
 | ishikawa | Yes | Yes | `ishikawa` | Yes | Full | N/A | Fishbone cause-and-effect: effect head, alternating cause bones, nested sub-causes; new family with no FrankenTUI reference counterpart |
 | treeView-beta | Yes | Yes | `treeview` | Yes | Full | N/A | Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart |
 | venn-beta | Yes | Yes | `venn` | Yes | Full | N/A | Area-proportional set circles placed from pairwise overlaps, region labels at the point of largest margin, text grids, set styles; new family with no FrankenTUI reference counterpart |
+| wardley-beta | Yes | Yes | `wardley` | Yes | Full | N/A | Evolution × visibility map with stage dividers, anchors, components, sourcing rings, inertia, links with flows, trends, pipelines, notes, annotations and (de)accelerators; new family with no FrankenTUI reference counterpart |
 <!-- END GENERATED: feature-parity-families -->
 
 ### Layout Algorithms
@@ -97,6 +98,7 @@ Current status in this file is grounded in:
 | `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
 | `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
 | `venn` | Venn-beta | Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point |
+| `wardley` | Wardley-beta | Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links |
 <!-- END GENERATED: feature-parity-layouts -->
 
 ### Cross-Cutting Features

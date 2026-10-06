@@ -73,6 +73,7 @@ const ALL_TYPES: &[DiagramType] = &[
     DiagramType::Ishikawa,
     DiagramType::TreeView,
     DiagramType::Venn,
+    DiagramType::Wardley,
     DiagramType::Unknown,
 ];
 
@@ -287,7 +288,8 @@ const fn declaration_index(ty: DiagramType) -> usize {
         DiagramType::Ishikawa => 27,
         DiagramType::TreeView => 28,
         DiagramType::Venn => 29,
-        DiagramType::Unknown => 30,
+        DiagramType::Wardley => 30,
+        DiagramType::Unknown => 31,
     }
 }
 
