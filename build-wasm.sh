@@ -76,7 +76,22 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
 # measured-justification procedure, not a correctness gate to be quietly relaxed — if a future
 # change cannot say what it cost and why, it should shrink instead of raising.
-MAX_GZIP_BYTES=$((701 * 1024))
+#
+# Raised 701K -> 706K on 2026-10-06 for two new diagram families, MEASURED per family from the
+# committed pkg/ at each step (`gzip -c | wc -c`, the measurement below):
+#   702544 gzip  before (1e5ed69)
+#   709388 gzip  + ishikawa and treeView-beta families, terminal text-block fix  (+6844, PASSED)
+#   722087 gzip  + venn-beta family and canvas `fill-opacity`                    (+12699, 4263 over)
+# So the raise is attributable to venn-beta alone: a lexer/statement parser, the IR meta and its
+# serialisation, and a geometry engine (lens-area inversion, greedy placement, stress refinement,
+# largest-margin region search, text grids). Shrink levers were applied FIRST and are what brought
+# it from 726452 to 722087 (-4365): dropping the generic `[String]::sort` and an index `sort_by`
+# for hand-rolled scans, building styles through the shared CSS parser instead of a new
+# BTreeMap-from-iterator instantiation, f32 geometry instead of f64 libm trig, and one shared
+# warning formatter. Measured function-by-function against the pre-venn build with names kept, the
+# remainder is the family's own inlined layout (~8.4K pre-opt) and parser (~6.6K pre-opt).
+# Headroom after raise: 857 bytes.
+MAX_GZIP_BYTES=$((706 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

@@ -441,6 +441,16 @@
       "node_count": 10,
       "nodes_checksum": "00f678b53f2e76a1"
     },
+    "venn_basic": {
+      "edge_count": 0,
+      "edges_checksum": "cbf29ce484222325",
+      "layout_algorithm": "auto",
+      "layout_checksum": "f6c8eaea02a41d55",
+      "layout_height": 500.0,
+      "layout_width": 800.0,
+      "node_count": 6,
+      "nodes_checksum": "dcfd7634f35d0596"
+    },
     "xychart_basic": {
       "edge_count": 0,
       "edges_checksum": "cbf29ce484222325",

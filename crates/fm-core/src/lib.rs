@@ -335,6 +335,9 @@ pub enum DiagramType {
     /// mermaid's `treeView-beta`: a file-explorer style indented tree of quoted names under an
     /// implicit `/` root.
     TreeView,
+    /// mermaid's `venn-beta`: sets drawn as area-proportional circles, the regions where they
+    /// overlap, and text placed inside a region.
+    Venn,
     #[default]
     Unknown,
 }
@@ -372,6 +375,7 @@ impl DiagramType {
             Self::Info => "info",
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeView-beta",
+            Self::Venn => "venn-beta",
             Self::Unknown => "unknown",
         }
     }
@@ -417,6 +421,7 @@ impl DiagramType {
             Self::Info => "info",
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeView",
+            Self::Venn => "venn",
             Self::GitGraph => "gitGraph",
             // Nothing upstream to match; the generic term is better than a guess at a family name.
             Self::Unknown => "diagram",
@@ -453,7 +458,8 @@ impl DiagramType {
             | Self::Radar
             | Self::Info
             | Self::Ishikawa
-            | Self::TreeView => MermaidSupportLevel::Supported,
+            | Self::TreeView
+            | Self::Venn => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -489,7 +495,8 @@ impl DiagramType {
             | Self::Radar
             | Self::Info
             | Self::Ishikawa
-            | Self::TreeView => "full",
+            | Self::TreeView
+            | Self::Venn => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -506,9 +513,12 @@ impl DiagramType {
     #[must_use]
     pub const fn parity_level(self) -> MermaidParityLevel {
         match self {
-            Self::Treemap | Self::Radar | Self::Info | Self::Ishikawa | Self::TreeView => {
-                MermaidParityLevel::NotApplicable
-            }
+            Self::Treemap
+            | Self::Radar
+            | Self::Info
+            | Self::Ishikawa
+            | Self::TreeView
+            | Self::Venn => MermaidParityLevel::NotApplicable,
             Self::Unknown => MermaidParityLevel::Missing,
             // Every reference-defined family currently adjudicates Partial (see the
             // generated table in FEATURE_PARITY.md for the per-family evidence notes).
@@ -1176,6 +1186,17 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             parity: MermaidParityLevel::NotApplicable,
             notes: "Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart",
         },
+        FamilyParityRow {
+            family: "venn-beta",
+            diagram_type: Some(DiagramType::Venn),
+            detection: true,
+            dedicated_parser: true,
+            layout: "venn",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Area-proportional set circles placed from pairwise overlaps, region labels at the point of largest margin, text grids, set styles; new family with no FrankenTUI reference counterpart",
+        },
     ];
     ROWS
 }
@@ -1606,6 +1627,7 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::Info,
         DiagramType::Ishikawa,
         DiagramType::TreeView,
+        DiagramType::Venn,
     ];
     DOCUMENTED
 }
@@ -7199,6 +7221,63 @@ pub struct IrXySeries {
 ///   240, 300).
 ///
 /// Note `radar-beta` is the only spelling: a bare `radar` is REJECTED upstream.
+/// A `venn-beta` diagram: its sets, the overlap regions it declares, and text placed in regions.
+///
+/// Read from the pinned mermaid 11.15.0 `vennDB`, whose rules this carries:
+///
+/// * a set's SIZE is the area its circle should have — `set A:20`, default 10;
+/// * a `union` names two or more ALREADY-DECLARED sets and the area their overlap should have,
+///   defaulting to `10 / k²` for a k-way union; its set ids are kept SORTED, as upstream sorts them,
+///   so `union B,A` and `union A,B` name one region;
+/// * a pair of sets that no union names is meant to be DISJOINT — upstream hands venn.js no area for
+///   it, which venn.js lays out as zero overlap.
+///
+/// Each set is a circle node in `ir.nodes` and each labelled union / text entry a text-block node;
+/// the indices here tie them back to their region, which is what the layout needs to place them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrVennMeta {
+    /// Every `set`, in declaration order.
+    pub sets: Vec<IrVennSet>,
+    /// Every `union`, in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unions: Vec<IrVennUnion>,
+    /// Every `text` entry, in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<IrVennText>,
+}
+
+/// One `venn-beta` set: a circle whose area is `size`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennSet {
+    /// The identifier the source used (`A` in `set A["Alpha"]`).
+    pub id: String,
+    /// Index of the set's circle in `ir.nodes`.
+    pub node: usize,
+    pub size: f64,
+}
+
+/// One `venn-beta` union: the region where every one of `sets` overlaps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennUnion {
+    /// Member set ids, sorted.
+    pub sets: Vec<String>,
+    pub size: f64,
+    /// Index in `ir.nodes` of the region's label, when the union declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_node: Option<usize>,
+}
+
+/// One `venn-beta` text entry, drawn inside the region `sets` names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennText {
+    /// The region's set ids, sorted.
+    pub sets: Vec<String>,
+    /// The entry's own identifier (`id` in `text A id["label"]`).
+    pub id: String,
+    /// Index of the entry's text-block node in `ir.nodes`.
+    pub node: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrRadarMeta {
     /// Axis names in declaration order, which is also the order they are placed clockwise.
@@ -7922,6 +8001,9 @@ pub struct MermaidDiagramIr {
     /// The `radar-beta` wheel, when this is a radar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radar_meta: Option<IrRadarMeta>,
+    /// The `venn-beta` sets and regions, when this is a Venn diagram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venn_meta: Option<IrVennMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7971,6 +8053,8 @@ impl MermaidDiagramIr {
             | DiagramType::PacketBeta
             | DiagramType::Treemap
             | DiagramType::Radar
+            // `title …` is drawn above the circles upstream (`venn-title`).
+            | DiagramType::Venn
             | DiagramType::Journey
             | DiagramType::Gantt
             | DiagramType::XyChart
@@ -8045,6 +8129,7 @@ impl MermaidDiagramIr {
             xy_chart_meta: None,
             treemap_meta: None,
             radar_meta: None,
+            venn_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,
@@ -13898,7 +13983,8 @@ mod tests {
                 | DiagramType::Radar
                 | DiagramType::Info
                 | DiagramType::Ishikawa
-                | DiagramType::TreeView => MermaidParityLevel::NotApplicable,
+                | DiagramType::TreeView
+                | DiagramType::Venn => MermaidParityLevel::NotApplicable,
                 _ => MermaidParityLevel::Partial,
             };
             assert_eq!(

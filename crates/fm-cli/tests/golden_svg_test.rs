@@ -64,6 +64,7 @@ const CASE_IDS: &[&str] = &[
     "info_basic",
     "ishikawa_basic",
     "treeview_basic",
+    "venn_basic",
 ];
 
 fn golden_dir() -> PathBuf {

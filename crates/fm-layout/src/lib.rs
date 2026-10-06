@@ -27,8 +27,10 @@ pub mod invariants;
 mod ishikawa;
 pub mod layout_lens;
 mod tree_view;
+mod venn;
 use ishikawa::layout_diagram_ishikawa_traced;
 use tree_view::layout_diagram_tree_view_traced;
+use venn::layout_diagram_venn_traced;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -781,6 +783,7 @@ pub enum LayoutAlgorithm {
     Radar,
     Ishikawa,
     TreeView,
+    Venn,
 }
 
 impl LayoutAlgorithm {
@@ -809,6 +812,7 @@ impl LayoutAlgorithm {
             Self::Radar => "radar",
             Self::Ishikawa => "ishikawa",
             Self::TreeView => "treeview",
+            Self::Venn => "venn",
         }
     }
 }
@@ -823,7 +827,7 @@ pub struct LayoutAlgorithmRow {
     pub notes: &'static str,
 }
 
-/// All 20 concrete algorithms plus `Auto`, one row each. Pinned by
+/// All 21 concrete algorithms plus `Auto`, one row each. Pinned by
 /// `tests::layout_algorithm_rows_cover_every_variant` — the pin's variant list is a
 /// compiler-checked match surface, so adding a `LayoutAlgorithm` variant without a row
 /// fails the build, not the docs.
@@ -934,6 +938,11 @@ pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
             algorithm: LayoutAlgorithm::TreeView,
             serves: "TreeView-beta",
             notes: "One pre-order row per entry, indented by depth, with trunk-and-elbow connectors",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Venn,
+            serves: "Venn-beta",
+            notes: "Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point",
         },
     ];
     ROWS
@@ -2119,6 +2128,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         xy_chart_meta,
         treemap_meta,
         radar_meta,
+        venn_meta,
         pie_meta,
         quadrant_meta,
         packet_meta,
@@ -2146,6 +2156,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *xy_chart_meta == current.xy_chart_meta
         && *treemap_meta == current.treemap_meta
         && *radar_meta == current.radar_meta
+        && *venn_meta == current.venn_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
         && *packet_meta == current.packet_meta
@@ -3913,6 +3924,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
         LayoutAlgorithm::Ishikawa => layout_diagram_ishikawa_traced(ir),
         LayoutAlgorithm::TreeView => layout_diagram_tree_view_traced(ir),
+        LayoutAlgorithm::Venn => layout_diagram_venn_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -4644,6 +4656,7 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::Sequence => return "auto_diagram_type_sequence",
         DiagramType::Ishikawa => return "auto_diagram_type_ishikawa",
         DiagramType::TreeView => return "auto_diagram_type_tree_view",
+        DiagramType::Venn => return "auto_diagram_type_venn",
         _ => {}
     }
     match selected {
@@ -4681,6 +4694,7 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::Radar => LayoutAlgorithm::Radar,
         DiagramType::Ishikawa => LayoutAlgorithm::Ishikawa,
         DiagramType::TreeView => LayoutAlgorithm::TreeView,
+        DiagramType::Venn => LayoutAlgorithm::Venn,
         // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
         // direction-aware placement has nothing to honour when no edge declares a side, so an
         // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
@@ -4921,6 +4935,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Radar => matches!(diagram_type, DiagramType::Radar),
         LayoutAlgorithm::Ishikawa => matches!(diagram_type, DiagramType::Ishikawa),
         LayoutAlgorithm::TreeView => matches!(diagram_type, DiagramType::TreeView),
+        LayoutAlgorithm::Venn => matches!(diagram_type, DiagramType::Venn),
     }
 }
 
@@ -5144,7 +5159,9 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         // One pre-order walk per cause bone; every label and bone is placed once.
         | LayoutAlgorithm::Ishikawa
         // One pre-order walk; one row and one connector per entry.
-        | LayoutAlgorithm::TreeView => LayoutCostEstimate {
+        | LayoutAlgorithm::TreeView
+        // A handful of sets: O(n²) pair targets and a fixed refinement budget.
+        | LayoutAlgorithm::Venn => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
                 .saturating_add(edges.saturating_mul(2))
@@ -19200,7 +19217,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Treemap
                 | LayoutAlgorithm::Radar
                 | LayoutAlgorithm::Ishikawa
-                | LayoutAlgorithm::TreeView => 900,
+                | LayoutAlgorithm::TreeView
+                | LayoutAlgorithm::Venn => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
@@ -19692,7 +19710,7 @@ mod tests {
     /// (and the row table) fails the build rather than drifting the published contract.
     #[test]
     fn layout_algorithm_rows_cover_every_variant() {
-        const ALL: [LayoutAlgorithm; 21] = [
+        const ALL: [LayoutAlgorithm; 22] = [
             LayoutAlgorithm::Auto,
             LayoutAlgorithm::Sugiyama,
             LayoutAlgorithm::Force,
@@ -19714,6 +19732,7 @@ mod tests {
             LayoutAlgorithm::Radar,
             LayoutAlgorithm::Ishikawa,
             LayoutAlgorithm::TreeView,
+            LayoutAlgorithm::Venn,
         ];
         let rows = super::layout_algorithm_rows();
         assert_eq!(rows.len(), ALL.len(), "row count must match variant count");
@@ -19730,7 +19749,7 @@ mod tests {
     /// rename here must never strand a stale spelling in the generated parity table.
     #[test]
     fn family_parity_layout_spellings_are_real_algorithms() {
-        const SPELLINGS: [&str; 21] = [
+        const SPELLINGS: [&str; 22] = [
             "auto",
             "sugiyama",
             "force",
@@ -19752,6 +19771,7 @@ mod tests {
             "radar",
             "ishikawa",
             "treeview",
+            "venn",
         ];
         for row in fm_core::family_parity_rows() {
             assert!(

@@ -1436,6 +1436,8 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // ONLY the `-beta` spelling is real mermaid. Naming the bare form here would tell an author
         // that `radar` is a diagram type they can use, and the incumbent rejects it.
         "radar" => Some("radar-beta"),
+        // Bare `venn` is rejected upstream; `venn-beta` is implemented, so only the bare spelling
+        // still lands here and is answered with the name that works.
         "venn" => Some("venn-beta"),
         "wardley" => Some("wardley-beta"),
         // A bare `treeView` is rejected upstream; only `treeView-beta` (implemented) parses, so the
@@ -1546,6 +1548,14 @@ fn exact_diagram_type_with(
         // `/^\s*treeView-beta/` and a bare `treeView` is rejected, which
         // `unsupported_upstream_keyword` still answers by naming the spelling that works.
         Some(DiagramType::TreeView)
+    } else if line
+        .trim_start()
+        .get(..9)
+        .is_some_and(|head| head.eq_ignore_ascii_case("venn-beta"))
+    {
+        // `venn-beta` ONLY: the incumbent's detector is `/^\s*venn-beta/` and a bare `venn` is
+        // rejected, which `unsupported_upstream_keyword` still answers by naming this spelling.
+        Some(DiagramType::Venn)
     } else if matches(line, "ishikawa") {
         // The incumbent's detector is `/^\s*ishikawa(-beta)?\b/i`; `matches` already accepts the
         // `-beta` suffix, so both spellings land here, exactly as they both parse upstream.
@@ -1592,6 +1602,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("radar-beta", DiagramType::Radar),
     ("ishikawa", DiagramType::Ishikawa),
     ("treeview-beta", DiagramType::TreeView),
+    ("venn-beta", DiagramType::Venn),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -4314,7 +4325,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
             ("eventmodeling\n  x\n", "eventmodeling"),
             ("treeView\n  root\n", "treeView"),
-            ("venn-beta\n  a\n", "venn"),
+            ("venn\n  a\n", "venn"),
             ("wardley-beta\n  a\n", "wardley"),
         ] {
             let detected = super::detect_type_with_confidence(source);
@@ -4356,6 +4367,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("ishikawa\n  Problem\n", fm_core::DiagramType::Ishikawa),
             ("ishikawa-beta\n  Problem\n", fm_core::DiagramType::Ishikawa),
             ("treeView-beta\n  \"src\"\n", fm_core::DiagramType::TreeView),
+            ("venn-beta\n  set A\n", fm_core::DiagramType::Venn),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);
@@ -4823,7 +4835,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn the_unimplemented_type_message_names_a_spelling_mermaid_accepts() {
         for (source, expected) in [
             ("radar\n  Item\n", "radar-beta"),
-            ("venn-beta\n  Item\n", "venn-beta"),
+            ("venn\n  Item\n", "venn-beta"),
             ("wardley-beta\n  Item\n", "wardley-beta"),
             // Bare `treeView` is rejected upstream; the message must name the `-beta` spelling.
             ("treeView\n  Item\n", "treeView-beta"),

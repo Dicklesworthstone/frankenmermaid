@@ -623,6 +623,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::Info => parse_info(content, &mut builder),
         DiagramType::Ishikawa => parse_ishikawa(content, &mut builder),
         DiagramType::TreeView => parse_tree_view(content, &mut builder),
+        DiagramType::Venn => parse_venn(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -638,7 +639,9 @@ pub fn parse_mermaid_with_detection_and_config(
     // Extract style/classDef/linkStyle directives for all diagram types.
     // (Previously only called from parse_flowchart; now runs generically
     // so that class, state, block-beta, etc. all support styling.)
-    if diagram_type != DiagramType::Flowchart {
+    // `venn-beta` owns its `style` statement: its targets are SET ids and REGIONS, not node ids,
+    // and the generic pass would read `style A,B fill: …` as a node directive naming `A,B`.
+    if diagram_type != DiagramType::Flowchart && diagram_type != DiagramType::Venn {
         extract_style_directives(content, &mut builder);
     }
 
@@ -7992,6 +7995,483 @@ fn parse_tree_view(content: &str, builder: &mut IrBuilder) {
         builder.add_class_to_node_id(node_id, "tree-view-node");
         builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
         stack.push((level, node_id));
+    }
+}
+
+/// Stroke / label colour pairs cycled per `venn-beta` set, in declaration order.
+///
+/// Upstream derives its eight `venn1..venn8` colours from the theme's primary/secondary/tertiary
+/// colours darkened by 30% lightness; for the default theme two of those land on pale yellows that
+/// fail contrast against a white page. These keep the upstream SHAPE — a saturated stroke, the same
+/// colour as a faint fill, a darker shade for the set's own label — at readable contrast.
+const VENN_PALETTE: [(&str, &str); 8] = [
+    ("#4f6bed", "#2b3fae"),
+    ("#e08a1e", "#8a5212"),
+    ("#2f9e72", "#1d6449"),
+    ("#d64541", "#8e2a27"),
+    ("#8e6cd8", "#55369a"),
+    ("#2a9fc4", "#1a6680"),
+    ("#c4589a", "#7f3a66"),
+    ("#6f8291", "#46535e"),
+];
+
+/// One lexed `venn-beta` token. The grammar is small enough that a hand lexer mirroring the
+/// incumbent's jison rules is clearer than a combinator parser.
+#[derive(Debug, Clone, PartialEq)]
+enum VennToken<'a> {
+    Word(&'a str),
+    Quoted(&'a str),
+    Bracket(&'a str),
+    /// A number, with the text it was written as: ids and style values keep the author's
+    /// spelling, and re-printing the float would also link the float formatter into the WASM.
+    Number(f64, &'a str),
+    Comma,
+    Colon,
+    /// Anything else (a colour, a unit) kept verbatim for `style` values.
+    Other(&'a str),
+}
+
+fn lex_venn(text: &str) -> Vec<VennToken<'_>> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        match c {
+            b',' => {
+                tokens.push(VennToken::Comma);
+                i += 1;
+            }
+            b':' => {
+                tokens.push(VennToken::Colon);
+                i += 1;
+            }
+            b'"' => {
+                let end = text[i + 1..].find('"').map_or(bytes.len(), |e| i + 1 + e);
+                tokens.push(VennToken::Quoted(&text[i + 1..end.min(bytes.len())]));
+                i = (end + 1).min(bytes.len());
+            }
+            b'[' => {
+                let end = text[i..].find(']').map_or(bytes.len(), |e| i + e);
+                let inner = text[i + 1..end].trim();
+                // `["label"]` and `[label]` are both labels upstream.
+                let inner = inner
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(inner);
+                tokens.push(VennToken::Bracket(inner));
+                i = (end + 1).min(bytes.len());
+            }
+            _ if c.is_ascii_alphabetic() || c == b'_' => {
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'-'))
+                {
+                    i += 1;
+                }
+                tokens.push(VennToken::Word(&text[start..i]));
+            }
+            _ => {
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b',' {
+                    // A colour like `rgb(1, 2, 3)` keeps its commas: they are inside parentheses.
+                    if bytes[i] == b'(' {
+                        while i < bytes.len() && bytes[i] != b')' {
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+                let raw = &text[start..i.min(bytes.len())];
+                match raw.parse::<f64>() {
+                    Ok(value) if value.is_finite() => tokens.push(VennToken::Number(value, raw)),
+                    _ => tokens.push(VennToken::Other(raw)),
+                }
+            }
+        }
+    }
+    tokens
+}
+
+/// A set identifier: a bare word or a quoted string, as upstream's `identifier`.
+fn venn_identifier<'a>(token: Option<&VennToken<'a>>) -> Option<&'a str> {
+    match token? {
+        VennToken::Word(word) => Some(word),
+        VennToken::Quoted(text) => Some(text.trim()),
+        _ => None,
+    }
+}
+
+/// `A, B, "C"` → identifiers, plus the index of the first token after the list.
+fn venn_identifier_list<'a>(tokens: &[VennToken<'a>], start: usize) -> (Vec<String>, usize) {
+    let mut ids = Vec::new();
+    let mut i = start;
+    while let Some(id) = venn_identifier(tokens.get(i)) {
+        ids.push(id.to_string());
+        i += 1;
+        if tokens.get(i) == Some(&VennToken::Comma) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    (ids, i)
+}
+
+/// `[label] [: size]` after a set or union.
+fn venn_label_and_size<'a>(
+    tokens: &[VennToken<'a>],
+    mut i: usize,
+) -> (Option<&'a str>, Option<f64>, usize) {
+    let mut label = None;
+    if let Some(VennToken::Bracket(text)) = tokens.get(i) {
+        label = Some(*text);
+        i += 1;
+    }
+    let mut size = None;
+    if tokens.get(i) == Some(&VennToken::Colon)
+        && let Some(VennToken::Number(value, _)) = tokens.get(i + 1)
+    {
+        size = Some(*value);
+        i += 2;
+    }
+    (label, size, i)
+}
+
+/// One `style` statement: its sorted targets and its `key: value` fields in source order.
+type VennStyle = (Vec<String>, Vec<(String, String)>);
+
+/// Parse a `venn-beta` document.
+///
+/// Mirrors the pinned 11.15.0 grammar and `vennDB`:
+///
+/// - `set A`, `set A["Label"]`, `set A:20`, `set A["Label"]:20` — a circle whose area is its size
+///   (default 10);
+/// - `union A,B[…][:size]` — the region where those sets overlap (default size `10 / k²`), naming
+///   only sets already declared, as upstream requires;
+/// - `text A,B id["label"]`, or an INDENTED `text id["label"]` directly under a `set`/`union`,
+///   which places text inside that region. Upstream's indent mode switches on at a `set`/`union`
+///   and off at the next line that starts in column 0;
+/// - `style A,B fill: …, color: …` — colours for a set's circle, a region's label or a text entry;
+/// - `title …` up to a `#` or `;`, as the incumbent's lexer reads it.
+///
+/// Every set is a circle node and every labelled region and text entry a text-block node, so all
+/// backends draw the diagram from node geometry; the sizes and memberships the layout needs travel
+/// in `ir.venn_meta`.
+fn parse_venn(content: &str, builder: &mut IrBuilder) {
+    let mut meta = fm_core::IrVennMeta::default();
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+    // The sets the most recent `set`/`union` named, while indent mode is on.
+    let mut current_sets: Option<Vec<String>> = None;
+    let mut ordinal = 0_usize;
+    let mut styles: Vec<VennStyle> = Vec::new();
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen
+            && trimmed
+                .get(..9)
+                .is_some_and(|head| head.eq_ignore_ascii_case("venn-beta"))
+        {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        let indented = line.starts_with([' ', '\t']);
+        if !indented {
+            current_sets = None;
+        }
+        let span = span_for(line_number, line);
+        let tokens = lex_venn(trimmed);
+        let Some(VennToken::Word(keyword)) = tokens.first() else {
+            venn_warning(builder, line_number, "unsupported venn syntax", trimmed);
+            continue;
+        };
+        match keyword.to_ascii_lowercase().as_str() {
+            "title" => {
+                let title = trimmed[5..].split(['#', ';']).next().map_or("", trim_fast);
+                if !title.is_empty() {
+                    builder.set_title(title.to_string());
+                }
+            }
+            "set" => {
+                let Some(id) = venn_identifier(tokens.get(1)) else {
+                    venn_warning(builder, line_number, "`set` needs a name", trimmed);
+                    continue;
+                };
+                let (label, size, _) = venn_label_and_size(&tokens, 2);
+                if meta.sets.iter().any(|set| set.id == id) {
+                    venn_warning(builder, line_number, "set declared twice", trimmed);
+                    continue;
+                }
+                let Some(node_id) = builder.intern_fresh_node_owned_label(
+                    format!("set_{id}"),
+                    label.unwrap_or(id).to_string(),
+                    NodeShape::Circle,
+                    span,
+                ) else {
+                    continue;
+                };
+                builder.add_class_to_node_id(node_id, "venn-set");
+                meta.sets.push(fm_core::IrVennSet {
+                    id: id.to_string(),
+                    node: node_id.0,
+                    size: size.filter(|size| *size > 0.0).unwrap_or(10.0),
+                });
+                current_sets = Some(vec![id.to_string()]);
+            }
+            "union" => {
+                let (mut ids, next) = venn_identifier_list(&tokens, 1);
+                let (label, size, _) = venn_label_and_size(&tokens, next);
+                sort_venn_ids(&mut ids);
+                ids.dedup();
+                if ids.len() < 2 {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "a union names at least two sets",
+                        trimmed,
+                    );
+                    continue;
+                }
+                if !venn_sets_declared(&meta, &ids) {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "union names an undeclared set",
+                        trimmed,
+                    );
+                    continue;
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let default_size = 10.0 / (ids.len() * ids.len()) as f64;
+                let label_node = label.and_then(|label| {
+                    ordinal += 1;
+                    let node_id = builder.intern_fresh_node_owned_label(
+                        format!("region_{ordinal}"),
+                        label.to_string(),
+                        NodeShape::TextBlock,
+                        span,
+                    )?;
+                    builder.add_class_to_node_id(node_id, "venn-region-label");
+                    Some(node_id.0)
+                });
+                current_sets = Some(ids.clone());
+                meta.unions.push(fm_core::IrVennUnion {
+                    sets: ids,
+                    size: size.filter(|size| *size >= 0.0).unwrap_or(default_size),
+                    label_node,
+                });
+            }
+            "text" => {
+                let (mut sets, next) = match current_sets.clone().filter(|_| indented) {
+                    Some(sets) => (sets, 1),
+                    None => venn_identifier_list(&tokens, 1),
+                };
+                // Without indent mode the identifier list is greedy, so `text A x` reads `A` as
+                // the region and `x` as the id; a list that swallowed the id has none left.
+                let id = match tokens.get(next) {
+                    Some(VennToken::Word(word)) => (*word).to_string(),
+                    Some(VennToken::Quoted(text)) => text.trim().to_string(),
+                    Some(VennToken::Number(_, raw)) => (*raw).to_string(),
+                    _ => {
+                        venn_warning(
+                            builder,
+                            line_number,
+                            "`text` names its region, then its id",
+                            trimmed,
+                        );
+                        continue;
+                    }
+                };
+                sort_venn_ids(&mut sets);
+                if sets.is_empty() || !venn_sets_declared(&meta, &sets) {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "`text` names an undeclared set",
+                        trimmed,
+                    );
+                    continue;
+                }
+                let label = match tokens.get(next + 1) {
+                    Some(VennToken::Bracket(text)) => (*text).to_string(),
+                    _ => id.clone(),
+                };
+                ordinal += 1;
+                let Some(node_id) = builder.intern_fresh_node_owned_label(
+                    format!("text_{ordinal}"),
+                    label,
+                    NodeShape::TextBlock,
+                    span,
+                ) else {
+                    continue;
+                };
+                builder.add_class_to_node_id(node_id, "venn-text");
+                meta.texts.push(fm_core::IrVennText {
+                    sets,
+                    id,
+                    node: node_id.0,
+                });
+            }
+            "style" => {
+                let (mut ids, next) = venn_identifier_list(&tokens, 1);
+                sort_venn_ids(&mut ids);
+                styles.push((ids, venn_style_fields(&tokens, next)));
+            }
+            _ => venn_warning(builder, line_number, "unsupported venn syntax", trimmed),
+        }
+    }
+
+    apply_venn_styles(builder, &meta, &styles);
+    if meta.sets.is_empty() {
+        builder.add_warning("venn-beta declared no sets");
+    }
+    builder.ir_mut().venn_meta = Some(meta);
+}
+
+/// One diagnostic shape for every rejected `venn-beta` line — a single formatting site rather than
+/// one per rule, which matters in the size-budgeted WASM bundle.
+fn venn_warning(builder: &mut IrBuilder, line_number: usize, problem: &str, line: &str) {
+    builder.add_warning(format!("Line {line_number}: {problem}: {line}"));
+}
+
+/// Sort set ids in place, as upstream sorts them to name a region.
+///
+/// An insertion sort over the handful of ids a region names: the generic `[String]::sort` would be a
+/// new monomorphization in the size-budgeted WASM bundle for no measurable benefit at this size.
+fn sort_venn_ids(ids: &mut [String]) {
+    for i in 1..ids.len() {
+        let mut j = i;
+        while j > 0 && ids[j - 1] > ids[j] {
+            ids.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
+
+/// Whether every id names a declared set (upstream throws `unknown set identifier` otherwise).
+fn venn_sets_declared(meta: &fm_core::IrVennMeta, ids: &[String]) -> bool {
+    ids.iter()
+        .all(|id| meta.sets.iter().any(|set| &set.id == id))
+}
+
+/// The value the LAST `style` line targeting exactly `targets` gave `key`, as upstream's
+/// `Object.assign` merge leaves it.
+fn venn_style_value<'a>(styles: &'a [VennStyle], targets: &[String], key: &str) -> Option<&'a str> {
+    styles
+        .iter()
+        .rev()
+        .filter(|(style_targets, _)| style_targets.as_slice() == targets)
+        .find_map(|(_, fields)| {
+            fields
+                .iter()
+                .rev()
+                .find(|(field, _)| field == key)
+                .map(|(_, value)| value.as_str())
+        })
+}
+
+/// `key: value, key: value` after `style <targets>`. A value is every token up to the next comma,
+/// so `rgb(1, 2, 3)` survives whole (the lexer keeps its inner commas).
+fn venn_style_fields(tokens: &[VennToken<'_>], mut i: usize) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    while let Some(VennToken::Word(key)) = tokens.get(i) {
+        if tokens.get(i + 1) != Some(&VennToken::Colon) {
+            break;
+        }
+        let mut value = String::new();
+        let mut j = i + 2;
+        while let Some(token) = tokens.get(j) {
+            let piece = match token {
+                VennToken::Word(text)
+                | VennToken::Other(text)
+                | VennToken::Quoted(text)
+                | VennToken::Number(_, text) => (*text).to_string(),
+                _ => break,
+            };
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(&piece);
+            j += 1;
+        }
+        fields.push((key.to_ascii_lowercase(), value));
+        i = j + 1;
+    }
+    fields
+}
+
+/// Paint every set circle and apply the author's `style` lines.
+///
+/// A set's circle defaults to its palette colour as stroke, the same colour as a 10% fill (upstream
+/// `fill-opacity ?? 0.1`), and a darker shade for its label; `style A fill: …` replaces the colour
+/// (stroke follows fill unless `stroke` is given, as upstream), and `color` the label colour.
+/// `color` on a union's targets recolours that region's label, and on a text entry's id that entry.
+/// A union's `fill` paints the lens upstream, which a node-based renderer cannot shape, so it is
+/// reported rather than silently dropped.
+fn apply_venn_styles(builder: &mut IrBuilder, meta: &fm_core::IrVennMeta, styles: &[VennStyle]) {
+    for (slot, set) in meta.sets.iter().enumerate() {
+        let targets = std::slice::from_ref(&set.id);
+        let custom = |key: &str| venn_style_value(styles, targets, key);
+        let (palette_stroke, palette_text) = VENN_PALETTE[slot % VENN_PALETTE.len()];
+        let fill = custom("fill").unwrap_or(palette_stroke);
+        // Through the shared CSS parser rather than a hand-built map, so author-supplied values get
+        // the same allow-list and sanitising every other `style` statement gets.
+        let style = fm_core::parse_style_string(&format!(
+            "fill:{fill},fill-opacity:{},stroke:{},stroke-width:{},color:{}",
+            custom("fill-opacity").unwrap_or("0.1"),
+            custom("stroke").unwrap_or(fill),
+            custom("stroke-width").unwrap_or("2.5"),
+            custom("color").unwrap_or(palette_text),
+        ));
+        if let Some(node) = builder.node_mut(fm_core::IrNodeId(set.node)) {
+            node.inline_style = Some(Box::new(style));
+        }
+    }
+
+    let paint_text = |builder: &mut IrBuilder, node: usize, color: &str| {
+        let style = fm_core::parse_style_string(&format!("color:{color}"));
+        if !style.is_empty()
+            && let Some(node) = builder.node_mut(fm_core::IrNodeId(node))
+        {
+            node.inline_style = Some(Box::new(style));
+        }
+    };
+    for union in &meta.unions {
+        if let (Some(node), Some(color)) = (
+            union.label_node,
+            venn_style_value(styles, &union.sets, "color"),
+        ) {
+            paint_text(builder, node, color);
+        }
+        if venn_style_value(styles, &union.sets, "fill").is_some() {
+            builder.add_warning(format!(
+                "venn region {} declares a fill; region fills are not drawn, only its label colour",
+                union.sets.join(",")
+            ));
+        }
+    }
+    for text in &meta.texts {
+        if let Some(color) = venn_style_value(styles, std::slice::from_ref(&text.id), "color") {
+            paint_text(builder, text.node, color);
+        }
     }
 }
 
@@ -25703,6 +26183,116 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    #[test]
+    fn venn_parses_sets_unions_sizes_and_labels() {
+        let source = "venn-beta\n  title Team overlap\n  set A\n  set B[\"Backend\"]:20\n  set \"C\":5\n  union B,A[\"APIs\"]\n  union A,B,C:0.5\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Venn);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Team overlap"));
+        let meta = parsed.ir.venn_meta.as_ref().expect("venn meta");
+        let sets: Vec<(&str, f64)> = meta.sets.iter().map(|s| (s.id.as_str(), s.size)).collect();
+        assert_eq!(sets, [("A", 10.0), ("B", 20.0), ("C", 5.0)]);
+        let label = |node: usize| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[node])
+                .to_string()
+        };
+        assert_eq!(label(meta.sets[1].node), "Backend");
+        assert_eq!(parsed.ir.nodes[meta.sets[0].node].shape, NodeShape::Circle);
+        // Union ids are sorted, the 2-way default is overridden by nothing here, the 3-way size is
+        // explicit, and only the labelled union owns a label node.
+        assert_eq!(meta.unions[0].sets, ["A", "B"]);
+        assert!((meta.unions[0].size - 2.5).abs() < 1e-9);
+        assert_eq!(label(meta.unions[0].label_node.unwrap()), "APIs");
+        assert_eq!(meta.unions[1].sets, ["A", "B", "C"]);
+        assert!((meta.unions[1].size - 0.5).abs() < 1e-9);
+        assert!(meta.unions[1].label_node.is_none());
+        assert!(parsed.ir.edges.is_empty());
+    }
+
+    #[test]
+    fn venn_text_attaches_to_its_region_explicitly_or_by_indentation() {
+        let source = "venn-beta\n  set A\n  set B\nunion A,B\n    text shared[\"Both\"]\n    text other\ntext A solo\ntext B, A pair[\"Pair\"]\n";
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        let texts: Vec<(Vec<&str>, &str, String)> = meta
+            .texts
+            .iter()
+            .map(|t| {
+                (
+                    t.sets.iter().map(String::as_str).collect(),
+                    t.id.as_str(),
+                    parsed
+                        .ir
+                        .node_display_text(&parsed.ir.nodes[t.node])
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (vec!["A", "B"], "shared", "Both".to_string()),
+                (vec!["A", "B"], "other", "other".to_string()),
+                (vec!["A"], "solo", "solo".to_string()),
+                (vec!["A", "B"], "pair", "Pair".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn venn_rejects_unions_of_undeclared_sets_and_single_set_unions() {
+        let parsed = parse_mermaid("venn-beta\n  set A\n  union A,Z\n  union A\n");
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        assert!(meta.unions.is_empty());
+        assert!(parsed.warnings.iter().any(|w| w.contains("undeclared set")));
+        assert!(parsed.warnings.iter().any(|w| w.contains("at least two")));
+    }
+
+    #[test]
+    fn venn_styles_paint_sets_regions_and_text_and_default_to_the_palette() {
+        // `text` at column 0: indented under the union it would join that region by indent mode.
+        let source = "venn-beta\n  set A\n  set B\n  union A,B[\"AB\"]\ntext A t1\n  style A fill: #ff0000, color: #00ff00\n  style B,A color: #123456\n  style t1 color: #abcdef\n";
+        let parsed = parse_mermaid(source);
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        let style = |node: usize, key: &str| {
+            parsed.ir.nodes[node]
+                .inline_style
+                .as_ref()
+                .and_then(|style| style.properties.get(key).cloned())
+        };
+        let a = meta.sets[0].node;
+        assert_eq!(style(a, "fill").as_deref(), Some("#ff0000"));
+        assert_eq!(
+            style(a, "stroke").as_deref(),
+            Some("#ff0000"),
+            "stroke follows fill"
+        );
+        assert_eq!(style(a, "color").as_deref(), Some("#00ff00"));
+        assert_eq!(style(a, "fill-opacity").as_deref(), Some("0.1"));
+        // An unstyled set still gets a translucent palette fill, never an opaque theme fill.
+        let b = meta.sets[1].node;
+        assert!(style(b, "fill").is_some());
+        assert_eq!(style(b, "fill-opacity").as_deref(), Some("0.1"));
+        assert_eq!(
+            style(meta.unions[0].label_node.unwrap(), "color").as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            style(meta.texts[0].node, "color").as_deref(),
+            Some("#abcdef")
+        );
+        // The generic `style` pass must not have read `style B,A …` as a node directive.
+        assert!(
+            parsed.ir.style_refs.is_empty(),
+            "{:?}",
+            parsed.ir.style_refs
+        );
+    }
+
     /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
     ///
     /// `treemap` renders in the incumbent. "No parseable nodes or edges were found" is true here but
@@ -25725,7 +26315,11 @@ Rel_Back(db, app, "Responds")"#,
         // `radar-beta` WAS HERE and is not any more: bd-sk4dv implemented the family. The BARE
         // `radar` spelling is still unimplemented and still names `radar-beta` back, which is
         // now a spelling that actually renders — asserted in lib.rs.
-        for (header, canonical) in [("venn-beta", "venn"), ("wardley-beta", "wardley")] {
+        // `venn-beta` WAS HERE and is not any more: the family is implemented.
+        for (header, canonical) in [
+            ("wardley-beta", "wardley"),
+            ("eventmodeling", "eventmodeling"),
+        ] {
             let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
 
             // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function

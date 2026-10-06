@@ -175,6 +175,32 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
         })
     };
     record(&mut changes, "radar", &radar(old), &radar(new));
+
+    // A Venn region is named by its sets, and its geometry by the sizes: a resized set or union is
+    // a real change with no node or edge to show it. Node indices are remapped to stable names so a
+    // reordered source is not reported as a different diagram.
+    let venn = |ir: &MermaidDiagramIr| {
+        ir.venn_meta.clone().map(|mut meta| {
+            let remap = |index: &mut usize| {
+                let mut id = IrNodeId(*index);
+                remap_node(ir, &names, &mut id);
+                *index = id.0;
+            };
+            for set in &mut meta.sets {
+                remap(&mut set.node);
+            }
+            for union in &mut meta.unions {
+                if let Some(node) = union.label_node.as_mut() {
+                    remap(node);
+                }
+            }
+            for text in &mut meta.texts {
+                remap(&mut text.node);
+            }
+            meta
+        })
+    };
+    record(&mut changes, "venn", &venn(old), &venn(new));
     let packet = |ir: &MermaidDiagramIr| {
         ir.packet_meta.clone().map(|mut meta| {
             for field in &mut meta.fields {

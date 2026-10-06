@@ -3692,7 +3692,55 @@ pub(crate) fn resolve_node_colors(
     node_index: usize,
 ) -> (Option<String>, Option<String>) {
     let merged = merged_node_style(ir, node_index);
-    (merged.get("fill").cloned(), merged.get("stroke").cloned())
+    // `fill-opacity` fades the FILL alone — the outline and label keep full strength, which is
+    // what separates it from `opacity`. A canvas has one `fillStyle` per shape, so the fade has to
+    // travel inside the colour itself; folding it into an `rgba()` here gives the Canvas2D pass and
+    // the GPU plan (which reads this same function) one answer. Overlapping translucent shapes —
+    // venn-beta's set circles are the reason this exists — would otherwise paint opaque and bury
+    // each other.
+    let fill = merged.get("fill").map(|fill| {
+        parse_opacity(merged.get("fill-opacity").map(String::as_str))
+            .and_then(|opacity| hex_fill_with_opacity(fill, opacity))
+            .unwrap_or_else(|| fill.clone())
+    });
+    (fill, merged.get("stroke").cloned())
+}
+
+/// A `#rgb`/`#rrggbb` (with optional alpha) colour as `rgba()` with `opacity` multiplied into its
+/// alpha; `None` for anything that is not a hex colour, so the caller keeps the declaration as is.
+fn hex_fill_with_opacity(fill: &str, opacity: f64) -> Option<String> {
+    let hex = fill.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |text: &str| u8::from_str_radix(text, 16).ok();
+    let doubled = |c: char| channel(&format!("{c}{c}"));
+    let chars: Vec<char> = hex.chars().collect();
+    let (r, g, b, a) = match chars.len() {
+        3 | 4 => (
+            doubled(chars[0])?,
+            doubled(chars[1])?,
+            doubled(chars[2])?,
+            chars.get(3).map_or(Some(255), |c| doubled(*c))?,
+        ),
+        6 | 8 => (
+            channel(&hex[0..2])?,
+            channel(&hex[2..4])?,
+            channel(&hex[4..6])?,
+            hex.get(6..8).map_or(Some(255), channel)?,
+        ),
+        _ => return None,
+    };
+    // Thousandths as an INTEGER: formatting the f64 would link core's float formatter into the
+    // WASM bundle for this one string.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let milli = (f64::from(a) / 255.0 * opacity.clamp(0.0, 1.0) * 1000.0).round() as u32;
+    let alpha = match milli {
+        0 => "0".to_string(),
+        1000.. => "1".to_string(),
+        _ => format!("0.{}", format!("{milli:03}").trim_end_matches('0')),
+    };
+    Some(format!("rgba({r}, {g}, {b}, {alpha})"))
 }
 
 /// The author's declared TEXT colour for this node, if any (bd-lvj3).
@@ -4240,6 +4288,38 @@ mod tests {
             ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
             _ => (default_width, None),
         }
+    }
+
+    #[test]
+    fn fill_opacity_fades_only_the_fill_colour() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "a".to_string(),
+            inline_style: Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+                ("fill".to_string(), "#4f6bed".to_string()),
+                ("fill-opacity".to_string(), "0.1".to_string()),
+                ("stroke".to_string(), "#4f6bed".to_string()),
+            ]))),
+            ..IrNode::default()
+        });
+        let (fill, stroke) = resolve_node_colors(&ir, 0);
+        assert_eq!(fill.as_deref(), Some("rgba(79, 107, 237, 0.1)"));
+        assert_eq!(
+            stroke.as_deref(),
+            Some("#4f6bed"),
+            "the outline keeps full strength"
+        );
+        // Short hex, an existing alpha channel, and a non-hex colour left untouched.
+        assert_eq!(
+            hex_fill_with_opacity("#f00", 0.5).as_deref(),
+            Some("rgba(255, 0, 0, 0.5)")
+        );
+        assert_eq!(
+            hex_fill_with_opacity("#ff000080", 0.5).as_deref(),
+            Some("rgba(255, 0, 0, 0.251)")
+        );
+        assert_eq!(hex_fill_with_opacity("red", 0.5), None);
+        assert_eq!(hex_fill_with_opacity("#ggg", 0.5), None);
     }
 
     fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
