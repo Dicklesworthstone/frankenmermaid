@@ -278,3 +278,341 @@ export function patchConfigurationDraft(draft, path, value) {
   } else owner[key] = value;
   return text(JSON.stringify(root, null, 2), MAX_CONFIG_UNITS, "Configuration");
 }
+
+/** Opt-in configuration workspace. Applying emits one normal source input event, so the
+ * existing document recovery/history, preview, sharing and export paths see the same text.
+ * Hosts must call sourceChanged for equal-text document replacements; observeSource covers
+ * programmatic text edits without invalidating harmless redraws. Closing preserves drafts. */
+export function mountConfigurationEditor({ sourceEl, panelEl, loadModule, saveArtifact,
+  validationTimeoutMs = 15000 }) {
+  if (typeof sourceEl?.value !== "string" || !panelEl?.ownerDocument || typeof loadModule !== "function" ||
+      !Number.isSafeInteger(validationTimeoutMs) || validationTimeoutMs < 1 || validationTimeoutMs > 60000) {
+    throw new TypeError("Configuration editing requires source, panel, module loader and a bounded timeout.");
+  }
+  const document = panelEl.ownerDocument, host = document.defaultView;
+  const session = new ConfigurationEditSession({ getSource: () => sourceEl.value, loadValidator: loadModule });
+  const listeners = [], urls = new Map(), fields = [];
+  let current = null, loadedDraft = "", selected = -1, dirty = false, stale = true;
+  let disposed = false, installing = false, busy = false, operation = 0, prepared = null, timer = null;
+  let lastChange = null;
+  function make(tag, id, content, parent = panelEl) {
+    const element = document.createElement(tag);
+    if (id) element.id = id;
+    if (content) element.textContent = content;
+    parent.append(element);
+    return element;
+  }
+  function listen(element, event, handler) {
+    element.addEventListener(event, handler);
+    listeners.push(() => element.removeEventListener(event, handler));
+  }
+  function button(id, label, parent) {
+    const element = make("button", id, label, parent);
+    element.type = "button";
+    return element;
+  }
+  make("h2", "config-editor-heading", "Diagram configuration");
+  make("p", "config-editor-help", "Edit a preamble init directive, validate it with the engine, then apply it to source. Later directives and explicit diagram syntax can override these settings. Exports and share links include applied settings; unapplied drafts do not.");
+  const targetLabel = make("label", "", "Initialization directive ");
+  const target = make("select", "config-editor-target", "", targetLabel);
+  const controls = make("fieldset", "config-editor-fields");
+  make("legend", "", "Visual settings (blank means inherit)", controls);
+  const booleanOptions = [["", "Inherit"], ["true", "Yes"], ["false", "No"]];
+  function field(id, label, path, type = "text", options) {
+    const wrapper = make("label", "", label + " ", controls);
+    const input = make(options ? "select" : "input", `config-editor-${id}`, "", wrapper);
+    if (options) for (const [value, caption] of options) {
+      const option = make("option", "", caption, input);
+      option.value = value;
+    }
+    else {
+      input.type = type;
+      if (type === "number") { input.min = "0"; input.step = "any"; }
+      else input.maxLength = 4096;
+    }
+    const record = { input, path, type, options };
+    fields.push(record);
+    listen(input, "change", () => {
+      try {
+        if (input.validity.badInput) throw new Error("Enter a valid finite number, or leave the field blank to inherit.");
+        let value = input.value === "" ? undefined : input.value;
+        if (value !== undefined && type === "number") value = Number(value);
+        if (value !== undefined && type === "boolean") value = value === "true";
+        let updated = draft.value;
+        if (id === "direction") updated = patchConfigurationDraft(updated, ["flowchart", "rankDir"], undefined);
+        draft.value = patchConfigurationDraft(updated, path, value);
+        draftChanged();
+      } catch (error) { status.textContent = error.message; }
+    });
+    return input;
+  }
+  const theme = field("theme", "Theme name", ["theme"]);
+  theme.placeholder = "default / dark / blueprint";
+  field("direction", "Flowchart direction", ["flowchart", "direction"], "text",
+    [["", "Inherit"], ["lr", "Left to right"], ["rl", "Right to left"], ["tb", "Top to bottom"], ["td", "Top down"], ["bt", "Bottom to top"]]);
+  field("node-spacing", "Node spacing", ["flowchart", "nodeSpacing"], "number");
+  field("rank-spacing", "Rank spacing", ["flowchart", "rankSpacing"], "number");
+  field("curve", "Edge curve", ["flowchart", "curve"]);
+  field("primary-color", "Primary color", ["themeVariables", "primaryColor"]);
+  field("line-color", "Line color", ["themeVariables", "lineColor"]);
+  field("background", "Background", ["themeVariables", "background"]);
+  field("mirror-actors", "Mirror sequence actors", ["sequence", "mirrorActors"], "boolean", booleanOptions);
+  field("sequence-numbers", "Sequence numbers", ["sequence", "showSequenceNumbers"], "boolean", booleanOptions);
+  field("gantt-top-axis", "Gantt top axis", ["gantt", "topAxis"], "boolean", booleanOptions);
+  const visualNote = make("p", "config-editor-visual-note");
+  const draftLabel = make("label", "", "Configuration object (JSON or existing JSON5) ");
+  const draft = make("textarea", "config-editor-draft", "", draftLabel);
+  draft.rows = 10;
+  draft.maxLength = MAX_CONFIG_UNITS;
+  draft.spellcheck = false;
+  const actions = make("div", "config-editor-actions");
+  const validate = button("config-editor-validate", "Validate settings", actions);
+  const apply = button("config-editor-apply", "Apply validated settings", actions);
+  const reload = button("config-editor-reload", "Discard draft / reload source", actions);
+  const cancel = button("config-editor-cancel", "Cancel pending work", actions);
+  const undo = button("config-editor-undo", "Undo configuration edit", actions);
+  const importButton = button("config-editor-import", "Import configuration", actions);
+  const file = make("input", "config-editor-file", "", actions);
+  file.type = "file"; file.accept = ".json,.json5"; file.hidden = true;
+  const download = button("config-editor-download", "Download validated configuration", actions);
+  const close = button("config-editor-close", "Close settings", actions);
+  const status = make("p", "config-editor-status");
+  status.setAttribute("role", "status");
+  const errors = make("pre", "config-editor-errors");
+  errors.setAttribute("role", "alert");
+  const preview = make("pre", "config-editor-preview");
+  preview.hidden = true;
+
+  function readDraft() {
+    try {
+      const value = JSON.parse(draft.value);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch { return null; }
+  }
+  function sync() {
+    const value = readDraft();
+    const locked = disposed || stale;
+    controls.disabled = locked || busy || value === null;
+    draft.disabled = disposed;
+    target.disabled = locked || busy || dirty || (current?.targets.length || 0) < 2;
+    validate.disabled = locked || busy;
+    apply.disabled = locked || busy || !prepared || prepared.updatedSource === sourceEl.value;
+    download.disabled = locked || busy || !prepared;
+    reload.disabled = disposed;
+    cancel.disabled = disposed || !busy;
+    importButton.disabled = locked || busy;
+    file.disabled = importButton.disabled;
+    close.disabled = disposed;
+    undo.disabled = locked || busy || dirty || !lastChange ||
+      sourceEl.value !== (lastChange.undone ? lastChange.before : lastChange.after);
+    undo.textContent = lastChange?.undone ? "Redo configuration edit" : "Undo configuration edit";
+    visualNote.textContent = value === null
+      ? "Visual controls need a JSON object. JSON5 is retained verbatim: edit it in the text field and use engine validation. Nothing has been applied."
+      : "Visual controls preserve other fields. Empty fields remove that override; false and zero remain explicit values.";
+    for (const {input, path, options} of fields) {
+      let found = value;
+      for (const key of path) found = found && typeof found === "object" && Object.hasOwn(found, key) ? found[key] : undefined;
+      if (path.join(".") === "flowchart.direction" && found === undefined && value?.flowchart && Object.hasOwn(value.flowchart, "rankDir")) found = value.flowchart.rankDir;
+      for (const option of input.querySelectorAll('[data-current-value]')) option.remove();
+      const displayed = found === undefined || found === null || typeof found === "object" ? "" : String(found);
+      if (options && !options.some(([key]) => key === displayed)) {
+        const option = make("option", "", `Current: ${displayed}`, input);
+        option.value = displayed;
+        option.dataset.currentValue = "true";
+      }
+      input.value = displayed;
+    }
+  }
+  function revoke() {
+    operation++;
+    session.cancel();
+    host.clearTimeout(timer);
+    timer = null;
+    busy = false;
+    prepared = null;
+    preview.hidden = true;
+  }
+  function setDraftFromTarget() {
+    selected = Number(target.value);
+    draft.value = current.targets[selected]?.draft || "{}";
+    loadedDraft = draft.value;
+    dirty = false;
+    errors.textContent = "";
+  }
+  function reloadSource() {
+    if (disposed) return;
+    revoke();
+    try {
+      current = session.load();
+      stale = false;
+      target.replaceChildren();
+      if (!current.targets.length) {
+        const option = make("option", "", "New initialization directive", target);
+        option.value = "-1";
+      } else for (const [index, item] of current.targets.entries()) {
+        const option = make("option", "", `Directive ${index + 1} — source line ${item.line}`, target);
+        option.value = String(index);
+      }
+      if (selected < 0 || selected >= current.targets.length) selected = current.targets.length - 1;
+      target.value = String(selected);
+      setDraftFromTarget();
+      status.textContent = "Settings loaded from source. Validate before applying a change.";
+    } catch (error) { stale = true; status.textContent = error.message; }
+    sync();
+  }
+  function draftChanged() {
+    revoke();
+    dirty = draft.value !== loadedDraft;
+    errors.textContent = "";
+    status.textContent = stale ? "Source changed. Your draft is retained but cannot be applied until you reload the current source."
+      : "Draft changed. Validate it before applying; diagram source is unchanged.";
+    sync();
+  }
+  function sourceChanged() {
+    if (disposed || installing) return;
+    const retain = dirty || busy || prepared !== null;
+    revoke();
+    session.sourceChanged();
+    lastChange = null;
+    if (retain) {
+      stale = true;
+      status.textContent = "Source changed. Your draft is retained but cannot be applied until you reload the current source.";
+      sync();
+    } else reloadSource();
+  }
+  function installSource(source) {
+    installing = true;
+    try {
+      sourceEl.value = source;
+      sourceEl.dispatchEvent(new host.Event("input", {bubbles: true}));
+    } finally { installing = false; }
+    reloadSource();
+  }
+  async function validateDraft() {
+    if (disposed || stale || busy) return;
+    revoke();
+    const version = operation;
+    busy = true;
+    status.textContent = "Validating the proposed source with the Rust configuration validator…";
+    errors.textContent = "";
+    sync();
+    timer = host.setTimeout(() => {
+      if (disposed || version !== operation) return;
+      revoke();
+      status.textContent = "Configuration validation timed out. Source and draft are unchanged; retry after the engine is available.";
+      sync();
+    }, validationTimeoutMs);
+    try {
+      const plan = await session.prepare(draft.value, selected);
+      if (disposed || version !== operation) return;
+      host.clearTimeout(timer); timer = null; busy = false; prepared = plan;
+      preview.textContent = `Proposed ${selected < 0 ? "new initialization directive" : "initialization object"}:\n${plan.replacement}`;
+      preview.hidden = false;
+      status.textContent = plan.updatedSource === sourceEl.value
+        ? "Configuration is valid. No source change is needed."
+        : "Configuration is valid. Review the proposed change, then apply it to source.";
+    } catch (error) {
+      if (disposed || version !== operation) return;
+      host.clearTimeout(timer); timer = null; busy = false;
+      errors.textContent = error.message || String(error);
+      status.textContent = "Configuration was not applied. Correct the error or reload the source.";
+    }
+    sync();
+  }
+  function save(artifact) {
+    if (saveArtifact) return saveArtifact(artifact);
+    const url = host.URL.createObjectURL(new host.Blob([artifact.text], {type:artifact.mime}));
+    const anchor = document.createElement("a");
+    anchor.href = url; anchor.download = artifact.filename; document.body.append(anchor);
+    try { anchor.click(); }
+    finally {
+      anchor.remove();
+      urls.set(url, host.setTimeout(() => { host.URL.revokeObjectURL(url); urls.delete(url); }, 1000));
+    }
+  }
+  listen(draft, "input", draftChanged);
+  listen(sourceEl, "input", sourceChanged);
+  listen(target, "change", () => { revoke(); setDraftFromTarget(); sync(); });
+  listen(reload, "click", reloadSource);
+  listen(validate, "click", () => { void validateDraft(); });
+  listen(cancel, "click", () => { revoke(); status.textContent = "Validation cancelled. Your draft and source are unchanged."; sync(); });
+  listen(apply, "click", () => {
+    try {
+      const before = sourceEl.value;
+      const after = session.commit(prepared);
+      lastChange = { before, after, undone:false };
+      installSource(after);
+      status.textContent = "Settings applied to source. Previews, recovery, source downloads, image exports and share links now use that source.";
+    } catch (error) { revoke(); errors.textContent = error.message; sync(); }
+  });
+  listen(undo, "click", () => {
+    if (undo.disabled) return;
+    lastChange.undone = !lastChange.undone;
+    installSource(lastChange.undone ? lastChange.before : lastChange.after);
+    status.textContent = lastChange.undone ? "Configuration edit undone." : "Configuration edit redone.";
+  });
+  listen(importButton, "click", () => { file.value = ""; file.click(); });
+  listen(file, "change", async () => {
+    const chosen = file.files?.[0];
+    if (!chosen || disposed || stale) return;
+    revoke();
+    const version = operation;
+    busy = true;
+    status.textContent = "Reading configuration as an unapplied draft…";
+    sync();
+    try {
+      if (!/\.(json|json5)$/i.test(chosen.name) || chosen.size > MAX_CONFIG_UNITS * 4) throw new Error("Choose a UTF-8 .json or .json5 configuration within the 256 KiB import limit.");
+      const bytes = await chosen.arrayBuffer();
+      if (disposed || version !== operation) return;
+      if (bytes.byteLength !== chosen.size || bytes.byteLength > MAX_CONFIG_UNITS * 4) throw new Error("Configuration file changed size while reading.");
+      const imported = new host.TextDecoder("utf-8", {fatal:true}).decode(bytes);
+      draft.value = text(imported, MAX_CONFIG_UNITS, "Configuration");
+      draftChanged();
+      status.textContent = "Configuration imported as an unapplied draft. Validate and review it before changing source.";
+    } catch (error) {
+      if (!disposed && version === operation) {
+        revoke(); errors.textContent = error.message;
+        status.textContent = "Configuration import failed. Source and draft are unchanged.";
+        sync();
+      }
+    }
+  });
+  listen(download, "click", async () => {
+    if (!prepared || disposed || stale || prepared.source !== sourceEl.value) return;
+    const version = operation;
+    const json = readDraft() !== null;
+    try {
+      await save({text: prepared.draft + "\n", mime: json ? "application/json;charset=utf-8" : "text/plain;charset=utf-8",
+        filename: `diagram.config.${json ? "json" : "json5"}`});
+      if (!disposed && version === operation) status.textContent = "Configuration download requested. Editable diagram source is unchanged.";
+    } catch (error) { if (!disposed && version === operation) errors.textContent = error.message; }
+  });
+  function closePanel() {
+    if (disposed) return;
+    revoke();
+    panelEl.hidden = true;
+    sync();
+  }
+  listen(close, "click", closePanel);
+  reloadSource();
+  return {
+    sourceChanged,
+    observeSource() { if (!disposed && current?.source !== sourceEl.value) sourceChanged(); },
+    open() {
+      if (disposed) return;
+      if (current?.source !== sourceEl.value) sourceChanged();
+      panelEl.hidden = false;
+      draft.focus();
+    },
+    close: closePanel,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      revoke(); session.dispose();
+      for (const remove of listeners) remove();
+      for (const [url, timeout] of urls) { host.clearTimeout(timeout); host.URL.revokeObjectURL(url); }
+      urls.clear();
+      sync();
+    },
+  };
+}

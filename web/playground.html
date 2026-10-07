@@ -31,6 +31,13 @@
   #deck-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; flex-shrink: 0; }
   #deck-editor-preview iframe { display: block; box-sizing: border-box; }
   #deck-editor pre { overflow: auto; }
+  #config-editor { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; max-height: 55vh; overflow: auto; flex-shrink: 0; }
+  #config-editor-fields { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); }
+  #config-editor label { display: block; }
+  #config-editor input:not([type="file"]), #config-editor select, #config-editor textarea { width: 100%; box-sizing: border-box; }
+  #config-editor textarea { border: 1px solid #cbd5e1; resize: vertical; }
+  #config-editor pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  #config-editor-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   #out [data-source-editable] { cursor: pointer; }
   #out [data-source-selected], #out [data-source-editable]:focus { outline: 3px solid #2563eb; outline-offset: 3px; }
 </style>
@@ -47,10 +54,12 @@
   <div id="editor-toolbar">
     <button id="edit-source" type="button">Edit diagram source (SVG)</button>
     <button id="edit-deck" type="button">Present / export graph deck</button>
+    <button id="edit-config" type="button">Theme / layout settings</button>
   </div>
   <section id="image-export" aria-label="Diagram image export"></section>
   <section id="source-editor" aria-label="Diagram source editor" hidden></section>
   <section id="deck-editor" aria-label="Graph deck authoring" hidden></section>
+  <section id="config-editor" aria-label="Diagram configuration editor" hidden></section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
@@ -77,6 +86,7 @@
   let startedAt = 0;
   let sourceEditor = null;
   let deckEditor = null;
+  let configEditor = null;
   let imageExport = null;
   let documentWorkspace = null;
   let shareControls = null;
@@ -180,6 +190,7 @@
     shareControls?.sourceChanged();
     imageExport?.sourceChanged();
     deckEditor?.sourceChanged();
+    configEditor?.observeSource();
     const previousId = liveRequestId;
     const requestId = nextRequestId++;
     liveRequestId = requestId;
@@ -315,11 +326,31 @@
       if (!disposed) button.disabled = false;
     }
   });
+  document.getElementById("edit-config")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      if (!configEditor) {
+        const { mountConfigurationEditor } = await import("./fm-config-editor.js");
+        if (disposed) return;
+        configEditor = mountConfigurationEditor({
+          sourceEl: srcEl, panelEl: document.getElementById("config-editor"), loadModule: ensureMainModule,
+        });
+      }
+      // Settings live in the source itself, not hidden state on one renderer or export path.
+      configEditor.open();
+    } catch (error) {
+      if (!disposed) log(`configuration editor unavailable: ${error.message || error}`, "err");
+    } finally {
+      if (!disposed) button.disabled = false;
+    }
+  });
   globalThis.addEventListener("pagehide", (event) => {
     if (event.persisted) return; // A back/forward-cache restore resumes this instance.
     disposed = true;
     sourceEditor?.dispose();
     deckEditor?.dispose();
+    configEditor?.dispose();
     imageExport?.dispose();
     shareControls?.dispose();
     documentWorkspace?.dispose();
@@ -340,6 +371,7 @@
           sourceEditor = mountSourceEditorInstance();
         }
         deckEditor?.sourceChanged();
+        configEditor?.sourceChanged();
       },
     });
     // Opening links uses the same guarded document replacement as file import/recovery.
