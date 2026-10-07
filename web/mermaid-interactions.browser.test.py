@@ -16,7 +16,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parent
 
 
-class SvgInteractionTests(unittest.TestCase):
+class BrowserFixture:
     @classmethod
     def setUpClass(cls):
         cls.playwright = sync_playwright().start()
@@ -61,6 +61,8 @@ class SvgInteractionTests(unittest.TestCase):
     def mount(self):
         self.page.evaluate('mount()')
 
+
+class SvgInteractionTests(BrowserFixture, unittest.TestCase):
     def test_pointer_activation_receives_author_source_id_not_namespaced_id(self):
         self.mount()
         self.page.locator('[data-id="A雪"] rect').click()
@@ -256,6 +258,278 @@ class SvgInteractionTests(unittest.TestCase):
         self.page.evaluate("mount(raw.replace('app.visit', 'app.visit()'))")
         self.page.locator('[data-callback] rect').click()
         self.assertEqual(self.page.evaluate('calls'), [])
+
+
+class MermaidApiInteractionTests(BrowserFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # Resolve only the relative module boundary; run the production implementation.
+        code = (ROOT / 'mermaid-compat.mjs').read_text().replace('"./mermaid-svg.mjs"', repr(self.module_url))
+        url = 'data:text/javascript;base64,' + base64.b64encode(code.encode()).decode()
+        self.page.evaluate('async url => { window.compat = await import(url); }', url)
+        self.page.evaluate('''() => {
+          window.engineCalls = [];
+          window.engine = {
+            parse: source => ({ir:{diagram_type:'Flowchart', diagnostics:[]}, warnings:[]}),
+            renderSvg: (source, config) => { engineCalls.push({source,config}); return raw; },
+            validateConfig: () => JSON.stringify({schemaVersion:'1.0.0', errors:[]}),
+          };
+          window.makeWidget = (report = error => errors.push(error.message)) => compat.createMermaid({
+            document, loadEngine: () => engine, reportError: report,
+          });
+          window.widget = makeWidget();
+          widget.initialize({securityLevel:'loose', startOnLoad:false});
+          window.unregister = widget.registerCallback('app.visit', id => calls.push(id));
+          window.draw = async (instance = widget, id = 'diagram', host = document.querySelector('#stage')) => {
+            const result = await instance.render(id, 'flowchart LR\\n A-->B', host);
+            host.innerHTML = result.svg;
+            window.result = result;
+            window.unbind = result.bindFunctions(host);
+          };
+        }''')
+
+    def test_render_returns_bind_function_and_never_populates_container(self):
+        self.page.evaluate('''async () => {
+          const host = document.querySelector('#stage'); host.textContent = 'Host content';
+          window.result = await widget.render('diagram', 'flowchart LR\\n A-->B', host);
+        }''')
+        self.assertEqual(self.page.locator('#stage').text_content(), 'Host content')
+        self.assertEqual(self.page.evaluate('typeof result.bindFunctions'), 'function')
+        self.page.evaluate('''() => {
+          const host = document.querySelector('#stage'); host.innerHTML = result.svg;
+          window.unbind = result.bindFunctions(host);
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['A雪'])
+
+    def test_run_binds_before_post_render_callback_and_coalesces_overlapping_runs(self):
+        self.page.evaluate('''async () => {
+          const hosts = [document.querySelector('#stage'), document.querySelector('#other')];
+          hosts.forEach(host => { host.className = 'mermaid'; host.textContent = 'flowchart LR\\n A-->B'; });
+          window.afterRender = [];
+          const options = {postRenderCallback(id) {
+            afterRender.push(id);
+            document.getElementById(id).querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+          }};
+          await Promise.all([widget.run(options), widget.run(options)]);
+          await widget.run(options);
+        }''')
+        self.assertEqual(self.page.evaluate('calls'), ['A雪', 'A雪'])
+        self.assertEqual(self.page.evaluate('afterRender.length'), 2)
+        self.assertEqual(self.page.evaluate('new Set(afterRender).size'), 2)
+        self.assertEqual(self.page.evaluate('engineCalls.length'), 2)
+        self.assertEqual(self.page.locator('[data-processed="true"]').count(), 2)
+
+    def test_default_strict_and_source_loose_cannot_enable_callbacks(self):
+        self.page.evaluate('''async () => {
+          widget.initialize({theme:'dark'});
+          window.result = await widget.render('diagram', '%%{init:{securityLevel:"loose"}}%%\\nflowchart LR\\nA-->B');
+          const host = document.querySelector('#stage'); host.innerHTML = result.svg;
+          result.bindFunctions(host);
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), [])
+        self.assertEqual(self.page.locator('[data-callback]').get_attribute('role'), 'graphics-symbol')
+        self.assertEqual(self.page.evaluate('errors'), [])
+
+    def test_tightening_security_revokes_existing_and_previously_returned_results(self):
+        self.page.evaluate('draw()')
+        self.page.locator('[data-callback] rect').click()
+        self.page.evaluate('''() => {
+          widget.initialize({securityLevel:'strict'});
+          widget.initialize({securityLevel:'loose'});
+          result.bindFunctions(document.querySelector('#stage'));
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['A雪'])
+        self.assertEqual(self.page.locator('[data-callback]').get_attribute('role'), 'graphics-symbol')
+        self.page.evaluate('draw()')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['A雪', 'A雪'])
+
+    def test_tightening_security_during_async_render_revokes_pending_authority(self):
+        self.page.evaluate('''() => {
+          engine.parse = () => new Promise(resolve => { window.finishParse = resolve; });
+          window.pending = widget.render('diagram','flowchart LR\\n A-->B');
+        }''')
+        self.page.wait_for_function('typeof finishParse === "function"')
+        self.page.evaluate('''async () => {
+          widget.initialize({securityLevel:'strict'}); widget.initialize({securityLevel:'loose'});
+          finishParse({ir:{diagram_type:'Flowchart', diagnostics:[]}, warnings:[]});
+          const result = await pending;
+          const host = document.querySelector('#stage'); host.innerHTML = result.svg; result.bindFunctions(host);
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), [])
+
+    def test_callback_registry_is_snapshotted_before_engine_load(self):
+        self.page.evaluate('''() => {
+          unregister();
+          engine.parse = () => new Promise(resolve => { window.finishParse = resolve; });
+          window.pending = widget.render('diagram', 'flowchart LR\\n A-->B');
+        }''')
+        self.page.wait_for_function('typeof finishParse === "function"')
+        self.page.evaluate('''async () => {
+          widget.registerCallback('app.visit', id => calls.push('late:' + id));
+          finishParse({ir:{diagram_type:'Flowchart', diagnostics:[]}, warnings:[]});
+          const result = await pending;
+          const host = document.querySelector('#stage'); host.innerHTML = result.svg; result.bindFunctions(host);
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), [])
+        self.assertIn('No callback registered', self.page.evaluate('errors[0]'))
+
+    def test_old_unregister_cannot_remove_replacement_registration(self):
+        self.page.evaluate('''async () => {
+          widget.registerCallback('app.visit', id => calls.push('new:' + id));
+          unregister(); unregister();
+          await draw();
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['new:A雪'])
+
+    def test_run_captures_one_registry_for_all_selected_diagrams(self):
+        self.page.evaluate('''async () => {
+          unregister();
+          const hosts = [document.querySelector('#stage'), document.querySelector('#other')];
+          hosts.forEach(host => { host.textContent = 'flowchart LR\\n A-->B'; });
+          await widget.run({nodes:hosts, postRenderCallback() {
+            widget.registerCallback('app.visit', id => calls.push('late:' + id));
+          }});
+          document.querySelectorAll('[data-callback]').forEach(node => {
+            node.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true}));
+          });
+        }''')
+        self.assertEqual(self.page.evaluate('calls'), [])
+        self.assertEqual(self.page.locator('[data-processed="true"]').count(), 2)
+
+    def test_competing_registry_cannot_coalesce_with_another_runs_authority(self):
+        self.page.evaluate('''() => {
+          const host = document.querySelector('#stage'); host.textContent = 'flowchart LR\\n A-->B';
+          engine.parse = () => new Promise(resolve => { window.finishParse = resolve; });
+          window.firstRun = widget.run({nodes:[host]});
+        }''')
+        self.page.wait_for_function('typeof finishParse === "function"')
+        self.page.evaluate('''async () => {
+          widget.registerCallback('app.visit', id => calls.push('changed:' + id));
+          window.failure = await widget.run({nodes:[document.querySelector('#stage')]}).then(() => null, error => error.errors[0].code);
+          finishParse({ir:{diagram_type:'Flowchart', diagnostics:[]}, warnings:[]});
+          await firstRun;
+        }''')
+        self.assertEqual(self.page.evaluate('failure'), 'element-busy')
+        self.page.locator('[data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), [])
+
+    def test_instance_disposal_unbinds_only_its_own_diagrams(self):
+        self.page.evaluate('''async () => {
+          await draw();
+          window.otherWidget = makeWidget(); otherWidget.initialize({securityLevel:'LOOSE'});
+          otherWidget.registerCallback('app.visit', id => calls.push('other:' + id));
+          await draw(otherWidget, 'other-diagram', document.querySelector('#other'));
+          widget.dispose(); widget.dispose();
+        }''')
+        self.page.locator('#stage [data-callback] rect').click()
+        self.page.locator('#other [data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['other:A雪'])
+        self.assertEqual(self.page.locator('#stage [data-callback]').get_attribute('role'), 'graphics-symbol')
+        self.assertEqual(self.page.locator('#other [data-callback]').get_attribute('role'), 'button')
+        self.assertIn('disposed', self.page.evaluate('''() => {
+          try { widget.registerCallback('new', () => {}); } catch (error) { return error.message; }
+        }'''))
+
+    def test_reporter_reentrancy_cannot_publish_stale_source(self):
+        self.page.evaluate('''async () => {
+          const host = document.querySelector('#stage'); host.textContent = 'flowchart LR\\n A-->B';
+          const instance = makeWidget(() => { host.textContent = 'New document'; });
+          instance.initialize({securityLevel:'loose'});
+          try { await instance.run({nodes:[host]}); } catch (error) { window.failure = error.errors[0].code; }
+        }''')
+        self.assertEqual(self.page.evaluate('failure'), 'stale-source')
+        self.assertEqual(self.page.locator('#stage').text_content(), 'New document')
+        self.assertIsNone(self.page.locator('#stage').get_attribute('data-processed'))
+
+    def test_reporter_reentrancy_cannot_claim_a_conflicting_id(self):
+        self.page.evaluate('''async () => {
+          const host = document.querySelector('#stage'); host.textContent = 'flowchart LR\\n A-->B';
+          // A fresh module instance has assigned no document IDs before this run.
+          const instance = makeWidget(() => { document.querySelector('#other').id = 'fm-mermaid-1'; });
+          instance.initialize({securityLevel:'loose'});
+          try { await instance.run({nodes:[host]}); } catch (error) { window.failure = error.errors[0].code; }
+        }''')
+        self.assertEqual(self.page.evaluate('failure'), 'id-conflict')
+        self.assertEqual(self.page.locator('#stage').text_content(), 'flowchart LR\n A-->B')
+        self.assertIsNone(self.page.locator('#stage').get_attribute('data-processed'))
+
+    def test_binding_failure_preserves_source_and_independent_siblings_continue(self):
+        self.page.evaluate('''async () => {
+          const first = document.querySelector('#stage'), second = document.querySelector('#other');
+          first.textContent = 'bad callback metadata'; second.textContent = 'valid metadata';
+          engine.renderSvg = source => source.startsWith('bad') ? raw.replace('data-id="A雪"', 'data-id=""') : raw;
+          try { await widget.run({nodes:[first,second]}); } catch (error) { window.failure = error.errors[0].message; }
+        }''')
+        self.assertIn('no addressable source node', self.page.evaluate('failure'))
+        self.assertEqual(self.page.locator('#stage').text_content(), 'bad callback metadata')
+        self.assertIsNone(self.page.locator('#stage').get_attribute('data-processed'))
+        self.assertEqual(self.page.locator('#other').get_attribute('data-processed'), 'true')
+        self.page.locator('#other [data-callback] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), ['A雪'])
+
+    def test_callback_failure_uses_reporter_without_reclassifying_as_parse_error(self):
+        self.page.evaluate('''async () => {
+          window.parseFailures = [];
+          widget.parseError = error => parseFailures.push(error.message);
+          widget.registerCallback('app.visit', async () => { throw new Error('application failure'); });
+          await draw();
+        }''')
+        self.page.locator('[data-callback] rect').click()
+        self.page.wait_for_function('errors.length === 1')
+        self.assertEqual(self.page.evaluate('errors'), ['application failure'])
+        self.assertEqual(self.page.evaluate('parseFailures'), [])
+
+    def test_reporter_disposal_during_binding_never_leaves_installed_controls(self):
+        self.page.evaluate('''async () => {
+          const instance = makeWidget(() => instance.dispose());
+          instance.initialize({securityLevel:'loose'});
+          instance.registerCallback('app.visit', id => calls.push(id));
+          engine.renderSvg = () => raw.replace('</svg>', '<g data-callback="invalid()"/></svg>');
+          const result = await instance.render('diagram', 'flowchart LR\\nA-->B');
+          const host = document.querySelector('#stage'); host.innerHTML = result.svg;
+          try { result.bindFunctions(host); } catch (error) { window.failure = error.message; }
+        }''')
+        self.assertIn('disposed while preparing', self.page.evaluate('failure'))
+        self.assertEqual(self.page.locator('[data-id="A雪"]').get_attribute('role'), 'graphics-symbol')
+        self.page.locator('[data-id="A雪"] rect').click()
+        self.assertEqual(self.page.evaluate('calls'), [])
+
+    def test_registry_is_bounded_and_validated_without_loading_engine(self):
+        result = self.page.evaluate('''() => {
+          const instance = compat.createMermaid({loadEngine() { throw new Error('must stay lazy'); }});
+          const errors = [];
+          for (const [name, fn] of [['constructor', () => {}], ['x', 'not a function']]) {
+            try { instance.registerCallback(name, fn); } catch (error) { errors.push(error.message); }
+          }
+          for (let index = 0; index < 1024; index++) instance.registerCallback('cb' + index, () => {});
+          instance.registerCallback('cb0', () => {});
+          try { instance.registerCallback('overflow', () => {}); } catch (error) { errors.push(error.message); }
+          return errors;
+        }''')
+        self.assertEqual(len(result), 3)
+        self.assertIn('safe identifier', result[0])
+        self.assertIn('must be a function', result[1])
+        self.assertIn('1024', result[2])
+
+    def test_all_new_native_diagram_families_reach_parse_and_render(self):
+        result = self.page.evaluate('''async () => {
+          const results = [];
+          for (const family of ['Venn', 'Wardley', 'EventModeling']) {
+            engine.parse = () => ({ir:{diagram_type:family, diagnostics:[]}, warnings:[]});
+            const parsed = await widget.parse('native family fixture');
+            const rendered = await widget.render('family', 'native family fixture');
+            results.push([parsed.diagramType, rendered.diagramType, rendered.svg.includes('<svg')]);
+          }
+          return results;
+        }''')
+        self.assertEqual(result, [['venn','venn',True], ['wardley','wardley',True], ['eventmodeling','eventmodeling',True]])
 
 
 if __name__ == '__main__':

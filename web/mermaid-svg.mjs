@@ -199,6 +199,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
       }
       plans.set(node, { name, sourceId, callback });
     }
+    if (!isLive()) throw new Error("The interaction owner was disposed while preparing bindings.");
     const restorations = [];
     let disposed = false, pressed = null;
     function attribute(node, name, value) {
@@ -288,6 +289,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
       }
       bindings.set(root, cleanup);
       onBind(root, cleanup);
+      if (!isLive()) throw new Error("The interaction owner was disposed while installing bindings.");
     } catch (error) { cleanup(); throw error; }
     for (const name of missing) report(new Error(`No callback registered for '${name}'; the diagram node remains inert.`));
     return cleanup;

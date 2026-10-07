@@ -1,4 +1,4 @@
-import { checkRenderId, prepareSvg } from "./mermaid-svg.mjs";
+import { checkCallbackName, checkRenderId, createSvgBinder, prepareSvg } from "./mermaid-svg.mjs";
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -12,7 +12,7 @@ const TYPES = Object.freeze({ Flowchart: "flowchart-v2", Sequence: "sequence", S
   Sankey: "sankey", XyChart: "xychart", BlockBeta: "block", PacketBeta: "packet", ArchitectureBeta: "architecture",
   C4Context: "c4", C4Container: "c4", C4Component: "c4", C4Dynamic: "c4", C4Deployment: "c4",
   Kanban: "kanban", Treemap: "treemap", Radar: "radar", Info: "info",
-  Ishikawa: "ishikawa", TreeView: "treeView" });
+  Ishikawa: "ishikawa", TreeView: "treeView", Venn: "venn", Wardley: "wardley", EventModeling: "eventmodeling" });
 
 export class MermaidError extends Error {
   constructor(message, code, diagnostics = []) {
@@ -83,6 +83,29 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   const owner = {};
   const window = document?.defaultView;
   const checkedConfigs = new WeakMap();
+  const callbacks = new Map();
+  const bindingRoots = new Set();
+  const bindingCleanup = new WeakMap();
+  let callbackEpoch = 0;
+  let callbackRevision = 0;
+  const captureInteractions = () => ({ epoch: callbackEpoch, revision: callbackRevision, registered: new Map(callbacks) });
+  const allowsCallbacks = (snapshot) => String(snapshot.value.securityLevel || "strict").toLowerCase() === "loose";
+  function trackBinding(root, cleanup) {
+    // A long-lived docs widget must not retain detached diagrams just so dispose can find them.
+    for (const reference of bindingRoots) if (!reference.deref()) bindingRoots.delete(reference);
+    const previous = bindingCleanup.get(root);
+    if (previous) { previous.cleanup(); bindingRoots.delete(previous.reference); }
+    const reference = new WeakRef(root);
+    bindingRoots.add(reference);
+    bindingCleanup.set(root, { reference, cleanup });
+  }
+  function clearBindings() {
+    for (const reference of bindingRoots) {
+      const root = reference.deref();
+      if (root) { bindingCleanup.get(root)?.cleanup(); bindingCleanup.delete(root); }
+    }
+    bindingRoots.clear();
+  }
   function assertLive() {
     if (disposed) throw new MermaidError("This Mermaid instance has been disposed.", "disposed");
   }
@@ -137,13 +160,22 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       catch (hookError) { report(hookError); }
     }
   }
-  async function renderSnapshot(id, source, snapshot, ownerDocument = document) {
+  async function renderSnapshot(id, source, snapshot, ownerDocument = document, interactions = captureInteractions()) {
     checkRenderId(id);
+    const { epoch, registered } = interactions;
+    const allowed = allowsCallbacks(snapshot);
     const parsed = await inspect(source, snapshot);
     const svg = await parsed.module.renderSvg(source, snapshot.value);
     assertLive();
     const output = prepareSvg(svg, id, ownerDocument);
-    return { ...output, diagramType: parsed.diagramType, diagnostics: parsed.diagnostics, warnings: parsed.warnings };
+    const bindFunctions = output.element.querySelector("[data-callback]") ? createSvgBinder(output.element, {
+      isLive: () => !disposed,
+      resolveCallback: (name) => allowed && epoch === callbackEpoch &&
+        callbacks.get(name) === registered.get(name) ? registered.get(name) : undefined,
+      reportError: (error) => { if (allowed && epoch === callbackEpoch) report(error); },
+      onBind: trackBinding,
+    }) : undefined;
+    return { ...output, bindFunctions, diagramType: parsed.diagramType, diagnostics: parsed.diagnostics, warnings: parsed.warnings };
   }
   function report(error) {
     // A host error reporter is observational; it must not turn a suppressed failure into an
@@ -195,7 +227,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       && node.innerHTML === item.markup && node.childNodes.length === item.children.length
       && item.children.every((child, index) => node.childNodes[index] === child);
   }
-  async function renderNode(item, snapshot) {
+  async function renderNode(item, snapshot, interactions) {
     assertLive();
     const { node } = item;
     // Another run may have completed this node since our selection snapshot. Never reparse
@@ -203,18 +235,18 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     if (node.getAttribute("data-processed") === "true") return undefined;
     const existing = activeNodes.get(node);
     if (existing) {
-      if (existing.owner !== owner || existing.snapshot !== snapshot || existing.markup !== item.markup
+      if (existing.owner !== owner || existing.snapshot !== snapshot || existing.callbackRevision !== interactions.revision || existing.markup !== item.markup
         || existing.source !== item.source) throw new MermaidError("A different render already owns this element.", "element-busy");
       await existing.promise;
       return undefined; // The owning run performs the callback exactly once.
     }
-    const job = { owner, snapshot, markup: item.markup, source: item.source };
+    const job = { owner, snapshot, callbackRevision: interactions.revision, markup: item.markup, source: item.source };
     job.promise = Promise.resolve().then(async () => {
       if (!unchanged(item)) throw new MermaidError("Diagram source changed before rendering; it was not replaced.", "stale-source");
       let id;
       do { id = `fm-mermaid-${++nextDocumentId}`; }
       while (item.document.getElementById(id) || item.root.getElementById?.(id));
-      const result = await renderSnapshot(id, item.source, snapshot, item.document);
+      const result = await renderSnapshot(id, item.source, snapshot, item.document, interactions);
       assertLive();
       if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
         throw new MermaidError("Diagram source changed while rendering; it was not replaced.", "stale-source");
@@ -224,8 +256,19 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       }
       // Nothing changes in the host DOM until parsing, rendering, SVG validation, and the
       // source-generation checks all succeed. Failed nodes retain their original source.
-      node.replaceChildren(result.element);
-      node.setAttribute("data-processed", "true");
+      const unbind = result.bindFunctions?.(result.element);
+      try {
+        // A missing-handler reporter is host code and may edit source or dispose this owner.
+        assertLive();
+        if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
+          throw new MermaidError("Diagram source changed during interaction binding; it was not replaced.", "stale-source");
+        }
+        if (item.document.getElementById(id) || item.root.getElementById?.(id)) {
+          throw new MermaidError("The generated SVG ID was claimed during interaction binding. Retry this element.", "id-conflict");
+        }
+        node.replaceChildren(result.element);
+        node.setAttribute("data-processed", "true");
+      } catch (error) { unbind?.(); throw error; }
       return id;
     });
     activeNodes.set(node, job);
@@ -234,6 +277,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   }
   async function run(options = {}) {
     const snapshot = site;
+    const interactions = captureInteractions();
     const suppress = options?.suppressErrors === true;
     const callback = options?.postRenderCallback;
     let items;
@@ -245,7 +289,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     const failures = [];
     for (const item of items) {
       try {
-        const id = await renderNode(item, snapshot);
+        const id = await renderNode(item, snapshot, interactions);
         if (id && callback) await callback(id);
       } catch (error) {
         if (suppress) report(error);
@@ -270,7 +314,27 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     }, 0);
   }
   const api = {
-    initialize(config) { assertLive(); site = configuration(config); },
+    initialize(config) {
+      assertLive();
+      site = configuration(config);
+      if (!allowsCallbacks(site)) {
+        callbackEpoch += 1;
+        clearBindings(); // Tightening policy revokes old diagrams, including pending results.
+      }
+    },
+    registerCallback(name, callback) {
+      assertLive();
+      checkCallbackName(name);
+      if (typeof callback !== "function") throw new TypeError("A diagram callback must be a function.");
+      if (!callbacks.has(name) && callbacks.size >= 1024) throw new RangeError("At most 1024 diagram callbacks may be registered per instance.");
+      // A fresh identity revokes prior registrations even when the same function is reused.
+      const handler = (sourceId) => callback(sourceId);
+      callbacks.set(name, handler);
+      callbackRevision += 1;
+      return () => {
+        if (callbacks.get(name) === handler) { callbacks.delete(name); callbackRevision += 1; }
+      };
+    },
     async parse(source, options = {}) {
       try {
         const { diagramType, diagnostics, warnings } = await inspect(source, site);
@@ -297,7 +361,13 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       if (site.value.startOnLoad !== false) await run();
     },
     parseError: undefined,
-    dispose() { disposed = true; clearStartup(); },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      callbacks.clear();
+      clearBindings();
+      clearStartup();
+    },
   };
   if (autoStart && document && window) {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scheduleStartup, { once: true });
