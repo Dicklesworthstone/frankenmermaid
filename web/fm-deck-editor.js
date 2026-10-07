@@ -164,6 +164,234 @@ if (!window.__fmDeckFailed && document.querySelector("#deck-stage .fm-deck-viewp
   return { html, nonce, manifest: deck.manifest };
 }
 
+const MAX_DECK_SOURCE = 8 * 1024 * 1024;
+const MAX_DECK_BLOCK = 32 * 1024;
+
+function authorText(value, maximum, name) {
+  if (typeof value !== "string" || value.length > maximum) throw new Error(`${name} exceeds the authoring limit or is not text.`);
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code >= 0xd800 && code <= 0xdfff) throw new Error(`${name} contains an unpaired surrogate.`);
+  }
+  return value;
+}
+
+function freezeDeck(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeDeck);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Validate an authored deck, not a resolved manifest. JSON is the editable interchange;
+ * existing JSON5 directives stay byte-for-byte in the source, never reserialized here. */
+export function deckDraft(json) {
+  authorText(json, MAX_DECK_BLOCK, "Deck draft");
+  const spec = JSON.parse(json);
+  function object(value, keys, name) {
+    if (!value || Array.isArray(value) || typeof value !== "object") throw new Error(`${name} must be an object.`);
+    for (const key of Object.keys(value)) if (!keys.includes(key)) throw new Error(`Unknown ${name} field: ${key}`);
+  }
+  function caption(value, name) {
+    authorText(value, 1024, name);
+    if (Array.from(value).length > 512) throw new Error(`${name} exceeds 512 characters.`);
+  }
+  function number(value, minimum, maximum, name) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) throw new Error(`Invalid ${name}.`);
+  }
+  function selectors(values, name) {
+    if (!Array.isArray(values) || !values.length || values.length > 512) throw new Error(`${name} needs 1–512 selectors.`);
+    const seen = new Set();
+    for (const value of values) {
+      authorText(value, 1024, name);
+      if (!value.trim() || seen.has(value)) throw new Error(`${name} has an empty or repeated selector.`);
+      seen.add(value);
+    }
+  }
+  object(spec, ["title", "options", "overview", "tips", "slides"], "deck");
+  if (spec.title !== undefined) caption(spec.title, "Deck title");
+  if (spec.options !== undefined) {
+    object(spec.options, ["fitMargin", "zoomMax", "dimOpacity", "autoAdvanceMs"], "options");
+    for (const [key, value] of Object.entries(spec.options)) {
+      number(value, key === "zoomMax" ? Number.MIN_VALUE : 0,
+        key === "dimOpacity" ? 1 : key === "autoAdvanceMs" ? 600000 : 100000, key);
+      if (key === "autoAdvanceMs" && !Number.isInteger(value)) throw new Error("Autoplay must use whole milliseconds.");
+    }
+  }
+  if (spec.overview !== undefined) {
+    object(spec.overview, ["title", "caption", "enabled", "tour"], "overview");
+    for (const [key, value] of Object.entries(spec.overview)) {
+      if (["enabled", "tour"].includes(key)) {
+        if (typeof value !== "boolean") throw new Error(`Overview ${key} must be a boolean.`);
+      } else caption(value, `Overview ${key}`);
+    }
+  }
+  if (spec.tips !== undefined) {
+    if (!spec.tips || typeof spec.tips !== "object" || Array.isArray(spec.tips)) throw new Error("Tips must be an object.");
+    for (const [key, value] of Object.entries(spec.tips)) {
+      authorText(key, 1024, "Tooltip node ID");
+      caption(value, "Tooltip");
+    }
+  }
+  if (!Array.isArray(spec.slides) || !spec.slides.length || spec.slides.length > 64) throw new Error("A deck needs 1–64 slides.");
+  const ids = new Set();
+  for (const slide of spec.slides) {
+    object(slide, ["id", "title", "caption", "nodes", "reveal", "edges", "fitMargin", "zoomMax"], "slide");
+    authorText(slide.id, 128, "Slide ID");
+    if (!slide.id.trim() || ids.has(slide.id)) throw new Error("Slide IDs must be nonempty and unique.");
+    ids.add(slide.id);
+    for (const key of ["title", "caption"]) if (slide[key] !== undefined) caption(slide[key], `Slide ${key}`);
+    selectors(slide.nodes, "Slide membership");
+    if (slide.reveal !== undefined && slide.reveal !== "auto") {
+      if (!Array.isArray(slide.reveal) || slide.reveal.length > 64) throw new Error("Reveal must be auto or up to 64 selector groups.");
+      const revealed = new Set();
+      for (const group of slide.reveal) {
+        selectors(group, "Reveal group");
+        for (const selector of group) {
+          if (revealed.has(selector)) throw new Error("A selector cannot appear in two reveal groups.");
+          revealed.add(selector);
+        }
+      }
+    }
+    if (slide.edges !== undefined && !["induced", "touching", "none"].includes(slide.edges)) throw new Error("Invalid slide edge policy.");
+    if (slide.fitMargin !== undefined) number(slide.fitMargin, 0, 100000, "slide margin");
+    if (slide.zoomMax !== undefined) number(slide.zoomMax, Number.MIN_VALUE, 100000, "slide zoom");
+  }
+  return freezeDeck(spec);
+}
+
+/** Append ONE independent directive. No scan of Mermaid labels, comments or JSON5 is needed.
+ * A composition session remembers its own exact suffix and can replace it on subsequent edits. */
+export function appendDeckDraft(source, json) {
+  authorText(source, MAX_DECK_SOURCE, "Source");
+  const spec = deckDraft(json);
+  const newline = /\r\n|\r|\n/u.exec(source)?.[0] || "\n";
+  // Escaping physical line separators and % also prevents a caption containing }%% from
+  // looking like the lexical end of a directive. JSON decoding restores the exact text.
+  const payload = JSON.stringify(spec).replace(/[%\u2028\u2029]/gu,
+    character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const block = `%%{deck: ${payload}}%%${newline}`;
+  if (new TextEncoder().encode(block).length > MAX_DECK_BLOCK) throw new Error("Deck directive exceeds 32 KiB. Split it into smaller compositions.");
+  const separator = source && !/[\r\n]$/u.test(source) ? newline : "";
+  const updatedSource = source + separator + block;
+  authorText(updatedSource, MAX_DECK_SOURCE, "Updated source");
+  return Object.freeze({ source, updatedSource, block, spec });
+}
+
+/** Read author IDs only from the engine's addressable SVG groups. This does not parse source
+ * or mount SVG. Large catalogs are searchable by the UI without creating one control per node. */
+export function deckNodeCatalog(svg, DOMParserClass = globalThis.DOMParser) {
+  authorText(svg, 16 * 1024 * 1024, "SVG");
+  const parsed = new DOMParserClass().parseFromString(svg, "image/svg+xml");
+  const root = parsed.documentElement;
+  if (parsed.doctype || parsed.querySelector("parsererror") || root?.localName !== "svg" ||
+      root.namespaceURI !== "http://www.w3.org/2000/svg") throw new Error("The engine returned invalid SVG for node selection.");
+  const nodes = new Map();
+  for (const element of root.querySelectorAll('[id^="fm-node-"][data-id]')) {
+    const id = element.getAttribute("data-id");
+    if (id && !nodes.has(id)) {
+      const label = element.querySelector("title")?.textContent || id;
+      nodes.set(id, Object.freeze({ id, label }));
+    }
+  }
+  return Object.freeze([...nodes.values()]);
+}
+
+function checkAuthoredSlides(spec, before, after) {
+  const previous = before?.slides || [], resolved = after.slides;
+  if (resolved.length !== previous.length + spec.slides.length ||
+      previous.some((slide, index) => slide.id !== resolved[index].id)) {
+    throw new Error("The engine dropped slides or changed the existing slide order. The source was not changed.");
+  }
+  for (const [index, slide] of spec.slides.entries()) {
+    const actual = resolved[previous.length + index];
+    if (actual.id !== slide.id || actual.title !== (slide.title ?? slide.id) ||
+        (actual.caption || "") !== (slide.caption || "") || !actual.nodes.length) {
+      throw new Error(`Slide '${slide.id}' was renamed, truncated or could not be resolved.`);
+    }
+    const members = new Map(actual.nodes.map(node => [node.sourceId, node.step]));
+    const literal = selector => selector !== "*" && !selector.startsWith("subgraph:");
+    for (const selector of slide.nodes.filter(literal)) {
+      if (!members.has(selector)) throw new Error(`Slide '${slide.id}' is missing node '${selector}'.`);
+    }
+    if (Array.isArray(slide.reveal)) for (const [step, group] of slide.reveal.entries()) {
+      for (const selector of group.filter(literal)) {
+        if (members.get(selector) !== step + 1) throw new Error(`Slide '${slide.id}' could not reveal '${selector}' at step ${step + 1}.`);
+      }
+    }
+    if (slide.reveal === undefined && actual.maxStep !== 0) throw new Error(`Slide '${slide.id}' has unexpected reveal steps.`);
+    if (slide.edges === "none" && actual.edges?.length) throw new Error(`Slide '${slide.id}' still contains edges.`);
+  }
+}
+
+/** Compose against an exact source revision. The engine resolves every selector/reveal and
+ * supplies the paired SVG/manifest; JavaScript never computes graph membership or geometry. */
+export class DeckAuthoringSession {
+  #render;
+  #cancel;
+  #checkElements;
+  #source = "";
+  #base = "";
+  #revision = 0;
+  #prepared = null;
+  #disposed = false;
+
+  constructor({ renderDeck, cancelRender = () => {}, checkElements = checkDeckElements }) {
+    if (![renderDeck, cancelRender, checkElements].every(fn => typeof fn === "function")) throw new TypeError("Deck authoring requires a renderer and SVG validator.");
+    this.#render = renderDeck;
+    this.#cancel = cancelRender;
+    this.#checkElements = checkElements;
+  }
+  get source() { return this.#source; }
+  get ownsComposition() { return this.#base !== this.#source; }
+  setSource(source) {
+    if (this.#disposed) throw abortError();
+    this.cancel();
+    authorText(source, MAX_DECK_SOURCE, "Source");
+    this.#source = this.#base = source;
+  }
+  cancel() { this.#revision += 1; this.#prepared = null; this.#cancel(); }
+  async prepare(json) {
+    if (this.#disposed) throw abortError();
+    this.cancel();
+    const version = this.#revision, source = this.#source;
+    const plan = appendDeckDraft(this.#base, json);
+    const live = () => {
+      if (this.#disposed || version !== this.#revision || source !== this.#source) throw abortError();
+    };
+    // Inspect existing slides separately so duplicate IDs / truncation cannot masquerade as
+    // a successfully appended slide. Each artifact still comes from ONE engine invocation.
+    const original = await this.#render(this.#base);
+    live();
+    if (typeof original?.svg !== "string" || !Array.isArray(original.warnings)) throw new Error("Invalid original deck result.");
+    const previous = original.manifest == null ? null : checkedDeck(original).manifest;
+    if ((previous?.slides.length || 0) + plan.spec.slides.length > 64) throw new Error("The existing presentation plus this composition exceeds 64 slides.");
+    for (const slide of plan.spec.slides) if (previous?.slides.some(old => old.id === slide.id)) {
+      throw new Error(`Slide ID '${slide.id}' is already used in the source. Choose another ID.`);
+    }
+    const result = await this.#render(plan.updatedSource);
+    live();
+    const deck = checkedDeck(result);
+    checkAuthoredSlides(plan.spec, previous, deck.manifest);
+    await this.#checkElements(deck);
+    live();
+    // Own all response data: a caller or a transport cannot mutate a reviewed confirmation.
+    const snapshot = JSON.parse(deckJson(deck));
+    this.#prepared = freezeDeck({ source, updatedSource: plan.updatedSource,
+      spec: plan.spec, deck: snapshot, existingSlides: previous?.slides.length || 0 });
+    return this.#prepared;
+  }
+  commit(prepared) {
+    if (this.#disposed || !prepared || prepared !== this.#prepared || prepared.source !== this.#source) throw abortError();
+    this.#source = prepared.updatedSource;
+    this.#prepared = null;
+    this.#revision += 1;
+    return this.#source;
+  }
+  dispose() { if (!this.#disposed) { this.#disposed = true; this.cancel(); } }
+}
+
 /** An opt-in live deck preview. Hosts call sourceChanged for programmatic edits as well as
  * typing. Closing the panel destroys the iframe and cancels work; reopening reuses no stale
  * presentation. Browser I/O is injectable for tests, never a second rendering implementation. */
