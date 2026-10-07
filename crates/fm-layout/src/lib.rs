@@ -13193,8 +13193,10 @@ fn class_member_row_width(
         row.push_str(" : ");
         row.push_str(&fm_core::parse_generic_types(return_type));
     }
-    // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.
-    metrics.estimate_dimensions(&row).0 * 0.9
+    // Rows render at `font_size * 0.9`, but the estimate runs ~10% narrower than browsers draw the
+    // text: scaled down to 0.9 the widest row (`+String beakColor`) ran past its box's edge. The
+    // full-size estimate is the row as drawn, with its margin.
+    metrics.estimate_dimensions(&row).0
 }
 
 fn node_size_cache_key(
