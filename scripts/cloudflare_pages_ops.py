@@ -55,6 +55,21 @@ HEADER_ROUTE_ORDER = (
     "/pkg/*",
     "/evidence/*",
 )
+# Explicit runtime dependencies, not a glob that also publishes tests or local drafts.
+# These paths are required by the playground and the public Mermaid browser adapter.
+AUTHORING_BUNDLE_FILES = (
+    "web/playground.html",
+    "web/fm-config-editor.js",
+    "web/fm-source-editor.js",
+    "web/fm-render.worker.js",
+    "web/fm-document.js",
+    "web/fm-share.js",
+    "web/fm-image-export.js",
+    "web/fm-deck-editor.js",
+    "web/mermaid.mjs",
+    "web/mermaid-compat.mjs",
+    "web/mermaid-svg.mjs",
+)
 REQUIRED_BUNDLE_FILES = (
     "index.html",
     "frankenmermaid_illustration.webp",
@@ -64,6 +79,7 @@ REQUIRED_BUNDLE_FILES = (
     "frankenmermaid_demo_showcase.html",
     "web/index.html",
     "web_react/index.html",
+    *AUTHORING_BUNDLE_FILES,
     "pkg/frankenmermaid.d.ts",
     "pkg/frankenmermaid.js",
     "pkg/frankenmermaid_bg.wasm",
@@ -78,6 +94,7 @@ REQUIRED_BUNDLE_FILES = (
 # runtime version matching the deployed WASM (bd-z7g6k).
 RENAMED_BUNDLE_FILES = {
     "crates/fm-cli/src/deck_runtime.js": "web/fm-deck-runtime.js",
+    "crates/fm-cli/src/deck_template.html": "web/fm-deck-template.html",
 }
 
 
@@ -253,6 +270,11 @@ def stage_bundle(
     )
 
     bundle_map = build_bundle_file_map(repo_root)
+    # Refuse an incomplete checkout before writing any distribution files. In particular,
+    # a page without its lazily imported editors is not a working authoring application.
+    for source_path in bundle_map:
+        if not source_path.is_file():
+            raise FileNotFoundError(f"required bundle source is missing or not a file: {source_path}")
     generated_headers_rel = Path("_headers")
     expected_paths = {dest for dest in bundle_map.values()}
     expected_paths.add(generated_headers_rel)
@@ -481,8 +503,9 @@ def build_route_integrity_report(stage_payload: dict[str, object]) -> dict[str, 
         ),
         record(
             "runtime assets",
-            "pkg/frankenmermaid.js" in copied_destinations and "pkg/frankenmermaid_bg.wasm" in copied_destinations,
-            "staged bundle contains the checked-in JS and WASM runtime artifacts",
+            {"pkg/frankenmermaid.js", "pkg/frankenmermaid_bg.wasm", *AUTHORING_BUNDLE_FILES,
+             *RENAMED_BUNDLE_FILES.values()}.issubset(copied_destinations),
+            "staged bundle contains JS/WASM plus every playground, editor, browser-adapter and deck runtime dependency",
         ),
         record(
             "capability artifact",

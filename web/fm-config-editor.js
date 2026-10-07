@@ -166,13 +166,23 @@ export function planConfigurationEdit(document, draft, index = document.targets.
   if (!body.startsWith("{") || valueEnd(body, 0) !== body.length) {
     throw new Error("Configuration must be exactly one object, not another directive or diagram statement.");
   }
+  // The engine accepts multiline deck blocks, but init directives occupy ONE physical
+  // source line. JSON cannot contain literal CR/LF inside a string, so replacing its
+  // formatting newlines is lossless without reserializing numbers or duplicate keys.
+  // Do not guess at JSON5 line comments or string continuations: leave those drafts intact.
+  let inline = body;
+  if (/[\r\n]/u.test(body)) {
+    try { JSON.parse(body); }
+    catch { throw new Error("Multiline initialization drafts must use JSON. Keep JSON5 on one source line; its comments and strings cannot be compacted safely here."); }
+    inline = body.replace(/\r\n?|\n/g, " ");
+  }
   if (!Number.isInteger(index) || index < -1 || index >= document.targets.length || (index === -1 && document.targets.length)) {
     throw new RangeError("Select an existing initialization directive.");
   }
   const target = document.targets[index];
   const from = target?.from ?? document.insertion, to = target?.to ?? from;
   const separator = from && !/[\r\n\uFEFF]/u.test(document.source[from - 1]) ? document.newline : "";
-  const replacement = target ? body : `${separator}%%{init: ${body}}%%${document.newline}`;
+  const replacement = target ? inline : `${separator}%%{init: ${inline}}%%${document.newline}`;
   const updatedSource = document.source.slice(0, from) + replacement + document.source.slice(to);
   text(updatedSource, MAX_SOURCE_UNITS, "Updated source");
   return Object.freeze({ source: document.source, updatedSource, from, to, replacement, draft: body, index });

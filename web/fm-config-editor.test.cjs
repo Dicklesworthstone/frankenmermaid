@@ -235,3 +235,29 @@ test('visual field changes cannot introduce nonfinite values or traverse object 
   assert.throws(() => patchConfigurationDraft('{"flowchart":7}', ['flowchart','nodeSpacing'], 1), /not an object/);
   assert.throws(() => patchConfigurationDraft("{theme:'dark'}", ['theme'], 'forest')); // JSON5 stays text, never guessed.
 });
+
+test('formatted JSON drafts emit a single-line init without rounding or reserializing source values', async () => {
+  const { configurationDocument, planConfigurationEdit } = await modulePromise;
+  const draft = '{\r\n  "theme": "dark",\n  "themeVariables": {"large":9007199254740993,"text":"escaped\\nnewline"},\r  "flowchart": {"nodeSpacing":24.00}\n}';
+  for (const source of ['flowchart TD\na-->b', '%%{init:{}}%%\nflowchart TD\na-->b']) {
+    const plan = planConfigurationEdit(configurationDocument(source), draft);
+    const line = plan.updatedSource.split('\n')[0];
+    assert.ok(line.startsWith('%%{init:'));
+    assert.ok(line.endsWith('}%%'));
+    assert.ok(line.includes('9007199254740993'));
+    assert.ok(line.includes('24.00'));
+    assert.ok(line.includes('escaped\\nnewline'));
+    assert.equal(plan.updatedSource.split('\n').length, 3);
+    assert.equal(plan.draft, draft.trim());
+    assert.equal(configurationDocument(plan.updatedSource).targets[0].draft, draft.replace(/\r\n?|\n/g, ' '));
+  }
+});
+
+test('multiline JSON5 is rejected instead of emitting a directive the engine does not support', async () => {
+  const { configurationDocument, planConfigurationEdit } = await modulePromise;
+  const document = configurationDocument('flowchart TD\na-->b');
+  for (const draft of ["{\n theme:'dark', // comment\n}", "{theme:'line\\\ncontinuation'}", "{\n /* comment */ theme:'dark'\n}"]) {
+    assert.throws(() => planConfigurationEdit(document, draft), /Multiline initialization drafts must use JSON/);
+  }
+  assert.equal(planConfigurationEdit(document, "{theme:'dark', /* kept */}").draft, "{theme:'dark', /* kept */}");
+});

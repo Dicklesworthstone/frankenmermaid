@@ -1,9 +1,11 @@
+import hashlib
 import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 OPS_PATH = Path(__file__).resolve().parent.parent / "scripts" / "cloudflare_pages_ops.py"
@@ -99,6 +101,10 @@ class CloudflarePagesOpsTests(unittest.TestCase):
             "redirect_strategy": {"rules": []},
             "hosting_plan_gate": {"surface": "cloudflare-hosting-plan"},
         }
+        payload["copied_files"].extend(
+            {"destination": path}
+            for path in (*OPS.AUTHORING_BUNDLE_FILES, *OPS.RENAMED_BUNDLE_FILES.values())
+        )
         report = OPS.build_route_integrity_report(payload)
         self.assertFalse(report["ok"])
         failing = [check["name"] for check in report["checks"] if not check["ok"]]
@@ -231,6 +237,102 @@ class CloudflarePagesOpsTests(unittest.TestCase):
             payload = json.loads(result["stdout"])
             self.assertEqual(payload["action"], "stage-bundle")
             self.assertTrue(payload["generated_files"][0]["path"].endswith("_headers"))
+
+
+class AuthoringBundleTests(unittest.TestCase):
+    # The consuming application names these files. Keep this expectation independent of
+    # REQUIRED_BUNDLE_FILES: deriving expected paths from the stager would miss omissions.
+    RUNTIME_PATHS = (
+        "web/playground.html", "web/fm-config-editor.js", "web/fm-source-editor.js",
+        "web/fm-render.worker.js", "web/fm-document.js", "web/fm-share.js",
+        "web/fm-image-export.js", "web/fm-deck-editor.js", "web/mermaid.mjs",
+        "web/mermaid-compat.mjs", "web/mermaid-svg.mjs",
+        "web/fm-deck-runtime.js", "web/fm-deck-template.html",
+    )
+
+    def fixture(self, root, missing=None, directory=None):
+        for source in OPS.build_bundle_file_map(root):
+            if source == missing:
+                continue
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if source == directory:
+                source.mkdir()
+            else:
+                source.write_bytes(("fixture bytes: " + source.relative_to(root).as_posix() + " 雪\n").encode())
+
+    def stage(self, root, output):
+        # These are file-copy tests, not hosted-renderer or hosting-plan validation claims.
+        with patch.object(OPS, "validate_cloudflare_hosting_plan", return_value={"surface": "cloudflare-hosting-plan"}), \
+             patch.object(OPS, "merge_headers", return_value={"/web/*": {"cache-control": "no-cache"}}):
+            return OPS.stage_bundle(repo_root=root, output_dir=output)
+
+    def test_authoring_runtime_paths_are_all_required_and_tests_are_not_published(self):
+        mapping = OPS.build_bundle_file_map(Path("/repo"))
+        destinations = {path.as_posix() for path in mapping.values()}
+        self.assertTrue(set(self.RUNTIME_PATHS).issubset(destinations), set(self.RUNTIME_PATHS) - destinations)
+        self.assertEqual(len(mapping), len(destinations))
+        self.assertFalse(any(".test." in path or path.endswith(".py") for path in destinations))
+
+    def test_documented_recipe_includes_the_same_authoring_sources(self):
+        root = OPS_PATH.parent.parent
+        recipe = (root / "AGENTS.md").read_text().split("# 1. Assemble static distribution bundle", 1)[1].split("# 2. Deploy", 1)[0]
+        for source, target in OPS.build_bundle_file_map(root).items():
+            if target.as_posix() in self.RUNTIME_PATHS:
+                self.assertIn(source.relative_to(root).as_posix(), recipe)
+
+    def test_authoring_assets_are_copied_byte_for_byte_with_matching_hashes(self):
+        with TemporaryDirectory() as tempdir:
+            root, output = Path(tempdir) / "source", Path(tempdir) / "bundle"
+            self.fixture(root)
+            payload = self.stage(root, output)
+            records = {item["destination"]: item for item in payload["copied_files"]}
+            for path in self.RUNTIME_PATHS:
+                with self.subTest(path=path):
+                    record = records[path]
+                    expected = (root / record["source"]).read_bytes()
+                    self.assertEqual((output / path).read_bytes(), expected)
+                    self.assertEqual(record["sha256"], "sha256:" + hashlib.sha256(expected).hexdigest())
+            self.assertTrue(OPS.build_route_integrity_report(payload)["ok"])
+
+    def test_missing_authoring_asset_fails_before_any_distribution_file_is_written(self):
+        for relative in self.RUNTIME_PATHS:
+            with self.subTest(path=relative), TemporaryDirectory() as tempdir:
+                root, output = Path(tempdir) / "source", Path(tempdir) / "bundle"
+                mapping = OPS.build_bundle_file_map(root)
+                source = next(source for source, target in mapping.items() if target.as_posix() == relative)
+                self.fixture(root, missing=source)
+                with self.assertRaisesRegex(FileNotFoundError, "required bundle source"):
+                    self.stage(root, output)
+                self.assertFalse(output.exists())
+
+    def test_directory_cannot_stand_in_for_a_required_module(self):
+        with TemporaryDirectory() as tempdir:
+            root, output = Path(tempdir) / "source", Path(tempdir) / "bundle"
+            self.fixture(root, directory=root / "web/fm-config-editor.js")
+            with self.assertRaisesRegex(FileNotFoundError, "not a file"):
+                self.stage(root, output)
+            self.assertFalse(output.exists())
+
+    def test_route_integrity_rejects_each_missing_authoring_dependency(self):
+        with TemporaryDirectory() as tempdir:
+            root, output = Path(tempdir) / "source", Path(tempdir) / "bundle"
+            self.fixture(root)
+            payload = self.stage(root, output)
+            for path in self.RUNTIME_PATHS:
+                with self.subTest(path=path):
+                    incomplete = {**payload, "copied_files": [item for item in payload["copied_files"] if item["destination"] != path]}
+                    report = OPS.build_route_integrity_report(incomplete)
+                    self.assertFalse(report["ok"])
+                    self.assertEqual([item["name"] for item in report["checks"] if not item["ok"]], ["runtime assets"])
+
+    def test_hosting_precondition_failure_does_not_write_a_bundle(self):
+        with TemporaryDirectory() as tempdir:
+            root, output = Path(tempdir) / "source", Path(tempdir) / "bundle"
+            self.fixture(root)
+            with patch.object(OPS, "validate_cloudflare_hosting_plan", side_effect=ValueError("invalid hosting plan")):
+                with self.assertRaisesRegex(ValueError, "invalid hosting plan"):
+                    OPS.stage_bundle(repo_root=root, output_dir=output)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
