@@ -4500,6 +4500,7 @@ impl IncrementalLayoutEngine {
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
         let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+        clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -5650,6 +5651,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
+    clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -18986,6 +18988,73 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
 }
 
+/// End each edge written to a SUBGRAPH (`one --> two`) on that subgraph's border.
+///
+/// Such an endpoint is resolved to one of the subgraph's members, which the layout ranks and
+/// routes against, so the line ran on into the box to whichever member came first, piling onto
+/// that member's own edges. mermaid draws it to the cluster's edge instead. The path is cut where
+/// it crosses the named cluster's box: the source end where the route first leaves it, the target
+/// end where it last enters it. A route that never crosses the box is left alone.
+fn clip_edges_to_named_subgraphs(
+    ir: &MermaidDiagramIr,
+    edges: &mut [LayoutEdgePath],
+    clusters: &[LayoutClusterBox],
+) {
+    let inside = |r: LayoutRect, p: LayoutPoint| {
+        p.x > r.x && p.x < r.x + r.width && p.y > r.y && p.y < r.y + r.height
+    };
+    for path in edges.iter_mut() {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        let (from, to) = edge.named_subgraphs();
+        // The source end is clipped as the target end of the path read backwards.
+        for (subgraph, backwards) in [(from, true), (to, false)] {
+            let Some(r) = subgraph
+                .and_then(|id| ir.graph.subgraph(id)?.cluster)
+                .and_then(|cluster| clusters.iter().find(|c| c.cluster_index == cluster.0))
+                .map(|found| found.bounds)
+            else {
+                continue;
+            };
+            let points = &mut path.points;
+            let n = points.len();
+            let at = |i: usize| if backwards { n - 1 - i } else { i };
+            let Some(entry) = (1..n)
+                .rev()
+                .find(|&i| inside(r, points[at(i)]) && !inside(r, points[at(i - 1)]))
+            else {
+                continue;
+            };
+            // Where the segment from `a` (outside) to `b` (inside) crosses the border.
+            let (a, b) = (points[at(entry - 1)], points[at(entry)]);
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let mut t = 0.0_f32;
+            for (delta, start, low, high) in [
+                (dx, a.x, r.x, r.x + r.width),
+                (dy, a.y, r.y, r.y + r.height),
+            ] {
+                if delta.abs() > f32::EPSILON {
+                    let border = if delta > 0.0 { low } else { high };
+                    t = t.max((border - start) / delta);
+                }
+            }
+            // `b` becomes the cut, and everything past it along the read direction goes.
+            let cut = at(entry);
+            points[cut] = LayoutPoint {
+                x: dx.mul_add(t, a.x),
+                y: dy.mul_add(t, a.y),
+            };
+            if backwards {
+                points.copy_within(cut.., 0);
+                points.truncate(n - cut);
+            } else {
+                points.truncate(cut + 1);
+            }
+        }
+    }
+}
+
 /// For each node, the composite-state nodes whose clusters enclose it (empty outside state
 /// diagrams). A composite node is matched to its cluster exactly as in
 /// [`anchor_composite_state_nodes`]: the cluster's title is the state's id.
@@ -27071,6 +27140,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An edge written to a subgraph id ends on that subgraph's border, as mermaid draws it,
+    /// rather than running on into whichever member the endpoint resolved to.
+    #[test]
+    fn edges_named_to_a_subgraph_end_on_its_border() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  one --> two\n  a1 --> b1\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |title: &str| {
+            layout
+                .clusters
+                .iter()
+                .find(|c| c.title.as_deref() == Some(title))
+                .map(|c| c.bounds)
+                .expect("cluster")
+        };
+        let (one, two) = (bounds("one"), bounds("two"));
+        let on_border = |r: LayoutRect, p: LayoutPoint| {
+            let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+            let within = |v: f32, lo: f32, len: f32| v >= lo - 0.5 && v <= lo + len + 0.5;
+            ((near(p.x, r.x) || near(p.x, r.x + r.width)) && within(p.y, r.y, r.height))
+                || ((near(p.y, r.y) || near(p.y, r.y + r.height)) && within(p.x, r.x, r.width))
+        };
+        let path = |index: usize| {
+            &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == index)
+                .unwrap()
+                .points
+        };
+        let named = path(2);
+        assert!(
+            on_border(one, named[0]),
+            "starts on `one`'s border: {:?} vs {one:?}",
+            named[0]
+        );
+        let end = *named.last().unwrap();
+        assert!(
+            on_border(two, end),
+            "ends on `two`'s border: {end:?} vs {two:?}"
+        );
+        // CONTROL: an edge between members still runs node to node, inside the boxes.
+        let member = path(3);
+        assert!(!on_border(one, member[0]) && !on_border(two, *member.last().unwrap()));
     }
 
     /// A composite state is ranked as a unit: it sits after the state that enters it and before

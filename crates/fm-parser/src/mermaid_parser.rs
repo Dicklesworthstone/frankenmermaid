@@ -1468,6 +1468,7 @@ fn lower_flow_document_item(
     // a subgraph body), so it is a no-op called ~2400×/parse (both endpoints per edge + each node).
     // Gate the calls on this once-computed flag — byte-identical (skips a provable no-op).
     let in_groups = !active_clusters.is_empty() || !active_subgraphs.is_empty();
+    builder.begin_flow_statement();
     match item {
         FlowDocumentItem::FastEdge {
             from,
@@ -2138,6 +2139,7 @@ fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &m
     for item in document.items {
         lower_flow_document_item(item, builder, &[], &[]);
     }
+    builder.finish_subgraph_edge_ends();
 
     // Extract style directives from the raw input and add to IR.
     // This runs AFTER lowering so node IDs are resolved for `style nodeId` lookups.
@@ -19750,7 +19752,7 @@ mod tests {
     use fm_core::{
         ArrowType, C4RelationshipDirection, DiagnosticCategory, DiagnosticSeverity, DiagramType,
         GanttDate, GanttExclude, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
-        IrXySeriesKind, MermaidParseMode, NodeShape,
+        IrSubgraphId, IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
     use super::{
@@ -26948,6 +26950,42 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             edges("flowchart LR\n  A[x ~~~ y] --> B\n"),
             [edge("A", "B", ArrowType::Arrow)]
+        );
+    }
+
+    #[test]
+    fn flowchart_edges_remember_the_subgraphs_they_name() {
+        let named = |input: &str| -> Vec<(Option<String>, Option<String>)> {
+            let ir = parse_mermaid(input).ir;
+            let key = |id: Option<IrSubgraphId>| id.map(|id| ir.graph.subgraphs[id.0].key.clone());
+            ir.edges
+                .iter()
+                .map(|edge| {
+                    let (from, to) = edge.named_subgraphs();
+                    (key(from), key(to))
+                })
+                .collect()
+        };
+        let some = |key: &str| Some(key.to_string());
+        let input = "flowchart LR\n  c1 --> a2\n  subgraph one\n    a1 --> a2\n  end\n  \
+                     subgraph two\n    b1 --> b2\n  end\n  one --> two\n  three --> two\n  \
+                     subgraph three\n    c1 --> c2\n  end\n";
+        assert_eq!(
+            named(input),
+            [
+                (None, None),
+                (None, None),
+                (None, None),
+                (some("one"), some("two")),
+                (some("three"), some("two")),
+                (None, None),
+            ],
+            "only the ends written as a subgraph id name one, including a subgraph declared later"
+        );
+        // A chain names a subgraph only on the link whose end it is.
+        assert_eq!(
+            named("flowchart TB\n  subgraph s\n    x\n  end\n  a --> s --> b\n"),
+            [(None, some("s")), (some("s"), None)]
         );
     }
 

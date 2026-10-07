@@ -3217,6 +3217,15 @@ pub struct IrEdgeExtras {
     /// Requested direction of a C4 relationship such as `Rel_Up(a, b, "uses")`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_direction: Option<C4RelationshipDirection>,
+    /// The subgraph the source end NAMED, for a flowchart edge written to a subgraph's id
+    /// (`one --> two`). The endpoint itself is one of the subgraph's members, which is what the
+    /// layout ranks against; this is what lets the edge be drawn to the subgraph's border, the
+    /// way mermaid draws it, instead of into the member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_subgraph: Option<IrSubgraphId>,
+    /// The subgraph the target end named. See [`Self::from_subgraph`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_subgraph: Option<IrSubgraphId>,
 }
 
 /// How fast an opted-in edge marches, from mermaid 11's `edgeId@{ animate: … }` statement.
@@ -3403,6 +3412,14 @@ impl IrEdge {
     #[must_use]
     pub fn co_arrow(&self) -> Option<ArrowType> {
         self.extras.as_ref().and_then(|e| e.co_arrow)
+    }
+
+    /// The subgraph each end named, `(source, target)`; see [`IrEdgeExtras::from_subgraph`].
+    #[must_use]
+    pub fn named_subgraphs(&self) -> (Option<IrSubgraphId>, Option<IrSubgraphId>) {
+        self.extras
+            .as_ref()
+            .map_or((None, None), |e| (e.from_subgraph, e.to_subgraph))
     }
 
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {

@@ -185,7 +185,18 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # `flat_placement` + `cycle_preparation` (21.6K) and its caller (+6.1K), net +0.6K; compound
 # placement ~15K pre-opt (sub-diagram construction and drop glue, the per-cluster recursion,
 # parent-graph assembly), the router's composite-container parking ~1.2K. Headroom: 1077 bytes.
-MAX_GZIP_BYTES=$((750 * 1024))
+#
+# Raised 750K -> 751K on 2026-10-07 for flowchart edges written to a subgraph id (`one --> two`)
+# ending on the subgraph's border, measured against 0675e62 (766923 gzip, the committed pkg/):
+#   768542 gzip  + which edge ends named a subgraph (recorded per statement, resolved once
+#                  lowering ends so forward references work), the two `IrEdgeExtras` fields, and
+#                  the cut where the route crosses the named cluster's box             (+1619)
+#   768500 gzip  after clipping both ends through one loop with index mapping instead of a
+#                second copy (raw -1046) and resolving the recorded ends in place     (-42)
+# Function-by-function against 0675e62 under this script's opt-level=z profile, names kept: the
+# clip ~1.0K, the end bookkeeping inlined into `parse_flowchart_with_line_offset` / `push_edge` /
+# `resolve_subgraph_endpoint` ~0.9K, extras serde/eq/clone ~0.3K. Headroom: 524 bytes.
+MAX_GZIP_BYTES=$((751 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

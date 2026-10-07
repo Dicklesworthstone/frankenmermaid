@@ -204,6 +204,14 @@ pub struct IrBuilder {
     /// subgraphs declared LATER in the document than the edge naming them (bd-dw2a9). Empty for
     /// every other diagram type, so their paths pay one hash miss.
     flow_forward_subgraph_members: FxHashMap<String, String>,
+    /// Flowchart only: the endpoints of the statement being lowered that NAMED a subgraph, as
+    /// (member node it resolved to, subgraph public key). `push_edge` reads them to record which
+    /// ends of an edge were written to a subgraph; cleared at each statement.
+    pending_subgraph_endpoints: Vec<(IrNodeId, String)>,
+    /// (edge index, is the source end, subgraph public key) for every edge end that named a
+    /// subgraph. Resolved to subgraph ids once lowering ends, because a forward reference names
+    /// a subgraph that does not exist yet when the edge is pushed.
+    subgraph_edge_ends: Vec<(usize, bool, String)>,
     /// Subgraph PUBLIC key -> index into `ir.graph.subgraphs`.
     ///
     /// ⚠️ NOT `subgraph_index_by_key`, WHICH IS KEYED DIFFERENTLY. That map holds
@@ -556,6 +564,8 @@ impl IrBuilder {
             cluster_index_by_key,
             subgraph_index_by_key,
             flow_forward_subgraph_members,
+            pending_subgraph_endpoints,
+            subgraph_edge_ends,
             subgraph_index_by_public_key,
             cluster_member_set,
             subgraph_member_set,
@@ -571,6 +581,9 @@ impl IrBuilder {
             parser_config,
             reusable_prefix_guard: _,
         } = source;
+        self.pending_subgraph_endpoints
+            .clone_from(pending_subgraph_endpoints);
+        self.subgraph_edge_ends.clone_from(subgraph_edge_ends);
         self.node_id_index
             .buckets
             .clone_from(&node_id_index.buckets);
@@ -605,6 +618,8 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            pending_subgraph_endpoints: Vec::new(),
+            subgraph_edge_ends: Vec::new(),
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -655,6 +670,8 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            pending_subgraph_endpoints: Vec::new(),
+            subgraph_edge_ends: Vec::new(),
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -2199,11 +2216,41 @@ impl IrBuilder {
     /// every `IrNodeId` in edges, cluster and subgraph members and both id maps. Nothing is removed
     /// here because nothing wrong is ever created.
     pub(crate) fn resolve_subgraph_endpoint(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
-        if let Some(member) = self.subgraph_endpoint_member(id) {
-            return Some(member);
+        let member = if let Some(member) = self.subgraph_endpoint_member(id) {
+            member
+        } else {
+            let target = self.flow_forward_subgraph_members.get(id.trim())?.clone();
+            self.intern_node_auto_normalized(&target, None, NodeShape::Rect, span, false)?
+        };
+        self.pending_subgraph_endpoints
+            .push((member, id.trim().to_string()));
+        Some(member)
+    }
+
+    /// Start a new flowchart statement: endpoints noted by the previous one no longer apply.
+    pub(crate) fn begin_flow_statement(&mut self) {
+        self.pending_subgraph_endpoints.clear();
+    }
+
+    /// Turn the recorded subgraph-named edge ends into `from_subgraph` / `to_subgraph`, now that
+    /// every subgraph exists.
+    pub(crate) fn finish_subgraph_edge_ends(&mut self) {
+        for (edge, is_source, key) in &self.subgraph_edge_ends {
+            let (Some(&index), Some(edge)) = (
+                self.subgraph_index_by_public_key.get(key),
+                self.ir.edges.get_mut(*edge),
+            ) else {
+                continue;
+            };
+            let extras = edge.extras_mut();
+            let end = if *is_source {
+                &mut extras.from_subgraph
+            } else {
+                &mut extras.to_subgraph
+            };
+            *end = Some(IrSubgraphId(index));
         }
-        let target = self.flow_forward_subgraph_members.get(id.trim())?.clone();
-        self.intern_node_auto_normalized(&target, None, NodeShape::Rect, span, false)
+        self.subgraph_edge_ends.clear();
     }
 
     pub(crate) fn intern_edge_endpoint_pretrimmed(
@@ -2667,6 +2714,15 @@ impl IrBuilder {
         let label_id = parsed_label
             .as_ref()
             .map(|value| self.intern_label(value, span));
+        let edge_index = self.ir.edges.len();
+        for (member, key) in &self.pending_subgraph_endpoints {
+            for (end, is_source) in [(from, true), (to, false)] {
+                if end == *member {
+                    self.subgraph_edge_ends
+                        .push((edge_index, is_source, key.clone()));
+                }
+            }
+        }
         self.ir.edges.push(IrEdge {
             from: IrEndpoint::Node(from),
             to: IrEndpoint::Node(to),
