@@ -7725,16 +7725,13 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
     }
 }
 
-/// A sequence note's height: one line fills 0.7 of a message row, each further line adds 16px.
-fn sequence_note_height(text: &str, message_gap: f32) -> f32 {
+/// A sequence note's height: its lines plus a 10px margin above and below, as mermaid sizes it.
+/// One line used to fill 0.7 of a message row whatever it said — a 40px-high box of text in a
+/// 60-80px frame.
+fn sequence_note_height(text: &str) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let line_count = text.lines().count().max(1) as f32;
-    let base_note_height = message_gap * 0.7;
-    if line_count <= 1.0 {
-        base_note_height
-    } else {
-        (line_count - 1.0).mul_add(16.0, base_note_height) + 12.0
-    }
+    line_count.mul_add(19.0, 20.0)
 }
 
 /// Where the sequence timeline puts each message, note and fragment.
@@ -7826,7 +7823,7 @@ fn sequence_timeline_rows(
                 let top = floor + lead(after_message);
                 let text = &meta.notes[rows.note_top.len()].text;
                 rows.note_top.push(top);
-                floor = top + sequence_note_height(text, message_gap);
+                floor = top + sequence_note_height(text);
             }
             Step::Open => {
                 let fragment = open_fragment
@@ -7896,7 +7893,7 @@ fn build_sequence_note_geometry(
         .iter()
         .enumerate()
         .map(|(note_index, note)| {
-            let note_height = sequence_note_height(&note.text, message_gap);
+            let note_height = sequence_note_height(&note.text);
             // Adaptive note width from content: use the widest line + padding.
             let max_line_chars = note
                 .text

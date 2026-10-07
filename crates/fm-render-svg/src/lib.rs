@@ -4511,7 +4511,14 @@ fn render_layout_to_svg(
         // information instead of duplication. And scoped to this renderer: the terminal draws
         // journey lanes FROM these bands (its cluster overlay does not cover them), so emptying the
         // label upstream in layout would have taken the section names off that surface entirely.
-        let suppress_lane_labels = ir.diagram_type == fm_core::DiagramType::Journey;
+        //
+        // A sequence lifeline is a Lane band too, labelled with its participant, whose name the
+        // head (and foot) header already draws: the caption printed it a third time beside the
+        // lifeline's top. The canvas renderer suppresses it for the same reason.
+        let suppress_lane_labels = matches!(
+            ir.diagram_type,
+            fm_core::DiagramType::Journey | fm_core::DiagramType::Sequence
+        );
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
             if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {

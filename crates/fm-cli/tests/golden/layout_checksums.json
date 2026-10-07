@@ -363,10 +363,10 @@
     },
     "sequence_advanced": {
       "edge_count": 11,
-      "edges_checksum": "a1b2fd7e98fd6116",
+      "edges_checksum": "f1fb8bd42ab91556",
       "layout_algorithm": "auto",
-      "layout_checksum": "e7a2e235a7ce3252",
-      "layout_height": 1591.75,
+      "layout_checksum": "c82f2d78c1398103",
+      "layout_height": 1501.75,
       "layout_width": 677.899963,
       "node_count": 3,
       "nodes_checksum": "7baa49799686b6ad"
