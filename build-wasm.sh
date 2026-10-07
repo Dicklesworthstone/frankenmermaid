@@ -170,7 +170,22 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # closures and dedup ~0.5K, the icon glyphs ~1.2K, the block-arrow token parser ~0.8K, the outline
 # ~0.8K, the shape arms in node_path / render_node / canvas ~1.4K, NodeShape serde names 0.3K.
 # Headroom after raise: 604 bytes.
-MAX_GZIP_BYTES=$((739 * 1024))
+#
+# Raised 739K -> 750K on 2026-10-07 for compound (cluster-aware) layered layout, measured against
+# d35716d (756665 gzip, the committed pkg/):
+#   768769 gzip  + clusters laid out recursively and placed in the parent graph as single nodes
+#                  (`fm-layout/src/compound.rs`), composite-state boxes no longer obstacles to their
+#                  own contents, Brandes-Köpf coordinates read as centres            (+12104)
+#   768973 gzip  after routing both placements through one `flat_placement` (+204: the phases
+#                were already compiled once, inside the Sugiyama entry, so this bought nothing)
+#   766923 gzip  after building sub-diagrams without sorts or sorted maps and copying only the
+#                four meta fields layout reads instead of cloning the meta              (-2050)
+# Function-by-function against d35716d under this script's opt-level=z profile, names kept: the
+# layered phases moved out of `layout_diagram_sugiyama_traced_with_config` (27.1K) into
+# `flat_placement` + `cycle_preparation` (21.6K) and its caller (+6.1K), net +0.6K; compound
+# placement ~15K pre-opt (sub-diagram construction and drop glue, the per-cluster recursion,
+# parent-graph assembly), the router's composite-container parking ~1.2K. Headroom: 1077 bytes.
+MAX_GZIP_BYTES=$((750 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

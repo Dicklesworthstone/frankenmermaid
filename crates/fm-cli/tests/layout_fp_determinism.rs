@@ -149,10 +149,10 @@ fn layout_coordinates_match_their_cross_target_digest() {
     // — the microarchitecture level is part of what these pin, since it changes which float ops
     // lower to hardware instructions).
     const EXPECTED: &[(&str, u64)] = &[
-        ("flowchart", 0x19c8_0a8c_3608_67ca),
+        ("flowchart", 0x7a38_3211_86e6_63c1),
         ("sequence", 0x0372_54aa_adab_2295),
-        ("class", 0x3123_9435_760e_03d5),
-        ("state", 0x6e24_4785_b0ab_0e8a),
+        ("class", 0x1d60_a5f8_ff2d_ac23),
+        ("state", 0x94c3_50ce_79fe_820b),
     ];
 
     let mut actual = Vec::new();

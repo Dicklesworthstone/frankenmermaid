@@ -5,7 +5,7 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 483.08,
+    "width": 492.15,
     "height": 623.5
   },
   "options": {
@@ -21,7 +21,7 @@
       "bounds": {
         "x": 92.0,
         "y": 92.0,
-        "width": 197.04,
+        "width": 208.61,
         "height": 439.5
       },
       "fitMargin": 150.0,
@@ -89,9 +89,9 @@
       "id": "exit",
       "title": "exit",
       "bounds": {
-        "x": 189.04,
+        "x": 200.61,
         "y": 92.0,
-        "width": 202.04,
+        "width": 199.54,
         "height": 253.0
       },
       "fitMargin": 150.0,
@@ -143,19 +143,19 @@
   },
   "nodeGeometry": {
     "fm-node-check-1": {
-      "x": 189.04,
+      "x": 200.61,
       "y": 92.0,
       "width": 100.0,
       "height": 66.5
     },
     "fm-node-done-3": {
-      "x": 286.08,
+      "x": 295.15,
       "y": 278.5,
       "width": 105.0,
       "height": 66.5
     },
     "fm-node-fetch-0": {
-      "x": 92.0,
+      "x": 98.6,
       "y": 465.0,
       "width": 109.95,
       "height": 66.5

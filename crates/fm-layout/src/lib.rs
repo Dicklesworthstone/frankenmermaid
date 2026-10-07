@@ -23,6 +23,7 @@ pub mod fnx_ordering;
 
 pub mod adapton;
 mod cga_routing;
+mod compound;
 mod event_model;
 pub mod invariants;
 mod ishikawa;
@@ -5502,6 +5503,83 @@ fn evaluate_layout_guardrails(
     guard
 }
 
+/// Node priorities and cycle removal: the layered layout's first phase.
+///
+/// Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node
+/// ids) that `cycle_removal`, `rank_assignment` and `build_cycle_cluster_map` all need, so they are
+/// computed once and threaded through. Shared by the full pipeline and compound placement, so each
+/// phase has ONE caller and is compiled once.
+#[inline(never)]
+pub(crate) fn cycle_preparation(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> (Vec<usize>, CycleRemovalResult) {
+    let node_priority = stable_node_priorities(ir);
+    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
+    (node_priority, cycle_result)
+}
+
+/// Ranks, crossing reduction and coordinates for a graph laid out flat: returns the crossing
+/// counts before and after refinement, and the node boxes.
+///
+/// The one implementation the full pipeline and compound placement (`compound`) share. A second
+/// copy of these calls once cost 34 KB of wasm, because every phase that had been inlined into its
+/// single caller was then compiled a second time out of line.
+#[inline(never)]
+pub(crate) fn flat_placement(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    config: &LayoutConfig,
+    spacing: LayoutSpacing,
+    cycle_result: &CycleRemovalResult,
+    node_priority: &[usize],
+    trace: &mut LayoutTrace,
+) -> (usize, usize, Vec<LayoutNodeBox>) {
+    let mut ranks = rank_assignment(ir, cycle_result, node_priority);
+    if config.lp_relaxation_layers
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
+        && ir.constraints.is_empty()
+        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, cycle_result, &ranks)
+    {
+        ranks = relaxed_ranks;
+    }
+    apply_ir_constraints(ir, &mut ranks);
+    push_snapshot(
+        trace,
+        "rank_assignment",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        0,
+    );
+
+    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks, config);
+    push_snapshot(
+        trace,
+        "crossing_minimization",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        crossing_count_before,
+    );
+
+    // Refinement: transpose + sifting heuristics.
+    let (crossing_count, ordering_by_rank) =
+        crossing_refinement(ir, &ranks, ordering_by_rank, crossing_count_before);
+    push_snapshot(
+        trace,
+        "crossing_refinement",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        crossing_count,
+    );
+
+    let nodes = coordinate_assignment(ir, node_sizes, &ranks, &ordering_by_rank, spacing);
+    (crossing_count_before, crossing_count, nodes)
+}
+
 fn layout_diagram_sugiyama_traced_with_config(
     ir: &MermaidDiagramIr,
     config: LayoutConfig,
@@ -5513,11 +5591,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         .clone()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
-    // Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node ids).
-    // `cycle_removal`, `rank_assignment`, and `build_cycle_cluster_map` each recomputed it — hoist to ONE
-    // computation and thread it through. Byte-identical (same Vec); removes 1-2 redundant sorts per layout.
-    let node_priority = stable_node_priorities(ir);
-    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
+    let (node_priority, cycle_result) = cycle_preparation(ir, &config);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -5533,50 +5607,34 @@ fn layout_diagram_sugiyama_traced_with_config(
         None
     };
 
-    let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
-    if config.lp_relaxation_layers
-        && ir.diagram_type == DiagramType::Flowchart
-        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
-        && ir.constraints.is_empty()
-        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, &cycle_result, &ranks)
+    // Clusters are placed as units where the diagram has any (see `compound`); their contents,
+    // directions and separation then come from that placement rather than the flat passes.
+    let (crossing_count_before, crossing_count, mut nodes) = if let Some(nodes) =
+        compound::compound_node_boxes(ir, &node_sizes, &config, spacing, &metrics)
     {
-        ranks = relaxed_ranks;
-    }
-    apply_ir_constraints(ir, &mut ranks);
-    push_snapshot(
-        &mut trace,
-        "rank_assignment",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        0,
-    );
-
-    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks, &config);
-    push_snapshot(
-        &mut trace,
-        "crossing_minimization",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        crossing_count_before,
-    );
-
-    // Refinement: transpose + sifting heuristics.
-    let (crossing_count, ordering_by_rank) =
-        crossing_refinement(ir, &ranks, ordering_by_rank, crossing_count_before);
-    push_snapshot(
-        &mut trace,
-        "crossing_refinement",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        crossing_count,
-    );
-
-    let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
-    apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
-    separate_disjoint_subgraphs(ir, &mut nodes, spacing);
+        push_snapshot(
+            &mut trace,
+            "compound_placement",
+            ir.nodes.len(),
+            ir.edges.len(),
+            cycle_result.reversed_edge_indexes.len(),
+            0,
+        );
+        (0, 0, nodes)
+    } else {
+        let (before, after, mut nodes) = flat_placement(
+            ir,
+            &node_sizes,
+            &config,
+            spacing,
+            &cycle_result,
+            &node_priority,
+            &mut trace,
+        );
+        apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
+        separate_disjoint_subgraphs(ir, &mut nodes, spacing);
+        (before, after, nodes)
+    };
     apply_constraint_solver(ir, &mut nodes, spacing, &config);
     // Clusters are built BEFORE edge routing, not after. `build_cluster_boxes` is a pure function of
     // the already-positioned `nodes`, so the boxes are identical either way — but a composite state
@@ -15442,6 +15500,20 @@ fn coordinate_assignment(
     );
 
     // Build output using primary offsets and Brandes-Köpf secondary coordinates.
+    // The coordinates are centres (see below); the smallest leading edge is kept at 0, as it was
+    // when they were used as edges.
+    let secondary_floor = (0..ir.nodes.len())
+        .filter_map(|node| {
+            let centre = *secondary_coords.get(node)?;
+            let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
+            Some(centre - if horizontal_ranks { height } else { width } / 2.0)
+        })
+        .fold(f32::INFINITY, f32::min);
+    let secondary_floor = if secondary_floor.is_finite() {
+        secondary_floor
+    } else {
+        0.0
+    };
     let mut output = Vec::with_capacity(ir.nodes.len());
     for (rank, fallback_node_indexes) in &fallback_nodes_by_rank {
         let Some(rank_index) = rank_to_index.get(rank).copied() else {
@@ -15458,10 +15530,15 @@ fn coordinate_assignment(
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let secondary = secondary_coords.get(node_index).copied().unwrap_or(0.0);
 
+            // Brandes-Köpf separates neighbours by HALF extents, so its coordinate is a node's
+            // CENTRE; using it as the top/left edge misaligned nodes of different sizes (an edge
+            // between a narrow and a wide node jogged) and could overlap them. Along the rank axis
+            // a node stays on its band's leading edge, which gives every edge into the rank one
+            // shared channel for the orthogonal router.
             let (x, y) = if horizontal_ranks {
-                (primary, secondary)
+                (primary, secondary - height / 2.0 - secondary_floor)
             } else {
-                (secondary, primary)
+                (secondary - width / 2.0 - secondary_floor, primary)
             };
             let node_id = ir
                 .nodes
@@ -16343,7 +16420,18 @@ fn build_subgraph_local_layout(
             .fold(0.0_f32, f32::max)
             .max(1.0);
 
-        let mut secondary_cursor = 0.0_f32;
+        // Centred across the rank like the full pipeline's coordinate assignment, so a relaid
+        // region matches what a full layout would have put there: each rank's run is centred on
+        // one line, and every node stays on its band's leading edge.
+        let run: f32 = rank_nodes
+            .iter()
+            .map(|&node_index| {
+                let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
+                if horizontal_ranks { height } else { width }
+            })
+            .sum::<f32>()
+            + spacing.node_spacing * rank_nodes.len().saturating_sub(1) as f32;
+        let mut secondary_cursor = -run / 2.0;
         for (order, &node_index) in rank_nodes.iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let bounds = if horizontal_ranks {
@@ -17929,6 +18017,10 @@ fn build_edge_paths_with_orientation(
     // Each edge's own two endpoints are temporarily parked far away below so the
     // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
     let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    // A composite state's node has its cluster's box (`anchor_composite_state_nodes`), so as an
+    // obstacle it walls in its own contents: every route between two of its members was nudged out
+    // of the box and back. Each node's enclosing composites are parked with its edges' endpoints.
+    let containers = composite_containers(ir, nodes.len());
     // Index the obstacle set for either a sparse/tree-like flowchart (the original
     // `edges <= 1.5*nodes` case) **or** a *large* dense graph. The density gate alone
     // kept wide layered graphs on the per-edge linear scan, but a fresh profile shows
@@ -18039,6 +18131,19 @@ fn build_edge_paths_with_orientation(
                 if let Some(slot) = obstacle_bounds.get_mut(target) {
                     *slot = FAR_AWAY;
                 }
+                // Restored in reverse, so a container enclosing BOTH ends gets its first-saved
+                // (real) box back rather than the parked one its second save captured.
+                let mut parked: SmallVec<[(usize, LayoutRect); 4]> = SmallVec::new();
+                for &container in [source, target]
+                    .iter()
+                    .filter_map(|&node| containers.get(node))
+                    .flatten()
+                {
+                    if let Some(slot) = obstacle_bounds.get_mut(container) {
+                        parked.push((container, *slot));
+                        *slot = FAR_AWAY;
+                    }
+                }
                 let mut pts = match edge_routing {
                     EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
                         source_anchor,
@@ -18060,6 +18165,9 @@ fn build_edge_paths_with_orientation(
                 }
                 if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(target), saved_target) {
                     *slot = saved;
+                }
+                for &(container, saved) in parked.iter().rev() {
+                    obstacle_bounds[container] = saved;
                 }
                 if parallel_offset.abs() > 0.01 {
                     apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
@@ -18876,6 +18984,37 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
     let epsilon = 0.001_f32;
     ((a.x - b.x).abs() < epsilon && (b.x - c.x).abs() < epsilon)
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
+}
+
+/// For each node, the composite-state nodes whose clusters enclose it (empty outside state
+/// diagrams). A composite node is matched to its cluster exactly as in
+/// [`anchor_composite_state_nodes`]: the cluster's title is the state's id.
+fn composite_containers(ir: &MermaidDiagramIr, node_count: usize) -> Vec<Vec<usize>> {
+    if ir.diagram_type != DiagramType::State || ir.clusters.is_empty() {
+        return Vec::new();
+    }
+    let mut containers = vec![Vec::new(); node_count];
+    for subgraph in &ir.graph.subgraphs {
+        let Some(title) = subgraph
+            .cluster
+            .and_then(|cluster| ir.clusters.get(cluster.0))
+            .and_then(|cluster| cluster.title)
+            .and_then(|label| ir.labels.get(label.0))
+        else {
+            continue;
+        };
+        let Some(composite) = ir.nodes.iter().position(|node| node.id == title.text) else {
+            continue;
+        };
+        for member in ir.graph.subgraph_members_recursive(subgraph.id) {
+            if let Some(list) = containers.get_mut(member.0)
+                && member.0 != composite
+            {
+                list.push(composite);
+            }
+        }
+    }
+    containers
 }
 
 /// Make a composite state's node BE its container.
@@ -26886,6 +27025,137 @@ mod tests {
                     path.points
                 );
             }
+        }
+    }
+
+    fn rects_overlap(a: LayoutRect, b: LayoutRect) -> bool {
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    }
+
+    /// mermaid's own subgraph example: cluster boxes are separated by a real gap (the flat layout
+    /// left them butting edge to edge, so two borders read as one line), and no node sits inside a
+    /// cluster it does not belong to.
+    #[test]
+    fn clusters_are_placed_as_units() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 3, "CONTROL: three clusters");
+        let gap = LayoutSpacing::default().node_spacing / 2.0;
+        let grown = |r: LayoutRect| LayoutRect {
+            x: r.x - gap,
+            y: r.y - gap,
+            width: r.width + 2.0 * gap,
+            height: r.height + 2.0 * gap,
+        };
+        for (i, a) in layout.clusters.iter().enumerate() {
+            for b in &layout.clusters[i + 1..] {
+                assert!(
+                    !rects_overlap(grown(a.bounds), b.bounds),
+                    "{:?} and {:?} are not {gap} apart",
+                    a.title,
+                    b.title
+                );
+            }
+            let members = &ir.clusters[a.cluster_index].members;
+            for node in &layout.nodes {
+                if !members.contains(&IrNodeId(node.node_index)) {
+                    assert!(
+                        !rects_overlap(a.bounds, node.bounds),
+                        "{} sits inside {:?}",
+                        node.node_id,
+                        a.title
+                    );
+                }
+            }
+        }
+    }
+
+    /// A composite state is ranked as a unit: it sits after the state that enters it and before
+    /// the one it leaves for, with its contents inside it. It used to be ranked as a plain node
+    /// while its contents were laid out after everything else, so the composite box landed BELOW
+    /// `Error`, the state its own `fail` transition leads to.
+    #[test]
+    fn a_composite_state_holds_its_contents() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    [*] --> Validating\n    Validating --> Computing\n    Computing --> [*]\n  }\n  Idle --> Processing : start\n  Processing --> Error : fail\n  Idle --> Other\n  Other --> Done\n  Error --> [*]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let index = |id: &str| ir.nodes.iter().position(|n| n.id == id).expect(id);
+        let composite = layout.nodes[index("Processing")].bounds;
+        for inner in ["Validating", "Computing"] {
+            let b = layout.nodes[index(inner)].bounds;
+            assert!(
+                b.x >= composite.x
+                    && b.y >= composite.y
+                    && b.x + b.width <= composite.x + composite.width
+                    && b.y + b.height <= composite.y + composite.height,
+                "{inner} {b:?} is outside Processing {composite:?}"
+            );
+        }
+        for outer in ["Idle", "Other", "Done", "Error"] {
+            assert!(
+                !rects_overlap(layout.nodes[index(outer)].bounds, composite),
+                "{outer} overlaps Processing"
+            );
+        }
+        let idle = layout.nodes[index("Idle")].bounds;
+        let error = layout.nodes[index("Error")].bounds;
+        assert!(
+            idle.y + idle.height <= composite.y,
+            "Idle is above Processing"
+        );
+        assert!(
+            composite.y + composite.height <= error.y,
+            "Error {error:?} is below Processing {composite:?}"
+        );
+    }
+
+    /// Nodes of different sizes connected in a chain share a centre line, so the edge between
+    /// them is straight. Brandes-Köpf's coordinate is a centre, and using it as the left edge
+    /// aligned the chain's LEFT edges instead, which bent every edge between a narrow and a wide
+    /// node. In a left-to-right chain through a subgraph, the outside nodes line up with the
+    /// subgraph's middle.
+    #[test]
+    fn chains_align_on_centres() {
+        let tb = fm_parser::parse(
+            "flowchart TB\n  A[short] --> B[a considerably longer label than the first]\n  B --> C[mid length]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&tb);
+        let centre_x = |id: &str| {
+            let b = layout.nodes[tb.nodes.iter().position(|n| n.id == id).expect(id)].bounds;
+            b.x + b.width / 2.0
+        };
+        assert!(
+            layout.nodes[0].bounds.width + 50.0 < layout.nodes[1].bounds.width,
+            "CONTROL: the widths really differ"
+        );
+        for id in ["B", "C"] {
+            assert!(
+                (centre_x(id) - centre_x("A")).abs() < 0.01,
+                "{id} is off A's centre line"
+            );
+        }
+
+        let lr = fm_parser::parse(
+            "flowchart LR\n  start --> gate{Gate}\n  gate --> core1\n  subgraph core\n    core1 --> core2\n  end\n  core2 --> done\n",
+        )
+        .ir;
+        let layout = layout_diagram(&lr);
+        let centre_y = |id: &str| {
+            let b = layout.nodes[lr.nodes.iter().position(|n| n.id == id).expect(id)].bounds;
+            b.y + b.height / 2.0
+        };
+        let line = centre_y("core1");
+        for id in ["start", "gate", "core2", "done"] {
+            assert!(
+                (centre_y(id) - line).abs() < 0.01,
+                "{id} is off the chain's centre line"
+            );
         }
     }
 

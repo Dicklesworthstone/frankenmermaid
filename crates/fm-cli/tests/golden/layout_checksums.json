@@ -43,63 +43,63 @@
     },
     "c4_basic": {
       "edge_count": 2,
-      "edges_checksum": "093026c0517e8478",
+      "edges_checksum": "9dae5d5613526476",
       "layout_algorithm": "auto",
-      "layout_checksum": "e5c8479a93daf89a",
+      "layout_checksum": "bb696916b14298d6",
       "layout_height": 543.5,
       "layout_width": 260.975006,
       "node_count": 3,
-      "nodes_checksum": "0a61aa2613b3895c"
+      "nodes_checksum": "9d11c2144b266962"
     },
     "c4_component": {
       "edge_count": 4,
-      "edges_checksum": "08525da1c533109e",
+      "edges_checksum": "88aa9c336855421e",
       "layout_algorithm": "auto",
-      "layout_checksum": "9b156355c3f18757",
+      "layout_checksum": "3937849e2bfa803a",
       "layout_height": 919.850037,
-      "layout_width": 307.174988,
+      "layout_width": 315.174988,
       "node_count": 4,
-      "nodes_checksum": "8e5ae366eb02fe7c"
+      "nodes_checksum": "92e8805e57f8aa83"
     },
     "c4_container": {
       "edge_count": 4,
-      "edges_checksum": "d7d8b44cd3852313",
+      "edges_checksum": "712560b459c81b8b",
       "layout_algorithm": "auto",
-      "layout_checksum": "141f15797a5b3d37",
-      "layout_height": 1096.350098,
-      "layout_width": 405.375,
+      "layout_checksum": "fc45a543e12af076",
+      "layout_height": 1200.350098,
+      "layout_width": 389.725006,
       "node_count": 5,
-      "nodes_checksum": "874c63288c28854b"
+      "nodes_checksum": "9f067645d2b34c5a"
     },
     "c4_deployment": {
       "edge_count": 2,
-      "edges_checksum": "22f6b5f0a8ff4922",
+      "edges_checksum": "45dbcb90b235b002",
       "layout_algorithm": "auto",
-      "layout_checksum": "d649d451f6205988",
-      "layout_height": 871.350037,
+      "layout_checksum": "e4b2414ec1346b75",
+      "layout_height": 1131.350098,
       "layout_width": 433.169983,
       "node_count": 3,
-      "nodes_checksum": "255dc24229104776"
+      "nodes_checksum": "8f330927022aac11"
     },
     "c4_dynamic": {
       "edge_count": 4,
-      "edges_checksum": "d3d0935773c4f56b",
+      "edges_checksum": "8dd53bec674c940b",
       "layout_algorithm": "auto",
-      "layout_checksum": "2db9c5318c900dd5",
+      "layout_checksum": "ae82d2a96d338a40",
       "layout_height": 909.850037,
       "layout_width": 293.975006,
       "node_count": 4,
-      "nodes_checksum": "cd971673b0b9eaa4"
+      "nodes_checksum": "b49ab9ffc24ae49f"
     },
     "class_basic": {
       "edge_count": 1,
-      "edges_checksum": "121abedfd64a9b82",
+      "edges_checksum": "c92b6fbc65e511d8",
       "layout_algorithm": "auto",
-      "layout_checksum": "e75d9b5bbc030f28",
+      "layout_checksum": "59e8eb1b340ec35b",
       "layout_height": 382.174988,
       "layout_width": 217.25,
       "node_count": 2,
-      "nodes_checksum": "2de2231315927323"
+      "nodes_checksum": "f0479dc789738e44"
     },
     "cycle_braid": {
       "edge_count": 20,
@@ -113,13 +113,13 @@
     },
     "cycle_feedback": {
       "edge_count": 16,
-      "edges_checksum": "fa9ca330d1f30ce2",
+      "edges_checksum": "1fc364a2c7e1c362",
       "layout_algorithm": "auto",
-      "layout_checksum": "ed00ee42f6c1805e",
+      "layout_checksum": "1d3f83b48b70b3be",
       "layout_height": 1476.0,
-      "layout_width": 759.362549,
+      "layout_width": 752.762573,
       "node_count": 11,
-      "nodes_checksum": "8d186482140b0734"
+      "nodes_checksum": "5105112988ee1a02"
     },
     "cycle_ladder": {
       "edge_count": 22,
@@ -143,13 +143,13 @@
     },
     "dense_flowchart_stress": {
       "edge_count": 25,
-      "edges_checksum": "1925d05d362b754c",
+      "edges_checksum": "ab50808198ccc918",
       "layout_algorithm": "auto",
-      "layout_checksum": "80cfc53e0ff57e16",
+      "layout_checksum": "3c7141339c10bb7a",
       "layout_height": 1103.0,
-      "layout_width": 893.937439,
+      "layout_width": 894.76239,
       "node_count": 16,
-      "nodes_checksum": "45e73cffb52f104a"
+      "nodes_checksum": "c4da91b75fad5a7f"
     },
     "empty_diagram": {
       "edge_count": 0,
@@ -163,13 +163,13 @@
     },
     "er_basic": {
       "edge_count": 2,
-      "edges_checksum": "21bda17467cfa29a",
+      "edges_checksum": "fff95eb54957e870",
       "layout_algorithm": "auto",
-      "layout_checksum": "8eff9f24352f0b60",
+      "layout_checksum": "ca2abc7cfbd5e6a6",
       "layout_height": 557.099976,
       "layout_width": 247.774994,
       "node_count": 3,
-      "nodes_checksum": "8803637056d0eaf8"
+      "nodes_checksum": "cc1f2b6a5fad553c"
     },
     "eventmodeling_basic": {
       "edge_count": 5,
@@ -213,13 +213,13 @@
     },
     "fuzzy_keyword_recovery": {
       "edge_count": 5,
-      "edges_checksum": "4c77423e05d7cd2e",
+      "edges_checksum": "ad698e9b6e6a0c96",
       "layout_algorithm": "auto",
-      "layout_checksum": "22fa9d6905006bd1",
+      "layout_checksum": "4ba277be494811e2",
       "layout_height": 730.0,
-      "layout_width": 509.5,
+      "layout_width": 527.649963,
       "node_count": 5,
-      "nodes_checksum": "4ffe06b0f5aa47ba"
+      "nodes_checksum": "272a6f6e24d81fb1"
     },
     "gantt_basic": {
       "edge_count": 1,
@@ -343,13 +343,13 @@
     },
     "requirement_basic": {
       "edge_count": 2,
-      "edges_checksum": "7cbb576b52f5626a",
+      "edges_checksum": "740e9ab4b6040b4a",
       "layout_algorithm": "auto",
-      "layout_checksum": "fbaa0703757435f0",
+      "layout_checksum": "73888c5b921b4d04",
       "layout_height": 572.5,
       "layout_width": 305.581238,
       "node_count": 3,
-      "nodes_checksum": "c2dd24f5c4c68388"
+      "nodes_checksum": "5720bd1e1e9a3ef8"
     },
     "sankey_basic": {
       "edge_count": 8,
@@ -393,33 +393,33 @@
     },
     "state_basic": {
       "edge_count": 3,
-      "edges_checksum": "b32b43ec9076a8b6",
+      "edges_checksum": "4a37cc7b77d8282e",
       "layout_algorithm": "auto",
-      "layout_checksum": "01137095409d44e7",
+      "layout_checksum": "bb5627f7d071b4a7",
       "layout_height": 497.0,
       "layout_width": 228.800003,
       "node_count": 3,
-      "nodes_checksum": "b2eb93e7c08ee268"
+      "nodes_checksum": "90cc550dd96bb720"
     },
     "state_composite": {
       "edge_count": 16,
-      "edges_checksum": "bc139dea3338d994",
+      "edges_checksum": "67288cba56b2a0b8",
       "layout_algorithm": "auto",
-      "layout_checksum": "b29524ddc59ca662",
-      "layout_height": 2053.5,
-      "layout_width": 641.3125,
+      "layout_checksum": "44a2b6577d395340",
+      "layout_height": 1911.0,
+      "layout_width": 690.0,
       "node_count": 15,
-      "nodes_checksum": "6b6bbb9026ba35f9"
+      "nodes_checksum": "f412f1d5227c433a"
     },
     "stress_120_nodes": {
       "edge_count": 130,
-      "edges_checksum": "9cd2d9b083ed2be3",
+      "edges_checksum": "9ae76da10347f6f1",
       "layout_algorithm": "auto",
-      "layout_checksum": "61fa2e5fc1b512d7",
+      "layout_checksum": "18ecacc6922b4567",
       "layout_height": 22364.0,
       "layout_width": 245.875,
       "node_count": 120,
-      "nodes_checksum": "4a34ea423fdee8a7"
+      "nodes_checksum": "ac916cf5e36b10a9"
     },
     "timeline_basic": {
       "edge_count": 6,

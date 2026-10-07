@@ -5,7 +5,7 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 483.9,
+    "width": 483.15,
     "height": 623.5
   },
   "options": {
@@ -21,7 +21,7 @@
       "bounds": {
         "x": 92.0,
         "y": 92.0,
-        "width": 288.3,
+        "width": 290.8,
         "height": 439.5
       },
       "fitMargin": 150.0,
@@ -84,7 +84,7 @@
       "bounds": {
         "x": 186.15,
         "y": 92.0,
-        "width": 205.75,
+        "width": 202.45,
         "height": 253.0
       },
       "fitMargin": 150.0,
@@ -166,25 +166,25 @@
       "height": 66.5
     },
     "fm-node-failed-4": {
-      "x": 280.3,
+      "x": 277.0,
       "y": 278.5,
       "width": 111.6,
       "height": 66.5
     },
     "fm-node-idle-1": {
-      "x": 280.3,
+      "x": 282.8,
       "y": 465.0,
       "width": 100.0,
       "height": 66.5
     },
     "fm-node-state-end-5": {
-      "x": 92.0,
+      "x": 132.5,
       "y": 465.0,
       "width": 24.0,
       "height": 24.0
     },
     "fm-node-state-start-0": {
-      "x": 328.65,
+      "x": 371.15,
       "y": 92.0,
       "width": 20.0,
       "height": 20.0
