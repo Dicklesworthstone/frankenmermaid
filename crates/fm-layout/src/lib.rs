@@ -4489,9 +4489,12 @@ impl IncrementalLayoutEngine {
                 .map_or(Span::default(), |node| node.span_primary);
         }
 
+        // Clusters before routing, as in the full path: edges are routed around them.
+        let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
         let mut edges = build_edge_paths(
             ir,
             &nodes,
+            &clusters,
             &highlighted_edge_indexes,
             // Resolved the same way as the full path; wiring only one would make an edited
             // diagram re-route part of itself with the caller's default instead of the source's
@@ -4501,8 +4504,6 @@ impl IncrementalLayoutEngine {
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
         separate_shared_channels(ir, &mut edges);
-        let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
-        clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -5649,12 +5650,12 @@ fn layout_diagram_sugiyama_traced_with_config(
     let mut edges = build_edge_paths(
         ir,
         &nodes,
+        &clusters,
         &cycle_result.highlighted_edge_indexes,
         edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
     separate_shared_channels(ir, &mut edges);
-    clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -5975,7 +5976,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let edges =
         build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
             .unwrap_or_else(|| {
-                build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+                build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default())
             });
     // Same metrics this function's node sizes were computed with: every caller on these
     // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
@@ -10006,7 +10007,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         });
     }
 
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
+    let edges = build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default());
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let mut bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
@@ -11195,6 +11196,7 @@ fn finalize_specialized_layout(
     let edges = build_edge_paths_with_orientation(
         ir,
         &nodes,
+        &[],
         &BTreeSet::new(),
         horizontal_edges,
         EdgeRouting::default(),
@@ -17888,6 +17890,7 @@ fn count_inversions(values: &mut [usize]) -> usize {
 fn build_edge_paths(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
+    clusters: &[LayoutClusterBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
@@ -17895,6 +17898,7 @@ fn build_edge_paths(
     build_edge_paths_with_orientation(
         ir,
         nodes,
+        clusters,
         highlighted_edge_indexes,
         horizontal_ranks,
         edge_routing,
@@ -17972,6 +17976,7 @@ fn build_directed_path_edge_paths_unchecked(
 fn build_edge_paths_with_orientation(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
+    clusters: &[LayoutClusterBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
@@ -18021,7 +18026,19 @@ fn build_edge_paths_with_orientation(
     // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
     // Each edge's own two endpoints are temporarily parked far away below so the
     // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
-    let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    //
+    // Cluster boxes come FIRST: an edge goes AROUND a subgraph it neither starts nor ends in
+    // rather than through it (where it read as part of that subgraph). The nudge is taken from the
+    // lowest-index obstacle a segment hits, and a cluster encloses its nodes, so stepping past the
+    // cluster clears them too; with the nodes first the route stepped past one member and stayed
+    // inside the box. The clusters holding either end are parked per edge, below, as its
+    // endpoints are. Node `i` is obstacle `base + i`.
+    let base = clusters.len();
+    let mut obstacle_bounds: Vec<LayoutRect> = clusters
+        .iter()
+        .map(|cluster| cluster.bounds)
+        .chain(nodes.iter().map(|n| n.bounds))
+        .collect();
     // A composite state's node has its cluster's box (`anchor_composite_state_nodes`), so as an
     // obstacle it walls in its own contents: every route between two of its members was nudged out
     // of the box and back. Each node's enclosing composites are parked with its edges' endpoints.
@@ -18112,12 +18129,42 @@ fn build_edge_paths_with_orientation(
             let points = if is_self_loop {
                 route_self_loop(source_box, horizontal_ranks)
             } else {
+                // An end written to a subgraph (`one --> two`) is drawn to the subgraph's box, as
+                // mermaid draws it: it leaves or enters the box's face instead of the member the
+                // endpoint resolved to for ranking.
+                let (from_subgraph, to_subgraph) = edge.named_subgraphs();
+                let end_box = |subgraph: Option<fm_core::IrSubgraphId>, member: &LayoutNodeBox| {
+                    let cluster = ir.graph.subgraph(subgraph?)?.cluster?;
+                    let found = clusters.iter().find(|c| c.cluster_index == cluster.0)?;
+                    Some(LayoutNodeBox {
+                        bounds: found.bounds,
+                        ..member.clone()
+                    })
+                };
+                let (source_end, target_end) = (
+                    end_box(from_subgraph, source_box),
+                    end_box(to_subgraph, target_box),
+                );
+                let shape = |end: &Option<LayoutNodeBox>, member| {
+                    end.as_ref()
+                        .map_or_else(|| node_shape_at(ir, member), |_| fm_core::NodeShape::Rect)
+                };
+                let (source_end, target_end) = (
+                    (
+                        source_end.as_ref().unwrap_or(source_box),
+                        shape(&source_end, source_box),
+                    ),
+                    (
+                        target_end.as_ref().unwrap_or(target_box),
+                        shape(&target_end, target_box),
+                    ),
+                );
                 let (source_anchor, target_anchor) = edge_anchors(
-                    source_box,
-                    target_box,
+                    source_end.0,
+                    target_end.0,
                     horizontal_ranks,
-                    node_shape_at(ir, source_box),
-                    node_shape_at(ir, target_box),
+                    source_end.1,
+                    target_end.1,
                 );
                 // Exclude this edge's own endpoints from the shared obstacle set by
                 // parking them far away (the router's AABB reject drops them), then
@@ -18128,25 +18175,33 @@ fn build_edge_paths_with_orientation(
                     width: 0.0,
                     height: 0.0,
                 };
-                let saved_source = obstacle_bounds.get(source).copied();
-                let saved_target = obstacle_bounds.get(target).copied();
-                if let Some(slot) = obstacle_bounds.get_mut(source) {
-                    *slot = FAR_AWAY;
-                }
-                if let Some(slot) = obstacle_bounds.get_mut(target) {
-                    *slot = FAR_AWAY;
-                }
-                // Restored in reverse, so a container enclosing BOTH ends gets its first-saved
-                // (real) box back rather than the parked one its second save captured.
+                // Restored in reverse, so a box parked twice (a container enclosing BOTH ends)
+                // gets its first-saved (real) box back rather than the parked one its second save
+                // captured. The two endpoints, then their enclosing composites, then every cluster
+                // holding either end.
                 let mut parked: SmallVec<[(usize, LayoutRect); 4]> = SmallVec::new();
-                for &container in [source, target]
-                    .iter()
-                    .filter_map(|&node| containers.get(node))
-                    .flatten()
+                let ends = [source_box.bounds.center(), target_box.bounds.center()];
+                let holding_clusters = clusters.iter().enumerate().filter(|(_, cluster)| {
+                    let r = cluster.bounds;
+                    ends.iter().any(|p| {
+                        p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+                    })
+                });
+                for slot in [source, target]
+                    .into_iter()
+                    .chain(
+                        [source, target]
+                            .iter()
+                            .filter_map(|&node| containers.get(node))
+                            .flatten()
+                            .copied(),
+                    )
+                    .map(|node| base + node)
+                    .chain(holding_clusters.map(|(k, _)| k))
                 {
-                    if let Some(slot) = obstacle_bounds.get_mut(container) {
-                        parked.push((container, *slot));
-                        *slot = FAR_AWAY;
+                    if let Some(slot_box) = obstacle_bounds.get_mut(slot) {
+                        parked.push((slot, *slot_box));
+                        *slot_box = FAR_AWAY;
                     }
                 }
                 let mut pts = match edge_routing {
@@ -18165,14 +18220,38 @@ fn build_edge_paths_with_orientation(
                         obstacle_index.as_mut(),
                     ),
                 };
-                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(source), saved_source) {
-                    *slot = saved;
+                for &(slot, saved) in parked.iter().rev() {
+                    obstacle_bounds[slot] = saved;
                 }
-                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(target), saved_target) {
-                    *slot = saved;
-                }
-                for &(container, saved) in parked.iter().rev() {
-                    obstacle_bounds[container] = saved;
+                // Only an aligned detour has six points. It leaves and enters at the faces'
+                // centres, where the edges between neighbouring ranks attach too, so its stubs
+                // ran along theirs; on a flat face it attaches part-way toward its detour instead.
+                if pts.len() == 6 && matches!(edge_routing, EdgeRouting::Orthogonal) {
+                    let across = |p: LayoutPoint| if horizontal_ranks { p.y } else { p.x };
+                    let toward = across(pts[2]) - across(pts[0]);
+                    for (bends, (end_box, end_shape)) in
+                        [([0, 1], source_end), ([4, 5], target_end)]
+                    {
+                        if !matches!(
+                            end_shape,
+                            fm_core::NodeShape::Rect | fm_core::NodeShape::Rounded
+                        ) {
+                            continue;
+                        }
+                        let face = if horizontal_ranks {
+                            end_box.bounds.height
+                        } else {
+                            end_box.bounds.width
+                        };
+                        let shift = toward.clamp(-face / 4.0, face / 4.0);
+                        for bend in bends {
+                            if horizontal_ranks {
+                                pts[bend].y += shift;
+                            } else {
+                                pts[bend].x += shift;
+                            }
+                        }
+                    }
                 }
                 if parallel_offset.abs() > 0.01 {
                     apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
@@ -18677,18 +18756,7 @@ fn route_edge_points_with_obstacle_index(
             if let Some(nudge) =
                 find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
             {
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: source.x,
-                        y: nudge,
-                    },
-                    LayoutPoint {
-                        x: target.x,
-                        y: nudge,
-                    },
-                    target,
-                ]
+                aligned_detour(source, target, nudge, true)
             } else {
                 smallvec![source, target]
             }
@@ -18750,18 +18818,7 @@ fn route_edge_points_with_obstacle_index(
         if let Some(nudge) =
             find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
         {
-            smallvec![
-                source,
-                LayoutPoint {
-                    x: nudge,
-                    y: source.y,
-                },
-                LayoutPoint {
-                    x: nudge,
-                    y: target.y,
-                },
-                target,
-            ]
+            aligned_detour(source, target, nudge, false)
         } else {
             smallvec![source, target]
         }
@@ -18807,6 +18864,46 @@ fn route_edge_points_with_obstacle_index(
     };
 
     simplify_polyline(points)
+}
+
+/// The detour for an aligned edge whose straight run is blocked: out of the source perpendicular
+/// to its face for a short stub, across to the clear line `clear`, along it, and back in the same
+/// way. Without the stubs the legs ran ALONG both faces to the clear line, so the edge seemed to
+/// leave from a corner and arrived sliding along its target's side.
+fn aligned_detour(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    clear: f32,
+    horizontal_ranks: bool,
+) -> EdgePoints {
+    const STUB: f32 = 16.0;
+    let (start, end, line) = if horizontal_ranks {
+        (source.x, target.x, source.y)
+    } else {
+        (source.y, target.y, source.x)
+    };
+    let stub = ((end - start) / 4.0).clamp(-STUB, STUB);
+    let point = |along: f32, across: f32| {
+        if horizontal_ranks {
+            LayoutPoint {
+                x: along,
+                y: across,
+            }
+        } else {
+            LayoutPoint {
+                x: across,
+                y: along,
+            }
+        }
+    };
+    smallvec![
+        source,
+        point(start + stub, line),
+        point(start + stub, clear),
+        point(end - stub, clear),
+        point(end - stub, line),
+        target,
+    ]
 }
 
 /// Route an edge using spline-friendly control points.
@@ -19094,73 +19191,6 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                 } else {
                     points[bend].x += offset;
                 }
-            }
-        }
-    }
-}
-
-/// End each edge written to a SUBGRAPH (`one --> two`) on that subgraph's border.
-///
-/// Such an endpoint is resolved to one of the subgraph's members, which the layout ranks and
-/// routes against, so the line ran on into the box to whichever member came first, piling onto
-/// that member's own edges. mermaid draws it to the cluster's edge instead. The path is cut where
-/// it crosses the named cluster's box: the source end where the route first leaves it, the target
-/// end where it last enters it. A route that never crosses the box is left alone.
-fn clip_edges_to_named_subgraphs(
-    ir: &MermaidDiagramIr,
-    edges: &mut [LayoutEdgePath],
-    clusters: &[LayoutClusterBox],
-) {
-    let inside = |r: LayoutRect, p: LayoutPoint| {
-        p.x > r.x && p.x < r.x + r.width && p.y > r.y && p.y < r.y + r.height
-    };
-    for path in edges.iter_mut() {
-        let Some(edge) = ir.edges.get(path.edge_index) else {
-            continue;
-        };
-        let (from, to) = edge.named_subgraphs();
-        // The source end is clipped as the target end of the path read backwards.
-        for (subgraph, backwards) in [(from, true), (to, false)] {
-            let Some(r) = subgraph
-                .and_then(|id| ir.graph.subgraph(id)?.cluster)
-                .and_then(|cluster| clusters.iter().find(|c| c.cluster_index == cluster.0))
-                .map(|found| found.bounds)
-            else {
-                continue;
-            };
-            let points = &mut path.points;
-            let n = points.len();
-            let at = |i: usize| if backwards { n - 1 - i } else { i };
-            let Some(entry) = (1..n)
-                .rev()
-                .find(|&i| inside(r, points[at(i)]) && !inside(r, points[at(i - 1)]))
-            else {
-                continue;
-            };
-            // Where the segment from `a` (outside) to `b` (inside) crosses the border.
-            let (a, b) = (points[at(entry - 1)], points[at(entry)]);
-            let (dx, dy) = (b.x - a.x, b.y - a.y);
-            let mut t = 0.0_f32;
-            for (delta, start, low, high) in [
-                (dx, a.x, r.x, r.x + r.width),
-                (dy, a.y, r.y, r.y + r.height),
-            ] {
-                if delta.abs() > f32::EPSILON {
-                    let border = if delta > 0.0 { low } else { high };
-                    t = t.max((border - start) / delta);
-                }
-            }
-            // `b` becomes the cut, and everything past it along the read direction goes.
-            let cut = at(entry);
-            points[cut] = LayoutPoint {
-                x: dx.mul_add(t, a.x),
-                y: dy.mul_add(t, a.y),
-            };
-            if backwards {
-                points.copy_within(cut.., 0);
-                points.truncate(n - cut);
-            } else {
-                points.truncate(cut + 1);
             }
         }
     }
@@ -24823,8 +24853,12 @@ mod tests {
             false,
             &[obstacle],
         );
-        assert_eq!(points.len(), 4);
-        assert_ne!(points[1].x, 50.0);
+        // Out of the source and into the target perpendicular to their faces, for a short stub
+        // each, rather than sliding along the faces to the clear line.
+        assert_eq!(points.len(), 6);
+        assert_eq!(points[1], LayoutPoint { x: 50.0, y: 26.0 });
+        assert_eq!(points[4], LayoutPoint { x: 50.0, y: 184.0 });
+        assert_ne!(points[2].x, 50.0);
         for pt in &points {
             let inside = pt.x >= obstacle.x
                 && pt.x <= obstacle.x + obstacle.width
@@ -27346,6 +27380,48 @@ mod tests {
                         a.0,
                         b.0
                     );
+                }
+            }
+        }
+    }
+
+    /// An edge goes around a subgraph that holds neither of its ends: drawn through the box it
+    /// read as part of that subgraph. mermaid's own subgraph example, both directions.
+    #[test]
+    fn edges_go_around_subgraphs_they_do_not_belong_to() {
+        for direction in ["TB", "LR"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart {direction}\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let holds = |r: LayoutRect, node: usize| {
+                let p = layout.nodes[node].bounds.center();
+                p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+            };
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let ends = [
+                    crate::endpoint_node_index(&ir, edge.from).unwrap(),
+                    crate::endpoint_node_index(&ir, edge.to).unwrap(),
+                ];
+                for cluster in &layout.clusters {
+                    let r = cluster.bounds;
+                    if ends.iter().any(|&end| holds(r, end)) {
+                        continue;
+                    }
+                    for pair in path.points.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let crosses = a.x.max(b.x) > r.x + 0.5
+                            && a.x.min(b.x) < r.x + r.width - 0.5
+                            && a.y.max(b.y) > r.y + 0.5
+                            && a.y.min(b.y) < r.y + r.height - 0.5;
+                        assert!(
+                            !crosses,
+                            "{direction}: edge {} runs through {:?}: {a:?} -> {b:?}",
+                            path.edge_index, cluster.title
+                        );
+                    }
                 }
             }
         }
@@ -29946,6 +30022,7 @@ mod tests {
             let generic = build_edge_paths(
                 &chain,
                 &layout.nodes,
+                &[],
                 &BTreeSet::new(),
                 EdgeRouting::default(),
             );
