@@ -131,7 +131,15 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # `parse_mermaid_with_detection_and_config` ~6.3K pre-opt plus the lexer's data reader 0.7K, the
 # layout inlined into the guardrail dispatcher ~2.9K, serde for the new meta ~0.4K. The remainder
 # is the family. Headroom after raise: 1597 bytes.
-MAX_GZIP_BYTES=$((733 * 1024))
+#
+# Raised 733K -> 734K on 2026-10-07 for sequence diagrams, measured from the committed pkg/:
+#   748995 gzip  (53f8063)
+#   750542 gzip  + source-order timeline: notes, fragment headers and branches get their own
+#                  rows, note-only regions, created participants at their message (dcb63ff, fit)
+#   751261 gzip  + `actor` drawn as a stick figure in its own `render_node` arm   (+719, 669 over)
+# No lever was found inside the figure itself — a circle, one path and the shared label writer —
+# so the raise is that arm. Headroom after raise: 355 bytes.
+MAX_GZIP_BYTES=$((734 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

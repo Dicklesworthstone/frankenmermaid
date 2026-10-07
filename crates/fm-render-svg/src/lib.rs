@@ -8953,6 +8953,8 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
             || kw.double_border
             || class.eq_ignore_ascii_case("c4-external")
             || class.eq_ignore_ascii_case("block-beta-space")
+            // Drawn as a stick figure by the slow path, never as the fragment's plain shape.
+            || class == "sequence-participant-actor"
         {
             return None;
         }
@@ -11251,6 +11253,68 @@ fn render_node(
         if config.a11y.keyboard_nav {
             group = group.attr("tabindex", "0");
         }
+    }
+
+    // A sequence `actor` is a stick figure with its name beneath it, as mermaid draws it — the
+    // box it used to be drawn as is what a plain `participant` looks like, so the two read alike.
+    if ir.diagram_type == DiagramType::Sequence
+        && ir_node.is_some_and(|node| {
+            node.classes
+                .iter()
+                .any(|class| class == "sequence-participant-actor")
+        })
+    {
+        let label_band = node_font_size + 6.0;
+        let figure_h = (h - label_band).max(24.0);
+        let head_r = (figure_h * 0.17).max(5.0);
+        let head_cy = y + 2.0 + head_r;
+        let neck = head_cy + head_r;
+        let hips = neck + figure_h * 0.33;
+        let arms = neck + figure_h * 0.12;
+        let feet = y + figure_h;
+        let reach = head_r * 1.35;
+        let limbs = PathBuilder::new()
+            .move_to(cx, neck)
+            .line_to(cx, hips)
+            .move_to(cx - reach, arms)
+            .line_to(cx + reach, arms)
+            .move_to(cx - reach, feet)
+            .line_to(cx, hips)
+            .line_to(cx + reach, feet)
+            .build();
+        let figure = Element::group()
+            .class("fm-sequence-actor-figure")
+            .child(
+                Element::circle()
+                    .cx(cx)
+                    .cy(head_cy)
+                    .r(head_r)
+                    .fill(&colors.node_fill)
+                    .stroke(&colors.node_stroke)
+                    .stroke_width(1.6),
+            )
+            .child(
+                Element::path()
+                    .d(&limbs)
+                    .fill("none")
+                    .stroke(&colors.node_stroke)
+                    .stroke_width(1.6),
+            );
+        let label = render_node_label_text(
+            ir,
+            label_id,
+            &label_text,
+            cx,
+            y + h - 4.0,
+            node_font_size,
+            fit_width((w + 40.0).max(node_font_size)),
+            label_band,
+            config,
+            colors,
+            text_style.as_deref(),
+            emit_classdef_classes,
+        );
+        return group.child(figure).child(label);
     }
 
     // Create shape element based on node type
@@ -21999,6 +22063,27 @@ marker#arrow-open path {
             !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
             "a prefixed label survived alongside the number element, so both forms are emitted"
         );
+    }
+
+    /// An `actor` is drawn as a stick figure with its name beneath; a `participant` keeps its box.
+    #[test]
+    fn sequence_actor_is_a_stick_figure() {
+        let svg = render_source(
+            "sequenceDiagram\n  actor U as User\n  participant W as Web\n  U->>W: Login\n",
+        );
+        let actor = svg
+            .split("<g id=")
+            .find(|group| group.contains("fm-node-user-sequence-participant-actor"))
+            .unwrap_or_else(|| panic!("no actor group: {svg}"));
+        assert!(actor.contains("fm-sequence-actor-figure"), "{actor}");
+        assert!(actor.contains("<circle"), "a head: {actor}");
+        assert!(actor.contains(">User</text>"), "its name: {actor}");
+        assert!(!actor.contains("<rect"), "no box for an actor: {actor}");
+        let participant = svg
+            .split("<g id=")
+            .find(|group| group.contains(">Web</text>") && group.contains("fm-node"))
+            .expect("participant group");
+        assert!(!participant.contains("fm-sequence-actor-figure"));
     }
 
     #[test]

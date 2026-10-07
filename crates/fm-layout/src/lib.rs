@@ -6974,7 +6974,17 @@ pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    // An `actor` is drawn as a stick figure with its name beneath: it needs a taller header.
+    for (size, node) in node_sizes.iter_mut().zip(&ir.nodes) {
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "sequence-participant-actor")
+        {
+            size.1 = size.1.max(76.0);
+        }
+    }
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
