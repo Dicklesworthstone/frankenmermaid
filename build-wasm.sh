@@ -196,7 +196,23 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # Function-by-function against 0675e62 under this script's opt-level=z profile, names kept: the
 # clip ~1.0K, the end bookkeeping inlined into `parse_flowchart_with_line_offset` / `push_edge` /
 # `resolve_subgraph_endpoint` ~0.9K, extras serde/eq/clone ~0.3K. Headroom: 524 bytes.
-MAX_GZIP_BYTES=$((751 * 1024))
+#
+# Raised 751K -> 753K on 2026-10-07 for three layout-correctness fixes, measured against b866942
+# (768796 gzip, the committed pkg/):
+#   770277 gzip  + a flowchart node kept in one subgraph (mermaid's first-closed rule; two
+#                  subgraphs naming one node built two overlapping boxes), a few disconnected
+#                  components sharing their ranks (they were laid end to end along the rank axis),
+#                  and route legs checked against obstacles (an edge spanning ranks ran through the
+#                  nodes between; it now turns early or late, or crosses on a line cleared of every
+#                  obstacle rather than the first)                                       (+1481)
+#   770260 gzip  after removing members by position instead of three `retain` instantiations and
+#                iterating the held subgraphs as a slice                                  (-17)
+# Function-by-function against b866942 under this script's opt-level=z profile, names kept: the
+# two CGA nudges (2x1.2K) now inline once into `segment_blocked` (2.1K), the router +0.6K with
+# `turning_route` inlined, `clear_line` 0.5K and its closures 0.4K: routing net +0.9K; the
+# membership pass inlined into `parse_flowchart_with_line_offset` ~1.0K plus its iterator chain
+# 0.3K; shared component ranks ~0.4K. Headroom: 812 bytes.
+MAX_GZIP_BYTES=$((753 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

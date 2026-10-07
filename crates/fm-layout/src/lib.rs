@@ -13962,7 +13962,15 @@ fn rank_assignment(
     // Compact disconnected components along the rank axis so each component
     // gets an independent band instead of sharing rank-0/rank-1 globally.
     // This avoids pathological ultra-wide layouts for many disconnected chains.
+    //
+    // A FEW components share the ranks instead, side by side across the rank axis, as mermaid
+    // places them: two independent flows read as two parallel lanes. Banding them laid `A --> B`
+    // and `C --> D` end to end in one line, and inside a subgraph it put two branches of the same
+    // fork one after the other. Isolated nodes count as one group.
+    const SHARED_RANK_COMPONENTS: usize = 4;
     let mut components = weakly_connected_components(node_count, &edges);
+    let groups = components.iter().filter(|c| c.len() > 1).count()
+        + usize::from(components.iter().any(|c| c.len() == 1));
     components.sort_by_key(|component| {
         component
             .iter()
@@ -13971,7 +13979,7 @@ fn rank_assignment(
             .unwrap_or(usize::MAX)
     });
 
-    if components.len() > 1 {
+    if components.len() > 1 && groups > SHARED_RANK_COMPONENTS {
         let mut compacted_ranks = ranks.clone();
         let mut rank_cursor = 0_usize;
         let mut isolated_singletons = Vec::new();
@@ -18752,133 +18760,187 @@ fn route_edge_points_with_obstacle_index(
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> EdgePoints {
     let epsilon = 0.001_f32;
-
-    let points = if horizontal_ranks {
-        if (source.y - target.y).abs() < epsilon {
-            let segment = (
-                LayoutPoint {
-                    x: source.x.min(target.x),
-                    y: source.y,
-                },
-                LayoutPoint {
-                    x: source.x.max(target.x),
-                    y: target.y,
-                },
-            );
-            if let Some(nudge) =
-                find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
-            {
-                aligned_detour(source, target, nudge, true)
-            } else {
-                smallvec![source, target]
-            }
-        } else {
-            let mid_x = f32::midpoint(source.x, target.x);
-            let mid_segment = (
-                LayoutPoint {
-                    x: mid_x,
-                    y: source.y.min(target.y),
-                },
-                LayoutPoint {
-                    x: mid_x,
-                    y: source.y.max(target.y),
-                },
-            );
-            // Check if the vertical mid-segment clips through any obstacle.
-            if let Some(nudge) =
-                find_obstacle_nudge_x(mid_segment, mid_x, obstacles, obstacle_index.as_deref_mut())
-            {
-                // Route around: two vertical segments flanking the obstacle.
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: nudge,
-                        y: source.y,
-                    },
-                    LayoutPoint {
-                        x: nudge,
-                        y: target.y,
-                    },
-                    target,
-                ]
-            } else {
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: mid_x,
-                        y: source.y,
-                    },
-                    LayoutPoint {
-                        x: mid_x,
-                        y: target.y,
-                    },
-                    target,
-                ]
-            }
-        }
-    } else if (source.x - target.x).abs() < epsilon {
-        let segment = (
-            LayoutPoint {
-                x: source.x,
-                y: source.y.min(target.y),
-            },
-            LayoutPoint {
-                x: target.x,
-                y: source.y.max(target.y),
-            },
-        );
-        if let Some(nudge) =
-            find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
-        {
-            aligned_detour(source, target, nudge, false)
-        } else {
-            smallvec![source, target]
-        }
+    let aligned = if horizontal_ranks {
+        (source.y - target.y).abs() < epsilon
     } else {
-        let mid_y = f32::midpoint(source.y, target.y);
-        let mid_segment = (
-            LayoutPoint {
-                x: source.x.min(target.x),
-                y: mid_y,
-            },
-            LayoutPoint {
-                x: source.x.max(target.x),
-                y: mid_y,
-            },
-        );
-        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles, obstacle_index) {
-            smallvec![
-                source,
-                LayoutPoint {
-                    x: source.x,
-                    y: nudge,
-                },
-                LayoutPoint {
-                    x: target.x,
-                    y: nudge,
-                },
-                target,
-            ]
-        } else {
-            smallvec![
-                source,
-                LayoutPoint {
-                    x: source.x,
-                    y: mid_y,
-                },
-                LayoutPoint {
-                    x: target.x,
-                    y: mid_y,
-                },
-                target,
-            ]
-        }
+        (source.x - target.x).abs() < epsilon
+    };
+    let points = if !aligned {
+        turning_route(source, target, horizontal_ranks, obstacles, obstacle_index)
+    } else if let Some(clear) = clear_line(source, target, obstacles, obstacle_index) {
+        aligned_detour(source, target, clear, horizontal_ranks)
+    } else {
+        smallvec![source, target]
     };
 
     simplify_polyline(points)
+}
+
+/// Whether a segment parallel to an axis runs into an obstacle (within the router's margin).
+fn segment_blocked(
+    a: LayoutPoint,
+    b: LayoutPoint,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> Option<f32> {
+    let segment = (
+        LayoutPoint {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+        },
+        LayoutPoint {
+            x: a.x.max(b.x),
+            y: a.y.max(b.y),
+        },
+    );
+    if (a.x - b.x).abs() < 0.001 {
+        find_obstacle_nudge_x(segment, a.x, obstacles, obstacle_index)
+    } else {
+        find_obstacle_nudge_y(segment, a.y, obstacles, obstacle_index)
+    }
+}
+
+/// Where a segment parallel to an axis has to move to clear EVERY obstacle, or `None` when it is
+/// clear where it is.
+///
+/// The router's nudge steps past the first obstacle it finds, so a line along a column of nodes
+/// cleared the nearest and ran through a wider one further along. This keeps stepping the line,
+/// in the direction of that first step, past whatever is still in its way.
+fn clear_line(
+    a: LayoutPoint,
+    b: LayoutPoint,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> Option<f32> {
+    const MARGIN: f32 = 8.0;
+    let first = segment_blocked(a, b, obstacles, obstacle_index)?;
+    let vertical = (a.x - b.x).abs() < 0.001;
+    let (line, lo, hi) = if vertical {
+        (a.x, a.y.min(b.y), a.y.max(b.y))
+    } else {
+        (a.y, a.x.min(b.x), a.x.max(b.x))
+    };
+    let downward = first < line;
+    let mut at = first;
+    for _ in 0..obstacles.len() {
+        let in_the_way = obstacles.iter().find(|r| {
+            let (span_lo, span_hi, cross_lo, cross_hi) = if vertical {
+                (r.y, r.y + r.height, r.x, r.x + r.width)
+            } else {
+                (r.x, r.x + r.width, r.y, r.y + r.height)
+            };
+            hi > span_lo - MARGIN
+                && lo < span_hi + MARGIN
+                && at > cross_lo - MARGIN
+                && at < cross_hi + MARGIN
+        });
+        let Some(r) = in_the_way else {
+            break;
+        };
+        let (cross_lo, cross_hi) = if vertical {
+            (r.x, r.x + r.width)
+        } else {
+            (r.y, r.y + r.height)
+        };
+        at = if downward {
+            cross_lo - MARGIN - 0.5
+        } else {
+            cross_hi + MARGIN + 0.5
+        };
+    }
+    Some(at)
+}
+
+/// Route an edge whose ends are not aligned: out along the rank axis, across, and on into the
+/// target.
+///
+/// The turn is halfway between the ends, stepped past anything on that crossing line, whenever
+/// both legs are clear — every edge between neighbouring ranks. An edge spanning several ranks
+/// ran its legs straight through the nodes of the ranks between, so a leg that runs into a node
+/// turns instead just past the source, or just before the target, whichever leaves its segments
+/// clear, or else crosses on a clear line between those two turns.
+fn turning_route(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> EdgePoints {
+    const STUB: f32 = 16.0;
+    let (start, end, from, to) = if horizontal_ranks {
+        (source.x, target.x, source.y, target.y)
+    } else {
+        (source.y, target.y, source.x, target.x)
+    };
+    let point = |along: f32, across: f32| {
+        if horizontal_ranks {
+            LayoutPoint {
+                x: along,
+                y: across,
+            }
+        } else {
+            LayoutPoint {
+                x: across,
+                y: along,
+            }
+        }
+    };
+    let turn =
+        |at: f32| -> EdgePoints { smallvec![source, point(at, from), point(at, to), target] };
+    let clear = |route: &EdgePoints, index: &mut Option<&mut ObstacleSpatialIndex>| {
+        route.windows(2).all(|pair| {
+            segment_blocked(pair[0], pair[1], obstacles, index.as_deref_mut()).is_none()
+        })
+    };
+
+    let mid = f32::midpoint(start, end);
+    let mid = clear_line(
+        point(mid, from),
+        point(mid, to),
+        obstacles,
+        obstacle_index.as_deref_mut(),
+    )
+    .unwrap_or(mid);
+    let halfway = turn(mid);
+    if (end - start).abs() <= 2.0 * STUB
+        || (segment_blocked(source, halfway[1], obstacles, obstacle_index.as_deref_mut()).is_none()
+            && segment_blocked(halfway[2], target, obstacles, obstacle_index.as_deref_mut())
+                .is_none())
+    {
+        return halfway;
+    }
+    let step = STUB.copysign(end - start);
+    let (early, late) = (start + step, end - step);
+    for at in [early, late] {
+        let route = turn(at);
+        if clear(&route, &mut obstacle_index) {
+            return route;
+        }
+    }
+    // Both turns are blocked: cross between them on the first clear line past the target's.
+    let line = clear_line(
+        point(early, to),
+        point(late, to),
+        obstacles,
+        obstacle_index.as_deref_mut(),
+    )
+    .unwrap_or(to);
+    let detour: EdgePoints = smallvec![
+        source,
+        point(early, from),
+        point(early, line),
+        point(late, line),
+        point(late, to),
+        target,
+    ];
+    if clear(&detour, &mut obstacle_index) {
+        detour
+    } else {
+        halfway
+    }
 }
 
 /// The detour for an aligned edge whose straight run is blocked: out of the source perpendicular
@@ -27341,6 +27403,75 @@ mod tests {
                         node.node_id,
                         a.title
                     );
+                }
+            }
+        }
+    }
+
+    /// A few disconnected flows run as parallel lanes sharing their ranks, as in mermaid, rather
+    /// than end to end along the rank axis; inside a subgraph that had put two branches of one
+    /// fork one after the other.
+    #[test]
+    fn a_few_components_share_their_ranks() {
+        for input in [
+            "flowchart LR\n  A --> B\n  C --> D\n",
+            "flowchart LR\n  X --> A\n  X --> C\n  subgraph S\n    A --> B\n    C --> D\n  end\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            let left = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| ir.nodes[node.node_index].id == id)
+                    .map(|node| node.bounds.x)
+                    .unwrap()
+            };
+            assert!(
+                (left("A") - left("C")).abs() < 1.0,
+                "A and C share a rank: {input:?}"
+            );
+            assert!(
+                (left("B") - left("D")).abs() < 1.0,
+                "B and D share a rank: {input:?}"
+            );
+        }
+    }
+
+    /// No edge runs through a node it does not connect. Edges spanning several ranks ran their
+    /// legs straight through the nodes of the ranks between.
+    #[test]
+    fn edges_do_not_run_through_other_nodes() {
+        for input in [
+            "flowchart LR\n  subgraph Frontend\n    UI[Web UI] --> API_GW[API Gateway]\n  end\n  subgraph Backend\n    API_GW --> Auth[Auth Service]\n    API_GW --> Orders[Order Service]\n    Orders --> DB[(Orders DB)]\n    Auth --> Cache[(Redis)]\n  end\n  subgraph External\n    Pay[Payment Provider]\n  end\n  Orders --> Pay\n  Pay -.->|webhook| Orders\n  UI -.-> CDN[CDN]\n",
+            "flowchart TD\n  Input --> Process1\n  Process1 --> Process2\n  Process2 --> Process3\n  Process3 --> Output\n  Output --> Monitor\n  Monitor --> Controller\n  Controller --> Process1\n  Process2 --> Sensor\n  Sensor --> Adjuster\n  Adjuster --> Process1\n  Process3 --> Validator\n  Validator --> Process2\n  Monitor --> ErrorHandler\n  ErrorHandler --> Input\n  Controller --> Sensor\n  Validator --> Monitor\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let ends = [
+                    crate::endpoint_node_index(&ir, edge.from).unwrap(),
+                    crate::endpoint_node_index(&ir, edge.to).unwrap(),
+                ];
+                for node in layout
+                    .nodes
+                    .iter()
+                    .filter(|n| !ends.contains(&n.node_index))
+                {
+                    let r = node.bounds;
+                    for pair in path.points.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let crosses = a.x.max(b.x) > r.x + 0.5
+                            && a.x.min(b.x) < r.x + r.width - 0.5
+                            && a.y.max(b.y) > r.y + 0.5
+                            && a.y.min(b.y) < r.y + r.height - 0.5;
+                        assert!(
+                            !crosses,
+                            "{} -> {} runs through {}: {a:?} -> {b:?}",
+                            ir.nodes[ends[0]].id, ir.nodes[ends[1]].id, node.node_id
+                        );
+                    }
                 }
             }
         }

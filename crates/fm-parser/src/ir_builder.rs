@@ -2232,6 +2232,73 @@ impl IrBuilder {
         self.pending_subgraph_endpoints.clear();
     }
 
+    /// Keep each flowchart node in ONE subgraph, as mermaid does.
+    ///
+    /// A node written inside two subgraphs that do not nest (`API_GW` in `Frontend`, then again in
+    /// `Backend`) joined both, so the two boxes were built around it and overlapped. mermaid adds a
+    /// subgraph at its `end` and drops from it every node an earlier one already holds, so the node
+    /// stays in the subgraph that closed first. For subgraphs that do not nest that is also the one
+    /// that opened first, the lower index. The node leaves the other branch: its innermost
+    /// subgraph and every ancestor of it that is not also an ancestor of the one kept.
+    pub(crate) fn finish_unique_subgraph_membership(&mut self) {
+        if self.ir.graph.subgraphs.len() < 2 {
+            return;
+        }
+        for node in 0..self.ir.graph.nodes.len() {
+            let held = self.ir.graph.nodes[node].subgraphs.clone();
+            if held.len() < 2 {
+                continue;
+            }
+            let subgraphs = &self.ir.graph.subgraphs;
+            // The innermost subgraphs holding the node: none of their children holds it too.
+            let Some(keep) = held
+                .iter()
+                .copied()
+                .filter(|s| !subgraphs[s.0].children.iter().any(|c| held.contains(c)))
+                .min_by_key(|s| s.0)
+            else {
+                continue;
+            };
+            let mut chain = Vec::new();
+            let mut cursor = Some(keep);
+            while let Some(subgraph) = cursor {
+                chain.push(subgraph);
+                cursor = subgraphs[subgraph.0].parent;
+            }
+            if held.iter().all(|s| chain.contains(s)) {
+                continue;
+            }
+            let node_id = IrNodeId(node);
+            self.mark_reusable_prefix_node_dirty(node_id);
+            // Every list holds an entry at most once, so removing the first match removes it.
+            fn drop_entry<T: PartialEq>(list: &mut Vec<T>, entry: &T) {
+                if let Some(at) = list.iter().position(|held| held == entry) {
+                    list.remove(at);
+                }
+            }
+            for subgraph in &held {
+                if chain.contains(subgraph) {
+                    continue;
+                }
+                self.mark_reusable_prefix_subgraph_dirty(subgraph.0);
+                drop_entry(&mut self.ir.graph.nodes[node].subgraphs, subgraph);
+                let entry = &mut self.ir.graph.subgraphs[subgraph.0];
+                drop_entry(&mut entry.members, &node_id);
+                let Some(cluster) = entry.cluster else {
+                    continue;
+                };
+                self.mark_reusable_prefix_cluster_dirty(cluster.0);
+                drop_entry(&mut self.ir.graph.nodes[node].clusters, &cluster);
+                if let Some(entry) = self.ir.clusters.get_mut(cluster.0) {
+                    drop_entry(&mut entry.members, &node_id);
+                }
+                if let Some(entry) = self.ir.graph.clusters.get_mut(cluster.0) {
+                    drop_entry(&mut entry.members, &node_id);
+                }
+            }
+        }
+    }
+
     /// Turn the recorded subgraph-named edge ends into `from_subgraph` / `to_subgraph`, now that
     /// every subgraph exists.
     pub(crate) fn finish_subgraph_edge_ends(&mut self) {

@@ -13,13 +13,13 @@
     },
     "all_node_shapes": {
       "edge_count": 10,
-      "edges_checksum": "519cd9a112568f1b",
+      "edges_checksum": "83d6d092e7f835f0",
       "layout_algorithm": "auto",
-      "layout_checksum": "006da6829a522c9b",
-      "layout_height": 317.0,
-      "layout_width": 2643.199707,
+      "layout_checksum": "d38d619facd8e867",
+      "layout_height": 610.0,
+      "layout_width": 1351.550049,
       "node_count": 13,
-      "nodes_checksum": "9d88afde57114a87"
+      "nodes_checksum": "a67184ff42114ced"
     },
     "architecture_basic": {
       "edge_count": 2,
@@ -103,9 +103,9 @@
     },
     "cycle_braid": {
       "edge_count": 20,
-      "edges_checksum": "225503602ddbcbff",
+      "edges_checksum": "dfc0d3b2bd9d33c3",
       "layout_algorithm": "auto",
-      "layout_checksum": "b3a51f658db01a43",
+      "layout_checksum": "ba88212b24dc1bd7",
       "layout_height": 458.45105,
       "layout_width": 488.648712,
       "node_count": 9,
@@ -113,11 +113,11 @@
     },
     "cycle_feedback": {
       "edge_count": 16,
-      "edges_checksum": "0da302b200f0c08f",
+      "edges_checksum": "d057ee6cd5f201bf",
       "layout_algorithm": "auto",
-      "layout_checksum": "758e88fc1514b501",
+      "layout_checksum": "5d462d9d0a816528",
       "layout_height": 1476.0,
-      "layout_width": 752.762573,
+      "layout_width": 761.262573,
       "node_count": 11,
       "nodes_checksum": "5105112988ee1a02"
     },
@@ -133,9 +133,9 @@
     },
     "cycle_scc_heavy": {
       "edge_count": 15,
-      "edges_checksum": "10f1e82c1aea70eb",
+      "edges_checksum": "10b815a205d2f17d",
       "layout_algorithm": "auto",
-      "layout_checksum": "56024aadb4b84f0c",
+      "layout_checksum": "d9244244eb940872",
       "layout_height": 1476.0,
       "layout_width": 392.0,
       "node_count": 12,
@@ -283,13 +283,13 @@
     },
     "malformed_recovery": {
       "edge_count": 2,
-      "edges_checksum": "e08f045bd921faec",
+      "edges_checksum": "f7c61d636539539b",
       "layout_algorithm": "auto",
-      "layout_checksum": "b378bb57b711db75",
-      "layout_height": 170.5,
-      "layout_width": 1180.025024,
+      "layout_checksum": "2cabd2287480e001",
+      "layout_height": 317.0,
+      "layout_width": 960.025024,
       "node_count": 4,
-      "nodes_checksum": "ac3e94c41029023b"
+      "nodes_checksum": "8be14e9a3231c895"
     },
     "mindmap_basic": {
       "edge_count": 5,
@@ -403,9 +403,9 @@
     },
     "state_composite": {
       "edge_count": 16,
-      "edges_checksum": "bd84d09cbf6d9010",
+      "edges_checksum": "c7331f1dba6d0534",
       "layout_algorithm": "auto",
-      "layout_checksum": "3a3ce37d11154f28",
+      "layout_checksum": "39112442f23b5be0",
       "layout_height": 1911.0,
       "layout_width": 690.0,
       "node_count": 15,

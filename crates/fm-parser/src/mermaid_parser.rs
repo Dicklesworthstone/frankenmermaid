@@ -2140,6 +2140,7 @@ fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &m
         lower_flow_document_item(item, builder, &[], &[]);
     }
     builder.finish_subgraph_edge_ends();
+    builder.finish_unique_subgraph_membership();
 
     // Extract style directives from the raw input and add to IR.
     // This runs AFTER lowering so node IDs are resolved for `style nodeId` lookups.
@@ -26956,6 +26957,46 @@ Rel_Back(db, app, "Responds")"#,
             edges("flowchart LR\n  A[x ~~~ y] --> B\n"),
             [edge("A", "B", ArrowType::Arrow)]
         );
+    }
+
+    /// A node written inside two subgraphs that do not nest stays in the one that closed first,
+    /// as in mermaid; in both, the two boxes were built around it and overlapped.
+    #[test]
+    fn a_flowchart_node_belongs_to_one_subgraph() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  subgraph Frontend\n    UI --> GW\n  end\n  subgraph Backend\n    \
+             GW --> Auth\n    subgraph Inner\n      GW --> Deep\n    end\n  end\n  subgraph Solo\n    \
+             Deep\n  end\n",
+        );
+        let ir = &parsed.ir;
+        let members = |key: &str| -> Vec<&str> {
+            let subgraph = ir.graph.subgraphs.iter().find(|s| s.key == key).unwrap();
+            subgraph
+                .members
+                .iter()
+                .map(|id| ir.nodes[id.0].id.as_str())
+                .collect()
+        };
+        assert_eq!(members("Frontend"), ["UI", "GW"]);
+        assert_eq!(members("Backend"), ["Auth", "Deep"], "GW stays in Frontend");
+        assert_eq!(members("Inner"), ["Deep"]);
+        assert!(
+            members("Solo").is_empty(),
+            "Deep stays in Inner, which closed first"
+        );
+        // The cluster records and each node's own lists agree with the subgraphs.
+        let gw = ir.nodes.iter().position(|n| n.id == "GW").unwrap();
+        assert_eq!(ir.graph.nodes[gw].subgraphs.len(), 1);
+        assert_eq!(ir.graph.nodes[gw].clusters.len(), 1);
+        for cluster in &ir.clusters {
+            let subgraph = ir
+                .graph
+                .subgraphs
+                .iter()
+                .find(|s| s.cluster == Some(cluster.id))
+                .unwrap();
+            assert_eq!(cluster.members, subgraph.members);
+        }
     }
 
     #[test]
