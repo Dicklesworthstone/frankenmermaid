@@ -13382,14 +13382,15 @@ fn cycle_removal(
     };
 
     let reversed_edge_indexes = match cycle_strategy {
-        // Eades' ordering knows nothing of the source, so on a tie it may reverse an edge the
-        // author drew forward: in mermaid's own `Christmas` example it reversed `Go shopping -->
-        // Let me think`, putting the decision above the step that leads to it. The DFS choice
-        // (mermaid's) is kept whenever it reverses no more edges; greedy wins only where it
-        // breaks the cycles with strictly fewer.
+        // Eades' ordering knows nothing of the source, so it may reverse an edge the author drew
+        // forward: in mermaid's own `Christmas` example it reversed `Go shopping --> Let me
+        // think`, putting the decision above the step that leads to it, and in a CI pipeline whose
+        // two loops share a path it reversed one edge of that path, putting `QA Pass?` on top. The
+        // DFS choice (mermaid's) is kept unless greedy breaks the cycles with under half as many
+        // reversals — a dense knot, where DFS's extra upward edges cost more than the order.
         CycleStrategy::Greedy if !dfs_back_edges.is_empty() => {
             let greedy = cycle_removal_greedy(node_count, &edges, node_priority);
-            if greedy.len() < dfs_back_edges.len() {
+            if 2 * greedy.len() < dfs_back_edges.len() {
                 greedy
             } else {
                 dfs_back_edges.clone()
@@ -18114,6 +18115,9 @@ fn build_edge_paths_with_orientation(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
+            // Inside a subgraph laid out in its own direction, its edges run that way too.
+            let horizontal_ranks =
+                subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks);
 
             let is_self_loop = source == target;
             let (pair_total, pair_idx) = if any_parallel {
@@ -18298,6 +18302,36 @@ fn build_edge_paths_with_orientation(
         });
     edge_paths.extend(routed);
     edge_paths
+}
+
+/// Whether an edge's ranks run across (`LR`/`RL`): the direction of the innermost subgraph
+/// holding both its ends that sets one, or `None` to follow the diagram.
+///
+/// A subgraph with its own `direction` is laid out that way, but its edges were anchored and
+/// routed by the DIAGRAM's direction: in `direction LR` inside a TB chart each edge left its
+/// source's bottom and entered its target's top, two nodes side by side, so the line ran through
+/// both and the arrowhead ended under a node.
+fn subgraph_rank_axis(ir: &MermaidDiagramIr, source: usize, target: usize) -> Option<bool> {
+    let held = |node: usize| {
+        ir.graph
+            .nodes
+            .get(node)
+            .map_or(&[][..], |graph_node| graph_node.subgraphs.as_slice())
+    };
+    let depth = |mut id: fm_core::IrSubgraphId| {
+        let mut depth = 0_usize;
+        while let Some(parent) = ir.graph.subgraph(id).and_then(|s| s.parent) {
+            depth += 1;
+            id = parent;
+        }
+        depth
+    };
+    held(source)
+        .iter()
+        .filter(|subgraph| held(target).contains(subgraph))
+        .filter_map(|&subgraph| Some((depth(subgraph), ir.graph.subgraph(subgraph)?.direction?)))
+        .max_by_key(|&(depth, _)| depth)
+        .map(|(_, direction)| matches!(direction, GraphDirection::LR | GraphDirection::RL))
 }
 
 /// Route a self-loop edge: goes out one side and returns on another.
@@ -27512,6 +27546,52 @@ mod tests {
             "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
             &["Idle", "Busy"],
         );
+        // Two loops sharing a path: reversing one edge of that path breaks both, but put the
+        // QA gate on top. The two loop-closing edges are the ones reversed.
+        rank_order(
+            "flowchart TB\n  dev --> repo\n  repo --> ci\n  ci --> build\n  build --> reg\n  \
+             reg --> qa\n  qa -->|yes| prod\n  qa -->|no| dev\n  prod --> mon\n  mon -.-> dev\n",
+            &["dev", "repo", "ci", "build", "reg", "qa", "prod", "mon"],
+        );
+    }
+
+    /// Edges inside a subgraph with its own `direction` run that way: in `direction LR` inside a
+    /// TB chart they left each source's bottom for the next node's top, beside it, so the line ran
+    /// through both nodes and the arrowhead ended under one.
+    #[test]
+    fn edges_in_a_subgraph_follow_its_direction() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  ci --> build\n  subgraph Pipeline\n    direction LR\n    \
+             build --> test --> lint\n  end\n  lint --> reg\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let node = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|n| ir.nodes[n.node_index].id == id)
+                .unwrap()
+                .bounds
+        };
+        for (from, to, edge_index) in [("build", "test", 1), ("test", "lint", 2)] {
+            let path = &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == edge_index)
+                .unwrap()
+                .points;
+            let (start, end) = (path[0], *path.last().unwrap());
+            let (a, b) = (node(from), node(to));
+            assert!(
+                (start.x - (a.x + a.width)).abs() < 1.0,
+                "{from} -> {to} leaves the right face"
+            );
+            assert!(
+                (end.x - b.x).abs() < 1.0,
+                "{from} -> {to} enters the left face"
+            );
+        }
     }
 
     /// Two edges that share neither source nor target never run along the same line: a return

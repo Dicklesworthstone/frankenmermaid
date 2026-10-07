@@ -113,13 +113,13 @@
     },
     "cycle_feedback": {
       "edge_count": 16,
-      "edges_checksum": "d057ee6cd5f201bf",
+      "edges_checksum": "01265bbe8afb58f9",
       "layout_algorithm": "auto",
-      "layout_checksum": "5d462d9d0a816528",
-      "layout_height": 1476.0,
-      "layout_width": 761.262573,
+      "layout_checksum": "708debd87822f5cc",
+      "layout_height": 1662.5,
+      "layout_width": 490.050018,
       "node_count": 11,
-      "nodes_checksum": "5105112988ee1a02"
+      "nodes_checksum": "ce83d6c0c69a3497"
     },
     "cycle_ladder": {
       "edge_count": 22,
