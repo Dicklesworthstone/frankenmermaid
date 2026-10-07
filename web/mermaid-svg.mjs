@@ -145,3 +145,151 @@ export function prepareSvg(svg, id, document) {
   if (declarations) for (const element of elements) if (element.hasAttribute("style")) declarations(element.style);
   return { svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true) };
 }
+
+/** Callback names are opaque registry keys, never expressions or window property paths. */
+export function checkCallbackName(name) {
+  if (typeof name !== "string" || name.length > 128 ||
+      !/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(name) ||
+      name.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part))) {
+    throw new TypeError("Callback name must be a safe identifier or dotted registry key within 128 characters.");
+  }
+  return name;
+}
+
+/** Capture an admitted SVG, then bind only an unchanged copy inside the caller's container.
+ * No global function lookup, evaluation, source parsing, or callback argument interpretation.
+ * The returned cleanup is idempotent; binding the same live root twice returns that cleanup.
+ */
+export function createSvgBinder(element, { resolveCallback = () => undefined,
+  isLive = () => true, reportError = () => {}, onBind = () => {} } = {}) {
+  if (![resolveCallback, isLive, reportError, onBind].every((fn) => typeof fn === "function")) {
+    throw new TypeError("SVG binding requires callback resolution and lifecycle functions.");
+  }
+  if (element?.namespaceURI !== SVG_NS || element.localName !== "svg") throw new TypeError("Binding requires a prepared SVG.");
+  const template = element.cloneNode(true), id = checkRenderId(template.id);
+  const bindings = new WeakMap();
+  const report = (error) => {
+    try { reportError(error); } catch { /* Reporting must not escape a DOM event or rejected callback. */ }
+  };
+  return function bindFunctions(container) {
+    if (!isLive()) throw new Error("This diagram's interaction owner has been disposed.");
+    if (container?.nodeType !== 1 || typeof container.querySelectorAll !== "function") {
+      throw new TypeError("bindFunctions requires the SVG or its containing element.");
+    }
+    const candidates = [...container.querySelectorAll(`[id="${id}"]`)];
+    if (container.id === id) candidates.unshift(container);
+    if (candidates.length !== 1 || candidates[0].namespaceURI !== SVG_NS || candidates[0].localName !== "svg") {
+      throw new Error("The container must contain exactly one SVG from this render result.");
+    }
+    const root = candidates[0], document = root.ownerDocument;
+    const existing = bindings.get(root);
+    if (existing) return existing;
+    if (!root.isEqualNode(template)) throw new Error("SVG changed before binding; insert this render result before binding its interactions.");
+
+    // Plan all bindings before touching the DOM. Nodes without registered handlers stay inert.
+    const plans = new Map(), missing = new Set();
+    for (const node of root.querySelectorAll("[data-callback]")) {
+      const name = node.getAttribute("data-callback"), sourceId = node.getAttribute("data-id");
+      try { checkCallbackName(name); }
+      catch (error) { report(error); continue; }
+      const callback = resolveCallback(name);
+      if (typeof callback !== "function") { missing.add(name); continue; }
+      if (!sourceId || node.localName !== "g" || node.closest("svg") !== root) {
+        throw new Error("Engine callback metadata has no addressable source node.");
+      }
+      plans.set(node, { name, sourceId, callback });
+    }
+    const restorations = [];
+    let disposed = false, pressed = null;
+    function attribute(node, name, value) {
+      const previous = node.getAttribute(name);
+      if (previous === value) return;
+      node.setAttribute(name, value);
+      restorations.push(() => {
+        // Do not undo a later host edit while removing our own accessibility decoration.
+        if (node.getAttribute(name) !== value) return;
+        if (previous === null) node.removeAttribute(name); else node.setAttribute(name, previous);
+      });
+    }
+    function target(event) {
+      if (disposed || !isLive() || !root.isConnected || root.ownerDocument !== document || event.defaultPrevented) return null;
+      let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+      if (!node || !root.contains(node) || node.closest("svg") !== root) return null;
+      if (node.closest('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return null;
+      for (; node && node !== root; node = node.parentElement) {
+        // A nested hyperlink owns its normal browser click and Enter behavior.
+        if (node.localName === "a" && (node.hasAttribute("href") || node.hasAttributeNS(XLINK_NS, "href"))) return null;
+        const plan = plans.get(node);
+        if (plan && node.getAttribute("data-id") === plan.sourceId &&
+            node.getAttribute("data-callback") === plan.name && resolveCallback(plan.name) === plan.callback) return node;
+      }
+      return null;
+    }
+    function activate(node) {
+      const plan = plans.get(node);
+      try { Promise.resolve(plan.callback(plan.sourceId)).catch(report); }
+      catch (error) { report(error); }
+    }
+    const modified = (event) => event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
+    function click(event) {
+      if (event.button !== 0 || modified(event)) return;
+      const node = target(event);
+      if (node) { event.preventDefault(); activate(node); }
+    }
+    function keydown(event) {
+      if (modified(event) || event.isComposing || !["Enter", " "].includes(event.key)) return;
+      const node = target(event);
+      if (!node) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.key === "Enter") { pressed = null; activate(node); }
+      else pressed = node;
+    }
+    function keyup(event) {
+      if (event.key !== " ") return;
+      const node = pressed;
+      pressed = null;
+      if (!modified(event) && !event.isComposing && node && target(event) === node) {
+        event.preventDefault(); activate(node);
+      }
+    }
+    function blur() { pressed = null; }
+    function cleanup() {
+      if (disposed) return;
+      disposed = true;
+      pressed = null;
+      root.removeEventListener("click", click);
+      root.removeEventListener("keydown", keydown);
+      root.removeEventListener("keyup", keyup);
+      root.removeEventListener("blur", blur, true);
+      for (const restore of restorations.reverse()) restore();
+      bindings.delete(root);
+    }
+    try {
+      if (plans.size) {
+        // Chromium otherwise adds an implicit Tab stop to an SVG with a click listener.
+        // The actionable node buttons, not the event-delegation root, own keyboard focus.
+        if (!root.hasAttribute("tabindex")) attribute(root, "tabindex", "-1");
+        // An outer role=img makes all descendants presentational to assistive technology.
+        // Expose the interactive children, retaining the engine's accessible name/description.
+        if (root.getAttribute("role") === "img") attribute(root, "role", "group");
+        for (const node of plans.keys()) {
+          attribute(node, "role", "button");
+          attribute(node, "tabindex", "0");
+          attribute(node, "aria-keyshortcuts", "Enter Space");
+          if (!node.hasAttribute("aria-label") && !node.hasAttribute("aria-labelledby")) {
+            attribute(node, "aria-label", node.getAttribute("title") || plans.get(node).sourceId);
+          }
+        }
+        root.addEventListener("click", click);
+        root.addEventListener("keydown", keydown);
+        root.addEventListener("keyup", keyup);
+        root.addEventListener("blur", blur, true);
+      }
+      bindings.set(root, cleanup);
+      onBind(root, cleanup);
+    } catch (error) { cleanup(); throw error; }
+    for (const name of missing) report(new Error(`No callback registered for '${name}'; the diagram node remains inert.`));
+    return cleanup;
+  };
+}
