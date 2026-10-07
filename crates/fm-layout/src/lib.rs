@@ -2413,7 +2413,8 @@ pub enum StateNoteSide {
 /// it. A renderer-only placement lands outside the viewBox and is clipped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutStateNote {
-    /// Index into [`DiagramLayout::nodes`] for the state this note annotates.
+    /// Index into [`DiagramLayout::nodes`] for the state this note annotates; `usize::MAX` for a
+    /// note that annotates the whole diagram (whose leader is then a single point).
     pub node_index: usize,
     /// Side the note was placed on, from `IrStateNote::position`.
     pub side: StateNoteSide,
@@ -19271,7 +19272,16 @@ fn build_state_note_geometry(
         return Vec::new();
     }
 
+    let size = |text: &str| {
+        let (text_width, text_height) = metrics.estimate_dimensions(text);
+        (
+            STATE_NOTE_FONT_SCALE.mul_add(text_width, 2.0 * STATE_NOTE_PAD_X),
+            STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y),
+        )
+    };
     let mut placed: Vec<LayoutStateNote> = Vec::with_capacity(ir.state_notes.len());
+    // A note with no target (a class diagram's `note "…"`) matches no node here and is placed
+    // after the loop.
     for note in &ir.state_notes {
         let Some(target) = nodes.iter().find(|node| node.node_id == note.target) else {
             continue;
@@ -19282,9 +19292,7 @@ fn build_state_note_geometry(
             StateNoteSide::Right
         };
 
-        let (text_width, text_height) = metrics.estimate_dimensions(&note.text);
-        let width = STATE_NOTE_FONT_SCALE.mul_add(text_width, 2.0 * STATE_NOTE_PAD_X);
-        let height = STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y);
+        let (width, height) = size(&note.text);
 
         // Start beside the target, then clear any OTHER state box the note's own row runs into.
         // Without this a note on a state that shares its rank with a neighbour is drawn on top of
@@ -19346,6 +19354,43 @@ fn build_state_note_geometry(
                 y: leader_y,
             },
         });
+    }
+
+    // A note attached to nothing annotates the whole diagram. mermaid lays it out as a free box;
+    // here the free notes stack in a column right of every node and note placed so far, from the
+    // top, so one can cover neither. Its leader is a point (renderers skip it): there is nothing
+    // to lead to. `node_index` is `usize::MAX` for the same reason.
+    let right = nodes
+        .iter()
+        .map(|node| node.bounds)
+        .chain(placed.iter().map(|note| note.bounds))
+        .fold(f32::NEG_INFINITY, |acc, r| acc.max(r.x + r.width));
+    let top = nodes
+        .iter()
+        .fold(f32::INFINITY, |acc, node| acc.min(node.bounds.y));
+    let x = if right.is_finite() {
+        right + STATE_NOTE_GAP
+    } else {
+        0.0
+    };
+    let mut y = if top.is_finite() { top } else { 0.0 };
+    for note in ir.state_notes.iter().filter(|note| note.target.is_empty()) {
+        let (width, height) = size(&note.text);
+        let corner = LayoutPoint { x, y };
+        placed.push(LayoutStateNote {
+            node_index: usize::MAX,
+            side: StateNoteSide::Right,
+            text: note.text.clone(),
+            bounds: LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            leader_start: corner,
+            leader_end: corner,
+        });
+        y += height + STATE_NOTE_STACK_GAP;
     }
     placed
 }
@@ -28590,6 +28635,51 @@ mod tests {
             span: Span::default(),
         });
         ir
+    }
+
+    /// A class diagram's `note "…"` annotates the diagram, not a class: it is placed clear of
+    /// every class and every attached note, with no leader, and the canvas holds it.
+    #[test]
+    fn a_note_on_the_whole_diagram_gets_a_place_of_its_own() {
+        let ir = fm_parser::parse(
+            "classDiagram\n  note \"From Duck till Zebra\"\n  Animal <|-- Duck\n  Animal <|-- Zebra\n  note for Duck \"can fly\"\n  note \"second\"\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let notes = &layout.extensions.state_notes;
+        assert_eq!(
+            notes.len(),
+            3,
+            "both free notes and the attached one are placed"
+        );
+        let free: Vec<_> = notes
+            .iter()
+            .filter(|n| n.node_index == usize::MAX)
+            .collect();
+        assert_eq!(
+            free.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            ["From Duck till Zebra", "second"]
+        );
+        for note in &free {
+            assert_eq!(note.leader_start, note.leader_end, "nothing to lead to");
+            for node in &layout.nodes {
+                assert!(
+                    !rects_overlap(note.bounds, node.bounds),
+                    "covers {}",
+                    node.node_id
+                );
+            }
+            for other in notes.iter().filter(|other| !std::ptr::eq(*other, *note)) {
+                assert!(
+                    !rects_overlap(note.bounds, other.bounds),
+                    "covers {:?}",
+                    other.text
+                );
+            }
+            let b = layout.bounds;
+            assert!(note.bounds.x + note.bounds.width <= b.x + b.width + 0.5);
+            assert!(note.bounds.y >= b.y - 0.5);
+        }
     }
 
     /// bd-a6l4: the note must EXIST in the layout at all. Before this, `ir.state_notes` was read by

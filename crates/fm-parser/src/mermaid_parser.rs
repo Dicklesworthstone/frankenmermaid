@@ -5734,29 +5734,34 @@ fn lower_class_statement(
     }
 }
 
-/// Parse `note for <class> "<text>"`, mermaid's class-diagram note.
+/// Parse `note for <class> "<text>"`, mermaid's class-diagram note, or the standalone
+/// `note "<text>"`, which annotates the diagram rather than a class and comes back with an EMPTY
+/// target (layout gives it a place of its own; it is never attached to some class).
 ///
 /// The text is taken WHOLE after the target token and only its surrounding quotes are stripped, so
 /// a note containing a colon survives — `mermaid_parser.rs` already flags that exact case as a
 /// hazard for the member shorthand, which splits on the first colon. Splitting here would turn
 /// `note for A "text: here"` into a truncated note or, worse, a member of a class named `note`.
-///
-/// Returns `None` for the standalone `note "<text>"` form, which has no target: placing an
-/// unattached note needs geometry the targeted path has no notion of. It stays dropped, and
-/// visibly so, rather than being silently reattached to an arbitrary class.
+/// A `\n` or `<br>` in the text breaks the line, as mermaid draws it.
 fn parse_class_note(statement: &str) -> Option<(String, String)> {
-    let rest = trim_fast(trim_fast(statement).strip_prefix("note for ")?);
-    let (target, remainder) = rest.split_once(char::is_whitespace)?;
-    let target = trim_fast(target);
-    let text = trim_fast(remainder);
+    let statement = trim_fast(statement);
+    let (target, text) = if let Some(rest) = statement.strip_prefix("note for ") {
+        let (target, remainder) = trim_fast(rest).split_once(char::is_whitespace)?;
+        (trim_fast(target), trim_fast(remainder))
+    } else {
+        let text = trim_fast(statement.strip_prefix("note ")?);
+        // Only the quoted form: `note` followed by anything else is not a note statement.
+        text.starts_with('"').then_some(("", text))?
+    };
     let text = text
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
         .map_or(text, trim_fast);
-    if target.is_empty() || text.is_empty() {
+    if text.is_empty() {
         return None;
     }
-    Some((target.to_string(), text.to_string()))
+    let text = replace_br_with_newlines(text).replace("\\n", "\n");
+    Some((target.to_string(), text))
 }
 
 fn parse_state(input: &str, builder: &mut IrBuilder) {
@@ -29315,12 +29320,18 @@ Rel_Back(db, app, "Responds")"#,
             "the orphan note is still carried; layout is where an unresolvable target is dropped"
         );
 
-        // The standalone form has no target. It stays dropped rather than being attached to an
-        // arbitrary class — and, as before, must not intern a node called `note`.
+        // The standalone form has no target. It is carried with an empty one rather than being
+        // attached to an arbitrary class — and, as before, must not intern a node called `note`.
         let standalone = parse_mermaid("classDiagram\n    class Duck\n    note \"loose text\"");
-        assert!(
-            standalone.ir.state_notes.is_empty(),
-            "the untargeted note form is not implemented and must not be guessed at"
+        assert_eq!(
+            standalone
+                .ir
+                .state_notes
+                .iter()
+                .map(|note| (note.target.as_str(), note.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("", "loose text")],
+            "the untargeted note annotates the diagram, not a class"
         );
         assert_eq!(
             standalone
@@ -29332,6 +29343,30 @@ Rel_Back(db, app, "Responds")"#,
             vec!["Duck"],
             "a standalone note must not intern a node"
         );
+    }
+
+    /// mermaid's own example, `note for Duck "can fly\ncan swim"`, draws one line per `\n`; the
+    /// escape was carried through as text and printed literally.
+    #[test]
+    fn class_note_line_breaks_break_the_line() {
+        let parsed = parse_mermaid(
+            "classDiagram\n    class Duck\n    note for Duck \"can fly\\ncan swim<br>can dive\"\n    \
+             note \"From Duck<br/>till Zebra\"",
+        );
+        let texts: Vec<&str> = parsed
+            .ir
+            .state_notes
+            .iter()
+            .map(|note| note.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["can fly\ncan swim\ncan dive", "From Duck\ntill Zebra"]
+        );
+        // `note` with no quoted text is not a note, and still declares nothing.
+        let bare = parse_mermaid("classDiagram\n    class Duck\n    note for\n    note x\n");
+        assert!(bare.ir.state_notes.is_empty());
+        assert_eq!(bare.ir.nodes.len(), 1);
     }
 
     // ── Class diagram cardinality and namespace tests ─────────────────

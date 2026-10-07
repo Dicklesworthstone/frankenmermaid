@@ -1717,18 +1717,20 @@ impl Canvas2dRenderer {
             ctx.set_line_width(self.config.node_stroke_width);
             ctx.stroke_rect(x, y, w, h);
 
-            // Leader from the annotated state to the note.
-            ctx.set_stroke_style(&self.config.edge_stroke);
-            ctx.begin_path();
-            ctx.move_to(
-                f64::from(note.leader_start.x) + offset_x,
-                f64::from(note.leader_start.y) + offset_y,
-            );
-            ctx.line_to(
-                f64::from(note.leader_end.x) + offset_x,
-                f64::from(note.leader_end.y) + offset_y,
-            );
-            ctx.stroke();
+            // Leader from the annotated state to the note; a note on the whole diagram has none.
+            if note.leader_start != note.leader_end {
+                ctx.set_stroke_style(&self.config.edge_stroke);
+                ctx.begin_path();
+                ctx.move_to(
+                    f64::from(note.leader_start.x) + offset_x,
+                    f64::from(note.leader_start.y) + offset_y,
+                );
+                ctx.line_to(
+                    f64::from(note.leader_end.x) + offset_x,
+                    f64::from(note.leader_end.y) + offset_y,
+                );
+                ctx.stroke();
+            }
 
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);

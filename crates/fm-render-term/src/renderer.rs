@@ -484,8 +484,11 @@ impl TermRenderer {
             let lx1 = (note.leader_end.x * pixel_scale_x) as isize + padding_x as isize;
             let ly1 = (note.leader_end.y * pixel_scale_y) as isize + padding_y as isize;
             // `draw_line` takes isize and clips internally, so negatives are safe to pass and the
-            // guard would only drop leaders that are partly on-canvas.
-            canvas.draw_line(lx0, ly0, lx1, ly1);
+            // guard would only drop leaders that are partly on-canvas. A note on the whole diagram
+            // has no leader.
+            if note.leader_start != note.leader_end {
+                canvas.draw_line(lx0, ly0, lx1, ly1);
+            }
         }
 
         // STATE CONCURRENCY-REGION DIVIDERS (bd-dgnm4). `state Big { A --> B  --  C --> D }`

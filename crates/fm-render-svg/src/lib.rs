@@ -5155,18 +5155,21 @@ fn render_layout_to_svg(
         let nx = note.bounds.x + offset_x;
         let ny = note.bounds.y + offset_y;
 
-        // Leader from the state's edge to the note's, dashed like mermaid-js's note connector.
-        doc = doc.child(
-            Element::line()
-                .x1(note.leader_start.x + offset_x)
-                .y1(note.leader_start.y + offset_y)
-                .x2(note.leader_end.x + offset_x)
-                .y2(note.leader_end.y + offset_y)
-                .stroke(&theme.colors.edge)
-                .stroke_width(1.0)
-                .stroke_dasharray("4,3")
-                .class("fm-state-note-leader"),
-        );
+        // Leader from the state's edge to the note's, dashed like mermaid-js's note connector. A
+        // note annotating the whole diagram has none.
+        if note.leader_start != note.leader_end {
+            doc = doc.child(
+                Element::line()
+                    .x1(note.leader_start.x + offset_x)
+                    .y1(note.leader_start.y + offset_y)
+                    .x2(note.leader_end.x + offset_x)
+                    .y2(note.leader_end.y + offset_y)
+                    .stroke(&theme.colors.edge)
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,3")
+                    .class("fm-state-note-leader"),
+            );
+        }
 
         doc = doc.child(
             Element::rect()

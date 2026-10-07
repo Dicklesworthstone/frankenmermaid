@@ -1628,15 +1628,18 @@ impl GpuRenderPlan {
             if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
                 continue;
             }
-            state_note_leader_segments.push(GpuEdgeSegment {
-                from: [note.leader_start.x, note.leader_start.y],
-                to: [note.leader_end.x, note.leader_end.y],
-                edge_index: NO_EDGE_INDEX,
-                color: DEFAULT_EDGE_STROKE_RGBA,
-                dash_phase: 0.0,
-                dash: [0.0, 0.0],
-                width: STATE_NOTE_STROKE_WIDTH,
-            });
+            // A note on the whole diagram has no leader, as in the raster pass.
+            if note.leader_start != note.leader_end {
+                state_note_leader_segments.push(GpuEdgeSegment {
+                    from: [note.leader_start.x, note.leader_start.y],
+                    to: [note.leader_end.x, note.leader_end.y],
+                    edge_index: NO_EDGE_INDEX,
+                    color: DEFAULT_EDGE_STROKE_RGBA,
+                    dash_phase: 0.0,
+                    dash: [0.0, 0.0],
+                    width: STATE_NOTE_STROKE_WIDTH,
+                });
+            }
             state_note_instances.push(GpuNodeInstance {
                 center: [
                     note.bounds.x + (note.bounds.width * 0.5),
