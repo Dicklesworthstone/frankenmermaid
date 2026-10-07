@@ -152,7 +152,7 @@ fn layout_coordinates_match_their_cross_target_digest() {
         ("flowchart", 0x19c8_0a8c_3608_67ca),
         ("sequence", 0x0372_54aa_adab_2295),
         ("class", 0x3123_9435_760e_03d5),
-        ("state", 0xa519_e199_b43f_131e),
+        ("state", 0x6e24_4785_b0ab_0e8a),
     ];
 
     let mut actual = Vec::new();

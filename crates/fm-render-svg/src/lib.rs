@@ -15052,26 +15052,9 @@ fn compute_edge_label<'a>(
         } else {
             label_text
         };
-        let (lx, ly) = if edge_path.points.len() == 4 {
-            let p1 = &edge_path.points[1];
-            let p2 = &edge_path.points[2];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else if edge_path.points.len() == 2 {
-            let p1 = &edge_path.points[0];
-            let p2 = &edge_path.points[1];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else {
-            let mid_idx = edge_path.points.len() / 2;
-            let mid_point = &edge_path.points[mid_idx];
-            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
-        };
-        Some((label_text, lx, ly))
+        // The anchor rule is fm-layout's, shared with the canvas and the render scene.
+        let anchor = fm_layout::edge_label_position(edge_path);
+        Some((label_text, anchor.x + offset_x, anchor.y + offset_y - 8.0))
     } else {
         None
     }

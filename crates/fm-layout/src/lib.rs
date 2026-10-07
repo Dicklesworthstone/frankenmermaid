@@ -3732,26 +3732,25 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
     layer
 }
 
-fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
-    if edge_path.points.len() == 4 {
-        let p1 = &edge_path.points[1];
-        let p2 = &edge_path.points[2];
+/// Where an edge's label is anchored: the middle of its middle segment. The one rule the SVG
+/// renderer, the canvas renderer and the render scene all place labels by.
+#[must_use]
+pub fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
+    let points = &edge_path.points;
+    if points.len() == 4 {
         LayoutPoint {
-            x: f32::midpoint(p1.x, p2.x),
-            y: f32::midpoint(p1.y, p2.y),
+            x: f32::midpoint(points[1].x, points[2].x),
+            y: f32::midpoint(points[1].y, points[2].y),
         }
-    } else if edge_path.points.len() == 2 {
-        let p1 = &edge_path.points[0];
-        let p2 = &edge_path.points[1];
+    } else if points.len() == 2 {
         LayoutPoint {
-            x: f32::midpoint(p1.x, p2.x),
-            y: f32::midpoint(p1.y, p2.y),
+            x: f32::midpoint(points[0].x, points[1].x),
+            y: f32::midpoint(points[0].y, points[1].y),
         }
-    } else if edge_path.points.is_empty() {
+    } else if points.is_empty() {
         LayoutPoint { x: 0.0, y: 0.0 }
     } else {
-        let midpoint_index = edge_path.points.len() / 2;
-        edge_path.points[midpoint_index]
+        points[points.len() / 2]
     }
 }
 
@@ -7544,6 +7543,7 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
     /// (node, side 0=left 1=right 2=top 3=bottom, quantised x, quantised y)
     type EndKey = (usize, u8, i32, i32);
     const GAP: f32 = 14.0;
+    const LABELLED_GAP: f32 = 26.0;
     const EPS: f32 = 0.5;
     // key -> [(edge path, at_start)]
     let mut groups: Vec<(EndKey, Vec<(usize, bool)>)> = Vec::new();
@@ -7623,7 +7623,15 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
         }
         #[allow(clippy::cast_precision_loss)]
         let span = (members.len() - 1) as f32;
-        let gap = GAP.min(side_length * 0.8 / span.max(1.0));
+        // A label sits at its path's midpoint, so two labelled relationships between the same pair
+        // need their paths a label's height apart or the labels print over each other.
+        let labelled = members.iter().any(|&(path, _)| {
+            ir.edges
+                .get(layout.edges[path].edge_index)
+                .is_some_and(|edge| edge.label.is_some())
+        });
+        let wanted = if labelled { LABELLED_GAP } else { GAP };
+        let gap = wanted.min(side_length * 0.8 / span.max(1.0));
         for (rank, (path, at_start)) in members.into_iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
             let offset = (rank as f32 - span / 2.0) * gap;
@@ -15324,6 +15332,51 @@ fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) 
     spacing
 }
 
+/// The gap each pair of adjacent ranks needs for the edge labels drawn between them, keyed by the
+/// lower rank index.
+///
+/// A label sits on its edge's midpoint, which for an edge between adjacent ranks is in the gap
+/// between them. The gap was the fixed `rank_spacing` however long the label, so in a left-to-right
+/// diagram a label wider than the gap was drawn under the two nodes it connects and read as
+/// `y long label on this`. The floor is the label's extent along the rank axis plus room for an
+/// arrowhead at each end.
+fn edge_label_rank_gaps(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    rank_to_index: &BTreeMap<usize, usize>,
+    horizontal_ranks: bool,
+) -> BTreeMap<usize, f32> {
+    const END_ROOM: f32 = 40.0;
+    let mut gaps = BTreeMap::new();
+    let metrics = fm_core::FontMetrics::default_metrics();
+    for edge in &ir.edges {
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let index = |endpoint| {
+            let node = endpoint_node_index(ir, endpoint)?;
+            rank_to_index.get(ranks.get(&node)?).copied()
+        };
+        let (Some(a), Some(b)) = (index(edge.from), index(edge.to)) else {
+            continue;
+        };
+        if a.abs_diff(b) != 1 {
+            continue;
+        }
+        let (width, height) = metrics.estimate_dimensions(&label.text);
+        // The renderer sizes the label's box from its own per-character estimate, which runs about
+        // a third wider than this measure (a 268-wide box for a label this measures at 199).
+        let needed = if horizontal_ranks {
+            width.mul_add(1.4, END_ROOM)
+        } else {
+            height + END_ROOM
+        };
+        let gap = gaps.entry(a.min(b)).or_insert(0.0_f32);
+        *gap = gap.max(needed);
+    }
+    gaps
+}
+
 fn coordinate_assignment(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
@@ -15367,9 +15420,15 @@ fn coordinate_assignment(
     } else {
         (0..ordered_ranks.len()).collect()
     };
-    for rank_index in iter_order {
+    let label_gaps = edge_label_rank_gaps(ir, ranks, &rank_to_index, horizontal_ranks);
+    for (position, &rank_index) in iter_order.iter().enumerate() {
         primary_offsets[rank_index] = primary_cursor;
-        primary_cursor += rank_span[rank_index] + spacing.rank_spacing;
+        let label_gap = iter_order
+            .get(position + 1)
+            .and_then(|&next| label_gaps.get(&rank_index.min(next)))
+            .copied()
+            .unwrap_or(0.0);
+        primary_cursor += rank_span[rank_index] + spacing.rank_spacing.max(label_gap);
     }
 
     // Compute secondary coordinates using Brandes-Köpf 4-way alignment.
@@ -17930,7 +17989,24 @@ fn build_edge_paths_with_orientation(
                 (1, 0)
             };
             let parallel_offset = if pair_total > 1 {
-                let offset_step = 12.0_f32;
+                // A labelled edge's label sits on its midpoint, so two edges of one pair a few
+                // units apart printed their labels over each other. The offset runs ACROSS the
+                // path: a label's height where ranks run left to right, its width (as far as the
+                // nodes leave room) where they run top to bottom. The offset's sign is fixed by the
+                // pair index whatever the step, so mixed steps keep every edge on its own side.
+                let offset_step = match edge.label.and_then(|id| ir.labels.get(id.0)) {
+                    None => 12.0_f32,
+                    Some(_) if horizontal_ranks => 26.0,
+                    Some(label) => {
+                        let width = fm_core::FontMetrics::default_metrics()
+                            .estimate_dimensions(&label.text)
+                            .0;
+                        let room = source_box.bounds.width.min(target_box.bounds.width) * 0.8
+                            / (pair_total - 1) as f32;
+                        // The rendered box: the renderer's wider per-character measure plus padding.
+                        width.mul_add(1.4, 30.0).min(room).max(26.0)
+                    }
+                };
                 (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
             } else {
                 0.0
@@ -26811,6 +26887,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A long label on a left-to-right edge widens that rank gap to fit it; it used to be drawn
+    /// under the two nodes it connects. Gaps with no label keep the default spacing.
+    #[test]
+    fn rank_gaps_make_room_for_edge_labels() {
+        let label = "a fairly long label on this edge";
+        let ir = fm_parser::parse(&format!("flowchart LR\n  A -->|{label}| B\n  B --> C\n")).ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (a, b, c) = (bounds("A"), bounds("B"), bounds("C"));
+        let labelled_gap = b.x - (a.x + a.width);
+        let plain_gap = c.x - (b.x + b.width);
+        let text = fm_core::FontMetrics::default_metrics()
+            .estimate_dimensions(label)
+            .0;
+        assert!(
+            labelled_gap > text * 1.3,
+            "a {labelled_gap}-wide gap for a label measuring {text}"
+        );
+        assert!(
+            (plain_gap - LayoutSpacing::default().rank_spacing).abs() < 0.01,
+            "CONTROL: the unlabelled gap keeps the default, {plain_gap}"
+        );
+    }
+
+    /// Two labelled transitions between one pair of states, in a top-down layout, are spread far
+    /// enough apart that their labels sit side by side instead of on top of each other.
+    #[test]
+    fn labelled_parallel_edges_leave_room_for_their_labels() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  Idle --> Running : start\n  Running --> Idle : stop\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let anchors: Vec<LayoutPoint> = layout
+            .edges
+            .iter()
+            .map(super::edge_label_position)
+            .collect();
+        assert_eq!(anchors.len(), 2, "CONTROL: both transitions are routed");
+        let text = fm_core::FontMetrics::default_metrics()
+            .estimate_dimensions("start")
+            .0;
+        assert!(
+            (anchors[0].x - anchors[1].x).abs() > text * 1.3,
+            "labels {} apart for words measuring {text}: {anchors:?}",
+            (anchors[0].x - anchors[1].x).abs()
+        );
     }
 
     /// A `~~~` link is an ordinary edge to the layout: it is what moves `C` a rank past `A`.

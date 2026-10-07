@@ -2298,28 +2298,12 @@ impl Canvas2dRenderer {
                     Cow::Borrowed(&label.text)
                 };
                 let label_offset = self.config.font_size * 0.8;
-                let (lx, ly) = if points.len() == 4 {
-                    let p1 = &points[1];
-                    let p2 = &points[2];
-                    (
-                        f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
-                        f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
-                    )
-                } else if points.len() == 2 {
-                    let p1 = &points[0];
-                    let p2 = &points[1];
-                    (
-                        f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
-                        f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
-                    )
-                } else {
-                    let mid_idx = points.len() / 2;
-                    let mid = &points[mid_idx];
-                    (
-                        f64::from(mid.x) + offset_x,
-                        f64::from(mid.y) + offset_y - label_offset,
-                    )
-                };
+                // The anchor rule is fm-layout's, shared with the SVG renderer.
+                let anchor = fm_layout::edge_label_position(edge_path);
+                let (lx, ly) = (
+                    f64::from(anchor.x) + offset_x,
+                    f64::from(anchor.y) + offset_y - label_offset,
+                );
 
                 // A declared `font-size` takes a side path so the hoisted secondary-label font
                 // is still what every undeclared edge draws under — same reasoning as the node
