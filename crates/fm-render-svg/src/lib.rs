@@ -1547,14 +1547,26 @@ fn mermaid_default_c4_person_colors(
         ))
 }
 
-fn mermaid_default_c4_stereotype_color<'a>(
-    config: &SvgRenderConfig,
-    colors: &'a ThemeColors,
-) -> &'a str {
-    if config.theme == ThemePreset::Default {
+/// The text colour on a C4 card: Mermaid's white on the default theme's navy Person card, the
+/// theme's text colour on every other card.
+///
+/// It is decided by the CARD, not the theme: forcing white for the whole default theme put
+/// `<<system>>` white-on-white on every themed card, and leaving the Person card's name and
+/// description at the theme text colour put them dark-on-navy.
+fn c4_card_text_color(person_card: bool, colors: &ThemeColors) -> &str {
+    if person_card {
         MERMAID_DEFAULT_C4_STEREOTYPE_COLOR
     } else {
         colors.text.as_str()
+    }
+}
+
+/// The inline restatement of the Person card's white, which `.fm-node text` would otherwise beat.
+fn write_c4_card_text_style(out: &mut String, person_card: bool) {
+    if person_card {
+        out.push_str(" style=\"fill:");
+        out.push_str(MERMAID_DEFAULT_C4_STEREOTYPE_COLOR);
+        out.push('"');
     }
 }
 
@@ -9513,17 +9525,12 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, small_font);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
-    let _ = write_escaped_attr(out, c4_type_label_color);
+    let card_text = c4_card_text_color(c4_person_colors.is_some(), colors);
+    let _ = write_escaped_attr(out, card_text);
     // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
-    // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned white,
-    // while non-default themes continue to inherit their themed text color.
+    // attribute, so the white on the navy Person card is restated inline on each of its texts.
     out.push_str("\" class=\"fm-c4-type-label\"");
-    if config.theme == ThemePreset::Default {
-        out.push_str(" style=\"fill:");
-        let _ = write_escaped_attr(out, c4_type_label_color);
-        out.push('\"');
-    }
+    write_c4_card_text_style(out, c4_person_colors.is_some());
     out.push_str(">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
@@ -9546,8 +9553,10 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, font_size);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, &colors.text);
-    out.push_str("\" class=\"fm-c4-name\">");
+    let _ = write_escaped_attr(out, card_text);
+    out.push_str("\" class=\"fm-c4-name\"");
+    write_c4_card_text_style(out, c4_person_colors.is_some());
+    out.push('>');
     let _ = write_escaped_text(out, label_text);
     out.push_str("</text>");
 
@@ -9570,8 +9579,10 @@ fn write_c4_node_fragment_into(
             out.push_str("\" text-anchor=\"middle\" font-size=\"");
             let _ = write_number_into(out, description_font);
             out.push_str("\" fill=\"");
-            let _ = write_escaped_attr(out, &colors.text);
-            out.push_str("\" class=\"fm-c4-description\">");
+            let _ = write_escaped_attr(out, card_text);
+            out.push_str("\" class=\"fm-c4-description\"");
+            write_c4_card_text_style(out, c4_person_colors.is_some());
+            out.push('>');
             let _ = write_escaped_text(out, &description_lines.join("\n"));
             out.push_str("</text>");
         }
@@ -12173,6 +12184,27 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => {
+            let outline = fm_core::block_arrow_outline(shape, x, y, w, h).unwrap_or_default();
+            let mut path = PathBuilder::new();
+            for (index, &(px, py)) in outline.iter().enumerate() {
+                path = if index == 0 {
+                    path.move_to(px, py)
+                } else {
+                    path.line_to(px, py)
+                };
+            }
+            Element::path()
+                .d(&path.close().build())
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::LinedDocument => {
             // The document outline plus a vertical rule 0.045 of the width in from the left, running
             // to 0.94h — both ratios measured, and the inset deliberately NOT `LinedRect`'s 0.14.
@@ -13337,8 +13369,16 @@ fn render_c4_node_content(
     let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
     let mut cursor_y = y + (small_font * 1.25);
 
-    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
-    let mut c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
+    let person_card = mermaid_default_c4_person_colors(config, c4_meta).is_some();
+    let card_text = c4_card_text_color(person_card, colors);
+    let person_text_style = |elem: Element| {
+        if person_card {
+            elem.attr("style", "fill:#FFFFFF")
+        } else {
+            elem
+        }
+    };
+    let c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
         .x(x + w / 2.0)
         .y(cursor_y)
         .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
@@ -13348,13 +13388,12 @@ fn render_c4_node_content(
         // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
         // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
         // given diagram happens to take.
-        .fill(c4_type_label_color)
+        .fill(card_text)
         .class("fm-c4-type-label")
         .build();
-    if config.theme == ThemePreset::Default {
-        c4_type_label = c4_type_label.attr("style", "fill:#FFFFFF");
-    }
-    group = group.child(apply_label_style(apply_label_class(c4_type_label)));
+    group = group.child(apply_label_style(apply_label_class(person_text_style(
+        c4_type_label,
+    ))));
 
     if node
         .classes
@@ -13369,7 +13408,7 @@ fn render_c4_node_content(
     }
 
     cursor_y += line_h * 0.95;
-    group = group.child(apply_label_style(apply_label_class(
+    group = group.child(apply_label_style(apply_label_class(person_text_style(
         TextBuilder::new(label_text)
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -13377,10 +13416,10 @@ fn render_c4_node_content(
             .font_size(font_size)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
-            .fill(&colors.text)
+            .fill(card_text)
             .class("fm-c4-name")
             .build(),
-    )));
+    ))));
 
     if let Some(technology) = &c4_meta.technology {
         cursor_y += line_h * 0.9;
@@ -13409,7 +13448,7 @@ fn render_c4_node_content(
                 * config.line_height;
             let baseline_y =
                 (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            group = group.child(apply_label_style(apply_label_class(
+            group = group.child(apply_label_style(apply_label_class(person_text_style(
                 TextBuilder::new(&description_text)
                     .x(x + w / 2.0)
                     .y(baseline_y)
@@ -13417,10 +13456,10 @@ fn render_c4_node_content(
                     .font_size(description_font)
                     .line_height(config.line_height)
                     .anchor(TextAnchor::Middle)
-                    .fill(&colors.text)
+                    .fill(card_text)
                     .class("fm-c4-description")
                     .build(),
-            )));
+            ))));
         }
     }
 
@@ -13699,6 +13738,54 @@ fn render_node_icon(
                         .stroke_width(1.0),
                 );
             }
+        }
+        // mermaid's five built-in architecture icons are cloud, database, disk, internet and
+        // server; without these two arms `disk` and `internet` fell to the letter fallback.
+        // Each is ONE path (outline plus interior strokes as subpaths), which costs a fraction of
+        // the wasm an element per stroke does.
+        "disk" | "storage" | "hdd" => {
+            let (top, bottom) = (y + size * 0.22, y + size * 0.78);
+            let d = PathBuilder::new()
+                .move_to(x, top)
+                .line_to(x + size, top)
+                .line_to(x + size, bottom)
+                .line_to(x, bottom)
+                .close()
+                .move_to(x + size * 0.14, cy)
+                .line_to(x + size * 0.6, cy)
+                .move_to(x + size * 0.74, cy)
+                .line_to(x + size * 0.86, cy)
+                .build();
+            icon = icon.child(
+                Element::path()
+                    .d(&d)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+        }
+        "internet" | "globe" | "web" => {
+            let meridian = half * 0.45;
+            let mut d = PathBuilder::new()
+                .move_to(cx - half, cy)
+                .arc_to(half, half, 0.0, false, true, cx + half, cy)
+                .arc_to(half, half, 0.0, false, true, cx - half, cy)
+                .move_to(cx, y)
+                .arc_to(meridian, half, 0.0, false, true, cx, y + size)
+                .arc_to(meridian, half, 0.0, false, true, cx, y);
+            for dy in [-0.45_f32, 0.0, 0.45] {
+                let reach = half * (1.0 - dy * dy).sqrt();
+                d = d
+                    .move_to(cx - reach, half.mul_add(dy, cy))
+                    .line_to(cx + reach, half.mul_add(dy, cy));
+            }
+            icon = icon.child(
+                Element::path()
+                    .d(&d.build())
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
         }
         "api" => {
             icon = icon.child(
@@ -14497,6 +14584,12 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::Cloud => "fm-node-shape-cloud",
         NodeShape::Tag => "fm-node-shape-tag",
         NodeShape::CrossedCircle => "fm-node-shape-crossed-circle",
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => "fm-node-shape-block-arrow",
     }
 }
 

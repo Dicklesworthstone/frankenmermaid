@@ -209,3 +209,55 @@ fn the_stereotype_label_is_rendered_at_all() {
         );
     }
 }
+
+/// Every text on a card is painted for THAT card, on both paths.
+///
+/// The default theme used to force the stereotype white on every card, so `<<system>>` was white on
+/// the white System card, while the Person card's name and description stayed dark on its navy.
+#[test]
+fn card_texts_are_painted_for_the_card_they_sit_on() {
+    const BOTH: &str =
+        "C4Context\n  title C\n  Person(a, \"A\", \"desc\")\n  System(s, \"S\", \"sys desc\")\n";
+    let texts_of = |svg: &str, id: &str| -> Vec<(String, String)> {
+        let start = svg
+            .find(&format!("data-id=\"{id}\""))
+            .unwrap_or_else(|| panic!("CONTROL: card {id} rendered"));
+        // The card's `<title>` closes its content; a `</g>` may be the person icon's.
+        let end = svg[start..]
+            .find("<title>")
+            .map_or(svg.len(), |e| start + e);
+        svg[start..end]
+            .split("<text")
+            .skip(1)
+            .filter_map(|chunk| {
+                let attrs = &chunk[..chunk.find('>')?];
+                let class = attrs.split("class=\"").nth(1)?.split('"').next()?;
+                let fill = attrs.split("fill=\"").nth(1)?.split('"').next()?;
+                Some((class.to_string(), fill.to_string()))
+            })
+            .collect()
+    };
+    for streaming in [true, false] {
+        let svg = render_svg_with_config(
+            &fm_parser::parse(BOTH).ir,
+            &SvgRenderConfig {
+                include_source_spans: !streaming,
+                ..SvgRenderConfig::default()
+            },
+        );
+        let person = texts_of(&svg, "a");
+        assert_eq!(person.len(), 3, "CONTROL: stereotype, name, description");
+        for (class, fill) in &person {
+            assert_eq!(fill, "#FFFFFF", "streaming={streaming}: Person {class}");
+        }
+        let system = texts_of(&svg, "s");
+        assert_eq!(system.len(), 3, "CONTROL: stereotype, name, description");
+        for (class, fill) in &system {
+            assert_ne!(
+                fill, "#FFFFFF",
+                "streaming={streaming}: System {class} is white on a light card"
+            );
+            assert_eq!(fill, &system[1].1, "streaming={streaming}: System {class}");
+        }
+    }
+}

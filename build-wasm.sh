@@ -154,7 +154,23 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 #   754944 gzip  with the skip in `render_edge_into`, which changed how wasm-opt inlined it
 #   754605 gzip  after moving the skip onto the arrow already read in `render_edge_body_into` and
 #                folding the `<desc>` filter into its existing `filter_map`              (-339)
-MAX_GZIP_BYTES=$((737 * 1024))
+#
+# Raised 737K -> 739K on 2026-10-07 for architecture/block/C4 rendering fixes, measured against
+# 919766a (754605 gzip, the committed pkg/):
+#   756219 gzip  + architecture edges routed between their declared sides, junctions as points,
+#                  `disk`/`internet` icon glyphs, block arrows (`id<["…"]>(dir)`: parse, shared
+#                  outline, SVG/canvas/layout-boundary arms), per-group block `columns`, C4 card
+#                  text painted for its card                                              (+1614)
+#   756133 gzip  after drawing each new glyph as ONE path, building the arrow outline in one
+#                transform loop, and matching the direction without allocating            (-86)
+#   756132 gzip  after building the arrow's boundary path in a plain loop                 (-1)
+# Removing the router's `dedup_by` shrank raw wasm 505 B but GREW gzip 403 B, so it stayed.
+# Function-by-function against 919766a under this script's own opt-level=z profile, names kept:
+# the side router inlined into `compute_traced_layout_with_config_and_guardrails` ~1.4K plus its
+# closures and dedup ~0.5K, the icon glyphs ~1.2K, the block-arrow token parser ~0.8K, the outline
+# ~0.8K, the shape arms in node_path / render_node / canvas ~1.4K, NodeShape serde names 0.3K.
+# Headroom after raise: 604 bytes.
+MAX_GZIP_BYTES=$((739 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

@@ -2123,6 +2123,67 @@ pub enum NodeShape {
     /// A third handler in the registry rather than a flag on either brace, and it renders three
     /// paths where the single braces render two.
     Braces,
+    /// block-beta `id<["label"]>(right)`: a fat arrow with the label in its shaft, pointing right.
+    /// The outline is [`block_arrow_outline`], shared by every renderer and the layout boundary.
+    BlockArrowRight,
+    /// block-beta `<["…"]>(left)`.
+    BlockArrowLeft,
+    /// block-beta `<["…"]>(up)`.
+    BlockArrowUp,
+    /// block-beta `<["…"]>(down)`.
+    BlockArrowDown,
+    /// block-beta `<["…"]>(x)`: heads at both horizontal ends.
+    BlockArrowX,
+    /// block-beta `<["…"]>(y)`: heads at both vertical ends.
+    BlockArrowY,
+}
+
+/// The closed outline of a block arrow filling the box `(x, y, w, h)`, or `None` for any other
+/// shape. The shaft is the middle 60% across the arrow; each head is as long as the shaft is
+/// thick, capped at 40% of the length.
+#[must_use]
+pub fn block_arrow_outline(
+    shape: NodeShape,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<Vec<(f32, f32)>> {
+    // (vertical, pointing toward the low end, heads at both ends)
+    let (vertical, reversed, both) = match shape {
+        NodeShape::BlockArrowRight => (false, false, false),
+        NodeShape::BlockArrowLeft => (false, true, false),
+        NodeShape::BlockArrowX => (false, false, true),
+        NodeShape::BlockArrowDown => (true, false, false),
+        NodeShape::BlockArrowUp => (true, true, false),
+        NodeShape::BlockArrowY => (true, false, true),
+        _ => return None,
+    };
+    let (len, thick) = if vertical { (h, w) } else { (w, h) };
+    let head = (thick * 0.6).min(len * 0.4);
+    let tail = if both { head } else { 0.0 };
+    // One arrow along +x as (along, across), `across` running 0..1 over the thickness.
+    let mut points: Vec<(f32, f32)> = vec![
+        (tail, 0.2),
+        (len - head, 0.2),
+        (len - head, 0.0),
+        (len, 0.5),
+        (len - head, 1.0),
+        (len - head, 0.8),
+        (tail, 0.8),
+    ];
+    if both {
+        points.extend([(head, 1.0), (0.0, 0.5), (head, 0.0)]);
+    }
+    for point in &mut points {
+        let along = if reversed { len - point.0 } else { point.0 };
+        *point = if vertical {
+            (point.1.mul_add(w, x), y + along)
+        } else {
+            (x + along, point.1.mul_add(h, y))
+        };
+    }
+    Some(points)
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -6612,7 +6673,13 @@ pub struct MermaidDiagramMeta {
     pub direction: GraphDirection,
     pub support_level: MermaidSupportLevel,
     pub parse_mode: MermaidParseMode,
+    /// The TOP-LEVEL block-beta `columns N`.
     pub block_beta_columns: Option<usize>,
+    /// `columns N` written inside a block-beta group, as `(subgraph index, N)`: it shapes only
+    /// that group's own grid. Folding it into [`Self::block_beta_columns`] let a nested
+    /// `columns 2` resize the whole diagram.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_beta_group_columns: Vec<(usize, usize)>,
     /// Requested minimum gap between nodes within a rank, in layout units.
     ///
     /// A source-level HINT that overrides the engine default when present; `None` means "use the
@@ -8314,6 +8381,7 @@ impl MermaidDiagramIr {
                 support_level: diagram_type.support_level(),
                 parse_mode: MermaidParseMode::Compat,
                 block_beta_columns: None,
+                block_beta_group_columns: Vec::new(),
                 node_spacing: None,
                 rank_spacing: None,
                 edge_routing: None,

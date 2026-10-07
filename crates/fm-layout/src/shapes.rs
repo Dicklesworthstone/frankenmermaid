@@ -143,6 +143,32 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The stack fills its box corner to corner between the back and front copies, so the box is
         // the right boundary; an edge stopping on it lands on one of the three outlines.
         NodeShape::StackedDocument | NodeShape::StackedRect => rounded_rect_path(bounds, 0.0),
+        // The arrow's own outline: its heads leave most of the box corners empty.
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => {
+            let outline = fm_core::block_arrow_outline(
+                shape,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+            )
+            .unwrap_or_default();
+            let mut path = Vec::with_capacity(outline.len() + 1);
+            for (x, y) in outline {
+                path.push(if path.is_empty() {
+                    PathCmd::MoveTo { x, y }
+                } else {
+                    PathCmd::LineTo { x, y }
+                });
+            }
+            path.push(PathCmd::Close);
+            path
+        }
     }
 }
 

@@ -10838,11 +10838,140 @@ fn row_worst_ratio(
 /// Reached only when [`architecture_declares_a_side`] holds, so a side-less architecture diagram
 /// still takes the general path and is unchanged.
 fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_directed_grid_traced(
+    let mut traced = layout_diagram_directed_grid_traced(
         ir,
         architecture_edge_step,
         "architecture_direction_placement",
-    )
+    );
+    let layout = Arc::make_mut(&mut traced.layout);
+    route_architecture_sides(ir, layout);
+    layout.bounds = compute_bounds(
+        &layout.nodes,
+        &layout.clusters,
+        &layout.edges,
+        LayoutSpacing::default(),
+    );
+    traced
+}
+
+/// Route every architecture edge between the SIDES it names.
+///
+/// `db:L -- R:server` says the line leaves db's left face and enters server's right face; the
+/// shared router ignored that and ran from db's bottom, through both boxes, to server's top. Each
+/// end now starts at the middle of its declared side (an undeclared end takes the side facing the
+/// other node), steps straight out, and the two stubs are joined orthogonally.
+fn route_architecture_sides(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+    const STUB: f32 = 18.0;
+    let port = |bounds: LayoutRect, side: ArchitectureSide| -> (LayoutPoint, (f32, f32)) {
+        let (cx, cy) = (
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        );
+        match side {
+            ArchitectureSide::Left => (LayoutPoint { x: bounds.x, y: cy }, (-1.0, 0.0)),
+            ArchitectureSide::Right => (
+                LayoutPoint {
+                    x: bounds.x + bounds.width,
+                    y: cy,
+                },
+                (1.0, 0.0),
+            ),
+            ArchitectureSide::Top => (LayoutPoint { x: cx, y: bounds.y }, (0.0, -1.0)),
+            ArchitectureSide::Bottom => (
+                LayoutPoint {
+                    x: cx,
+                    y: bounds.y + bounds.height,
+                },
+                (0.0, 1.0),
+            ),
+        }
+    };
+    // The side of `from` that faces `to`, for an end that declared none.
+    let facing = |from: LayoutRect, to: LayoutRect| {
+        let dx = (to.x + to.width / 2.0) - (from.x + from.width / 2.0);
+        let dy = (to.y + to.height / 2.0) - (from.y + from.height / 2.0);
+        if dx.abs() >= dy.abs() {
+            if dx >= 0.0 {
+                ArchitectureSide::Right
+            } else {
+                ArchitectureSide::Left
+            }
+        } else if dy >= 0.0 {
+            ArchitectureSide::Bottom
+        } else {
+            ArchitectureSide::Top
+        }
+    };
+
+    for path in &mut layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        let (a, b) = (layout.nodes[from].bounds, layout.nodes[to].bounds);
+        let source_side = edge.source_side().unwrap_or_else(|| facing(a, b));
+        let target_side = edge.target_side().unwrap_or_else(|| facing(b, a));
+        let (p, (pnx, pny)) = port(a, source_side);
+        let (q, (qnx, qny)) = port(b, target_side);
+        let p_out = LayoutPoint {
+            x: pnx.mul_add(STUB, p.x),
+            y: pny.mul_add(STUB, p.y),
+        };
+        let q_out = LayoutPoint {
+            x: qnx.mul_add(STUB, q.x),
+            y: qny.mul_add(STUB, q.y),
+        };
+        let horizontal = |nx: f32| nx != 0.0;
+        let mut points = EdgePoints::new();
+        points.push(p);
+        match (horizontal(pnx), horizontal(qnx)) {
+            // Facing horizontal sides: one vertical jog halfway between the faces.
+            (true, true) if pnx * (q.x - p.x) > 0.0 && qnx * (p.x - q.x) > 0.0 => {
+                let mid = (p.x + q.x) / 2.0;
+                points.push(LayoutPoint { x: mid, y: p.y });
+                points.push(LayoutPoint { x: mid, y: q.y });
+            }
+            (false, false) if pny * (q.y - p.y) > 0.0 && qny * (p.y - q.y) > 0.0 => {
+                let mid = (p.y + q.y) / 2.0;
+                points.push(LayoutPoint { x: p.x, y: mid });
+                points.push(LayoutPoint { x: q.x, y: mid });
+            }
+            // One horizontal and one vertical side: a single corner, when it lies outward of both.
+            (true, false) if pnx * (q.x - p.x) >= 0.0 && qny * (p.y - q.y) >= 0.0 => {
+                points.push(LayoutPoint { x: q.x, y: p.y });
+            }
+            (false, true) if pny * (q.y - p.y) >= 0.0 && qnx * (p.x - q.x) >= 0.0 => {
+                points.push(LayoutPoint { x: p.x, y: q.y });
+            }
+            // Otherwise leave both faces straight and join the stubs around the outside.
+            (source_horizontal, _) => {
+                points.push(p_out);
+                if source_horizontal {
+                    points.push(LayoutPoint {
+                        x: p_out.x,
+                        y: q_out.y,
+                    });
+                } else {
+                    points.push(LayoutPoint {
+                        x: q_out.x,
+                        y: p_out.y,
+                    });
+                }
+                points.push(q_out);
+            }
+        }
+        points.push(q);
+        points.dedup_by(|x, y| (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01);
+        path.points = points;
+    }
 }
 
 /// Place C4 elements from the `Rel_U`/`Rel_D`/`Rel_L`/`Rel_R` grammar.
@@ -14190,15 +14319,33 @@ fn block_beta_item_rows(
     match item {
         BlockBetaGridItem::Node(_) => 1,
         BlockBetaGridItem::Group(subgraph_id) => {
-            let group_columns = block_beta_item_span(ir, item, available_columns);
+            let span = block_beta_item_span(ir, item, available_columns);
             let children = block_beta_direct_items(ir, Some(subgraph_id));
             if children.is_empty() {
                 1
             } else {
-                block_beta_rows_required(ir, &children, group_columns)
+                block_beta_rows_required(
+                    ir,
+                    &children,
+                    block_beta_inner_columns(ir, subgraph_id, span),
+                )
             }
         }
     }
+}
+
+/// How many columns a group's OWN grid has: the `columns N` written inside it, else its span.
+fn block_beta_inner_columns(
+    ir: &MermaidDiagramIr,
+    subgraph_id: fm_core::IrSubgraphId,
+    span: usize,
+) -> usize {
+    ir.meta
+        .block_beta_group_columns
+        .iter()
+        .find(|(group, _)| *group == subgraph_id.0)
+        .map_or(span, |(_, columns)| *columns)
+        .max(1)
 }
 
 fn block_beta_rows_required(
@@ -14335,7 +14482,11 @@ fn place_block_beta_items(
                     // The container owns `span` columns of the OUTER grid. Its children divide
                     // that width between the columns they actually use, so a container's declared
                     // span reaches its contents instead of evaporating when they under-fill it.
-                    let used = block_beta_group_used_columns(ir, &child_items, span);
+                    let used = block_beta_group_used_columns(
+                        ir,
+                        &child_items,
+                        block_beta_inner_columns(ir, subgraph_id, span),
+                    );
                     let inner_cell_width = span as f32 * cell_width / used as f32;
                     // `item_x` is the CENTRE of the container's first outer cell, and these
                     // coordinates are cell centres throughout (a box is `centre ± width/2`). The
@@ -22460,6 +22611,75 @@ mod tests {
         let first = layout_diagram_traced(&ir);
         let second = layout_diagram_traced(&ir);
         assert_eq!(first, second);
+    }
+
+    /// mermaid's documented grid: `a:3` fills row 0, the two-column group takes the first two
+    /// columns of row 1 with `g` BESIDE it, and the group lays its four children out two by two.
+    /// The nested `columns 2` used to resize the whole diagram, which put `g` below the group.
+    #[test]
+    fn block_beta_group_columns_shape_only_their_group() {
+        let ir = fm_parser::parse(
+            "block-beta\n  columns 3\n  a:3\n  block:group1:2\n    columns 2\n    h i j k\n  end\n  g\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (h, i, j, k, g) = (
+            bounds("h"),
+            bounds("i"),
+            bounds("j"),
+            bounds("k"),
+            bounds("g"),
+        );
+        assert!(
+            (h.y - i.y).abs() < 0.01 && (j.y - k.y).abs() < 0.01,
+            "two per row"
+        );
+        assert!(j.y > h.y, "j starts the group's second row");
+        assert!(
+            (g.y - h.y).abs() < 0.01,
+            "g sits beside the group, on its first row"
+        );
+        assert!(g.x > i.x + i.width, "g is to the right of the group");
+    }
+
+    /// Architecture edges leave and enter the sides they name, so `db:L -- R:server` runs from
+    /// db's left face to server's right face instead of through both boxes.
+    #[test]
+    fn architecture_edges_use_their_declared_sides() {
+        let ir = fm_parser::parse(
+            "architecture-beta\n  service db(database)[DB]\n  service server(server)[Server]\n  service disk(disk)[Disk]\n  db:L -- R:server\n  disk:T -- B:server\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (db, server, disk) = (bounds("db"), bounds("server"), bounds("disk"));
+        let first = &layout.edges[0].points;
+        let (start, end) = (first[0], first[first.len() - 1]);
+        assert!(
+            (start.x - db.x).abs() < 0.01,
+            "leaves db's left face: {start:?}"
+        );
+        assert!(
+            (end.x - (server.x + server.width)).abs() < 0.01,
+            "enters server's right face: {end:?}"
+        );
+        let second = &layout.edges[1].points;
+        let (start, end) = (second[0], second[second.len() - 1]);
+        assert!(
+            (start.y - disk.y).abs() < 0.01,
+            "leaves disk's top: {start:?}"
+        );
+        assert!(
+            (end.y - (server.y + server.height)).abs() < 0.01,
+            "enters server's bottom: {end:?}"
+        );
     }
 
     #[test]

@@ -89,6 +89,12 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Cloud => draw_cloud(ctx, x, y, width, height),
         NodeShape::Tag => draw_tag(ctx, x, y, width, height),
         NodeShape::CrossedCircle => draw_crossed_circle(ctx, x, y, width, height),
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => draw_block_arrow(ctx, shape, x, y, width, height),
     }
 
     // Draw double circle outer ring if needed
@@ -613,6 +619,33 @@ fn draw_flag<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
 }
 
 /// Draw a lightning bolt — mermaid's `bolt` (bd-7ls21). Same six measured vertices as the SVG path.
+/// A block-beta arrow, from the outline fm-core shares with the SVG renderer and the layout.
+#[allow(clippy::cast_possible_truncation)]
+fn draw_block_arrow<C: Canvas2dContext>(
+    ctx: &mut C,
+    shape: NodeShape,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) {
+    let Some(outline) = fm_core::block_arrow_outline(shape, x as f32, y as f32, w as f32, h as f32)
+    else {
+        return;
+    };
+    ctx.begin_path();
+    for (index, &(px, py)) in outline.iter().enumerate() {
+        if index == 0 {
+            ctx.move_to(f64::from(px), f64::from(py));
+        } else {
+            ctx.line_to(f64::from(px), f64::from(py));
+        }
+    }
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
 fn draw_lightning_bolt<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
     ctx.begin_path();
     ctx.move_to(x + w, y);

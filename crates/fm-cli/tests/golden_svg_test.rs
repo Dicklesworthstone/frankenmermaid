@@ -2997,27 +2997,27 @@ fn architecture_edges_fan_out_from_their_declared_source() {
         starts.len()
     );
 
-    // `api --> db` and `api --> cache` share a source, so the two starts coincide.
-    assert!(
-        (starts[0].0 - starts[1].0).abs() < 1.0 && (starts[0].1 - starts[1].1).abs() < 1.0,
-        "both edges are declared from `api` but start at {:?} and {:?}",
-        starts[0],
-        starts[1]
-    );
-    // …and they go to different services, so the ends must not coincide.
+    // They go to different services, so the ends must not coincide.
     assert!(
         (ends[0].0 - ends[1].0).abs() > 1.0 || (ends[0].1 - ends[1].1).abs() > 1.0,
         "the two edges end at the same point {:?}, so they cannot be reaching db and cache",
         ends[0]
     );
 
-    // The shared source is `api`: its box centre-x and bottom must match where the edges leave.
+    // Both leave `api`, each from the SIDE it declares. This used to pin one shared start point,
+    // which was the router ignoring `R` and `B` — the two edges both left api's bottom.
     let api = centre_of(&centres, "API Gateway");
     assert!(
-        (starts[0].0 - api.0).abs() < 2.0,
-        "edges leave at x={} but `api` is centred at x={}",
-        starts[0].0,
-        api.0
+        (starts[0].1 - api.1).abs() < 2.0 && starts[0].0 > api.0,
+        "`api:R --> L:db` leaves at {:?}, not api's right face (api centred at {:?})",
+        starts[0],
+        (api.0, api.1)
+    );
+    assert!(
+        (starts[1].0 - api.0).abs() < 2.0 && starts[1].1 > api.1,
+        "`api:B --> T:cache` leaves at {:?}, not api's bottom (api centred at {:?})",
+        starts[1],
+        (api.0, api.1)
     );
 }
 

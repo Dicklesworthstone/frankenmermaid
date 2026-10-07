@@ -715,6 +715,16 @@ impl IrBuilder {
         self.ir.meta.block_beta_columns = Some(columns.max(1));
     }
 
+    /// `columns N` inside the block-beta group whose subgraph index is `subgraph`.
+    pub(crate) fn set_block_beta_group_columns(&mut self, subgraph: usize, columns: usize) {
+        let columns = columns.max(1);
+        let entries = &mut self.ir.meta.block_beta_group_columns;
+        match entries.iter_mut().find(|(group, _)| *group == subgraph) {
+            Some(entry) => entry.1 = columns,
+            None => entries.push((subgraph, columns)),
+        }
+    }
+
     pub(crate) fn set_gantt_meta(&mut self, gantt_meta: IrGanttMeta) {
         self.ir.gantt_meta = Some(gantt_meta);
     }

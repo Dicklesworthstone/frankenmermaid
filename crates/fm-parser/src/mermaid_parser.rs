@@ -12799,9 +12799,12 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(declaration) = parse_architecture_declaration(trimmed, "junction") {
+            // A junction is the point where edges meet, not a service: mermaid draws nothing there.
+            // The textless junction dot shows the meeting point without printing the id, which a
+            // labelled circle did.
             let label = declaration.label.as_deref();
             let Some(node_id) =
-                builder.intern_node(&declaration.id, label, NodeShape::Circle, span)
+                builder.intern_node(&declaration.id, label, NodeShape::FilledCircle, span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid architecture junction declaration: {trimmed}"
@@ -13134,6 +13137,9 @@ fn lower_block_beta_document_item(
                         builder.add_warning(format!(
                             "Line {line_number}: block-beta columns must be >= 1"
                         ));
+                    } else if let Some(&group) = active_subgraphs.last() {
+                        // Inside `block … end` it shapes that group's grid, not the diagram's.
+                        builder.set_block_beta_group_columns(group, *columns);
                     } else {
                         builder.set_block_beta_columns(*columns);
                     }
@@ -13408,12 +13414,45 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
         None => (trimmed, 1),
     };
 
+    if let Some(arrow) = parse_block_beta_arrow(core, config) {
+        return Some(BlockDef { span_cols, ..arrow });
+    }
+
     let node = parse_node_token_with_config(core, config)?;
     Some(BlockDef {
         id: node.id,
         label: node.label.map(|label| label.text),
         shape: node.shape,
         span_cols,
+        is_space: false,
+    })
+}
+
+/// block-beta's block arrow, `id<["label"]>(right)`, with `left`, `up`, `down`, `x` or `y`.
+///
+/// The node-token grammar has no `<[ … ]>` bracket, so this fell through to a plain box labelled
+/// `arrow"]>(right)` — the closing syntax printed as text.
+fn parse_block_beta_arrow(core: &str, config: &ParserConfig) -> Option<BlockDef> {
+    let (id, rest) = core.split_once("<[")?;
+    let (inner, direction) = rest.rsplit_once("]>")?;
+    let direction = direction.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let (_, shape) = [
+        ("right", NodeShape::BlockArrowRight),
+        ("left", NodeShape::BlockArrowLeft),
+        ("up", NodeShape::BlockArrowUp),
+        ("down", NodeShape::BlockArrowDown),
+        ("x", NodeShape::BlockArrowX),
+        ("y", NodeShape::BlockArrowY),
+    ]
+    .into_iter()
+    .find(|(name, _)| direction.eq_ignore_ascii_case(name))?;
+    // The label inside reads exactly as a `[ … ]` box label would, quotes and markup included.
+    let node = parse_node_token_with_config(&format!("{}[{inner}]", id.trim()), config)?;
+    Some(BlockDef {
+        id: node.id,
+        label: node.label.map(|label| label.text),
+        shape,
+        span_cols: 1,
         is_space: false,
     })
 }
@@ -21485,6 +21524,58 @@ mod tests {
         assert_eq!(parsed.ir.edges.len(), 2);
     }
 
+    /// `columns` inside a group shapes only that group: it used to overwrite the diagram's own
+    /// `columns`, so a nested `columns 2` made a three-column diagram two columns wide.
+    #[test]
+    fn block_beta_nested_columns_belong_to_their_group() {
+        let parsed = parse_mermaid(
+            "block-beta\n  columns 3\n  a:3\n  block:inner:2\n    columns 2\n    h i\n  end\n  g\n",
+        );
+        assert_eq!(parsed.ir.meta.block_beta_columns, Some(3));
+        let inner = parsed
+            .ir
+            .graph
+            .subgraphs
+            .iter()
+            .position(|subgraph| subgraph.key == "inner")
+            .expect("CONTROL: the group exists");
+        assert_eq!(parsed.ir.meta.block_beta_group_columns, [(inner, 2)]);
+    }
+
+    /// `id<["label"]>(dir)` is a block arrow with the label inside, not a box whose label ends in
+    /// the closing syntax.
+    #[test]
+    fn block_beta_block_arrows_parse_their_label_and_direction() {
+        let parsed = parse_mermaid(
+            "block-beta\n  r<[\"go\"]>(right) l<[\"back\"]>(left) u<[\"up\"]>(up)\n  d<[\"down\"]>(down) x<[\"both\"]>(x) y<[\"vert\"]>(y)\n",
+        );
+        let shapes: Vec<(&str, NodeShape, Option<&str>)> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.shape,
+                    node.label
+                        .and_then(|id| parsed.ir.labels.get(id.0))
+                        .map(|label| label.text.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            [
+                ("r", NodeShape::BlockArrowRight, Some("go")),
+                ("l", NodeShape::BlockArrowLeft, Some("back")),
+                ("u", NodeShape::BlockArrowUp, Some("up")),
+                ("d", NodeShape::BlockArrowDown, Some("down")),
+                ("x", NodeShape::BlockArrowX, Some("both")),
+                ("y", NodeShape::BlockArrowY, Some("vert")),
+            ]
+        );
+    }
+
     #[test]
     fn block_beta_parses_basic_blocks_without_flowchart_fallback_warning() {
         let parsed = parse_mermaid("block-beta\ncolumns 2\nalpha[Alpha]\nbeta[Beta]");
@@ -23122,7 +23213,11 @@ fan_in:B --> T:db",
             .iter()
             .find(|node| node.id == "fan_in")
             .expect("junction node");
-        assert_eq!(junction.shape, NodeShape::Circle);
+        assert_eq!(junction.shape, NodeShape::FilledCircle);
+        assert!(
+            parsed.ir.is_textless_ornament_node(junction),
+            "a junction is a meeting point, so its id is not printed"
+        );
 
         let platform_cluster = &parsed.ir.clusters[0];
         let title = platform_cluster
