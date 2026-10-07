@@ -4499,6 +4499,7 @@ impl IncrementalLayoutEngine {
         );
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
+        separate_shared_channels(ir, &mut edges);
         let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
         clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
@@ -5651,6 +5652,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
+    separate_shared_channels(ir, &mut edges);
     clip_edges_to_named_subgraphs(ir, &mut edges, &clusters);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
@@ -18988,6 +18990,114 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
 }
 
+/// Give unrelated edges that share a line their own track.
+///
+/// The router runs every edge between two ranks through the channel's midline, and every edge
+/// whose straight run is blocked to the same line just past the obstacles, so unrelated edges lay
+/// on top of each other for part of their length and the reader could not tell which line went
+/// where. Edges sharing a source or a target keep sharing (that trunk reads as one fan-out or
+/// fan-in); any other pair overlapping on one line is moved apart a track at a time, by moving
+/// the segment's two bends. A segment whose neighbours both come from one side (a detour past
+/// obstacles) moves further from them; one crossing a channel alternates about its line, kept
+/// inside the channel. End segments stay where they meet their nodes.
+fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
+    const TRACK_GAP: f32 = 10.0;
+    // Past this many segments on one line the edges are a dense mesh that tracks cannot untangle,
+    // and the pairwise pass would cost quadratically for nothing.
+    const MAX_SHARED: usize = 64;
+    for horizontal in [true, false] {
+        let across = |point: LayoutPoint| if horizontal { point.y } else { point.x };
+        let along = |point: LayoutPoint| if horizontal { point.x } else { point.y };
+        // (path, the segment's first point, its low and high end, its edge's source and target)
+        // and, to group them by line, (quantized line, segment).
+        let mut segments: Vec<(usize, usize, f32, f32, usize, usize)> = Vec::new();
+        let mut keys: Vec<(usize, usize)> = Vec::new();
+        for (p, path) in edges.iter().enumerate() {
+            let Some(edge) = ir.edges.get(path.edge_index) else {
+                continue;
+            };
+            if path.is_self_loop || path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+                continue;
+            }
+            // An end written to a subgraph is drawn to its border, so it shares nothing with the
+            // member it resolved to; it is told apart by the subgraph instead.
+            let end = |endpoint, subgraph: Option<fm_core::IrSubgraphId>| {
+                subgraph.map_or_else(
+                    || endpoint_node_index(ir, endpoint).unwrap_or(usize::MAX),
+                    |id| ir.nodes.len() + id.0,
+                )
+            };
+            let (from_subgraph, to_subgraph) = edge.named_subgraphs();
+            let (from, to) = (end(edge.from, from_subgraph), end(edge.to, to_subgraph));
+            for i in 1..path.points.len().saturating_sub(2) {
+                let (a, b) = (path.points[i], path.points[i + 1]);
+                if (across(a) - across(b)).abs() > 0.01 {
+                    continue;
+                }
+                let line = (across(a) * 2.0).round() as i32 as u32 ^ 0x8000_0000;
+                keys.push((line as usize, segments.len()));
+                let (lo, hi) = (along(a).min(along(b)), along(a).max(along(b)));
+                segments.push((p, i, lo, hi, from, to));
+            }
+        }
+        keys.sort_unstable();
+        let mut tracks = vec![0_usize; segments.len()];
+        let mut start = 0;
+        while start < keys.len() {
+            let end = keys[start..]
+                .iter()
+                .position(|key| key.0 != keys[start].0)
+                .map_or(keys.len(), |n| start + n);
+            for k in (start + 1..end).filter(|_| end - start <= MAX_SHARED) {
+                let (p, _, lo, hi, from, to) = segments[keys[k].1];
+                let blocks = |&(_, other): &(usize, usize), track: usize| {
+                    let (q, _, other_lo, other_hi, other_from, other_to) = segments[other];
+                    tracks[other] == track
+                        && q != p
+                        && lo < other_hi - 0.5
+                        && other_lo < hi - 0.5
+                        && from != other_from
+                        && to != other_to
+                };
+                let mut track = 0;
+                while keys[start..k].iter().any(|key| blocks(key, track)) {
+                    track += 1;
+                }
+                tracks[keys[k].1] = track;
+            }
+            start = end;
+        }
+        for (&(p, i, ..), &track) in segments.iter().zip(&tracks) {
+            if track == 0 {
+                continue;
+            }
+            let points = &mut edges[p].points;
+            let line = across(points[i]);
+            let before = across(points[i - 1]) - line;
+            let after = across(points[i + 2]) - line;
+            let offset = if before * after > 0.0 {
+                -before.signum() * track as f32 * TRACK_GAP
+            } else {
+                // Alternately either side of the line, never past either neighbour's end.
+                let side = if track % 2 == 1 {
+                    (track / 2 + 1) as f32
+                } else {
+                    -((track / 2) as f32)
+                };
+                let room = before.abs().min(after.abs()) - TRACK_GAP;
+                (side * TRACK_GAP).clamp(-room.max(0.0), room.max(0.0))
+            };
+            for bend in [i, i + 1] {
+                if horizontal {
+                    points[bend].y += offset;
+                } else {
+                    points[bend].x += offset;
+                }
+            }
+        }
+    }
+}
+
 /// End each edge written to a SUBGRAPH (`one --> two`) on that subgraph's border.
 ///
 /// Such an endpoint is resolved to one of the subgraph's members, which the layout ranks and
@@ -27136,6 +27246,60 @@ mod tests {
                         "{} sits inside {:?}",
                         node.node_id,
                         a.title
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two edges that share neither source nor target never run along the same line: a return
+    /// edge used to be drawn over the trunk it returns along, and blocked same-row edges over
+    /// each other, so the reader could not tell which line went where.
+    #[test]
+    fn unrelated_edges_do_not_share_a_line() {
+        for input in [
+            "flowchart LR\n  A[Start] --> B{Validate}\n  B -->|yes| C[Ship]\n  B -->|no| D[Fix]\n  D --> B\n",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Processing : start\n  Processing --> Idle : complete\n  Idle --> Other\n  Other --> Done\n",
+            "flowchart LR\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            // (edge, horizontal, line, low, high) for every segment between two bends.
+            let mut runs = Vec::new();
+            for path in &layout.edges {
+                for pair in path
+                    .points
+                    .windows(2)
+                    .skip(1)
+                    .take(path.points.len().saturating_sub(3))
+                {
+                    let (a, b) = (pair[0], pair[1]);
+                    if (a.y - b.y).abs() < 0.01 {
+                        runs.push((path.edge_index, true, a.y, a.x.min(b.x), a.x.max(b.x)));
+                    } else if (a.x - b.x).abs() < 0.01 {
+                        runs.push((path.edge_index, false, a.x, a.y.min(b.y), a.y.max(b.y)));
+                    }
+                }
+            }
+            let ends = |edge: usize| {
+                let edge = &ir.edges[edge];
+                let (from, to) = edge.named_subgraphs();
+                (
+                    from.map_or_else(|| format!("{:?}", edge.from), |s| format!("{s:?}")),
+                    to.map_or_else(|| format!("{:?}", edge.to), |s| format!("{s:?}")),
+                )
+            };
+            for (i, a) in runs.iter().enumerate() {
+                for b in &runs[i + 1..] {
+                    let (ea, eb) = (ends(a.0), ends(b.0));
+                    let unrelated = a.0 != b.0 && ea.0 != eb.0 && ea.1 != eb.1;
+                    let shared =
+                        a.1 == b.1 && (a.2 - b.2).abs() < 0.5 && a.3 < b.4 - 0.5 && b.3 < a.4 - 0.5;
+                    assert!(
+                        !(unrelated && shared),
+                        "edges {} and {} share a line in {input:?}: {a:?} {b:?}",
+                        a.0,
+                        b.0
                     );
                 }
             }
