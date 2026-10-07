@@ -3977,8 +3977,16 @@ fn compute_traced_layout_with_config_and_guardrails(
     // Class and ER relationships carry their meaning in END markers — inheritance triangles,
     // composition diamonds, crow's feet, cardinalities — so two relationships may not share one
     // endpoint, where the second marker is drawn exactly under the first and disappears.
-    if matches!(ir.diagram_type, DiagramType::Class | DiagramType::Er) {
-        spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout));
+    // In a flowchart or state diagram only an edge arriving where another leaves is moved: a
+    // return edge drawn into the start of the node's own outgoing line read as one two-way edge.
+    match ir.diagram_type {
+        DiagramType::Class | DiagramType::Er => {
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false);
+        }
+        DiagramType::Flowchart | DiagramType::State => {
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true);
+        }
+        _ => {}
     }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
@@ -7603,7 +7611,11 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// top of it. Ends are fanned out by up to 14px each, ordered by where their routes head so the
 /// fan does not cross itself, and an end's first segment is kept straight by moving the bend that
 /// shares its coordinate.
-fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+///
+/// `by_role` (flowcharts and state diagrams) spreads a point only where edges both LEAVE and ENTER
+/// there — a return edge arriving where the node's own edge departs, drawn in and out on one line —
+/// and moves every end of one role together, so a fan-out keeps its shared trunk.
+fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by_role: bool) {
     /// (node, side 0=left 1=right 2=top 3=bottom, quantised x, quantised y)
     type EndKey = (usize, u8, i32, i32);
     const GAP: f32 = 14.0;
@@ -7656,7 +7668,7 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
     }
 
     for ((node, side, _, _), mut members) in groups {
-        if members.len() < 2 {
+        if members.len() < 2 || (by_role && members.iter().all(|m| m.1 == members[0].1)) {
             continue;
         }
         let vertical_side = side < 2;
@@ -7685,8 +7697,31 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
                 j -= 1;
             }
         }
+        // By role only one role moves, a full gap toward the side its routes head, and the other
+        // keeps the port: the arriving ends, unless one of them is a straight two-point route
+        // (moving its end would tilt it), then the leaving ends; with both straight, neither.
+        let straight = |arriving: bool| {
+            members.iter().any(|&(path, at_start)| {
+                at_start != arriving && layout.edges[path].points.len() == 2
+            })
+        };
+        let moving = if !straight(true) {
+            Some(false)
+        } else if !straight(false) {
+            Some(true)
+        } else {
+            None
+        };
+        if by_role && moving.is_none() {
+            continue;
+        }
+        let first_role = members[0].1;
         #[allow(clippy::cast_precision_loss)]
-        let span = (members.len() - 1) as f32;
+        let span = if by_role {
+            1.0
+        } else {
+            (members.len() - 1) as f32
+        };
         // A label sits at its path's midpoint, so two labelled relationships between the same pair
         // need their paths a label's height apart or the labels print over each other.
         let labelled = members.iter().any(|&(path, _)| {
@@ -7698,7 +7733,15 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
         let gap = wanted.min(side_length * 0.8 / span.max(1.0));
         for (rank, (path, at_start)) in members.into_iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
-            let offset = (rank as f32 - span / 2.0) * gap;
+            let offset = if !by_role {
+                (rank as f32 - span / 2.0) * gap
+            } else if Some(at_start) != moving {
+                continue;
+            } else if at_start == first_role {
+                -gap
+            } else {
+                gap
+            };
             let points = &mut layout.edges[path].points;
             let len = points.len();
             let (end, next) = if at_start { (0, 1) } else { (len - 1, len - 2) };
@@ -27575,6 +27618,37 @@ mod tests {
             "flowchart TB\n  dev --> repo\n  repo --> ci\n  ci --> build\n  build --> reg\n  \
              reg --> qa\n  qa -->|yes| prod\n  qa -->|no| dev\n  prod --> mon\n  mon -.-> dev\n",
             &["dev", "repo", "ci", "build", "reg", "qa", "prod", "mon"],
+        );
+    }
+
+    /// A return edge arriving at a node does not end on the point the node's own edge leaves
+    /// from — drawn in and out on one line it read as a single two-way edge — and the straight
+    /// forward edge stays straight.
+    #[test]
+    fn a_return_edge_does_not_share_its_targets_outgoing_port() {
+        let ir = fm_parser::parse(
+            "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.-> a\n  b --> d[Delta]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let path = |index: usize| {
+            &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == index)
+                .unwrap()
+                .points
+        };
+        let (forward, back) = (path(0), path(2));
+        assert!(
+            (forward[0].x - forward.last().unwrap().x).abs() < 0.01,
+            "Alpha -> Beta stays straight: {forward:?}"
+        );
+        let arrival = *back.last().unwrap();
+        assert!(
+            (arrival.x - forward[0].x).abs() >= 8.0,
+            "the return edge arrives {arrival:?} on Alpha -> Beta's start {:?}",
+            forward[0]
         );
     }
 

@@ -113,9 +113,9 @@
     },
     "cycle_feedback": {
       "edge_count": 16,
-      "edges_checksum": "01265bbe8afb58f9",
+      "edges_checksum": "f08eda05240e638d",
       "layout_algorithm": "auto",
-      "layout_checksum": "708debd87822f5cc",
+      "layout_checksum": "9351631e38998c58",
       "layout_height": 1662.5,
       "layout_width": 490.050018,
       "node_count": 11,
@@ -133,9 +133,9 @@
     },
     "cycle_scc_heavy": {
       "edge_count": 15,
-      "edges_checksum": "10b815a205d2f17d",
+      "edges_checksum": "8a91f2c9dc7cd813",
       "layout_algorithm": "auto",
-      "layout_checksum": "d9244244eb940872",
+      "layout_checksum": "b62362a71353e838",
       "layout_height": 1476.0,
       "layout_width": 392.0,
       "node_count": 12,

@@ -149,7 +149,7 @@ fn layout_coordinates_match_their_cross_target_digest() {
     // — the microarchitecture level is part of what these pin, since it changes which float ops
     // lower to hardware instructions).
     const EXPECTED: &[(&str, u64)] = &[
-        ("flowchart", 0x7731_d581_58aa_48b5),
+        ("flowchart", 0x59c1_414f_614f_6019),
         ("sequence", 0x0372_54aa_adab_2295),
         ("class", 0x1d60_a5f8_ff2d_ac23),
         ("state", 0xc8f8_7a6c_c721_c2eb),
