@@ -8565,6 +8565,8 @@ impl MermaidDiagramIr {
         match node.shape {
             NodeShape::FilledCircle | NodeShape::HorizontalBar => true,
             NodeShape::DoubleCircle => node.label.is_none(),
+            // A state diagram's `<<choice>>`: mermaid draws a bare diamond, not the state's id.
+            NodeShape::Diamond => self.diagram_type == DiagramType::State && node.label.is_none(),
             _ => false,
         }
     }

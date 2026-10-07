@@ -14237,8 +14237,16 @@ fn register_state_declaration(
     let label = state_declaration.title.clone();
     let span = span_for(line_number, source_line);
     let (shape, label) = match state_declaration.stereotype {
-        Some(StatePseudoState::Fork | StatePseudoState::Join) => (NodeShape::HorizontalBar, None),
-        Some(StatePseudoState::Choice) => (NodeShape::Diamond, label),
+        // Pseudostates carry no text: mermaid draws a choice as a bare diamond, and the id it fell
+        // back to (`if_state`) printed inside a full-size one.
+        Some(StatePseudoState::Fork | StatePseudoState::Join | StatePseudoState::Choice) => (
+            if state_declaration.stereotype == Some(StatePseudoState::Choice) {
+                NodeShape::Diamond
+            } else {
+                NodeShape::HorizontalBar
+            },
+            None,
+        ),
         Some(StatePseudoState::History) => (
             NodeShape::Circle,
             if explicit_label {

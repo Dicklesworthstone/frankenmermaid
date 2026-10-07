@@ -12716,6 +12716,9 @@ fn compute_node_size(
             }
         }
         fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
+        // A state `<<choice>>`, the one diamond with no text: mermaid's is a 28px mark. Sized
+        // from its id it was a full decision box with nothing in it.
+        fm_core::NodeShape::Diamond if text.is_empty() => (28.0, 28.0),
         _ => {
             let text = if text.is_empty() {
                 node.id.as_str()
@@ -19413,10 +19416,12 @@ fn build_state_note_geometry(
         return Vec::new();
     }
 
+    // The estimate runs ~10% narrower than the note text as browsers draw it, so the text ran
+    // to (and past) the box's right edge with no padding left; the width carries a margin for it.
     let size = |text: &str| {
         let (text_width, text_height) = metrics.estimate_dimensions(text);
         (
-            STATE_NOTE_FONT_SCALE.mul_add(text_width, 2.0 * STATE_NOTE_PAD_X),
+            (STATE_NOTE_FONT_SCALE * 1.15).mul_add(text_width, 2.0 * STATE_NOTE_PAD_X),
             STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y),
         )
     };
@@ -19445,6 +19450,25 @@ fn build_state_note_geometry(
                 && other.bounds.y < row_bottom
                 && other.bounds.y + other.bounds.height > row_top
         });
+        // A neighbour on the requested side pushes the note past it, and the leader then runs
+        // through that neighbour to reach it (`note right of State2` beyond `State3`). When the
+        // other side is free the note goes there instead.
+        let centre = target.bounds.center().x;
+        let occupied = |side: StateNoteSide| {
+            row_neighbours.clone().any(|other| match side {
+                StateNoteSide::Right => other.bounds.x >= centre,
+                StateNoteSide::Left => other.bounds.x + other.bounds.width <= centre,
+            })
+        };
+        let other_side = match side {
+            StateNoteSide::Right => StateNoteSide::Left,
+            StateNoteSide::Left => StateNoteSide::Right,
+        };
+        let side = if occupied(side) && !occupied(other_side) {
+            other_side
+        } else {
+            side
+        };
         // Folded as a single max/min over the whole row rather than nudged per neighbour: a
         // one-pass nudge in node order is not a fixpoint, so a node visited before the push could
         // still be overlapped afterwards.
@@ -28974,6 +28998,47 @@ mod tests {
             span: Span::default(),
         });
         ir
+    }
+
+    /// mermaid's choice/fork example: the `<<choice>>` is a small bare diamond, not a decision box
+    /// printed with its id, and a note whose requested side is taken by a neighbour goes to the
+    /// free side rather than past the neighbour with its leader through it.
+    #[test]
+    fn state_choice_is_a_mark_and_notes_keep_clear_of_neighbours() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  state if_state <<choice>>\n  [*] --> IsPositive\n  IsPositive --> if_state\n  \
+             if_state --> False: if n < 0\n  if_state --> True : if n >= 0\n  state fork_state <<fork>>\n  \
+             True --> fork_state\n  fork_state --> State2\n  fork_state --> State3\n  \
+             note right of State2 : Important information!\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let choice = layout
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "if_state")
+            .unwrap();
+        assert!(choice.bounds.width <= 32.0 && choice.bounds.height <= 32.0);
+        assert_eq!(ir.node_display_text(&ir.nodes[choice.node_index]), "");
+        let note = &layout.extensions.state_notes[0];
+        let (a, b) = (note.leader_start, note.leader_end);
+        for node in layout
+            .nodes
+            .iter()
+            .filter(|n| n.node_index != note.node_index)
+        {
+            let r = node.bounds;
+            let crosses = a.x.max(b.x) > r.x
+                && a.x.min(b.x) < r.x + r.width
+                && a.y.max(b.y) > r.y
+                && a.y.min(b.y) < r.y + r.height;
+            assert!(!crosses, "the leader runs through {}", node.node_id);
+            assert!(
+                !rects_overlap(note.bounds, r),
+                "the note covers {}",
+                node.node_id
+            );
+        }
     }
 
     /// A class diagram's `note "…"` annotates the diagram, not a class: it is placed clear of
