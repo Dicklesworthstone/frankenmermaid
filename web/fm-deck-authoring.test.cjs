@@ -255,3 +255,57 @@ test('disposal cancels pending work and permanently revokes all edit methods', a
   assert.throws(() => h.s.setSource('x'), { name: 'AbortError' });
   assert.throws(() => h.s.commit({}), { name: 'AbortError' });
 });
+
+test('editing diagram text retains only the exact known composition suffix', async () => {
+  const h = await session();
+  const first = await h.s.prepare(draft());
+  h.s.commit(first);
+  const updated = '%% added diagram comment\n' + first.updatedSource;
+  assert.equal(h.s.observeSource(updated), true);
+  assert.equal(h.s.ownsComposition, true);
+  assert.equal(h.s.canUndo, false);
+  const next = await h.s.prepare(draft());
+  assert.equal(h.calls[2], '%% added diagram comment\n' + first.source);
+  assert.equal(next.updatedSource, updated);
+  assert.equal(h.s.commit(next), updated);
+});
+
+test('editing or moving the authored suffix loses ownership rather than overwriting user edits', async () => {
+  for (const change of [source => source.replace('Introduction', 'Hand edited'), source => source + '\n%% another directive']) {
+    const h = await session();
+    const first = await h.s.prepare(draft());
+    h.s.commit(first);
+    const source = change(first.updatedSource);
+    assert.equal(h.s.observeSource(source), false);
+    assert.equal(h.s.source, source);
+    assert.equal(h.s.ownsComposition, false);
+  }
+});
+
+test('undo and redo restore exact source and revoke pending reviews without losing the owned base', async () => {
+  const h = await session();
+  const first = await h.s.prepare(draft());
+  assert.equal(h.s.canUndo, false);
+  h.s.commit(first);
+  assert.equal(h.s.canUndo, true);
+  assert.equal(h.s.undo(), first.source);
+  assert.equal(h.s.canRedo, true);
+  assert.equal(h.s.ownsComposition, false);
+  const prepared = await h.s.prepare(draft());
+  assert.equal(h.s.redo(), first.updatedSource);
+  assert.throws(() => h.s.commit(prepared), { name: 'AbortError' });
+  assert.equal(h.s.ownsComposition, true);
+  const next = await h.s.prepare(draft());
+  assert.equal(next.updatedSource, first.updatedSource);
+});
+
+test('external document replacement revokes undo and cannot erase the new document', async () => {
+  const h = await session();
+  const first = await h.s.prepare(draft());
+  h.s.commit(first);
+  h.s.setSource(first.updatedSource);
+  assert.equal(h.s.canUndo, false);
+  assert.equal(h.s.canRedo, false);
+  assert.throws(() => h.s.undo(), { name: 'AbortError' });
+  assert.throws(() => h.s.redo(), { name: 'AbortError' });
+});

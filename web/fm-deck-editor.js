@@ -1,5 +1,5 @@
 // Graph-deck authoring surface (bd-z7g6k). Rust resolves slides and geometry; the canonical
-// CLI runtime presents them. This module only binds source revisions to preview/export.
+// CLI runtime presents them. Draft composition publishes ordinary source, not shadow state.
 import { createSourceEditorBackend } from "./fm-source-editor.js";
 
 export function deckJson(value) {
@@ -336,6 +336,7 @@ export class DeckAuthoringSession {
   #revision = 0;
   #prepared = null;
   #disposed = false;
+  #change = null;
 
   constructor({ renderDeck, cancelRender = () => {}, checkElements = checkDeckElements }) {
     if (![renderDeck, cancelRender, checkElements].every(fn => typeof fn === "function")) throw new TypeError("Deck authoring requires a renderer and SVG validator.");
@@ -345,11 +346,27 @@ export class DeckAuthoringSession {
   }
   get source() { return this.#source; }
   get ownsComposition() { return this.#base !== this.#source; }
+  get canUndo() { return !this.#disposed && this.#change !== null && this.#source === this.#change.after && this.#change.before !== this.#change.after; }
+  get canRedo() { return !this.#disposed && this.#change !== null && this.#source === this.#change.before && this.#change.before !== this.#change.after; }
   setSource(source) {
     if (this.#disposed) throw abortError();
     this.cancel();
+    this.#change = null;
     authorText(source, MAX_DECK_SOURCE, "Source");
     this.#source = this.#base = source;
+  }
+  observeSource(source) {
+    if (this.#disposed) throw abortError();
+    this.cancel(); this.#change = null;
+    authorText(source, MAX_DECK_SOURCE, "Source");
+    // A known, unchanged trailing block can survive edits to the diagram before it. This
+    // is an exact suffix check, not a search for similar directives or a source parser.
+    // Document switches MUST use setSource, even if their text happens to be identical.
+    const suffix = this.#source.slice(this.#base.length);
+    const retained = !!suffix && source.endsWith(suffix);
+    this.#base = retained ? source.slice(0, -suffix.length) : source;
+    this.#source = source;
+    return retained;
   }
   cancel() { this.#revision += 1; this.#prepared = null; this.#cancel(); }
   async prepare(json) {
@@ -384,12 +401,359 @@ export class DeckAuthoringSession {
   }
   commit(prepared) {
     if (this.#disposed || !prepared || prepared !== this.#prepared || prepared.source !== this.#source) throw abortError();
+    this.#change = { before: this.#source, after: prepared.updatedSource };
     this.#source = prepared.updatedSource;
     this.#prepared = null;
     this.#revision += 1;
     return this.#source;
   }
+  undo() {
+    if (!this.canUndo) throw abortError();
+    this.cancel(); this.#source = this.#change.before; return this.#source;
+  }
+  redo() {
+    if (!this.canRedo) throw abortError();
+    this.cancel(); this.#source = this.#change.after; return this.#source;
+  }
   dispose() { if (!this.#disposed) { this.#disposed = true; this.cancel(); } }
+}
+
+/** Visual composition owns a draft, not a second document. Applying publishes one normal
+ * source-input event, so recovery, history, sharing and exports see the same directive. */
+export function mountDeckComposer({ sourceEl, panelEl, backend, loadAssets = createDeckAssetLoader(),
+  timeoutMs = 60000, saveFile }) {
+  if (!backend || ![backend.renderDeck, backend.cancel, backend.dispose].every(fn => typeof fn === "function")) throw new TypeError("Deck composition requires a rendering backend.");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new RangeError("Invalid composition timeout.");
+  const document = panelEl.ownerDocument, host = document.defaultView;
+  const session = new DeckAuthoringSession({ renderDeck: source => backend.renderDeck(source),
+    cancelRender: () => backend.cancel(), checkElements: deck => checkDeckElements(deck, host.DOMParser) });
+  session.setSource(sourceEl.value);
+  let spec = { slides: [] }, selected = -1, catalog = [], usedIds = new Set();
+  let prepared = null, frame = null, frameWait = null, frameNonce = null, operation = 0, cancelWait = null, deadline;
+  let disposed = false, suspended = false, busy = false, ownInput = false, dirty = false;
+  const listeners = [], urls = new Map();
+  function make(tag, text, parent = panelEl, suffix) {
+    const element = document.createElement(tag);
+    if (text) element.textContent = text;
+    if (suffix) element.id = `deck-compose-${suffix}`;
+    parent.append(element);
+    return element;
+  }
+  function listen(target, type, fn) {
+    target.addEventListener(type, fn);
+    listeners.push(() => target.removeEventListener(type, fn));
+  }
+  function button(text, suffix, parent = panelEl) {
+    const element = make("button", text, parent, suffix); element.type = "button"; return element;
+  }
+  function field(text, tag, suffix, parent = panelEl) {
+    const label = make("label", text, parent);
+    label.style.display = "block";
+    const element = make(tag, "", label, suffix);
+    element.style.cssText = "display:block;box-sizing:border-box;width:100%;max-width:100%";
+    if (tag === "textarea") element.rows = 2;
+    return element;
+  }
+  function options(select, entries) {
+    for (const [value, text] of entries) { const option = make("option", text, select); option.value = value; }
+  }
+  make("h3", "Compose presentation slides");
+  make("p", "Add slides without rewriting existing directives. Select nodes, arrange the draft, then validate and preview before applying it to source. Existing slides remain first. The draft stays here when this panel closes; download its JSON to keep it across page reloads.");
+  const deckTitle = field("Presentation title (blank inherits existing title)", "input", "title");
+  const loadNodes = button("Load nodes from current diagram", "load-nodes");
+  const catalogStatus = make("p", "Node choices have not been loaded.", panelEl, "catalog-status");
+  const slideList = field("Slides in this composition", "select", "slides");
+  const actions = make("div");
+  const add = button("Add slide", "add", actions), duplicate = button("Duplicate slide", "duplicate", actions);
+  const up = button("Move earlier", "up", actions), down = button("Move later", "down", actions);
+  const remove = button("Remove from draft", "remove", actions);
+  const fields = make("fieldset", "", panelEl, "fields");
+  make("legend", "Selected slide", fields);
+  const id = field("Slide ID", "input", "id", fields);
+  const title = field("Slide title (blank uses ID)", "input", "slide-title", fields);
+  const caption = field("Narration / caption", "textarea", "caption", fields);
+  const members = field('Node selectors as JSON (IDs, "subgraph:KEY", or "*")', "textarea", "members", fields);
+  const all = button("Use whole diagram (*)", "all", fields);
+  const search = field("Find explicit node selectors", "input", "search", fields); search.type = "search";
+  const picker = make("div", "", fields, "nodes");
+  picker.style.cssText = "max-height:180px;overflow:auto";
+  const count = make("p", "", fields, "node-count");
+  const reveal = field("Reveal order", "select", "reveal", fields);
+  options(reveal, [["none", "All visible on entry"], ["auto", "Automatic — engine dependency order"], ["groups", "Authored step groups"]]);
+  const groups = field('Reveal groups as JSON (for example [["b"],["c"]])', "textarea", "groups", fields);
+  const edges = field("Edges", "select", "edges", fields);
+  options(edges, [["induced", "Between slide members"], ["touching", "All touching edges"], ["none", "No edges"]]);
+  const margin = field("Camera margin (blank inherits)", "input", "margin", fields);
+  const zoom = field("Maximum zoom (blank inherits)", "input", "zoom", fields);
+  for (const input of [margin, zoom]) { input.type = "number"; input.min = "0"; input.step = "any"; }
+  const validate = button("Validate and preview composition", "validate");
+  const apply = button("Apply composition to source", "apply");
+  const cancel = button("Cancel review", "cancel");
+  const undo = button("Undo source application", "undo"), redo = button("Redo source application", "redo");
+  const downloadDraft = button("Download composition JSON", "download");
+  const importDraft = field("Replace draft from composition JSON", "input", "import");
+  importDraft.type = "file"; importDraft.accept = ".json,application/json";
+  const status = make("p", "No source changes until Apply.", panelEl, "status"); status.setAttribute("role", "status");
+  const review = make("pre", "", panelEl, "review"); review.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto";
+  const preview = make("div", "", panelEl, "preview");
+
+  function controls() {
+    const locked = disposed || suspended;
+    for (const control of [deckTitle, loadNodes, slideList, add, downloadDraft, importDraft]) control.disabled = locked || busy;
+    fields.disabled = locked || busy || selected < 0;
+    duplicate.disabled = locked || busy || selected < 0 || spec.slides.length >= 64;
+    remove.disabled = locked || busy || selected < 0;
+    up.disabled = locked || busy || selected <= 0;
+    down.disabled = locked || busy || selected < 0 || selected >= spec.slides.length - 1;
+    add.disabled ||= spec.slides.length >= 64;
+    validate.disabled = locked || busy || !spec.slides.length;
+    apply.disabled = locked || busy || !prepared || prepared.source !== sourceEl.value;
+    undo.disabled = locked || busy || !session.canUndo || session.source !== sourceEl.value;
+    redo.disabled = locked || busy || !session.canRedo || session.source !== sourceEl.value;
+    cancel.disabled = locked || (!busy && !prepared);
+    groups.parentElement.hidden = reveal.value !== "groups";
+    groups.parentElement.style.display = reveal.value === "groups" ? "block" : "none";
+    panelEl.setAttribute("aria-busy", String(busy));
+  }
+  function invalidate(message) {
+    operation += 1; session.cancel(); prepared = null; busy = false;
+    host.clearTimeout(deadline);
+    if (cancelWait) { cancelWait(abortError()); cancelWait = null; }
+    if (frameWait) { frameWait.reject(abortError()); frameWait = null; }
+    frame?.remove(); frame = null; frameNonce = null; review.textContent = "";
+    if (message) status.textContent = message;
+    controls();
+  }
+  function changed(event) {
+    dirty = true; invalidate("Draft changed. Validate again before applying.");
+    if (event?.target === members) fillNodes();
+  }
+  function saveCurrent() {
+    if (selected >= 0) {
+      const entry = { ...spec.slides[selected], id: id.value, nodes: JSON.parse(members.value) };
+      for (const [key, control] of [["title", title], ["caption", caption], ["fitMargin", margin], ["zoomMax", zoom]]) {
+        if (control.value === "") delete entry[key];
+        else entry[key] = control === margin || control === zoom ? Number(control.value) : control.value;
+      }
+      entry.edges = edges.value;
+      if (reveal.value === "none") delete entry.reveal;
+      else entry.reveal = reveal.value === "auto" ? "auto" : JSON.parse(groups.value);
+      spec.slides[selected] = entry;
+    }
+    if (deckTitle.value) spec.title = deckTitle.value; else delete spec.title;
+  }
+  function fillNodes() {
+    picker.replaceChildren();
+    let chosen;
+    try { chosen = JSON.parse(members.value); if (!Array.isArray(chosen)) return; }
+    catch { count.textContent = "Repair the selector JSON before using node checkboxes."; return; }
+    const query = search.value.toLowerCase();
+    let matches = 0;
+    for (const [index, node] of catalog.entries()) {
+      if (!`${node.id} ${node.label}`.toLowerCase().includes(query)) continue;
+      matches += 1;
+      if (matches > 200) continue;
+      const label = make("label", "", picker); label.style.display = "block";
+      const box = make("input", "", label); box.type = "checkbox"; box.checked = chosen.includes(node.id);
+      box.dataset.nodeIndex = String(index);
+      label.append(document.createTextNode(` ${node.id} — ${node.label}`));
+    }
+    count.textContent = `${chosen.length} explicit selectors. Showing ${Math.min(matches, 200)} of ${matches} matching nodes; search to narrow. Group selectors remain in the JSON list.`;
+  }
+  function fill() {
+    slideList.replaceChildren();
+    for (const [index, slide] of spec.slides.entries()) {
+      const option = make("option", `${index + 1}. ${slide.title || slide.id}`, slideList); option.value = String(index);
+    }
+    slideList.value = String(selected);
+    const slide = spec.slides[selected];
+    id.value = slide?.id || ""; title.value = slide?.title || ""; caption.value = slide?.caption || "";
+    members.value = JSON.stringify(slide?.nodes || []);
+    reveal.value = slide?.reveal === "auto" ? "auto" : Array.isArray(slide?.reveal) ? "groups" : "none";
+    groups.value = JSON.stringify(Array.isArray(slide?.reveal) ? slide.reveal : []);
+    edges.value = slide?.edges || "induced";
+    margin.value = slide?.fitMargin ?? ""; zoom.value = slide?.zoomMax ?? "";
+    deckTitle.value = spec.title || "";
+    fillNodes(); controls();
+  }
+  function nextId() {
+    let i = 1;
+    while (usedIds.has(`slide-${i}`) || spec.slides.some(slide => slide.id === `slide-${i}`)) i++;
+    return `slide-${i}`;
+  }
+  function edit(fn) {
+    try { saveCurrent(); fn(); changed(); fill(); }
+    catch (error) { slideList.value = String(selected); status.textContent = `Draft not changed: ${error.message}`; }
+  }
+  async function execute(label, work) {
+    if (disposed || suspended) return;
+    invalidate();
+    const version = operation, source = sourceEl.value;
+    const live = () => !disposed && !suspended && version === operation && source === sourceEl.value;
+    const check = () => { if (!live()) throw abortError(); };
+    busy = true; controls(); status.textContent = label;
+    const cancelled = new Promise((_resolve, reject) => { cancelWait = reject; });
+    deadline = host.setTimeout(() => invalidate("Composition work timed out. Your source and draft were retained."), timeoutMs);
+    try { await Promise.race([Promise.resolve().then(() => work(check, source)), cancelled]); }
+    catch (error) {
+      if (live()) {
+        session.cancel(); prepared = null; frame?.remove(); frame = null;
+        status.textContent = `Composition unavailable: ${error.message || error}`;
+      }
+    } finally {
+      if (version === operation) {
+        host.clearTimeout(deadline); cancelWait = null; frameWait = null; busy = false; controls();
+      }
+    }
+  }
+  async function loadCatalog() {
+    return execute("Reading node IDs from the current engine SVG…", async (check, source) => {
+      const result = await backend.renderDeck(source); check();
+      catalog = deckNodeCatalog(result.svg, host.DOMParser);
+      usedIds = new Set(result.manifest == null ? [] : checkedDeck(result).manifest.slides.map(slide => slide.id));
+      catalogStatus.textContent = `${catalog.length} addressable node IDs loaded. Existing slides: ${usedIds.size}.`;
+      fillNodes();
+      status.textContent = catalog.length ? "Choose slide members from the node list or enter group selectors." : "This diagram has no addressable node groups; deck composition may not be supported.";
+    });
+  }
+  async function prepare() {
+    try { saveCurrent(); }
+    catch (error) { invalidate(`Repair draft JSON: ${error.message}`); return; }
+    const json = JSON.stringify(spec);
+    return execute("Resolving the draft presentation in the engine…", async (check, source) => {
+      if (session.source !== source) session.observeSource(source);
+      const candidate = await session.prepare(json); check();
+      const assets = await loadAssets(); check();
+      const built = buildDeckHtml(candidate.deck, assets);
+      frameNonce = built.nonce;
+      frame = make("iframe", "", preview);
+      frame.title = "Draft presentation preview — source not yet changed";
+      frame.setAttribute("sandbox", "allow-scripts"); frame.setAttribute("allow", "fullscreen");
+      frame.setAttribute("referrerpolicy", "no-referrer");
+      frame.style.cssText = "width:100%;height:360px;border:1px solid #cbd5e1";
+      const ready = new Promise((resolve, reject) => { frameWait = { nonce: built.nonce, resolve, reject }; });
+      frame.srcdoc = built.html;
+      await ready; check();
+      const manifest = candidate.deck.manifest;
+      review.textContent = manifest.slides.map((slide, index) =>
+        `${index + 1}. ${slide.title} [${slide.id}] — ${slide.nodes.length} nodes, ${slide.maxStep} reveal steps\n` +
+        slide.nodes.map(node => `  ${node.sourceId} (step ${node.step})`).join("\n")).join("\n\n");
+      const warnings = candidate.deck.warnings.map(warning => typeof warning === "string" ? warning : warning.message || "Deck warning");
+      if (warnings.length) review.textContent += `\n\nEngine warnings:\n${warnings.join("\n")}`;
+      prepared = candidate;
+      status.textContent = `${spec.slides.length} draft slides resolved; ${candidate.existingSlides} existing slides retained. Review the presentation${warnings.length ? " and warnings" : ""}, then Apply. Source is unchanged.`;
+    });
+  }
+  function applyDraft() {
+    try {
+      if (disposed || suspended || busy || !prepared || prepared.source !== sourceEl.value) throw abortError();
+      const updated = session.commit(prepared);
+      invalidate(); dirty = false;
+      ownInput = true;
+      try { sourceEl.value = updated; sourceEl.dispatchEvent(new host.Event("input", { bubbles: true })); }
+      finally { ownInput = false; }
+      if (sourceEl.value !== updated) { sourceChanged(true); return; }
+      status.textContent = "Composition applied to source. You can revise these draft slides again; only this composition's exact block will be replaced.";
+      controls();
+    } catch (error) { invalidate(`Apply refused: ${error.message}`); }
+  }
+  function restoreSource(direction) {
+    try {
+      if (disposed || suspended || busy || session.source !== sourceEl.value) throw abortError();
+      const updated = direction === "undo" ? session.undo() : session.redo();
+      invalidate(); dirty = true;
+      ownInput = true;
+      try { sourceEl.value = updated; sourceEl.dispatchEvent(new host.Event("input", { bubbles: true })); }
+      finally { ownInput = false; }
+      if (sourceEl.value !== updated) { sourceChanged(true); return; }
+      status.textContent = `Source ${direction === "undo" ? "application undone" : "application restored"}. The draft is retained; validate before applying more changes.`;
+      controls();
+    } catch (error) { invalidate(`Source restore refused: ${error.message}`); }
+  }
+  function sourceChanged(force = false) {
+    if (disposed || (ownInput && !force) || (!force && sourceEl.value === session.source)) return;
+    invalidate();
+    catalog = []; usedIds.clear(); catalogStatus.textContent = "Source changed; reload node choices.";
+    try {
+      const retained = force ? (session.setSource(sourceEl.value), false) : session.observeSource(sourceEl.value);
+      status.textContent = retained
+        ? "Diagram source changed. Draft retained and its unchanged source block is still editable. Reload nodes and validate again."
+        : "The source or document changed. Draft retained, but its old source block is no longer editable here. Revalidate as a new composition; existing IDs must be unique.";
+    } catch (error) { status.textContent = error.message; }
+    fillNodes();
+    controls();
+  }
+  function download(file) {
+    if (saveFile) return saveFile(file);
+    const url = host.URL.createObjectURL(new host.Blob([file.text], { type: file.mime }));
+    const link = make("a", "", document.body); link.href = url; link.download = file.filename;
+    try { link.click(); } finally {
+      link.remove(); urls.set(url, host.setTimeout(() => { host.URL.revokeObjectURL(url); urls.delete(url); }, 1000));
+    }
+  }
+  listen(host, "message", event => {
+    if (!frameNonce || event.source !== frame?.contentWindow || event.data?.token !== frameNonce) return;
+    if (event.data.kind === "fm-deck-ready") frameWait?.resolve();
+    else if (event.data.kind === "fm-deck-error") invalidate(`Draft presentation failed: ${event.data.reason || "Runtime error"}. Source and draft retained.`);
+  });
+  listen(host, "beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+  listen(sourceEl, "input", () => sourceChanged());
+  for (const control of [deckTitle, id, title, caption, members, groups, margin, zoom]) listen(control, "input", changed);
+  for (const control of [reveal, edges]) listen(control, "change", changed);
+  listen(search, "input", fillNodes);
+  listen(picker, "change", event => {
+    if (event.target.dataset.nodeIndex === undefined) return;
+    const node = catalog[Number(event.target.dataset.nodeIndex)];
+    if (!node) return;
+    edit(() => {
+      const entry = spec.slides[selected];
+      entry.nodes = event.target.checked ? [...new Set([...entry.nodes, node.id])] : entry.nodes.filter(id => id !== node.id);
+    });
+  });
+  listen(slideList, "change", () => { const index = Number(slideList.value); edit(() => { selected = index; }); });
+  listen(add, "click", () => edit(() => { spec.slides.push({ id: nextId(), nodes: [] }); selected = spec.slides.length - 1; }));
+  listen(duplicate, "click", () => edit(() => { spec.slides.splice(selected + 1, 0, { ...JSON.parse(JSON.stringify(spec.slides[selected])), id: nextId() }); selected++; }));
+  listen(remove, "click", () => edit(() => { spec.slides.splice(selected, 1); selected = Math.min(selected, spec.slides.length - 1); }));
+  for (const [control, delta] of [[up, -1], [down, 1]]) listen(control, "click", () => edit(() => {
+    const next = selected + delta;
+    [spec.slides[selected], spec.slides[next]] = [spec.slides[next], spec.slides[selected]]; selected = next;
+  }));
+  listen(all, "click", () => edit(() => { spec.slides[selected].nodes = ["*"]; }));
+  listen(loadNodes, "click", () => { void loadCatalog(); });
+  listen(validate, "click", () => { void prepare(); });
+  listen(apply, "click", applyDraft);
+  listen(cancel, "click", () => invalidate("Review cancelled. Source and draft retained."));
+  listen(undo, "click", () => restoreSource("undo"));
+  listen(redo, "click", () => restoreSource("redo"));
+  listen(downloadDraft, "click", async () => {
+    try { saveCurrent(); const json = JSON.stringify(deckDraft(JSON.stringify(spec)), null, 2);
+      await download({ text: json + "\n", filename: "diagram-composition.json", mime: "application/json;charset=utf-8" });
+    } catch (error) { if (!disposed) status.textContent = `Draft download failed: ${error.message}`; }
+  });
+  listen(importDraft, "change", () => {
+    const file = importDraft.files?.[0]; importDraft.value = "";
+    if (!file) return;
+    void execute("Reading composition JSON…", async check => {
+      if (file.size > MAX_DECK_BLOCK) throw new Error("Composition JSON exceeds 32 KiB.");
+      const bytes = await file.arrayBuffer(); check();
+      if (bytes.byteLength !== file.size || bytes.byteLength > MAX_DECK_BLOCK) throw new Error("Composition file size changed.");
+      const imported = deckDraft(new host.TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      spec = JSON.parse(JSON.stringify(imported)); selected = 0; dirty = true; fill();
+      status.textContent = "Composition JSON loaded into the draft. Validate it before changing source.";
+    });
+  });
+  fill();
+  return { prepare, apply: applyDraft, loadCatalog, sourceChanged,
+    suspend() { suspended = true; invalidate("Draft retained while the presentation panel is closed."); },
+    resume() { if (!disposed) { suspended = false; sourceChanged(); controls(); } },
+    dispose() {
+      if (disposed) return;
+      disposed = true; invalidate(); session.dispose(); backend.dispose();
+      for (const remove of listeners) remove();
+      for (const [url, timer] of urls) { host.clearTimeout(timer); host.URL.revokeObjectURL(url); }
+      urls.clear();
+    },
+  };
 }
 
 /** An opt-in live deck preview. Hosts call sourceChanged for programmatic edits as well as
@@ -409,6 +773,7 @@ export function mountDeckEditor({ sourceEl, panelEl, loadModule, workerOptions =
   let frame;
   let waiting;
   let artifact;
+  let composer = null;
   const downloads = new Map();
   const listeners = [];
   function listen(element, event, handler) {
@@ -423,13 +788,39 @@ export function mountDeckEditor({ sourceEl, panelEl, loadModule, workerOptions =
     return element;
   }
   make("h2", "Graph deck");
-  make("p", "Author slides in a %%{deck: …}%% directive. Preview the presentation, then save one playable HTML file. External resources are blocked; embed images as data URIs.");
+  make("p", "Compose slides visually or author a %%{deck: …}%% directive. Preview the presentation, then save one playable HTML file. External resources are blocked; embed images as data URIs.");
   const example = make("details", "");
   const exampleTitle = document.createElement("summary");
   exampleTitle.textContent = "Deck directive example (replace a, b, c with your node IDs)";
   const exampleSource = document.createElement("pre");
   exampleSource.textContent = "%%{deck: {\n  title: 'My presentation',\n  slides: [\n    {id: 'start', title: 'Start', nodes: ['a', 'b'], reveal: [['b']]},\n    {id: 'next', title: 'Next', nodes: ['b', 'c']}\n  ]\n}}%%";
   example.append(exampleTitle, exampleSource);
+  const composition = make("details", "", "deck-editor-composition");
+  const compositionTitle = document.createElement("summary");
+  compositionTitle.textContent = "Compose slides visually";
+  const compositionPanel = document.createElement("section");
+  compositionPanel.setAttribute("aria-label", "Presentation composition");
+  compositionPanel.style.cssText = "max-height:75vh;overflow:auto;padding:8px";
+  composition.append(compositionTitle, compositionPanel);
+  listen(composition, "toggle", () => {
+    if (disposed) return;
+    if (composition.open && !composer) {
+      // Do not compete with the live presentation's worker or allocate another WASM instance
+      // merely to show the form. The composer owns its worker after the first explicit load.
+      let authorBackend = null;
+      composer = mountDeckComposer({ sourceEl, panelEl: compositionPanel, loadAssets, saveFile,
+        backend: {
+          renderDeck(source) {
+            authorBackend ||= createSourceEditorBackend({ loadModule, ...workerOptions });
+            return authorBackend.renderDeck(source);
+          },
+          cancel() { authorBackend?.cancel(); },
+          dispose() { authorBackend?.dispose(); },
+        },
+      });
+    }
+    if (composition.open && active) composer?.resume(); else composer?.suspend();
+  });
   const refresh = make("button", "Refresh presentation", "deck-editor-refresh");
   const saveHtml = make("button", "Save presentation (.html)", "deck-editor-save-html");
   const saveManifest = make("button", "Save manifest (.json)", "deck-editor-save-manifest");
@@ -542,20 +933,22 @@ export function mountDeckEditor({ sourceEl, panelEl, loadModule, workerOptions =
       if (live()) preview.setAttribute("aria-busy", "false");
     }
   }
-  function sourceChanged() {
-    if (disposed || observedSource === sourceEl.value) return;
+  function sourceChanged(force = false) {
+    if (disposed) return;
+    composer?.sourceChanged(force);
+    if (!force && observedSource === sourceEl.value) return;
     observedSource = sourceEl.value;
     invalidate();
     status.textContent = "Source changed. Refresh the presentation to preview or export this revision.";
     if (active && automatic.checked) timer = host.setTimeout(() => { void render(); }, 350);
   }
-  listen(sourceEl, "input", sourceChanged);
+  listen(sourceEl, "input", () => sourceChanged());
   listen(refresh, "click", () => { void render(); });
   listen(automatic, "change", () => {
     host.clearTimeout(timer);
     if (automatic.checked && !artifact) void render();
   });
-  listen(close, "click", () => { active = false; invalidate(); panelEl.hidden = true; });
+  listen(close, "click", () => { active = false; composer?.suspend(); invalidate(); panelEl.hidden = true; });
   for (const [button, exportFile] of [[saveHtml, exportHtml], [saveManifest, exportManifest]]) {
     listen(button, "click", async () => {
       try { await (saveFile || download)(exportFile()); }
@@ -566,10 +959,11 @@ export function mountDeckEditor({ sourceEl, panelEl, loadModule, workerOptions =
   sync();
   return {
     render, sourceChanged, exportHtml, exportManifest,
-    open() { if (!disposed) { active = true; panelEl.hidden = false; return render(); } },
+    documentChanged() { sourceChanged(true); },
+    open() { if (!disposed) { active = true; panelEl.hidden = false; if (composition.open) composer?.resume(); return render(); } },
     dispose() {
       if (disposed) return;
-      disposed = true; invalidate(); backend.dispose();
+      disposed = true; invalidate(); composer?.dispose(); backend.dispose();
       for (const remove of listeners) remove();
       for (const [url, timeout] of downloads) { host.clearTimeout(timeout); host.URL.revokeObjectURL(url); }
       downloads.clear();
