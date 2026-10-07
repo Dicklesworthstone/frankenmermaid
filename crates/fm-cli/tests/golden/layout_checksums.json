@@ -133,13 +133,13 @@
     },
     "cycle_scc_heavy": {
       "edge_count": 15,
-      "edges_checksum": "6e20a55911ac815b",
+      "edges_checksum": "10f1e82c1aea70eb",
       "layout_algorithm": "auto",
-      "layout_checksum": "9cb668c293835e23",
-      "layout_height": 1103.0,
-      "layout_width": 572.0,
+      "layout_checksum": "56024aadb4b84f0c",
+      "layout_height": 1476.0,
+      "layout_width": 392.0,
       "node_count": 12,
-      "nodes_checksum": "8811c21d0bfead6c"
+      "nodes_checksum": "ca23ebb0ec9760c6"
     },
     "dense_flowchart_stress": {
       "edge_count": 25,

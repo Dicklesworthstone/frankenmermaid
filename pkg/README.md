@@ -1024,8 +1024,8 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 
 | Strategy | How it works | When to use |
 |---|---|---|
-| **Greedy** | Repeatedly remove sinks (out-degree 0) and sources (in-degree 0). Order remaining nodes by `max(out_degree − in_degree)`. Reverse edges that violate the resulting order | Fast default. Good enough for most graphs |
-| **DFS back-edge** | Standard DFS with three-color marking. Edges to nodes in the "visiting" state are back-edges and get reversed. Linear O(V+E) and reproducible | Predictable results, identical DFS order → identical reversed-edge set. Iterative implementation — no stack-overflow risk on deep graphs |
+| **Greedy** | Repeatedly remove sinks (out-degree 0) and sources (in-degree 0). Order remaining nodes by `max(out_degree − in_degree)`. Reverse edges that violate the resulting order. The DFS back-edge choice is kept whenever it reverses no more edges, so the edge that closes a loop as written is the one reversed | Fast default. Good enough for most graphs |
+| **DFS back-edge** | Standard DFS with three-color marking, visiting nodes and their out-edges in declaration order (mermaid's own acyclicer). Edges to nodes in the "visiting" state are back-edges and get reversed. Linear O(V+E) and reproducible | Predictable results, identical DFS order → identical reversed-edge set. Iterative implementation — no stack-overflow risk on deep graphs |
 | **MFAS approximation** | Operates per SCC. Sorts nodes by `(out_degree − in_degree)` descending; reverses edges that violate the position order. Falls back to DFS if no improvement | Minimum reversed edges → better visual quality |
 | **Cycle-aware** | Full SCC detection with optional cluster collapse. Records `cycle_count`, `cycle_node_count`, `max_cycle_size`, and `reversed_edge_total_length` | Best visual quality. Cycle clusters render as grouped boxes |
 
@@ -2864,7 +2864,7 @@ The asymptotic complexity of every algorithm currently in `fm-layout`. Times in 
 | Five-tier detection pipeline (worst case fallback) | O(L) | Same |
 | IR builder (interning) | O(n + m) | `BTreeMap` keyed by ID |
 | Cycle removal (Greedy) | O(n + m) | Stable sink/source removal order |
-| Cycle removal (DFS back-edge) | O(n + m) | Iterative DFS in stable node order |
+| Cycle removal (DFS back-edge) | O(n + m) | Iterative DFS in declaration order |
 | Cycle removal (MFAS approximation) | O((n + m) log n) per SCC | Stable sort by `(out − in)` degree |
 | Cycle removal (cycle-aware + SCC) | O(n + m) for Tarjan, then per-component MFAS | Tarjan with index/lowlink |
 | Rank assignment (longest-path) | O(n + m) | Min-heap with stable priority |

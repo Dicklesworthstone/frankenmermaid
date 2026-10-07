@@ -21,7 +21,7 @@
       "bounds": {
         "x": 92.0,
         "y": 92.0,
-        "width": 208.61,
+        "width": 213.59,
         "height": 439.5
       },
       "fitMargin": 150.0,
@@ -31,32 +31,32 @@
           "index": 0,
           "sourceId": "fetch",
           "elementId": "fm-node-fetch-0",
-          "step": 2
+          "step": 0
         },
         {
           "index": 1,
           "sourceId": "check",
           "elementId": "fm-node-check-1",
-          "step": 0
+          "step": 1
         },
         {
           "index": 2,
           "sourceId": "retry",
           "elementId": "fm-node-retry-2",
-          "step": 1
+          "step": 2
         }
       ],
       "edges": [
         {
           "index": 0,
           "elementId": "fm-edge-0",
-          "step": 2,
+          "step": 1,
           "touching": false
         },
         {
           "index": 1,
           "elementId": "fm-edge-1",
-          "step": 1,
+          "step": 2,
           "touching": false
         },
         {
@@ -71,15 +71,15 @@
         {
           "step": 1,
           "elementIds": [
-            "fm-node-retry-2",
-            "fm-edge-1"
+            "fm-node-check-1",
+            "fm-edge-0"
           ]
         },
         {
           "step": 2,
           "elementIds": [
-            "fm-node-fetch-0",
-            "fm-edge-0",
+            "fm-node-retry-2",
+            "fm-edge-1",
             "fm-edge-2"
           ]
         }
@@ -90,7 +90,7 @@
       "title": "exit",
       "bounds": {
         "x": 200.61,
-        "y": 92.0,
+        "y": 278.5,
         "width": 199.54,
         "height": 253.0
       },
@@ -144,25 +144,25 @@
   "nodeGeometry": {
     "fm-node-check-1": {
       "x": 200.61,
-      "y": 92.0,
+      "y": 278.5,
       "width": 100.0,
       "height": 66.5
     },
     "fm-node-done-3": {
       "x": 295.15,
-      "y": 278.5,
+      "y": 465.0,
       "width": 105.0,
       "height": 66.5
     },
     "fm-node-fetch-0": {
-      "x": 98.6,
-      "y": 465.0,
+      "x": 195.64,
+      "y": 92.0,
       "width": 109.95,
       "height": 66.5
     },
     "fm-node-retry-2": {
       "x": 92.0,
-      "y": 278.5,
+      "y": 465.0,
       "width": 123.15,
       "height": 66.5
     }

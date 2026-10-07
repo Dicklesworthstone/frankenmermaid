@@ -4538,7 +4538,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x76d3_e9e9_c1b0_bbd0;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x64ec_6e89_884a_4d31;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4581,7 +4581,7 @@ mod tests {
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x1940_b1c0_5e19_bed8,
+                0x9dcf_6d14_b453_9097,
             ),
         ];
 

@@ -13368,7 +13368,7 @@ fn cycle_removal(
         };
     }
 
-    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, node_priority);
+    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges);
     // A directed graph is acyclic iff a DFS finds no back edge. When the graph is
     // acyclic there are no cyclic components and the cycle summary is empty, so the
     // (otherwise unconditional) strongly-connected-components pass is pure waste — the
@@ -13382,7 +13382,20 @@ fn cycle_removal(
     };
 
     let reversed_edge_indexes = match cycle_strategy {
-        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
+        // Eades' ordering knows nothing of the source, so on a tie it may reverse an edge the
+        // author drew forward: in mermaid's own `Christmas` example it reversed `Go shopping -->
+        // Let me think`, putting the decision above the step that leads to it. The DFS choice
+        // (mermaid's) is kept whenever it reverses no more edges; greedy wins only where it
+        // breaks the cycles with strictly fewer.
+        CycleStrategy::Greedy if !dfs_back_edges.is_empty() => {
+            let greedy = cycle_removal_greedy(node_count, &edges, node_priority);
+            if greedy.len() < dfs_back_edges.len() {
+                greedy
+            } else {
+                dfs_back_edges.clone()
+            }
+        }
+        CycleStrategy::Greedy => BTreeSet::new(),
         CycleStrategy::DfsBack => dfs_back_edges.clone(),
         CycleStrategy::MfasApprox => {
             cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
@@ -13572,19 +13585,21 @@ fn detect_cycle_components(
     }
 }
 
-fn cycle_removal_dfs_back(
-    node_count: usize,
-    edges: &[OrientedEdge],
-    node_priority: &[usize],
-) -> BTreeSet<usize> {
-    let outgoing_edge_slots = sorted_outgoing_edge_slots(node_count, edges, node_priority);
+/// Reverse every DFS back edge, visiting nodes and each node's out-edges in DECLARATION order —
+/// mermaid's own acyclicer (dagre's `dfsFAS`). So the edge reversed is the one that closes a loop
+/// as the source reads: in `B --> C … H -->|No| B` it is `H --> B`, the loop the author drew
+/// back, not `B --> C`, which put the decision above the step that leads to it. (The visit order
+/// used to be node ids sorted alphabetically, which matched the source only by accident.)
+fn cycle_removal_dfs_back(node_count: usize, edges: &[OrientedEdge]) -> BTreeSet<usize> {
+    // `edges` is in declaration order already.
+    let mut outgoing_edge_slots = vec![Vec::new(); node_count];
+    for (edge_slot, edge) in edges.iter().enumerate() {
+        outgoing_edge_slots[edge.source].push(edge_slot);
+    }
     let mut state = vec![0_u8; node_count];
     let mut reversed_edge_indexes = BTreeSet::new();
 
-    let mut node_visit_order: Vec<usize> = (0..node_count).collect();
-    node_visit_order.sort_by(|left, right| compare_priority(*left, *right, node_priority));
-
-    for start_node in node_visit_order {
+    for start_node in 0..node_count {
         if state[start_node] != 0 {
             continue;
         }
@@ -13676,7 +13691,7 @@ fn cycle_removal_mfas_approx(
     }
 
     if reversed_edge_indexes.is_empty() {
-        return cycle_removal_dfs_back(node_count, edges, node_priority);
+        return cycle_removal_dfs_back(node_count, edges);
     }
 
     reversed_edge_indexes
@@ -27329,6 +27344,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The edge reversed to break a cycle is the one that closes the loop as the source reads, as
+    /// in mermaid: `Paid? -->|No| Go shopping`, not `Go shopping --> Let me think`, which put the
+    /// decision above the step leading to it; and a state's return transition, not its exit.
+    #[test]
+    fn the_edge_that_closes_a_loop_is_the_one_reversed() {
+        let rank_order = |input: &str, expected: &[&str]| {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            let top = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| ir.nodes[node.node_index].id == id)
+                    .map(|node| node.bounds.y)
+                    .unwrap()
+            };
+            for pair in expected.windows(2) {
+                assert!(
+                    top(pair[0]) < top(pair[1]),
+                    "{} must sit above {} in {input:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        };
+        rank_order(
+            "flowchart TD\n  A[Christmas] -->|Get money| B(Go shopping)\n  B --> C{Let me think}\n  \
+             C -->|One| D[Laptop]\n  C -->|Two| E[iPhone]\n  D --> G[Checkout]\n  E --> G\n  \
+             G --> H{Paid?}\n  H -->|No| B\n  H -->|Yes| I((Done))\n",
+            &["A", "B", "C", "D", "G", "H", "I"],
+        );
+        rank_order(
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
+            &["Idle", "Busy"],
+        );
     }
 
     /// Two edges that share neither source nor target never run along the same line: a return
