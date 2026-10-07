@@ -109,9 +109,18 @@ fn compact_label_width(line: &str) -> usize {
     line.chars().count()
 }
 
+/// A `~~~` link shapes the layout and is never drawn, nor is its label.
+fn is_invisible_edge(ir: &MermaidDiagramIr, edge_path: &fm_layout::LayoutEdgePath) -> bool {
+    ir.edges
+        .get(edge_path.edge_index)
+        .is_some_and(|edge| edge.arrow == ArrowType::Invisible)
+}
+
 const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     match arrow {
-        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => (false, false),
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
+            (false, false)
+        }
         ArrowType::DoubleArrow
         | ArrowType::DoubleThickArrow
         | ArrowType::DoubleDottedArrow
@@ -308,6 +317,9 @@ impl TermRenderer {
 
         // Render edges.
         for edge_path in &layout.edges {
+            if is_invisible_edge(ir, edge_path) {
+                continue;
+            }
             self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
         }
 
@@ -705,6 +717,9 @@ impl TermRenderer {
 
         // Render edges.
         for edge_path in &layout.edges {
+            if is_invisible_edge(ir, edge_path) {
+                continue;
+            }
             self.render_edge_canvas(
                 &mut canvas,
                 edge_path,
@@ -2497,7 +2512,7 @@ impl TermRenderer {
         // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
         let mut edge_label_rects = Vec::new();
         for edge_path in &layout.edges {
-            if edge_path.points.len() < 2 {
+            if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
             }
             if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)

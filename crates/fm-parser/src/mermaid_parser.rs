@@ -24,7 +24,9 @@ use crate::{
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
 
-const FLOW_OPERATORS: [(&str, ArrowType); 26] = [
+const FLOW_OPERATORS: [(&str, ArrowType); 27] = [
+    // `~~~` is here for the first-byte gate: `match_mermaid_flow_link` reads the whole tilde run.
+    ("~~~", ArrowType::Invisible),
     ("-.->", ArrowType::DottedArrow),
     ("<-.->", ArrowType::DoubleDottedArrow),
     ("-.-", ArrowType::DottedLine),
@@ -15043,6 +15045,12 @@ fn find_operator_from_index<'a>(
 /// Returns the matched byte length and the `ArrowType` naming the (tail marker × stroke) pair.
 /// `None` means "not a link here" and leaves the table's answer standing.
 fn match_mermaid_flow_link(bytes: &[u8], index: usize) -> Option<(usize, ArrowType)> {
+    // `~~~+`, mermaid's INVISIBLE_LINK: no head, no tail, and any run of three or more is one token
+    // (a longer run only asks for more rank distance).
+    let tildes = bytes[index..].iter().take_while(|&&b| b == b'~').count();
+    if tildes > 0 {
+        return (tildes >= 3).then_some((tildes, ArrowType::Invisible));
+    }
     // A LEADING `o`/`x` IS A HEAD ONLY AT A TOKEN BOUNDARY, exactly as for the table scan
     // (bd-zdpwd): mermaid's regex opens `\s*[xo<]?`, so without this `Foo--o Bar` would match a
     // head at the second `o` of `Foo` and split the node. `<` cannot occur inside an identifier.
@@ -26793,6 +26801,58 @@ Rel_Back(db, app, "Responds")"#,
             parsed.ir.edges.len() >= 6,
             "Should have 6 edges for 6 arrow types, got {}",
             parsed.ir.edges.len()
+        );
+    }
+
+    /// `~~~` was not an operator at all: `A ~~~ B` became ONE node labelled "A ~~~ B" and the
+    /// placement the author asked for was lost. Any run of three or more tildes is one invisible
+    /// link, in chains, `&` groups and with a label; two tildes are not a link.
+    #[test]
+    fn flowchart_tilde_runs_are_invisible_links() {
+        let edges = |input: &str| -> Vec<(String, String, ArrowType)> {
+            let ir = parse_mermaid(input).ir;
+            ir.edges
+                .iter()
+                .map(|edge| {
+                    let id = |endpoint| match endpoint {
+                        IrEndpoint::Node(id) => ir.nodes[id.0].id.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (id(edge.from), id(edge.to), edge.arrow)
+                })
+                .collect()
+        };
+        let edge = |from: &str, to: &str, arrow| (from.to_string(), to.to_string(), arrow);
+        assert_eq!(
+            edges("flowchart LR\n  A ~~~ B\n"),
+            [edge("A", "B", ArrowType::Invisible)]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A~~~~~B\n"),
+            [edge("A", "B", ArrowType::Invisible)]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A --> B ~~~ C\n"),
+            [
+                edge("A", "B", ArrowType::Arrow),
+                edge("B", "C", ArrowType::Invisible)
+            ]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A & B ~~~ C\n"),
+            [
+                edge("A", "C", ArrowType::Invisible),
+                edge("B", "C", ArrowType::Invisible)
+            ]
+        );
+        let labelled = parse_mermaid("flowchart LR\n  A ~~~|why| B\n").ir;
+        assert_eq!(labelled.edges.len(), 1);
+        assert_eq!(labelled.nodes.len(), 2, "the label is not a node");
+        // Two tildes are not a link, and tildes inside a label stay text.
+        assert!(edges("flowchart LR\n  A ~~ B\n").is_empty());
+        assert_eq!(
+            edges("flowchart LR\n  A[x ~~~ y] --> B\n"),
+            [edge("A", "B", ArrowType::Arrow)]
         );
     }
 

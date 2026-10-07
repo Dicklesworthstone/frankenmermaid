@@ -1651,8 +1651,9 @@ fn build_marker_defs_body(edge_color: &str, marker_mask: u32) -> String {
     // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
     // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
     // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
-    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
-    // twin because a diamond looks identical either way round.
+    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no twin: their
+    // one def is already `auto-start-reverse` (see `ArrowheadMarker::diamond_marker`), and that one
+    // orientation keeps the diamond on the path at either end.
     push(
         &mut s,
         MARKER_START_TRIANGLE_OPEN,
@@ -3632,7 +3633,7 @@ fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
 fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
     use fm_core::ArrowType;
     match arrow {
-        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => 0,
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => 0,
         ArrowType::Arrow | ArrowType::DottedArrow => MARKER_END,
         ArrowType::OpenArrow | ArrowType::DottedOpenArrow => MARKER_OPEN,
         ArrowType::HalfArrowTop
@@ -6310,27 +6311,24 @@ fn write_class_cardinality_labels_into(
             && edge_path.points.len() >= 2
         {
             let font_size = config.font_size * 0.7;
-            if let Some(card) = ir_edge.source_cardinality() {
-                let p = &edge_path.points[0];
+            let points = &edge_path.points;
+            let last = points.len() - 1;
+            for (card, end, next) in [
+                (ir_edge.source_cardinality(), &points[0], &points[1]),
+                (
+                    ir_edge.target_cardinality(),
+                    &points[last],
+                    &points[last - 1],
+                ),
+            ] {
+                let Some(card) = card else { continue };
+                let (x, y, anchor) = cardinality_anchor(end, next, font_size);
                 write_cardinality_text_into(
                     out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
+                    x + offset_x,
+                    y + offset_y,
                     font_size,
-                    &colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-class-cardinality",
-                    card,
-                );
-            }
-            if let Some(card) = ir_edge.target_cardinality() {
-                let p = &edge_path.points[edge_path.points.len() - 1];
-                write_cardinality_text_into(
-                    out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
+                    anchor,
                     &colors.text,
                     &config.font_family,
                     config.embed_theme_css,
@@ -6339,6 +6337,36 @@ fn write_class_cardinality_labels_into(
                 );
             }
         }
+    }
+}
+
+/// Where a cardinality label goes for the edge end at `end`, whose path continues towards `next`.
+///
+/// The label is stepped along the path past the end marker and kept on the path's side of the node
+/// border. A fixed offset from the endpoint put it INSIDE the node whenever the edge left to the left
+/// or upwards, and cardinality is drawn before the nodes, so the node box covered it.
+fn cardinality_anchor(
+    end: &fm_layout::LayoutPoint,
+    next: &fm_layout::LayoutPoint,
+    font_size: f32,
+) -> (f32, f32, &'static str) {
+    const ALONG: f32 = 14.0;
+    const ASIDE: f32 = 6.0;
+    let (dx, dy) = (next.x - end.x, next.y - end.y);
+    let length = dx.hypot(dy);
+    if length <= f32::EPSILON {
+        return (end.x + ASIDE, end.y - ASIDE, "start");
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let (x, y) = (end.x + ux * ALONG, end.y + uy * ALONG);
+    if ux.abs() >= uy.abs() {
+        // Horizontal: above the line, extending away from the node.
+        (x, y - ASIDE, if ux < 0.0 { "end" } else { "start" })
+    } else if uy > 0.0 {
+        // Leaving downwards: the baseline sits a full line below the border.
+        (x + ASIDE, y + font_size * 0.5, "start")
+    } else {
+        (x + ASIDE, y, "start")
     }
 }
 
@@ -6354,6 +6382,7 @@ fn write_cardinality_text_into(
     x: f32,
     y: f32,
     font_size: f32,
+    anchor: &str,
     fill: &str,
     font_family: &str,
     embed_css: bool,
@@ -6365,7 +6394,9 @@ fn write_cardinality_text_into(
     let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(out, y);
-    out.push_str("\" text-anchor=\"start\" dominant-baseline=\"auto\" font-size=\"");
+    out.push_str("\" text-anchor=\"");
+    out.push_str(anchor);
+    out.push_str("\" dominant-baseline=\"auto\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, font_size);
     out.push('"');
     if !embed_css {
@@ -15107,7 +15138,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // second copy of it that could drift. Previously this was an inline `match arrow`.
     let edge_visuals = |arrow: ArrowType| -> (Option<&str>, Option<&str>, Option<&str>, &str) {
         match arrow {
-            ArrowType::Line | ArrowType::ThickLine => (None, None, None, &colors.edge),
+            ArrowType::Line | ArrowType::ThickLine | ArrowType::Invisible => {
+                (None, None, None, &colors.edge)
+            }
             ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
             ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
             ArrowType::HalfArrowTop => (None, None, Some("url(#arrow-half-top)"), &colors.edge),
@@ -15832,6 +15865,10 @@ fn render_edge_body_into(
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
+    // `~~~` placed the nodes during layout; drawing it would show the connection the author hid.
+    if arrow == ArrowType::Invisible {
+        return;
+    }
     let is_back_edge = edge_path.reversed;
     // `edgeId@{ animate: … }` opt-in. Resolved once here because it gates BOTH fast paths and is
     // applied on the slow one; a second lookup is how the gate and the emission drift apart.
@@ -15957,7 +15994,11 @@ fn render_edge_body_into(
             "",
             " points to ",
         ),
-        ArrowType::Line => (1.8, "fm-edge-solid", "", "", "", " connects to "),
+        // `Invisible` never reaches here (`render_edge_into` returns first); it shares `Line`'s arm
+        // only because the match must be total.
+        ArrowType::Line | ArrowType::Invisible => {
+            (1.8, "fm-edge-solid", "", "", "", " connects to ")
+        }
         ArrowType::OpenArrow => (
             1.8,
             "fm-edge-solid",
@@ -22062,6 +22103,78 @@ marker#arrow-open path {
         assert!(
             !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
             "a prefixed label survived alongside the number element, so both forms are emitted"
+        );
+    }
+
+    /// A cardinality is stepped OUT of its node whichever way the edge leaves, and extends away from
+    /// it: the old fixed `(+8, -8)` offset put it inside the box for edges leaving left or up.
+    #[test]
+    fn cardinality_sits_on_the_path_side_of_its_node() {
+        let end = fm_layout::LayoutPoint { x: 100.0, y: 50.0 };
+        let cases = [
+            ((60.0, 50.0), "end"),    // leaves leftwards
+            ((140.0, 50.0), "start"), // leaves rightwards
+            ((100.0, 10.0), "start"), // leaves upwards
+            ((100.0, 90.0), "start"), // leaves downwards
+        ];
+        for ((nx, ny), expected_anchor) in cases {
+            let next = fm_layout::LayoutPoint { x: nx, y: ny };
+            let (x, y, anchor) = cardinality_anchor(&end, &next, 10.0);
+            assert_eq!(anchor, expected_anchor, "towards ({nx},{ny})");
+            // The label lies on the path's side of the border it leaves through.
+            if nx < 100.0 {
+                assert!(x < end.x, "left: {x}");
+            } else if nx > 100.0 {
+                assert!(x > end.x, "right: {x}");
+            } else if ny < 50.0 {
+                assert!(y < end.y, "up: {y}");
+            } else {
+                assert!(
+                    y - 10.0 > end.y,
+                    "down: the glyphs start below the border, {y}"
+                );
+            }
+        }
+    }
+
+    /// A `~~~` link is neither drawn nor described: it positions nodes and nothing else.
+    #[test]
+    fn invisible_links_are_not_drawn_or_described() {
+        let svg = render_svg(
+            &fm_parser::parse("flowchart LR\n  A --> B\n  A ~~~|secret| C\n  C --> D\n").ir,
+        );
+        assert_eq!(
+            svg.matches("class=\"fm-edge fm-edge-solid\"").count(),
+            2,
+            "only the two visible edges are drawn"
+        );
+        assert!(!svg.contains("secret"), "the hidden link's label is drawn");
+        let desc = svg
+            .split("<desc")
+            .nth(1)
+            .and_then(|rest| rest.split("</desc>").next())
+            .expect("CONTROL: the diagram is described");
+        assert!(desc.contains("4 nodes and 2 edges"), "{desc}");
+        assert!(!desc.contains("A connects to C"), "{desc}");
+    }
+
+    /// The composition diamond at `marker-start` lies on the path, not inside the owning node.
+    /// Its tip is the anchor, so with plain `orient="auto"` the start slot pointed the body INTO the
+    /// node, which painted over it.
+    #[test]
+    fn start_diamonds_point_their_body_along_the_path() {
+        let svg = render_svg(&fm_parser::parse("classDiagram\n  A *-- B\n  C o-- D\n").ir);
+        for id in ["arrow-diamond", "arrow-diamond-open"] {
+            let def = svg
+                .split("<marker ")
+                .find(|chunk| chunk.starts_with(&format!("id=\"{id}\"")))
+                .unwrap_or_else(|| panic!("CONTROL: {id} is defined"));
+            assert!(def.contains("orient=\"auto-start-reverse\""), "{id}: {def}");
+        }
+        assert!(
+            svg.contains("marker-start=\"url(#arrow-diamond)\"")
+                && svg.contains("marker-start=\"url(#arrow-diamond-open)\""),
+            "CONTROL: both diamonds are used at the start slot"
         );
     }
 

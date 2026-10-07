@@ -45,14 +45,20 @@ pub fn describe_diagram_with_layout(
     };
 
     let diagnostics = ir.diagnostic_counts();
+    // A `~~~` link only positions nodes; the picture shows no connection, so neither does this.
+    let edge_count = ir
+        .edges
+        .iter()
+        .filter(|edge| edge.arrow != ArrowType::Invisible)
+        .count();
     let _ = write!(
         desc,
         "{} with {} node{} and {} edge{}",
         leading_type_phrase(type_desc),
         ir.nodes.len(),
         plural_suffix(ir.nodes.len()),
-        ir.edges.len(),
-        plural_suffix(ir.edges.len())
+        edge_count,
+        plural_suffix(edge_count)
     );
 
     if !ir.clusters.is_empty() {
@@ -111,6 +117,11 @@ pub fn describe_diagram_with_layout(
     }
 
     if let Some(layout) = layout {
+        // Each `~~~` link is routed as exactly one path, none of which is drawn.
+        let drawn_edges = layout
+            .edges
+            .len()
+            .saturating_sub(ir.edges.len() - edge_count);
         let _ = write!(
             desc,
             ". Layout spans {:.0} by {:.0} units with {} rendered node {} and {} routed edge path{}",
@@ -122,8 +133,8 @@ pub fn describe_diagram_with_layout(
             } else {
                 "boxes"
             },
-            layout.edges.len(),
-            plural_suffix(layout.edges.len())
+            drawn_edges,
+            plural_suffix(drawn_edges)
         );
         if layout.stats.crossing_count > 0 {
             let _ = write!(
@@ -169,6 +180,9 @@ fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
     ir.edges
         .iter()
         .filter_map(|edge| {
+            if edge.arrow == ArrowType::Invisible {
+                return None;
+            }
             let from = ir
                 .resolve_endpoint_node(edge.from)
                 .and_then(|id| ir.nodes.get(id.0))?;

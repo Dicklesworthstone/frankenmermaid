@@ -2330,6 +2330,12 @@ pub enum ArrowType {
     Lollipop,
     /// UML lollipop written target-first (`A --() B`), putting the socket at the target end.
     LollipopReverse,
+    /// Flowchart `~~~` (three or more tildes): a link that shapes the layout and is not drawn.
+    ///
+    /// Authors use it to place nodes — keep two in one rank order, pull one below another —
+    /// without a visible connection, so it must reach the layout as an ordinary edge while every
+    /// renderer leaves it out.
+    Invisible,
 }
 
 impl ArrowType {
@@ -2383,6 +2389,7 @@ impl ArrowType {
             Self::InheritanceReverse => "--|>",
             Self::Lollipop => "()--",
             Self::LollipopReverse => "--()",
+            Self::Invisible => "~~~",
         }
     }
 }

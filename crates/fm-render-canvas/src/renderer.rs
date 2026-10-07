@@ -642,7 +642,7 @@ impl Canvas2dRenderer {
                 path.marker_start,
                 x + offset_x,
                 y + offset_y,
-                angle,
+                start_marker_angle(path.marker_start, angle),
                 stroke_color,
             );
         }
@@ -2016,6 +2016,10 @@ impl Canvas2dRenderer {
         for edge_path in &layout.edges {
             let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
+            // A `~~~` link has placed its nodes; it is not drawn, nor is its label.
+            if arrow == ArrowType::Invisible {
+                continue;
+            }
 
             // Deref the point `SmallVec` to a slice ONCE — the edge draw below indexes it ~12× (path
             // loop, arrowhead direction, label anchor), and each `edge_path.points[i]` / `.len()` was a
@@ -2157,7 +2161,7 @@ impl Canvas2dRenderer {
                         marker_start,
                         sx,
                         sy,
-                        angle,
+                        start_marker_angle(marker_start, angle),
                         &self.config.node_fill,
                         stroke,
                     );
@@ -3194,6 +3198,17 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
             1
         }
+    }
+}
+
+/// The angle to draw `marker` with at a path's START, given the start tangent (pointing INTO the
+/// path). A diamond is drawn on the -x side of its tip, so it is turned half round: unflipped, it
+/// lay inside the owning node, which painted over it.
+fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
+    if matches!(marker, MarkerKind::Diamond | MarkerKind::DiamondOpen) {
+        angle + std::f64::consts::PI
+    } else {
+        angle
     }
 }
 
@@ -4513,6 +4528,17 @@ mod tests {
                 |operation| matches!(operation, DrawOperation::Translate(x, y)
                     if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
             ));
+        }
+
+        // A start diamond is turned to face back along the path (the edge runs +x from the
+        // owner), so its body lies on the edge rather than inside the owning node.
+        for arrow in [ArrowType::Aggregation, ArrowType::Composition] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(
+                operations.iter().any(|operation| matches!(operation,
+                    DrawOperation::Rotate(angle) if (*angle - std::f64::consts::PI).abs() < 0.001)),
+                "{arrow:?}: {operations:?}"
+            );
         }
     }
 

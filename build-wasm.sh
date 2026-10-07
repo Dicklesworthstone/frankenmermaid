@@ -139,7 +139,22 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 #   751261 gzip  + `actor` drawn as a stick figure in its own `render_node` arm   (+719, 669 over)
 # No lever was found inside the figure itself — a circle, one path and the shared label writer —
 # so the raise is that arm. Headroom after raise: 355 bytes.
-MAX_GZIP_BYTES=$((734 * 1024))
+#
+# Raised 734K -> 737K on 2026-10-07 for class/ER relationship ends, measured against 700a609
+# (751261 gzip, rebuilt by this script in the same session):
+#   753918 gzip  + ends sharing one point on a node side are fanned apart, cardinality labels are
+#                  stepped out of the node along the path, start diamonds face along the path
+#   753572 gzip  after replacing the fan's stable `sort_by` with an insertion sort (-346; ~11.6K
+#                  pre-opt of driftsort/quicksort/smallsort instantiations)
+# Function-by-function against 700a609 with names kept: the fan inlined into
+# `compute_traced_layout_with_config_and_guardrails` ~2.8K pre-opt, the direction-aware
+# cardinality writer +0.3K net. Headroom after raise: 1116 bytes, of which the same commit's
+# flowchart `~~~` invisible links then took 1033 (+461 pre-opt: the tilde run in the link grammar,
+# the skip in the SVG edge writer and scene builder, and leaving them out of the `<desc>`):
+#   754944 gzip  with the skip in `render_edge_into`, which changed how wasm-opt inlined it
+#   754605 gzip  after moving the skip onto the arrow already read in `render_edge_body_into` and
+#                folding the `<desc>` filter into its existing `filter_map`              (-339)
+MAX_GZIP_BYTES=$((737 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

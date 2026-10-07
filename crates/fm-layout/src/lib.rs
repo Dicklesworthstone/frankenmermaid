@@ -3294,7 +3294,13 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
 
     for edge in &layout.edges {
-        if edge.points.len() < 2 {
+        // A `~~~` link has done its work in the layout and is never drawn.
+        if edge.points.len() < 2
+            || ir
+                .edges
+                .get(edge.edge_index)
+                .is_some_and(|e| e.arrow == fm_core::ArrowType::Invisible)
+        {
             continue;
         }
 
@@ -3546,6 +3552,8 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     fm_core::ArrowType::LollipopReverse => {
                         marker_end = MarkerKind::Lollipop;
                     }
+                    // Skipped at the top of the loop; it has no marker to give.
+                    fm_core::ArrowType::Invisible => {}
                 }
 
                 // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second
@@ -3964,6 +3972,12 @@ fn compute_traced_layout_with_config_and_guardrails(
         let notes = build_state_note_geometry(ir, &layout.nodes, &metrics);
         layout.extensions.state_notes = notes;
         extend_bounds_for_state_notes(layout);
+    }
+    // Class and ER relationships carry their meaning in END markers — inheritance triangles,
+    // composition diamonds, crow's feet, cardinalities — so two relationships may not share one
+    // endpoint, where the second marker is drawn exactly under the first and disappears.
+    if matches!(ir.diagram_type, DiagramType::Class | DiagramType::Er) {
+        spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout));
     }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
@@ -7514,6 +7528,128 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             dirty_regions: Vec::new(),
         }),
         trace,
+    }
+}
+
+/// Spread edge ends that meet a node at the SAME point on the same side apart along that side.
+///
+/// Orthogonal routing gives every edge leaving one side of a node the side's centre as its port.
+/// That is harmless for a plain arrowhead converging on a target, and destructive where the END
+/// carries meaning: `Animal <|-- Duck` and `Animal *-- Leg` both left `Animal` at one point, and the
+/// composition diamond was drawn exactly under the inheritance triangle, with its cardinality on
+/// top of it. Ends are fanned out by up to 14px each, ordered by where their routes head so the
+/// fan does not cross itself, and an end's first segment is kept straight by moving the bend that
+/// shares its coordinate.
+fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+    /// (node, side 0=left 1=right 2=top 3=bottom, quantised x, quantised y)
+    type EndKey = (usize, u8, i32, i32);
+    const GAP: f32 = 14.0;
+    const EPS: f32 = 0.5;
+    // key -> [(edge path, at_start)]
+    let mut groups: Vec<(EndKey, Vec<(usize, bool)>)> = Vec::new();
+    for (path_index, path) in layout.edges.iter().enumerate() {
+        if path.points.len() < 2 || path.is_self_loop {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        for (at_start, endpoint) in [(true, edge.from), (false, edge.to)] {
+            let Some(node) = endpoint_node_index(ir, endpoint) else {
+                continue;
+            };
+            let Some(bounds) = layout.nodes.get(node).map(|n| n.bounds) else {
+                continue;
+            };
+            let p = if at_start {
+                path.points[0]
+            } else {
+                path.points[path.points.len() - 1]
+            };
+            let side = if (p.x - bounds.x).abs() < EPS {
+                0
+            } else if (p.x - (bounds.x + bounds.width)).abs() < EPS {
+                1
+            } else if (p.y - bounds.y).abs() < EPS {
+                2
+            } else if (p.y - (bounds.y + bounds.height)).abs() < EPS {
+                3
+            } else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let key = (
+                node,
+                side,
+                (p.x * 4.0).round() as i32,
+                (p.y * 4.0).round() as i32,
+            );
+            match groups.iter_mut().find(|(existing, _)| *existing == key) {
+                Some((_, members)) => members.push((path_index, at_start)),
+                None => groups.push((key, vec![(path_index, at_start)])),
+            }
+        }
+    }
+
+    for ((node, side, _, _), mut members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let vertical_side = side < 2;
+        let bounds = layout.nodes[node].bounds;
+        let side_length = if vertical_side {
+            bounds.height
+        } else {
+            bounds.width
+        };
+        // Where each route heads after its first bend, along the side's own axis.
+        let heading = |layout: &DiagramLayout, (path, at_start): (usize, bool)| {
+            let points = &layout.edges[path].points;
+            let far = if at_start {
+                points[points.len().min(3) - 1]
+            } else {
+                points[points.len().saturating_sub(3)]
+            };
+            if vertical_side { far.y } else { far.x }
+        };
+        // Insertion sort, stable like `sort_by`: a group is a handful of ends, and the generic
+        // stable sort monomorphised for this one call cost ~11 KB of wasm.
+        for i in 1..members.len() {
+            let mut j = i;
+            while j > 0 && heading(layout, members[j - 1]) > heading(layout, members[j]) {
+                members.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let span = (members.len() - 1) as f32;
+        let gap = GAP.min(side_length * 0.8 / span.max(1.0));
+        for (rank, (path, at_start)) in members.into_iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let offset = (rank as f32 - span / 2.0) * gap;
+            let points = &mut layout.edges[path].points;
+            let len = points.len();
+            let (end, next) = if at_start { (0, 1) } else { (len - 1, len - 2) };
+            let original = points[end];
+            let shift = |p: &mut LayoutPoint| {
+                if vertical_side {
+                    p.y += offset;
+                } else {
+                    p.x += offset;
+                }
+            };
+            shift(&mut points[end]);
+            // Keep the end's first segment straight by moving the bend that shares its coordinate
+            // — but never the far endpoint of a two-point route.
+            let shares = if vertical_side {
+                (points[next].y - original.y).abs() < EPS
+            } else {
+                (points[next].x - original.x).abs() < EPS
+            };
+            if len > 2 && shares {
+                shift(&mut points[next]);
+            }
+        }
     }
 }
 
@@ -26409,6 +26545,87 @@ mod tests {
             (marker.center.y - layout.edges[2].points[0].y).abs() < 0.01,
             "cross at `bye`"
         );
+    }
+
+    /// Two relationships leaving `Animal` on one side used to share the side's centre, so the
+    /// composition diamond was drawn exactly under the inheritance triangle. Every class edge end
+    /// now meets its node at its own point, and each end's first segment stays axis-aligned.
+    #[test]
+    fn class_relationship_ends_do_not_share_a_point() {
+        let ir = fm_parser::parse(
+            "classDiagram\n  direction RL\n  Animal <|-- Duck\n  Animal \"1\" *-- \"many\" Leg\n  Animal <|-- Fish\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let animal = ir
+            .nodes
+            .iter()
+            .position(|n| n.id == "Animal")
+            .expect("Animal");
+        let ends: Vec<LayoutPoint> = layout
+            .edges
+            .iter()
+            .filter(|path| ir.edges[path.edge_index].from == IrEndpoint::Node(IrNodeId(animal)))
+            .map(|path| path.points[0])
+            .collect();
+        assert_eq!(
+            ends.len(),
+            3,
+            "CONTROL: all three relationships leave Animal"
+        );
+        for (i, a) in ends.iter().enumerate() {
+            for b in &ends[i + 1..] {
+                assert!(
+                    (a.x - b.x).abs() + (a.y - b.y).abs() > 1.0,
+                    "two ends share {a:?}"
+                );
+            }
+        }
+        for path in &layout.edges {
+            let (p, q) = (path.points[0], path.points[1]);
+            if path.points.len() > 2 {
+                assert!(
+                    (p.x - q.x).abs() < 0.01 || (p.y - q.y).abs() < 0.01,
+                    "first segment bent: {:?}",
+                    path.points
+                );
+            }
+        }
+    }
+
+    /// A `~~~` link is an ordinary edge to the layout: it is what moves `C` a rank past `A`.
+    /// The scene the canvas draws from leaves it out.
+    #[test]
+    fn invisible_links_place_nodes_and_are_not_drawn() {
+        let layout_of = |source: &str| {
+            let ir = fm_parser::parse(source).ir;
+            let layout = layout_diagram(&ir);
+            let rank = |id: &str| {
+                let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+                layout.nodes[index].rank
+            };
+            (rank("A"), rank("C"), build_render_scene(&ir, &layout))
+        };
+        let (a, c, scene) = layout_of("flowchart LR\n  A --> B\n  A ~~~ C\n  C --> D\n");
+        assert_eq!(c, a + 1, "C is ranked after A");
+        let (a0, c0, _) = layout_of("flowchart LR\n  A --> B\n  C --> D\n");
+        assert_ne!(
+            c0,
+            a0 + 1,
+            "CONTROL: without the link C is placed elsewhere"
+        );
+        let edge_paths = scene
+            .root
+            .children
+            .iter()
+            .find_map(|child| match child {
+                RenderItem::Group(group) if group.id.as_deref() == Some("edges") => {
+                    Some(group.children.len())
+                }
+                _ => None,
+            })
+            .expect("edge layer");
+        assert_eq!(edge_paths, 2, "only the two visible edges are drawn");
     }
 
     #[test]
