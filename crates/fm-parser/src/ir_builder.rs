@@ -2232,6 +2232,13 @@ impl IrBuilder {
         self.pending_subgraph_endpoints.clear();
     }
 
+    /// An edge whose push was skipped (one endpoint did not intern) must not leave the subgraph
+    /// endpoint it did resolve for the next edge to pick up: in `G & c --> a & X["x]` the skipped
+    /// `G --> X` would otherwise attach `c --> a` to G.
+    pub(crate) fn discard_pending_subgraph_endpoints(&mut self) {
+        self.pending_subgraph_endpoints.clear();
+    }
+
     /// Keep each flowchart node in ONE subgraph, as mermaid does.
     ///
     /// A node written inside two subgraphs that do not nest (`API_GW` in `Frontend`, then again in

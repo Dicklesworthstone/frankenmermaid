@@ -67,7 +67,7 @@ const COMPOUND_MAX_NESTING: usize = 32;
 /// Whether any subgraph sits deeper than `limit` levels. Each parent chain is walked at most
 /// `limit` steps, so a malformed (cyclic) chain cannot loop.
 fn subgraph_nesting_exceeds(ir: &MermaidDiagramIr, limit: usize) -> bool {
-    ir.subgraphs.iter().any(|subgraph| {
+    ir.graph.subgraphs.iter().any(|subgraph| {
         let mut depth = 1;
         let mut parent = subgraph.parent;
         while let Some(id) = parent {
@@ -75,7 +75,7 @@ fn subgraph_nesting_exceeds(ir: &MermaidDiagramIr, limit: usize) -> bool {
             if depth > limit {
                 return true;
             }
-            parent = ir.subgraphs.get(id.0).and_then(|next| next.parent);
+            parent = ir.graph.subgraph(id).and_then(|next| next.parent);
         }
         false
     })

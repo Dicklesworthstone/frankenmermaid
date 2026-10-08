@@ -103,3 +103,30 @@ fn deeply_nested_composite_states_parse_and_lay_out_without_aborting() {
     assert_eq!(edge_count, 1);
     assert!(layout_node_count >= 2);
 }
+
+#[test]
+fn composite_states_at_the_compound_depth_limit_fit_a_wasm_sized_stack() {
+    // The deepest nesting compound placement still recurses into (32 levels) must fit the 1 MiB
+    // stack a WASM instance gets by default; deeper nesting takes the flat pipeline.
+    let nesting = 32;
+    let edge_count = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            use std::fmt::Write;
+            let mut input = String::from("stateDiagram-v2\n");
+            for i in 0..nesting {
+                writeln!(input, "state s{i} {{").unwrap();
+            }
+            input.push_str("a --> b\n");
+            for _ in 0..nesting {
+                input.push_str("}\n");
+            }
+            let parsed = fm_parser::parse(&input);
+            let _layout = fm_layout::layout_diagram(&parsed.ir);
+            parsed.ir.edges.len()
+        })
+        .expect("spawn pipeline thread")
+        .join()
+        .expect("32 nested composite states should lay out on a 1 MiB stack");
+    assert_eq!(edge_count, 1);
+}

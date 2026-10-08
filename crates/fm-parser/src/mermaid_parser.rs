@@ -1327,6 +1327,8 @@ fn lower_flow_ast(
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);
                 }
+            } else {
+                builder.discard_pending_subgraph_endpoints();
             }
         }
         FlowAst::ClassAssign { nodes, class } => {
@@ -1496,6 +1498,8 @@ fn lower_flow_document_item(
                     add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
                 }
                 builder.push_edge(f, t, arrow, None, span);
+            } else {
+                builder.discard_pending_subgraph_endpoints();
             }
         }
         FlowDocumentItem::FastNode {
