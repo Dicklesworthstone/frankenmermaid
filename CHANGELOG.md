@@ -19,7 +19,7 @@ New diagram families and a cluster-aware layout. The release covers 47 commits s
   - Compound placement falls back to the flat layout past 32 nesting levels, so deeply nested composite states, C4 boundaries and class namespaces no longer overflow the stack.
 - Dependencies: semver-compatible lockfile refresh. `wgpu` stays at 27, because 30 is a breaking GPU API change.
 
-Known limits: the committed WASM package (`pkg/`) and the Cloudflare Pages demo are rebuilt and deployed separately from the native release.
+The committed WASM package (`pkg/`, `@frankenmermaid/core` 0.4.0) is rebuilt from this source by `build-wasm.sh`. Known limits: the Cloudflare Pages demo is deployed separately from the native release.
 
 ## v0.3.0 — 2026-10-03
 
