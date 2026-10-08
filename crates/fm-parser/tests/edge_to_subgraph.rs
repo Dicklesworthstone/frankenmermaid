@@ -296,3 +296,39 @@ fn a_labelled_endpoint_reusing_the_name_resolves_to_the_subgraph() {
         "the subgraph name was interned as a node again"
     );
 }
+
+/// Only the edge that names the subgraph attaches to it (v0.4.0 release review).
+///
+/// The endpoints an edge resolved stayed pending for the rest of the statement, so in
+/// `G --> b --> a` the second edge `b --> a` (whose `a` is G's member, named directly) was attached
+/// to G's border too.
+#[test]
+fn a_chain_through_a_subgraph_attaches_only_the_edge_that_names_it() {
+    let source = format!("flowchart TD\n  subgraph G\n    a\n  end\n  G {ARROW} b {ARROW} a\n");
+    let ir = fm_parser::parse(&source).ir;
+    assert_eq!(ir.edges.len(), 2);
+    let ends = |index: usize| {
+        let extras = ir.edges[index].extras.as_ref();
+        (
+            extras.and_then(|x| x.from_subgraph).is_some(),
+            extras.and_then(|x| x.to_subgraph).is_some(),
+        )
+    };
+    assert_eq!(ends(0), (true, false), "G --> b must leave from G");
+    assert_eq!(ends(1), (false, false), "b --> a names `a`, not G");
+}
+
+/// An `&` list of subgraph endpoints attaches every expanded edge, and each edge records only its
+/// own two ends: the pending list used to grow with every lookup in the statement, so 90 x 90
+/// `G` endpoints left ~2E^2 entries (out of memory in WASM).
+#[test]
+fn an_ampersand_list_of_subgraph_endpoints_attaches_every_edge() {
+    let side = vec!["G"; 30].join(" & ");
+    let source = format!("flowchart TD\n  subgraph G\n    a\n  end\n  {side} {ARROW} {side}\n");
+    let ir = fm_parser::parse(&source).ir;
+    assert!(!ir.edges.is_empty());
+    for edge in &ir.edges {
+        let extras = edge.extras.as_ref().expect("subgraph ends recorded");
+        assert!(extras.from_subgraph.is_some() && extras.to_subgraph.is_some());
+    }
+}

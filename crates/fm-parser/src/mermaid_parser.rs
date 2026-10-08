@@ -9130,6 +9130,12 @@ fn split_wardley_link(body: &str) -> Option<(&str, &str, WardleyLink<'_>)> {
             index += 1;
             continue;
         }
+        // Every link token is ASCII, so a match can only start on a character
+        // boundary; slicing at a continuation byte (`Café -> Tea`) panicked.
+        if !body.is_char_boundary(index) {
+            index += 1;
+            continue;
+        }
         let rest = &body[index..];
         let mut link = WardleyLink {
             from: "",
@@ -9604,14 +9610,19 @@ fn build_wardley_ir(builder: &mut IrBuilder, doc: WardleyDocument<'_>) {
     } else {
         doc.stages
     };
-    let all_bounded = stages.iter().all(|(_, b)| b.is_some());
+    // A non-finite `@boundary` (`A@nan`) counts as absent: NaN reached `f32::clamp` as its
+    // lower bound on the next stage, which asserts (and panicked) even in release builds.
+    let all_bounded = stages.iter().all(|(_, b)| b.is_some_and(f32::is_finite));
     #[allow(clippy::cast_precision_loss)]
     let stage_width = 1.0 / stages.len() as f32;
     let mut start = 0.0;
     for (index, (caption, boundary)) in stages.iter().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let end = if all_bounded {
-            boundary.unwrap_or(1.0).clamp(start, 1.0)
+            boundary
+                .filter(|b| b.is_finite())
+                .unwrap_or(1.0)
+                .clamp(start, 1.0)
         } else {
             (index + 1) as f32 * stage_width
         };

@@ -47,10 +47,38 @@ pub(crate) fn compound_node_boxes(
     ) || !ir.constraints.is_empty()
         || config.collapse_cycle_clusters
         || top_level_clusters(ir).is_empty()
+        || subgraph_nesting_exceeds(ir, COMPOUND_MAX_NESTING)
     {
         return None;
     }
     Some(place(ir, node_sizes, config, spacing, metrics))
+}
+
+/// The deepest subgraph nesting compound placement recurses into.
+///
+/// [`place`] recurses once per nesting level and every frame keeps a cloned sub-IR (labels
+/// included) alive, so recursion depth, memory and time all followed the input's nesting.
+/// Only flowchart and block-beta nesting is capped by the parser; a composite state, C4
+/// boundary or class namespace nested a few thousand levels deep (about 15 bytes per level)
+/// overflowed the WASM stack. Deeper diagrams take the flat pipeline, which is what every
+/// diagram used before compound placement existed.
+const COMPOUND_MAX_NESTING: usize = 32;
+
+/// Whether any subgraph sits deeper than `limit` levels. Each parent chain is walked at most
+/// `limit` steps, so a malformed (cyclic) chain cannot loop.
+fn subgraph_nesting_exceeds(ir: &MermaidDiagramIr, limit: usize) -> bool {
+    ir.subgraphs.iter().any(|subgraph| {
+        let mut depth = 1;
+        let mut parent = subgraph.parent;
+        while let Some(id) = parent {
+            depth += 1;
+            if depth > limit {
+                return true;
+            }
+            parent = ir.subgraphs.get(id.0).and_then(|next| next.parent);
+        }
+        false
+    })
 }
 
 /// The top-level subgraphs that hold at least one node, in declaration order.

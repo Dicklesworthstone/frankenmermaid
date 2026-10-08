@@ -76,3 +76,30 @@ fn deeply_nested_subgraphs_parse_and_lay_out_without_aborting() {
         "nesting cap should bound clusters, got {cluster_count}"
     );
 }
+
+#[test]
+fn deeply_nested_composite_states_parse_and_lay_out_without_aborting() {
+    // Composite states have no parser nesting cap (only flowchart and block-beta do), and
+    // compound placement recursed once per nesting level, each frame holding a cloned sub-IR
+    // (v0.4.0 release review). Past its depth limit, layout takes the flat pipeline.
+    let nesting = 3_000;
+
+    let (edge_count, layout_node_count) = on_worker_sized_stack(move || {
+        use std::fmt::Write;
+        let mut input = String::from("stateDiagram-v2\n");
+        for i in 0..nesting {
+            writeln!(input, "state s{i} {{").unwrap();
+        }
+        input.push_str("a --> b\n");
+        for _ in 0..nesting {
+            input.push_str("}\n");
+        }
+
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        (parsed.ir.edges.len(), layout.nodes.len())
+    });
+
+    assert_eq!(edge_count, 1);
+    assert!(layout_node_count >= 2);
+}

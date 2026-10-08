@@ -2790,6 +2790,11 @@ impl IrBuilder {
                 }
             }
         }
+        // Each edge resolves its two endpoints right before this push, so what is pending belongs
+        // to THIS edge alone. Keeping it for the rest of the statement made every later edge
+        // re-match it: `G&G&…&G --> G&G&…&G` (90 x 90 edges) left ~2E^2 entries (OOM in wasm),
+        // and in `G --> b --> a` the edge `b --> a` was attached to G's border.
+        self.pending_subgraph_endpoints.clear();
         self.ir.edges.push(IrEdge {
             from: IrEndpoint::Node(from),
             to: IrEndpoint::Node(to),
