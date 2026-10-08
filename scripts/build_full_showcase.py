@@ -472,7 +472,7 @@ def main():
         </div>
         <div>
           <span class="text-lg font-extrabold tracking-tight text-white group-hover:text-emerald-400 transition">frankenmermaid</span>
-          <span class="ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.3.0</span>
+          <span class="ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.4.0</span>
         </div>
       </a>
 

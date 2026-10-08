@@ -232,7 +232,7 @@ The authoritative parity matrix against the FrankenTUI reference implementation 
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh" | bash
 ```
 
-The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.3.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
+The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.4.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
 
 Use `--from-source` to build with `cargo install --locked`; this path installs a minimal Rust toolchain via `rustup` if needed. Explicit `FM_INSTALL_PATH` or `FM_INSTALL_GIT_*` selectors also choose source installation. Source builds require a C/C++ toolchain and CMake. Existing source-selector precedence is preserved.
 
