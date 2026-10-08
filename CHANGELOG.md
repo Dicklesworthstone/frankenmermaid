@@ -4,6 +4,23 @@ All notable changes to **frankenmermaid** are documented here.
 
 Historical scope: project inception through 2026-08-19; the v0.3.0 release section below extends that record through 2026-09-26 and the release fixes.
 
+## v0.4.0 — 2026-10-08
+
+New diagram families and a cluster-aware layout. The release covers 47 commits since `v0.3.0` (35 features, 12 fixes) plus the release-review fixes below.
+
+- New diagram families: `wardley-beta` (Wardley maps), `venn-beta` with area-proportional layout, `ishikawa` (fishbone), `treeView-beta` and `eventmodeling`, the last unimplemented Mermaid type.
+- Compound (cluster-aware) layered layout. Subgraphs and composite states are laid out as units, routes go around unrelated subgraphs, and edges written to a subgraph id end on its border.
+- Diagram details: class/ER relationship ends, flowchart `~~~` invisible links, sequence `actor` stick figures, xychart horizontal orientation, gitGraph branch order, quadrant point styling, and the class diagram-level note.
+- Web and editor: Mermaid-shaped browser rendering with isolated SVG output, safe automatic startup, scoped SVG callback binding, playground theme/layout/config editing, and bounded multi-page PDF export. The VS Code integration gains structural source edits through Rust lenses and a cancellable WASM worker. Canvas scenes gain persistent selection and keyboard navigation.
+- Release-review fixes (independent review against `v0.3.0`):
+  - A non-ASCII name before a Wardley link arrow (`Café -> Tea`) no longer panics.
+  - A non-finite Wardley stage boundary (`@nan`) no longer panics.
+  - Flowchart statements that name a subgraph several times (`G & G & … --> G & …`) no longer use quadratic memory, and in `G --> b --> a` only the edge that names `G` attaches to it.
+  - Compound placement falls back to the flat layout past 32 nesting levels, so deeply nested composite states, C4 boundaries and class namespaces no longer overflow the stack.
+- Dependencies: semver-compatible lockfile refresh. `wgpu` stays at 27, because 30 is a breaking GPU API change.
+
+Known limits: the committed WASM package (`pkg/`) and the Cloudflare Pages demo are rebuilt and deployed separately from the native release.
+
 ## v0.3.0 — 2026-10-03
 
 This release includes the post-v0.2.0 engine, batch-rendering and presentation work through owner commit `0a938d76` (2026-09-26), plus the release fixes below. The historical Unreleased sections retain the earlier capability details; this release adds no new performance certification claims.
@@ -23,6 +40,7 @@ Known limits: explicitly permissive custom layout budgets can authorize excessiv
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
+| [`v0.4.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.4.0) | Release | 2026-10-08 | New diagram families (wardley, venn, ishikawa, treeView, eventmodeling), compound layout, review fixes |
 | [`v0.3.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.3.0) | Release | 2026-10-03 | Batch/deck correctness, packet guardrails, native archives |
 | Historical Unreleased | commits on `main` | 2026-07-11 → 2026-08-19 | Equivalence-clean corpora, concurrent CLI, GPU plan, janitor docs-reorg |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0) | Release | 2026-07-11 | First tagged GitHub Release |
