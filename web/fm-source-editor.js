@@ -791,6 +791,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   let preparedEdit = null;
   let displayedSource = null;
   let renderedSvg = null;
+  let rendering = null;
   let elements = new Map();
   let originalTabIndices = new Map();
   let matchedBindings = [];
@@ -837,7 +838,10 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   const redo = make("button", "Redo source change", "source-editor-redo");
   const saveSource = make("button", "Save source (.mmd)", "source-editor-save-source");
   const saveSvg = make("button", "Save SVG", "source-editor-save-svg");
-  for (const button of [undo, redo, saveSource, saveSvg]) button.type = "button";
+  const stop = make("button", "Stop current operation", "source-editor-stop");
+  const renderCurrent = make("button", "Render current source", "source-editor-render");
+  stop.setAttribute("aria-keyshortcuts", "Escape");
+  for (const button of [undo, redo, saveSource, saveSvg, stop, renderCurrent]) button.type = "button";
   const searchLabel = make("label", "Find diagram elements (ID, label or source)", "source-editor-search-label");
   const search = make("input", "", "source-editor-search");
   search.type = "search";
@@ -911,6 +915,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     redo.disabled = disposed || !history.canRedo;
     saveSource.disabled = disposed;
     saveSvg.disabled = !current() || renderedSvg === null;
+    stop.disabled = disposed || (rendering === null && activeEdit === null);
+    renderCurrent.disabled = disposed || rendering !== null || activeEdit !== null;
     const editable = current() && selection !== null && activeEdit === null;
     for (const control of [apply, snippet, insert, remove, insertText]) control.disabled = !editable;
     // A single-span mutation would invalidate the staged batch. Require an explicit clear
@@ -1187,6 +1193,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     syncControls();
   }
   function invalidate() {
+    rendering = null;
     epoch += 1;
     backend.cancel();
     clearBatchPreview();
@@ -1296,8 +1303,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   listen(sourceEl, "input", () => {
     history.record(sourceEl.value);
     // Hosts normally call render on input. Also invalidate when this editor is mounted alone;
-    // do not cancel a render the host already started (its displayedSource is already null).
-    if (displayedSource !== null && sourceEl.value !== displayedSource) {
+    // do not cancel a render the host already started for this exact input.
+    if ((rendering !== null && sourceEl.value !== rendering.source) ||
+        (displayedSource !== null && sourceEl.value !== displayedSource)) {
       invalidate();
       outEl.setAttribute("aria-busy", "false");
       message.textContent = "Source changed; render again before editing a span.";
@@ -1312,6 +1320,32 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     }
     clearStructural();
     syncControls();
+  }
+  function stopOperation() {
+    if (disposed || (rendering === null && activeEdit === null)) return false;
+    if (rendering !== null) {
+      invalidate();
+    } else {
+      // A cancelled edit never commits source. Keep its selection and replacement draft,
+      // and keep all staged batch edits so the user can review or retry them.
+      activeEdit = null;
+      backend.cancel();
+      clearBatchPreview();
+      clearStructural();
+    }
+    outEl.setAttribute("aria-busy", "false");
+    syncControls();
+    message.textContent = "Operation stopped. Source and replacement drafts are unchanged; render or prepare the edits again to retry.";
+    return true;
+  }
+  listen(stop, "click", stopOperation);
+  listen(renderCurrent, "click", () => { void renderSource(sourceEl.value); });
+  for (const element of [sourceEl, outEl, panelEl]) {
+    listen(element, "keydown", (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey ||
+          event.altKey || event.key !== "Escape") return;
+      if (stopOperation()) { event.preventDefault(); event.stopPropagation(); }
+    });
   }
   listen(insertText, "input", discardPreview);
   listen(snippet, "input", discardPreview);
@@ -1363,8 +1397,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     } finally {
       if (activeEdit === operation) {
         activeEdit = null;
-        outEl.setAttribute("aria-busy", "false");
         syncControls();
+        outEl.setAttribute("aria-busy", "false");
       }
     }
   }
@@ -1463,46 +1497,56 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
   invalidate();
 
+  async function renderSource(source) {
+    if (disposed || source !== sourceEl.value) return;
+    // Record edits before any asynchronous work: rapid typing and failed renders are undoable.
+    history.record(source);
+    invalidate();
+    const version = epoch;
+    const operation = { source, version };
+    rendering = operation;
+    syncControls();
+    message.textContent = `Building SVG and source map — ${backend.target}…`;
+    outEl.setAttribute("aria-busy", "true");
+    const live = () => !disposed && version === epoch && sourceEl.value === source;
+    try {
+      const { snapshot, svg } = await backend.renderSource(source);
+      if (!live()) return;
+      if (typeof svg !== "string") throw new Error("The renderer did not return SVG.");
+      const candidate = new SourceEditSession();
+      candidate.setSnapshot(source, snapshot);
+      session = candidate;
+      outEl.innerHTML = svg; // Only the renderer's sanitized SVG, never source or snippets.
+      const bindings = new Map(session.bindings.map((binding) => [binding.elementId, binding]));
+      for (const element of outEl.querySelectorAll("[id]")) {
+        if (!bindings.has(element.id)) continue;
+        elements.set(element.id, element);
+        originalTabIndices.set(element, element.getAttribute("tabindex"));
+        element.setAttribute("data-source-editable", "true");
+        renderedLabels.set(element.id, element.textContent);
+      }
+      displayedSource = source;
+      renderedSvg = svg;
+      rebuildMatches();
+      const warnings = snapshot.parsed?.warnings || [];
+      message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
+        (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
+    } catch (error) {
+      if (live()) message.textContent = `Source editor unavailable: ${error.message || error}`;
+    } finally {
+      if (rendering === operation) {
+        rendering = null;
+        outEl.setAttribute("aria-busy", "false");
+        syncControls();
+      }
+    }
+  }
+
   return {
     exportSource,
     exportSvg,
-    async render(source) {
-      if (disposed || source !== sourceEl.value) return;
-      // Record edits before any asynchronous work: rapid typing and failed renders are undoable.
-      history.record(source);
-      invalidate();
-      const version = epoch;
-      message.textContent = `Building SVG and source map — ${backend.target}…`;
-      outEl.setAttribute("aria-busy", "true");
-      const live = () => !disposed && version === epoch && sourceEl.value === source;
-      try {
-        const { snapshot, svg } = await backend.renderSource(source);
-        if (!live()) return;
-        if (typeof svg !== "string") throw new Error("The renderer did not return SVG.");
-        const candidate = new SourceEditSession();
-        candidate.setSnapshot(source, snapshot);
-        session = candidate;
-        outEl.innerHTML = svg; // Only the renderer's sanitized SVG, never source or snippets.
-        const bindings = new Map(session.bindings.map((binding) => [binding.elementId, binding]));
-        for (const element of outEl.querySelectorAll("[id]")) {
-          if (!bindings.has(element.id)) continue;
-          elements.set(element.id, element);
-          originalTabIndices.set(element, element.getAttribute("tabindex"));
-          element.setAttribute("data-source-editable", "true");
-          renderedLabels.set(element.id, element.textContent);
-        }
-        displayedSource = source;
-        renderedSvg = svg;
-        rebuildMatches();
-        const warnings = snapshot.parsed?.warnings || [];
-        message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
-          (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
-      } catch (error) {
-        if (live()) message.textContent = `Source editor unavailable: ${error.message || error}`;
-      } finally {
-        if (live()) outEl.setAttribute("aria-busy", "false");
-      }
-    },
+    render: renderSource,
+    cancel: stopOperation,
     dispose() {
       disposed = true;
       invalidate();

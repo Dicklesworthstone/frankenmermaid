@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Real Chromium Worker termination with a deliberately non-returning WASM function.
 
-Exercises the production source-worker client, backend, and mounted editor. The worker
-protocol peer is an explicit fixture, NOT the packaged Rust engine. Unlike an async mock,
-its infinite WASM loop cannot read cancellation messages or return to its event loop.
+Exercises the production source-worker client, worker entrypoint, backend, and mounted
+editor. Only the engine exports are fixtures, NOT the packaged Rust engine. Unlike an
+async mock, its infinite WASM loop cannot read cancellation messages or return to its event loop.
 No network resources are loaded. Requires Playwright and an installed Chromium.
 """
 import base64
@@ -16,8 +16,9 @@ from playwright.sync_api import sync_playwright
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = pathlib.Path(os.environ.get("FM_SOURCE_EDITOR_MODULE", ROOT / "fm-source-editor.js")).read_bytes()
 MODULE = "data:text/javascript;base64," + base64.b64encode(SOURCE).decode("ascii")
+WORKER = "data:text/javascript;base64," + base64.b64encode((ROOT / "fm-render.worker.js").read_bytes()).decode("ascii")
 
-SCRIPT = r"""async (moduleUrl) => {
+SCRIPT = r"""async ({ moduleUrl, workerUrl }) => {
   const { createSourceEditorBackend, mountSourceEditor } = await import(moduleUrl);
   const assert = (condition, reason) => { if (!condition) throw new Error(reason); };
   const waitFor = async (predicate) => {
@@ -32,29 +33,33 @@ SCRIPT = r"""async (moduleUrl) => {
   const bytes = [0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,104,97,110,103,0,0,
     10,9,1,7,0,3,64,12,0,11,11];
   assert(WebAssembly.validate(new Uint8Array(bytes)), 'infinite-loop WASM fixture is invalid');
-  const peer = `
+  const engineFixture = `
     const engine = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array(${JSON.stringify(bytes)})));
-    onmessage = ({ data: m }) => {
-      if (m.kind === 'init') {
-        postMessage({ kind: 'ready', sourceEditing: true, sourceDeletion: true,
-          sourceInsertion: true, sourceBatchEditing: true, deckRendering: true });
-        return;
-      }
-      if (m.kind === 'cancel') { postMessage({ kind: 'noReply', requestId: m.requestId }); return; }
-      if (m.input === 'hang') {
+    function block(input) {
+      if (input === 'hang') {
         postMessage({ kind: 'fixtureEntered' });
         engine.exports.hang();
         throw new Error('infinite loop unexpectedly returned');
       }
-      if (m.kind === 'sourceRender') {
-        postMessage({ kind: 'sourceRendered', requestId: m.requestId,
-          svg: '<svg xmlns="http://www.w3.org/2000/svg"><g id="fm-node-a-0"><text>' + m.input + '</text></g></svg>',
-          snapshot: { bindings: [{ elementId: 'fm-node-a-0', sourceId: 'A', kind: 'node', snippet: m.input,
-            textRange: { startByte: 0, endByte: new TextEncoder().encode(m.input).length } }], parsed: { warnings: [] } } });
-      }
-    };
+    }
+    export default async function init() {}
+    export function chooseCanvasTarget() { return JSON.stringify({ target: 'svgInWorker' }); }
+    export function parseLens(input) {
+      return { bindings: [{ elementId: 'fm-node-a-0', sourceId: 'A', kind: 'node', snippet: input,
+        textRange: { startByte: 0, endByte: new TextEncoder().encode(input).length } }], parsed: { warnings: [] } };
+    }
+    export function renderSvg(input) {
+      block(input);
+      return '<svg xmlns="http://www.w3.org/2000/svg"><g id="fm-node-a-0"><text>' + input + '</text></g></svg>';
+    }
+    export function applyParseLensEdit(input, elementId, replacement) {
+      block(replacement);
+      return { result: { elementId, updatedSource: replacement, previousSnippet: input, replacement,
+        replacedRange: { startByte: 0, endByte: new TextEncoder().encode(input).length } }, snapshot: parseLens(replacement) };
+    }
+    export function workerHandleMessage() { return null; }
   `;
-  const workerUrl = 'data:text/javascript;base64,' + btoa(peer);
+  const engineUrl = 'data:text/javascript;base64,' + btoa(engineFixture);
   const reports = [];
   function fixture(requestTimeoutMs = 600) {
     const workers = [];
@@ -71,7 +76,7 @@ SCRIPT = r"""async (moduleUrl) => {
       }
       terminate() { this.retired = true; super.terminate(); }
     }
-    const options = { WorkerClass: ObservedWorker, workerUrl, moduleUrl: 'unused-fixture-engine',
+    const options = { WorkerClass: ObservedWorker, workerUrl, moduleUrl: engineUrl,
       initTimeoutMs: 3000, requestTimeoutMs, cancelGraceMs: 40 };
     const loadModule = async () => {
       fallbackCalls += 1;
@@ -156,7 +161,99 @@ SCRIPT = r"""async (moduleUrl) => {
       } finally { editor.dispose(); }
       assert(f.workers.every(worker => worker.retired), 'mounted editor leaked a worker');
     }
-    return { scenarios: reports, heartbeat_ticks: heartbeat, boundary: 'real Worker and infinite WASM; explicit protocol peer, not packaged Rust' };
+    {
+      const f = fixture(3000);
+      document.body.innerHTML = '<textarea id="source"></textarea><div id="out"></div><section id="panel"></section>';
+      const sourceEl = document.getElementById('source'), outEl = document.getElementById('out');
+      sourceEl.value = 'hang';
+      const editor = mountSourceEditor({ sourceEl, outEl, panelEl: document.getElementById('panel'),
+        loadModule: f.loadModule, workerOptions: f.options, onChange() {} });
+      try {
+        const pending = editor.render(sourceEl.value);
+        await waitFor(() => f.workers[0].entered);
+        const stop = document.getElementById('source-editor-stop');
+        assert(!stop.disabled && document.getElementById('source-editor-render').disabled, 'busy controls are incorrect');
+        stop.click();
+        await pending;
+        await waitFor(() => f.workers[0].retired);
+        assert(sourceEl.value === 'hang' && stop.disabled, 'stop changed source or stayed enabled');
+        assert(outEl.getAttribute('aria-busy') === 'false', 'stop left a busy preview');
+        sourceEl.value = 'manual retry';
+        document.getElementById('source-editor-render').click();
+        await waitFor(() => outEl.textContent.includes('manual retry'));
+        assert(editor.exportSvg().text.includes('manual retry'), 'manual retry did not restore a current export');
+        reports.push({ scenario: 'stop_button_and_manual_render_recovery', passed: true });
+
+        sourceEl.value = 'hang';
+        const second = editor.render(sourceEl.value);
+        await waitFor(() => f.workers[1].entered);
+        const composing = new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true });
+        sourceEl.dispatchEvent(composing);
+        assert(!stop.disabled && !composing.defaultPrevented, 'IME Escape incorrectly stopped work');
+        const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+        sourceEl.dispatchEvent(escape);
+        assert(escape.defaultPrevented, 'Escape did not handle active cancellation');
+        await second;
+        await waitFor(() => f.workers[1].retired);
+        assert(editor.exportSource().text === 'hang' && !editor.cancel(), 'idle cancellation changed state');
+        reports.push({ scenario: 'escape_cancels_active_wasm_but_preserves_ime', passed: true });
+      } finally { editor.dispose(); }
+    }
+    {
+      const f = fixture(3000);
+      document.body.innerHTML = '<textarea id="source"></textarea><div id="out"></div><section id="panel"></section>';
+      const sourceEl = document.getElementById('source'), outEl = document.getElementById('out');
+      sourceEl.value = 'hang';
+      const editor = mountSourceEditor({ sourceEl, outEl, panelEl: document.getElementById('panel'),
+        loadModule: f.loadModule, workerOptions: f.options, onChange() {} });
+      try {
+        const pending = editor.render(sourceEl.value);
+        await waitFor(() => f.workers[0].entered);
+        sourceEl.value = 'typed without a host render callback';
+        sourceEl.dispatchEvent(new Event('input', { bubbles: true }));
+        await pending;
+        await waitFor(() => f.workers[0].retired);
+        assert(outEl.getAttribute('aria-busy') === 'false' && !document.getElementById('source-editor-render').disabled,
+          'standalone typing left obsolete work active');
+        assert(editor.exportSource().text === sourceEl.value && f.workers.length === 1, 'typing changed source or started unsolicited work');
+        reports.push({ scenario: 'standalone_input_cancels_obsolete_render', passed: true });
+      } finally { editor.dispose(); }
+    }
+    {
+      const f = fixture(3000);
+      document.body.innerHTML = '<textarea id="source"></textarea><div id="out"></div><section id="panel"></section>';
+      const sourceEl = document.getElementById('source'), outEl = document.getElementById('out');
+      sourceEl.value = 'original';
+      const editor = mountSourceEditor({ sourceEl, outEl, panelEl: document.getElementById('panel'),
+        loadModule: f.loadModule, workerOptions: f.options, onChange() {} });
+      try {
+        await editor.render(sourceEl.value);
+        outEl.querySelector('[id]').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        const snippet = document.getElementById('source-editor-snippet');
+        snippet.value = 'hang';
+        document.getElementById('source-editor-stage').click();
+        document.getElementById('source-editor-batch-prepare').click();
+        await waitFor(() => f.workers[0].entered);
+        document.getElementById('source-editor-stop').click();
+        await waitFor(() => f.workers[0].retired);
+        assert(sourceEl.value === 'original' && snippet.value === 'hang', 'batch cancellation lost source or replacement draft');
+        assert(document.getElementById('source-editor-batch-list').textContent.includes('hang'), 'staged edit was discarded');
+        assert(!document.getElementById('source-editor-batch-prepare').disabled, 'batch cannot be retried');
+        snippet.value = 'corrected batch';
+        snippet.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('source-editor-stage').click();
+        document.getElementById('source-editor-batch-prepare').click();
+        await waitFor(() => !document.getElementById('source-editor-batch-apply').hidden);
+        assert(sourceEl.value === 'original', 'retry committed before confirmation');
+        document.getElementById('source-editor-batch-apply').click();
+        assert(sourceEl.value === 'corrected batch', 'corrected batch could not commit');
+        document.getElementById('source-editor-undo').click();
+        assert(sourceEl.value === 'original' && f.fallbackCalls === 0, 'undo failed or batch escaped worker isolation');
+        reports.push({ scenario: 'batch_stop_preserves_drafts_and_retry_is_atomic', passed: true });
+      } finally { editor.dispose(); }
+    }
+    return { scenarios: reports, heartbeat_ticks: heartbeat,
+      boundary: 'production worker/client/editor; real infinite WASM engine fixture, not packaged Rust' };
   } finally {
     clearInterval(timer);
   }
@@ -175,7 +272,7 @@ def main():
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on("request", lambda request: requests.append(request.url))
             page.route("**/*", lambda route: route.abort())
-            result = page.evaluate(SCRIPT, MODULE)
+            result = page.evaluate(SCRIPT, {"moduleUrl": MODULE, "workerUrl": WORKER})
             assert errors == [], errors
             assert requests == [], requests
             print(json.dumps({**result, "page_errors": errors, "network_requests": requests}, indent=2))
