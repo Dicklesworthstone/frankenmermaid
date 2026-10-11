@@ -238,6 +238,95 @@ SCENARIOS = [
   check(!workers[0].replies.some(r => typeof r.value === 'string' && r.value.length > 16 * 1024 * 1024), 'oversized reply crossed boundary');
   check((await api.render('good', 'good')).svg.includes('good') && workers.length === 1, 'ordinary error broke worker');
 '''),
+('explicit stop preempts infinite WASM and queued calls without destroying configuration', r'''
+  const api = await make(); api.initialize({theme: 'dark', securityLevel: 'loose'});
+  const pending = Promise.allSettled([api.parse('hang-parse'), api.parse('never sent')]);
+  await until(() => calls().some(m => m.args[0] === 'hang-parse'));
+  api.cancelPending();
+  const retry = api.render('retry', 'corrected');
+  check((await pending).every(r => r.reason.name === 'AbortError' && r.reason.code === 'cancelled'), 'stop did not cancel both operations');
+  check((await retry).svg.includes('data-theme="dark"'), 'configuration lost on stop');
+  check(!calls().some(m => m.args[0] === 'never sent'), 'cancelled queue was restarted');
+  check(workers.length === 2 && workers[0].stops === 1, 'stop failed to preempt worker');
+'''),
+('stop during bootstrap does not poison the next worker or cached validation', r'''
+  window.failedEntryUrl = 'data:text/javascript,await new Promise(() => {})';
+  window.failFirstEntry = true;
+  const api = await make();
+  const pending = api.parse('never booted').catch(error => error);
+  await until(() => workers.length === 1);
+  api.cancelPending();
+  const retry = api.parse('retry');
+  check((await pending).code === 'cancelled', 'bootstrap not cancelled');
+  check((await retry).warnings[0] === 'retry', 'bootstrap cancellation poisoned retry');
+  check(workers.length === 2 && workers[0].sent.length === 1, 'cancelled bootstrap entered execution');
+'''),
+('stop cancels coalesced batches and immediate same-element retry does not inherit stale ownership', r'''
+  const api = await make(), first = document.createElement('pre'), second = document.createElement('pre');
+  first.textContent = 'hang-render'; second.textContent = 'not started'; document.body.append(first, second);
+  let callbacks = 0;
+  const old = Promise.allSettled([api.run({nodes: [first, second], postRenderCallback: () => callbacks++}),
+    api.run({nodes: [first], postRenderCallback: () => callbacks++})]);
+  await until(() => calls().some(m => m.method === 'renderSvg'));
+  api.cancelPending(); first.textContent = 'corrected';
+  const fresh = api.run({nodes: [first], postRenderCallback: () => callbacks++});
+  check((await old).every(r => r.reason instanceof AggregateError && r.reason.errors[0].code === 'cancelled'), 'coalesced batch was not cancelled');
+  await fresh;
+  check(first.querySelector('svg') && callbacks === 1, 'new run inherited cancelled ownership or callback');
+  check(second.textContent === 'not started' && !second.hasAttribute('data-processed'), 'stop consumed remaining source');
+  check(!calls().some(m => m.args[0] === 'not started'), 'cancelled batch dispatched its sibling');
+  await api.run({nodes: [first, second], postRenderCallback: () => callbacks++});
+  check(second.querySelector('svg') && callbacks === 2, 'resuming the remaining document failed');
+'''),
+('stop in a host callback retains published output and prevents the next diagram', r'''
+  const api = await make(), first = document.createElement('pre'), second = document.createElement('pre');
+  first.textContent = 'published'; second.textContent = 'remaining'; document.body.append(first, second);
+  const error = await api.run({nodes: [first, second], postRenderCallback() { api.cancelPending(); }}).catch(error => error);
+  check(error instanceof AggregateError && error.errors[0].code === 'cancelled', 'callback stop lost');
+  check(first.querySelector('svg') && first.dataset.processed === 'true', 'stop rolled back published content');
+  check(second.textContent === 'remaining' && !calls().some(m => m.args[0] === 'remaining'), 'stop started remaining diagram');
+  await api.run({nodes: [first, second]});
+  check(second.querySelector('svg'), 'later run could not resume');
+'''),
+('cancellation during binding is checked before replacing the source DOM', r'''
+  let api, cancel = true;
+  api = await make({reportError() { if (cancel) { cancel = false; api.cancelPending(); } }});
+  api.initialize({securityLevel: 'loose'}); // missing callback reporting invokes the host
+  const source = document.createElement('pre'); source.textContent = 'retain me'; document.body.append(source);
+  const error = await api.run({nodes: [source]}).catch(error => error);
+  check(error instanceof AggregateError && error.errors[0].code === 'cancelled', 'binding reporter cancellation ignored');
+  check(source.textContent === 'retain me' && !source.hasAttribute('data-processed'), 'cancelled binding published SVG');
+  let called = 0; api.registerCallback('show', () => called++);
+  await api.run({nodes: [source]});
+  source.querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0}));
+  check(called === 1, 'retry lost registered callbacks');
+'''),
+('stopping pending work preserves already-bound callbacks and other instances', r'''
+  const api = await make(), other = await make(); let called = 0;
+  api.initialize({securityLevel: 'loose'}); api.registerCallback('show', () => called++);
+  const result = await api.render('published', 'published');
+  const host = document.createElement('div'); host.innerHTML = result.svg; document.body.append(host); result.bindFunctions(host);
+  const old = api.parse('hang-parse').catch(error => error), independent = other.parse('slow other');
+  await until(() => calls().some(m => m.args[0] === 'hang-parse'));
+  api.cancelPending(); api.cancelPending();
+  check((await old).code === 'cancelled' && (await independent).warnings[0] === 'slow other', 'cancellation crossed instance boundary');
+  host.querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0}));
+  check(called === 1, 'stop revoked already-published callbacks');
+'''),
+('stop settles a never-resolving host callback without resuming the old document batch', r'''
+  const api = await make(), first = document.createElement('pre'), second = document.createElement('pre');
+  first.textContent = 'published'; second.textContent = 'remaining'; document.body.append(first, second);
+  let release;
+  const pending = api.run({nodes: [first, second], postRenderCallback: () => new Promise(resolve => { release = resolve; })}).catch(error => error);
+  await until(() => release);
+  api.cancelPending();
+  const error = await pending;
+  check(error instanceof AggregateError && error.errors[0].code === 'cancelled', 'callback wait did not settle');
+  release(); await sleep(30);
+  check(!calls().some(m => m.args[0] === 'remaining') && second.textContent === 'remaining', 'old callback resumed document batch');
+  await api.run({nodes: [first, second]});
+  check(second.querySelector('svg'), 'fresh document run did not recover');
+'''),
 ]
 
 results = []

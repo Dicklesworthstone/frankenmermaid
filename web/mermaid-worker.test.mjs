@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerMermaid } from "./mermaid-compat.mjs";
+import { createMermaid, createWorkerMermaid } from "./mermaid-compat.mjs";
 
 // Transport boundary fixture. The browser suite separately runs the production endpoint in
 // real DedicatedWorkers, including an infinite WebAssembly loop. No Rust grammar is mocked
@@ -271,4 +271,126 @@ test("instance configuration snapshots and lifetime are independent", async (t) 
   assert.equal(f.workers.length, 2);
   assert.equal(f.workers.filter((w) => w.terminated).length, 1);
   assert.deepEqual(f.workers.map((w) => JSON.parse(w.messages.find((m) => m.method === "validateConfig").args[0]).theme), ["dark", "neutral"]);
+});
+
+test("cancelPending terminates active work, rejects the queue and immediately permits retry", async (t) => {
+  const f = fixture(t, { call(_worker, message) { if (message.args[0] === "hang") return false; } });
+  f.api.initialize({ theme: "dark" });
+  const pending = Promise.allSettled([f.api.parse("hang"), f.api.parse("queued")]);
+  await until(() => f.calls().some((m) => m.args[0] === "hang"));
+  f.api.cancelPending();
+  const retry = f.api.parse("corrected"); // no wait for old rejection/cleanup microtasks
+  assert.ok((await pending).every((r) => r.reason.code === "cancelled" && r.reason.name === "AbortError"));
+  assert.equal((await retry).warnings[0], "corrected");
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.workers[0].terminated, 1);
+  assert.deepEqual(f.calls().filter((m) => m.method === "parse").map((m) => m.args[0]), ["hang", "corrected"]);
+  assert.deepEqual(f.calls().filter((m) => m.method === "validateConfig").map((m) => JSON.parse(m.args[0]).theme), ["dark", "dark"]);
+});
+
+test("cancel before loading never starts the cancelled request or poisons later work", async (t) => {
+  const f = fixture(t);
+  const pending = f.api.parse("cancel before load");
+  f.api.cancelPending(); f.api.cancelPending();
+  await assert.rejects(pending, { name: "AbortError", code: "cancelled" });
+  assert.equal(f.workers.length, 0);
+  assert.equal((await f.api.parse("new")).warnings[0], "new");
+  assert.equal(f.workers.length, 1);
+  f.api.dispose(); f.api.cancelPending();
+  assert.equal(f.workers[0].terminated, 1);
+});
+
+test("cancel during bootstrap retires its late ready notification and retries the same config", async (t) => {
+  let lateReady, attempts = 0;
+  const f = fixture(t, { init(worker) {
+    if (++attempts === 1) lateReady = worker.onmessage;
+    else worker.emit({ kind: "ready" });
+  } });
+  const pending = f.api.parse("old");
+  await until(() => lateReady);
+  f.api.cancelPending();
+  const fresh = f.api.parse("new");
+  lateReady({ data: { protocol: PROTOCOL, kind: "ready" } });
+  await assert.rejects(pending, { code: "cancelled" });
+  assert.equal((await fresh).warnings[0], "new");
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.workers[0].messages.length, 1);
+});
+
+test("cancelling shared pending validation rejects all owners and permits immediate validation retry", async (t) => {
+  let block = true;
+  const f = fixture(t, { call(_worker, message) { if (block && message.method === "validateConfig") return false; } });
+  const pending = Promise.allSettled([f.api.parse("a"), f.api.parse("b")]);
+  await until(() => f.calls().length === 1);
+  f.api.cancelPending(); block = false;
+  const retry = f.api.parse("retry");
+  assert.ok((await pending).every((r) => r.reason.code === "cancelled"));
+  assert.equal((await retry).warnings[0], "retry");
+  assert.deepEqual(f.calls().map((m) => m.method), ["validateConfig", "validateConfig", "parse"]);
+});
+
+test("cancellation after a transport reply revokes the still-pending public result", async (t) => {
+  const f = fixture(t, { call(worker, message) {
+    if (message.args[0] !== "reply then cancel") return;
+    worker.result(message, parsed("must not escape"));
+    f.api.cancelPending();
+    return false;
+  } });
+  await assert.rejects(f.api.parse("reply then cancel"), { code: "cancelled" });
+  assert.equal((await f.api.parse("new")).warnings[0], "new");
+});
+
+test("explicit cancellation respects parse suppression and reports unsuppressed operations once", async (t) => {
+  const f = fixture(t, { call(_worker, message) { if (message.method === "parse") return false; } });
+  const reported = [];
+  f.api.parseError = (error) => reported.push(error);
+  const quiet = f.api.parse("quiet", { suppressErrors: true });
+  const loud = f.api.parse("loud");
+  await until(() => f.calls().some((m) => m.method === "parse"));
+  f.api.cancelPending();
+  assert.equal(await quiet, false);
+  await assert.rejects(loud, { code: "cancelled" });
+  assert.equal(reported.length, 1);
+});
+
+test("cancellation is instance-local even while another worker is active", async (t) => {
+  const held = [];
+  const f = fixture(t, { call(worker, message) {
+    if (message.method === "parse") { held.push([worker, message]); return false; }
+  } });
+  const second = f.make();
+  const one = f.api.parse("one"), two = second.parse("two");
+  await until(() => held.length === 2);
+  f.api.cancelPending();
+  await assert.rejects(one, { code: "cancelled" });
+  const [worker, message] = held.find(([, m]) => m.args[0] === "two");
+  assert.equal(worker.terminated, 0);
+  worker.result(message, parsed("two"));
+  assert.equal((await two).warnings[0], "two");
+});
+
+test("custom loader cancellation settles promptly and cannot resume old parsing after loading", async (t) => {
+  let release;
+  const ready = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const api = createMermaid({ loadEngine: () => ready });
+  t.after(() => api.dispose());
+  const old = api.parse("old");
+  api.cancelPending();
+  await assert.rejects(old, { code: "cancelled" });
+  const current = api.parse("new");
+  release({ validateConfig: () => ({ errors: [] }), renderSvg: () => "<svg/>",
+    parse: (source) => { calls.push(source); return parsed(source); } });
+  assert.equal((await current).warnings[0], "new");
+  assert.deepEqual(calls, ["new"]);
+});
+
+test("operation waiting preserves even falsy host rejection reasons", async (t) => {
+  for (const reason of [undefined, null, false, 0, ""]) {
+    const api = createMermaid({ loadEngine: () => Promise.reject(reason) });
+    t.after(() => api.dispose());
+    const [result] = await Promise.allSettled([api.parse("source")]);
+    assert.equal(result.status, "rejected");
+    assert.equal(result.reason, reason);
+  }
 });

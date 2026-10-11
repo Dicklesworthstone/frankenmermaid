@@ -23,6 +23,12 @@ export class MermaidError extends Error {
   }
 }
 
+function cancelledError() {
+  const error = new MermaidError("The Mermaid operation was cancelled.", "cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
 function sourceText(source) {
   if (typeof source !== "string" || source.length > MAX_SOURCE_BYTES || encoder.encode(source).length > MAX_SOURCE_BYTES) {
     throw new MermaidError("Mermaid source must be text within the 2 MiB limit.", "source-limit");
@@ -82,7 +88,9 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   let startupFinished = false;
   const owner = {};
   const window = document?.defaultView;
-  const checkedConfigs = new WeakMap();
+  let checkedConfigs = new WeakMap();
+  let operationEpoch = {};
+  const pendingWaits = new Set();
   const callbacks = new Map();
   const bindingRoots = new Set();
   const bindingCleanup = new WeakMap();
@@ -109,6 +117,33 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   function assertLive() {
     if (disposed) throw new MermaidError("This Mermaid instance has been disposed.", "disposed");
   }
+  function assertCurrent(epoch) {
+    assertLive();
+    if (epoch !== operationEpoch) throw cancelledError();
+  }
+  // Settle logical operations immediately even when a host loader/callback never resolves.
+  // This does not stop host code: checkpoints revoke its authority to continue our pipeline.
+  // The worker factory additionally terminates synchronous WASM at the execution boundary.
+  function inOperation(promise, epoch) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = (success, value) => {
+        if (done) return;
+        done = true;
+        pendingWaits.delete(cancel);
+        if (success) resolve(value); else reject(value);
+      };
+      const cancel = () => {
+        try { assertCurrent(epoch); } catch (error) { finish(false, error); }
+      };
+      pendingWaits.add(cancel);
+      // Observe rejection even when this operation has already been cancelled.
+      Promise.resolve(promise).then(value => {
+        try { assertCurrent(epoch); finish(true, value); } catch (error) { finish(false, error); }
+      }, error => finish(false, error));
+      cancel();
+    });
+  }
   function engine() {
     assertLive();
     if (!loading) loading = Promise.resolve().then(loadEngine).then(async (module) => {
@@ -123,10 +158,14 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     }).catch((error) => { loading = undefined; throw error; });
     return loading;
   }
-  async function validate(module, snapshot) {
+  async function validate(module, snapshot, epoch) {
+    assertCurrent(epoch);
     let pending = checkedConfigs.get(snapshot);
     if (!pending) {
-      pending = Promise.resolve().then(() => module.validateConfig(snapshot.json)).then((raw) => {
+      pending = Promise.resolve().then(() => {
+        assertCurrent(epoch);
+        return module.validateConfig(snapshot.json);
+      }).then((raw) => {
         const report = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (!report || !Array.isArray(report.errors)) throw new MermaidError("Engine returned an invalid configuration report.", "engine-contract");
         if (report.errors.length) throw new MermaidError(report.errors.map((error) => `${error.field}: ${error.message}`).join("\n"), "config", report.errors);
@@ -141,12 +180,15 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     await pending;
     assertLive();
   }
-  async function inspect(source, snapshot) {
+  async function inspect(source, snapshot, epoch) {
+    assertCurrent(epoch);
     sourceText(source);
-    const module = await engine();
-    await validate(module, snapshot);
-    const parsed = await module.parse(source);
-    assertLive();
+    const module = await inOperation(engine(), epoch);
+    assertCurrent(epoch);
+    await inOperation(validate(module, snapshot, epoch), epoch);
+    assertCurrent(epoch);
+    const parsed = await inOperation(module.parse(source), epoch);
+    assertCurrent(epoch);
     const type = parsed?.ir?.diagram_type;
     const diagramType = Object.hasOwn(TYPES, type) ? TYPES[type] : undefined;
     const diagnostics = parsed?.ir?.diagnostics;
@@ -165,13 +207,15 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       catch (hookError) { report(hookError); }
     }
   }
-  async function renderSnapshot(id, source, snapshot, ownerDocument = document, interactions = captureInteractions()) {
+  async function renderSnapshot(id, source, snapshot, ownerDocument, interactions, operation) {
+    assertCurrent(operation);
     checkRenderId(id);
     const { epoch, registered } = interactions;
     const allowed = allowsCallbacks(snapshot);
-    const parsed = await inspect(source, snapshot);
-    const svg = await parsed.module.renderSvg(source, snapshot.value);
-    assertLive();
+    const parsed = await inOperation(inspect(source, snapshot, operation), operation);
+    assertCurrent(operation);
+    const svg = await inOperation(parsed.module.renderSvg(source, snapshot.value), operation);
+    assertCurrent(operation);
     const output = prepareSvg(svg, id, ownerDocument);
     const bindFunctions = output.element.querySelector("[data-callback]") ? createSvgBinder(output.element, {
       isLive: () => !disposed,
@@ -232,27 +276,34 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       && node.innerHTML === item.markup && node.childNodes.length === item.children.length
       && item.children.every((child, index) => node.childNodes[index] === child);
   }
-  async function renderNode(item, snapshot, interactions) {
-    assertLive();
+  async function renderNode(item, snapshot, interactions, epoch) {
+    assertCurrent(epoch);
     const { node } = item;
     // Another run may have completed this node since our selection snapshot. Never reparse
     // its SVG as Mermaid source. Removing data-processed is the caller's explicit retry/edit.
     if (node.getAttribute("data-processed") === "true") return undefined;
-    const existing = activeNodes.get(node);
+    let existing = activeNodes.get(node);
+    if (existing?.owner === owner && existing.epoch !== epoch) {
+      // An immediate retry must not await or inherit a cancelled run's ownership.
+      // Its publication checkpoints and identity-checked cleanup remain revoked.
+      activeNodes.delete(node);
+      existing = undefined;
+    }
     if (existing) {
       if (existing.owner !== owner || existing.snapshot !== snapshot || existing.callbackRevision !== interactions.revision || existing.markup !== item.markup
         || existing.source !== item.source) throw new MermaidError("A different render already owns this element.", "element-busy");
-      await existing.promise;
+      await inOperation(existing.promise, epoch);
       return undefined; // The owning run performs the callback exactly once.
     }
-    const job = { owner, snapshot, callbackRevision: interactions.revision, markup: item.markup, source: item.source };
+    const job = { owner, snapshot, epoch, callbackRevision: interactions.revision, markup: item.markup, source: item.source };
     job.promise = Promise.resolve().then(async () => {
+      assertCurrent(epoch);
       if (!unchanged(item)) throw new MermaidError("Diagram source changed before rendering; it was not replaced.", "stale-source");
       let id;
       do { id = `fm-mermaid-${++nextDocumentId}`; }
       while (item.document.getElementById(id) || item.root.getElementById?.(id));
-      const result = await renderSnapshot(id, item.source, snapshot, item.document, interactions);
-      assertLive();
+      const result = await inOperation(renderSnapshot(id, item.source, snapshot, item.document, interactions, epoch), epoch);
+      assertCurrent(epoch);
       if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
         throw new MermaidError("Diagram source changed while rendering; it was not replaced.", "stale-source");
       }
@@ -264,7 +315,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       const unbind = result.bindFunctions?.(result.element);
       try {
         // A missing-handler reporter is host code and may edit source or dispose this owner.
-        assertLive();
+        assertCurrent(epoch);
         if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
           throw new MermaidError("Diagram source changed during interaction binding; it was not replaced.", "stale-source");
         }
@@ -277,10 +328,11 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       return id;
     });
     activeNodes.set(node, job);
-    try { return await job.promise; }
+    try { return await inOperation(job.promise, epoch); }
     finally { if (activeNodes.get(node) === job) activeNodes.delete(node); }
   }
   async function run(options = {}) {
+    const epoch = operationEpoch;
     const snapshot = site;
     const interactions = captureInteractions();
     const suppress = options?.suppressErrors === true;
@@ -294,11 +346,16 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     const failures = [];
     for (const item of items) {
       try {
-        const id = await renderNode(item, snapshot, interactions);
-        if (id && callback) await callback(id);
+        assertCurrent(epoch);
+        const id = await inOperation(renderNode(item, snapshot, interactions, epoch), epoch);
+        assertCurrent(epoch);
+        if (id && callback) await inOperation(callback(id), epoch);
+        assertCurrent(epoch);
       } catch (error) {
         if (suppress) report(error);
         else { notify(error); failures.push(error); }
+        // A stopped document batch may not start its next diagram in a fresh worker.
+        if (disposed || epoch !== operationEpoch) break;
       }
     }
     if (failures.length) throw new AggregateError(failures, `${failures.length} Mermaid diagram(s) could not be processed.`);
@@ -341,8 +398,10 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       };
     },
     async parse(source, options = {}) {
+      const epoch = operationEpoch;
       try {
-        const { diagramType, diagnostics, warnings } = await inspect(source, site);
+        const { diagramType, diagnostics, warnings } = await inOperation(inspect(source, site, epoch), epoch);
+        assertCurrent(epoch);
         return { diagramType, diagnostics, warnings };
       } catch (error) {
         if (options.suppressErrors === true) return false;
@@ -350,11 +409,14 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       }
     },
     async render(id, source, container) {
+      const epoch = operationEpoch;
       try {
         if (container !== undefined && (!container?.ownerDocument || container.nodeType !== 1)) {
           throw new TypeError("render's optional container must be a DOM element, not a callback.");
         }
-        const { element, ...result } = await renderSnapshot(id, source, site, container?.ownerDocument || document);
+        const { element, ...result } = await inOperation(renderSnapshot(id, source, site,
+          container?.ownerDocument || document, captureInteractions(), epoch), epoch);
+        assertCurrent(epoch);
         return result;
       } catch (error) { notify(error); throw error; }
     },
@@ -366,9 +428,16 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       if (site.value.startOnLoad !== false) await run();
     },
     parseError: undefined,
+    cancelPending() {
+      if (disposed) return;
+      operationEpoch = {};
+      checkedConfigs = new WeakMap();
+      for (const cancel of pendingWaits) cancel();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
+      for (const cancel of pendingWaits) cancel();
       callbacks.clear();
       clearBindings();
       clearStartup();
@@ -519,21 +588,26 @@ function workerEngine(engineUrl, requestTimeoutMs) {
       pump();
     });
   }
+  function cancelPending(error) {
+    const job = active;
+    active = null;
+    retire();
+    if (job) settle(job, error);
+    while (queue.length) settle(queue.shift(), error);
+  }
   return {
     module: Object.freeze({
       parse: (source) => request("parse", [source]),
       renderSvg: (source, config) => request("renderSvg", [source, config]),
       validateConfig: (json) => request("validateConfig", [json]),
     }),
+    cancelPending() {
+      if (!disposed) cancelPending(cancelledError());
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
-      const error = workerError("This Mermaid instance has been disposed.", "disposed");
-      const job = active;
-      active = null;
-      retire();
-      if (job) settle(job, error);
-      while (queue.length) settle(queue.shift(), error);
+      cancelPending(workerError("This Mermaid instance has been disposed.", "disposed"));
     },
   };
 }
@@ -559,6 +633,8 @@ export function createWorkerMermaid({ engineUrl, requestTimeoutMs = 30_000, ...o
   if (!["http:", "https:", "blob:", "data:"].includes(url.protocol)) throw new TypeError("The worker engine URL must use HTTP(S) or a host-owned blob/data URL.");
   const client = workerEngine(url.href, requestTimeoutMs);
   const api = createMermaid({ ...options, loadEngine: () => client.module });
+  const cancelPending = api.cancelPending;
+  api.cancelPending = () => { try { cancelPending(); } finally { client.cancelPending(); } };
   const dispose = api.dispose;
   api.dispose = () => { try { dispose(); } finally { client.dispose(); } };
   return api;
