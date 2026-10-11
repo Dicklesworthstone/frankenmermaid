@@ -6,6 +6,11 @@ export const MAX_SHARE_SOURCE_BYTES = 256 * 1024;
 const MAX_PAYLOAD_BYTES = MAX_SHARE_SOURCE_BYTES * 6 + 4096; // Worst-case JSON escaping.
 const PREFIX = "#fm:";
 
+function isShareHash(hash) {
+  return typeof hash === "string" &&
+    (hash.startsWith(PREFIX) || hash.startsWith("#pako:") || hash.startsWith("#base64:"));
+}
+
 function validUnicode(text) {
   for (const character of text) {
     const code = character.codePointAt(0);
@@ -42,6 +47,15 @@ function unbase64url(text) {
   const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
   if (base64url(bytes) !== text) throw new Error("Non-canonical share-link encoding.");
   return bytes;
+}
+function unbase64Live(text) {
+  // Mermaid Live emits unpadded base64url. Also accept correctly padded standard
+  // base64 from older producers, but not ignored whitespace or nonzero pad bits.
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(text) ||
+      (text.includes("=") && text.length % 4 !== 0)) {
+    throw new Error("Malformed Mermaid Live link encoding.");
+  }
+  return unbase64url(text.replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_"));
 }
 async function boundedBytes(stream, limit) {
   const reader = stream.getReader(), chunks = [];
@@ -81,11 +95,30 @@ export async function encodeShareHash(document, { Compression = globalThis.Compr
   return hash;
 }
 
-/** Ordinary page anchors are not documents. Malformed/unknown fm: versions fail explicitly. */
+/** Decode native or Mermaid Live fragments. Import source only, never foreign settings. */
 export async function decodeShareHash(hash, { Decompression = globalThis.DecompressionStream } = {}) {
   if (typeof hash !== "string") throw new TypeError("Share fragment must be text.");
-  if (!hash.startsWith(PREFIX)) return null;
+  if (!isShareHash(hash)) return null;
   if (hash.length > MAX_SHARE_HASH_CHARS) throw new Error("Share link exceeds the encoded size limit.");
+  const live = /^#(pako|base64):(.+)$/.exec(hash);
+  if (live) {
+    let bytes = unbase64Live(live[2]);
+    if (live[1] === "pako") {
+      // pako.deflate uses a zlib wrapper, not gzip and not raw DEFLATE.
+      if (typeof Decompression !== "function") {
+        throw new Error("This browser cannot decompress the Mermaid Live link. Use a browser with deflate stream support.");
+      }
+      bytes = await boundedBytes(new Blob([bytes]).stream().pipeThrough(new Decompression("deflate")), MAX_PAYLOAD_BYTES);
+    }
+    const state = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    if (!state || typeof state !== "object" || Array.isArray(state) ||
+        !Object.hasOwn(state, "code") || typeof state.code !== "string") {
+      throw new Error("Invalid Mermaid Live document: expected code text.");
+    }
+    // Discard Mermaid config, callbacks, external resource URLs, and editor state.
+    // The host's security policy and the normal source validation remain authoritative.
+    return checkedDocument({ source: state.code, name: "diagram.mmd" });
+  }
   const match = /^#fm:v([0-9]+):(raw|gzip):([^:]+)$/.exec(hash);
   if (!match) throw new Error("Malformed or unsupported share-link format.");
   if (match[1] !== "1") throw new Error("Unsupported share-link version.");
@@ -220,12 +253,12 @@ export function mountShareControls({ panelEl, workspace }) {
     observedHash = hash;
     const ticket = ++navigation;
     openedRevision = null;
-    opening = hash.startsWith(PREFIX);
+    opening = isShareHash(hash);
     reopen.hidden = !opening;
     reopen.disabled = opening;
     reopen.textContent = "Open address-bar source";
     if (!opening) {
-      if (previousHash?.startsWith(PREFIX)) {
+      if (isShareHash(previousHash)) {
         navigationStatus.hidden = false;
         navigationStatus.textContent = "The address-bar share link was cleared. Current source retained.";
       }
@@ -240,7 +273,8 @@ export function mountShareControls({ panelEl, workspace }) {
       if (opened) {
         openedRevision = workspace.sourceSnapshot().revision;
         reopen.textContent = "Reopen address-bar source";
-        navigationStatus.textContent = "Shared source opened. Edit, present, or download it using the normal document controls.";
+        navigationStatus.textContent = "Shared source opened. Edit, present, or download it using the normal document controls." +
+          (hash.startsWith(PREFIX) ? "" : " Mermaid Live settings were not applied; only source was imported.");
       } else {
         navigationStatus.textContent = "Shared source was not opened; the current document is retained. See the source-file status for details. Use Open address-bar source to retry.";
       }
