@@ -373,137 +373,196 @@ async function applyLocalSourceBatch(api, input, edits, live) {
   return response;
 }
 
-/** A bounded, latest-request-only client for fm-render.worker.js source authoring. */
+/** Latest-request-only source worker with bounded cancellation and isolated recovery.
+ * A cancel message cannot preempt synchronous WASM. Give it a short grace period, then
+ * terminate the worker. The grace deadline belongs to the running job, not to new requests:
+ * continuous typing must not keep an obsolete computation alive indefinitely.
+ */
 export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, workerUrl, moduleUrl,
-  config, initTimeoutMs = 10000, requestTimeoutMs = 60000 } = {}) {
-  if (![initTimeoutMs, requestTimeoutMs].every((value) => Number.isSafeInteger(value) && value > 0)) {
-    throw new RangeError("Worker timeouts must be positive safe integers.");
+  config, initTimeoutMs = 10000, requestTimeoutMs = 60000, cancelGraceMs = 100 } = {}) {
+  if (![initTimeoutMs, requestTimeoutMs, cancelGraceMs].every((value) =>
+    Number.isSafeInteger(value) && value > 0 && value <= 2147483647)) {
+    throw new RangeError("Worker timeouts must be positive safe integers no greater than 2147483647.");
   }
-  let worker;
-  try {
-    if (typeof WorkerClass !== "function") throw new Error("Worker API not supported");
-    worker = new WorkerClass(workerUrl || new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
-  } catch (error) { throw new SourceWorkerUnavailable(String(error.message || error)); }
-  let ready = false;
-  let deckRendering = false;
-  let sourceDeletion = false;
-  let sourceInsertion = false;
-  let sourceBatchEditing = false;
+  if (typeof WorkerClass !== "function") throw new SourceWorkerUnavailable("Worker API not supported");
+  // A replacement worker must use the same configuration as the original, even if the
+  // caller mutates its object while a request is running. Do not transfer caller-owned data.
+  const initialConfig = structuredClone(config);
+  const url = workerUrl || new URL("./fm-render.worker.js", import.meta.url);
+  let current = null;
   let closed = false;
-  let failure = null;
+  let bootstrapFailure = null;
+  let dispatched = false;
   let pending = null;
   let nextId = 1;
-  let initTimer;
 
-  function settle(error, value) {
-    if (!pending) return;
-    const operation = pending;
+  function interrupted(reason) {
+    const error = new Error(`${reason}. The worker was stopped; edit the source or retry in a fresh worker.`);
+    error.name = "SourceWorkerInterrupted";
+    return error;
+  }
+  function settle(operation, error, value) {
+    if (!operation || pending !== operation) return;
     pending = null;
-    clearTimeout(operation.timer);
     if (error) operation.reject(error);
     else operation.resolve(value);
   }
-  function fail(reason) {
-    if (closed || failure) return;
-    failure = new SourceWorkerUnavailable(String(reason));
-    clearTimeout(initTimer);
-    settle(failure);
-    worker.terminate();
+  function clearActive(generation) {
+    clearTimeout(generation.active?.timer);
+    clearTimeout(generation.cancelTimer);
+    generation.cancelTimer = null;
+    generation.active = null;
+  }
+  function retire(generation) {
+    if (current !== generation) return;
+    current = null; // Revoke callbacks BEFORE terminating or settling a caller's promise.
+    clearTimeout(generation.initTimer);
+    clearActive(generation);
+    generation.worker.onmessage = generation.worker.onerror = generation.worker.onmessageerror = null;
+    generation.worker.terminate();
+  }
+  function fail(generation, reason) {
+    if (closed || current !== generation) return;
+    const active = generation.active;
+    const cancelled = active && active.operation !== pending;
+    retire(generation);
+    // Only initial transport/bootstrap unavailability permits the existing local fallback.
+    // A crash, timeout, or broken protocol after dispatch must NEVER replay work on the UI.
+    const error = dispatched ? interrupted(reason) : new SourceWorkerUnavailable(String(reason));
+    if (!dispatched) bootstrapFailure = error;
+    if (cancelled) {
+      // The failed job was already revoked. Start only the newer, explicitly requested job.
+      if (pending) start();
+    } else {
+      settle(pending, error);
+    }
+  }
+  function validReply(operation, message) {
+    const kind = operation.message.kind;
+    if (kind === "sourceDeck") {
+      return message.kind === "sourceDeckRendered" && typeof message.svg === "string" &&
+        Array.isArray(message.warnings) && (message.manifest == null ||
+          (typeof message.manifest === "object" && !Array.isArray(message.manifest)));
+    }
+    if (kind === "sourceRender") {
+      return message.kind === "sourceRendered" && typeof message.svg === "string" &&
+        Array.isArray(message.snapshot?.bindings);
+    }
+    const reply = { sourceEdit: "sourceEdited", sourceDelete: "sourceDeleted",
+      sourceInsert: "sourceInserted", sourceBatch: "sourceBatchEdited" }[kind];
+    return message.kind === reply && typeof message.response?.result?.updatedSource === "string" &&
+      Array.isArray(message.response?.snapshot?.bindings) &&
+      (kind !== "sourceBatch" || Array.isArray(message.response.result.changes));
+  }
+  function receive(generation, message) {
+    if (closed || current !== generation) return;
+    if (!message || typeof message !== "object") { fail(generation, "Invalid source worker response"); return; }
+    if (message.kind === "ready") {
+      if (generation.ready) return;
+      if (message.sourceEditing !== true) { fail(generation, "Worker package lacks source-editing support"); return; }
+      clearTimeout(generation.initTimer);
+      generation.ready = true;
+      generation.capabilities = message;
+      sendPending();
+      return;
+    }
+    if (message.kind === "failed" && (!generation.ready || message.requestId == null)) {
+      fail(generation, message.reason || "Source worker initialization failed");
+      return;
+    }
+    const active = generation.active;
+    if (!active || message.requestId !== active.operation.message.requestId) return;
+    const operation = active.operation;
+    if (message.kind !== "noReply" && message.kind !== "failed" && !validReply(operation, message)) {
+      fail(generation, "Mismatched source worker response");
+      return;
+    }
+    clearActive(generation);
+    if (operation === pending) {
+      if (message.kind === "noReply") settle(operation, cancelledOperation());
+      else if (message.kind === "failed") settle(operation, new Error(message.reason || "Source operation failed"));
+      else if (operation.message.kind === "sourceDeck") {
+        settle(operation, null, { svg: message.svg, manifest: message.manifest ?? null, warnings: message.warnings });
+      } else {
+        settle(operation, null, operation.message.kind === "sourceRender"
+          ? { svg: message.svg, snapshot: message.snapshot } : message.response);
+      }
+    }
+    // A late terminal reply also acknowledges cancellation. Reuse the worker only now,
+    // rather than posting an unbounded sequence of jobs behind synchronous WASM.
+    sendPending();
   }
   function sendPending() {
-    if (!ready || !pending || pending.sent || closed || failure) return;
-    if (pending.message.kind === "sourceBatch" && !sourceBatchEditing) {
-      settle(new Error("The worker package lacks atomic batch editing; update the worker and WASM package."));
+    const generation = current;
+    if (closed || !generation?.ready || generation.active || !pending) return;
+    const operation = pending;
+    const capability = { sourceDeck: "deckRendering", sourceDelete: "sourceDeletion",
+      sourceInsert: "sourceInsertion", sourceBatch: "sourceBatchEditing" }[operation.message.kind];
+    if (capability && generation.capabilities[capability] !== true) {
+      const feature = { deckRendering: "graph-deck rendering", sourceBatchEditing: "atomic batch editing",
+        sourceDeletion: "this structural edit", sourceInsertion: "this structural edit" }[capability];
+      settle(operation, new Error(`The worker package lacks ${feature}; update the worker and WASM package.`));
       return;
     }
-    if (pending.message.kind === "sourceDeck" && !deckRendering) {
-      settle(new Error("The worker package lacks graph-deck rendering; update the worker and WASM package."));
+    const active = { operation, timer: null };
+    generation.active = active;
+    dispatched = true;
+    active.timer = setTimeout(() => {
+      if (current === generation && generation.active === active) fail(generation, "Source worker request timed out");
+    }, requestTimeoutMs);
+    try { generation.worker.postMessage(operation.message); }
+    catch (error) { fail(generation, error.message || error); }
+  }
+  function start() {
+    if (closed || current || bootstrapFailure) return;
+    let worker;
+    try { worker = new WorkerClass(url, { type: "module" }); }
+    catch (error) {
+      const failure = dispatched ? interrupted(error.message || error) : new SourceWorkerUnavailable(String(error.message || error));
+      if (!dispatched) bootstrapFailure = failure;
+      settle(pending, failure);
       return;
     }
-    if ((pending.message.kind === "sourceDelete" && !sourceDeletion) ||
-        (pending.message.kind === "sourceInsert" && !sourceInsertion)) {
-      settle(new Error("The worker package lacks this structural edit; update the worker and WASM package."));
-      return;
-    }
-    pending.sent = true;
-    pending.timer = setTimeout(() => fail("source worker request timed out"), requestTimeoutMs);
-    try { worker.postMessage(pending.message); }
-    catch (error) { fail(error.message || error); }
+    const generation = { worker, ready: false, capabilities: null, active: null, cancelTimer: null, initTimer: null };
+    current = generation;
+    worker.onmessage = ({ data }) => receive(generation, data);
+    worker.onerror = (event) => fail(generation, event.message || "Source worker crashed");
+    worker.onmessageerror = () => fail(generation, "Source worker response could not be decoded");
+    generation.initTimer = setTimeout(() => fail(generation, "Source worker initialization timed out"), initTimeoutMs);
+    try {
+      worker.postMessage({ kind: "init", moduleUrl, config: initialConfig,
+        capabilities: { worker: true, offscreenCanvas: false, canvasTransferred: false } });
+    } catch (error) { fail(generation, error.message || error); }
   }
   function cancel() {
     if (!pending) return;
     const operation = pending;
-    settle(cancelledOperation());
-    if (operation.sent && !closed && !failure) {
-      try { worker.postMessage({ kind: "cancel", requestId: operation.message.requestId }); }
-      catch (error) { fail(error.message || error); }
-    }
+    settle(operation, cancelledOperation());
+    const generation = current;
+    if (!generation || generation.active?.operation !== operation) return;
+    // Do not reset either watchdog when newer edits replace a waiting request.
+    generation.cancelTimer = setTimeout(() => {
+      if (current !== generation || generation.active?.operation !== operation) return;
+      retire(generation);
+      if (pending) start();
+    }, cancelGraceMs);
+    try { generation.worker.postMessage({ kind: "cancel", requestId: operation.message.requestId }); }
+    catch (error) { fail(generation, error.message || error); }
   }
-  worker.onmessage = ({ data: message }) => {
-    if (closed || failure) return;
-    if (!message || typeof message !== "object") { fail("invalid source worker response"); return; }
-    if (message.kind === "ready") {
-      if (ready) return;
-      if (message.sourceEditing !== true) { fail("worker package lacks source-editing support"); return; }
-      clearTimeout(initTimer);
-      ready = true;
-      deckRendering = message.deckRendering === true;
-      sourceDeletion = message.sourceDeletion === true;
-      sourceInsertion = message.sourceInsertion === true;
-      sourceBatchEditing = message.sourceBatchEditing === true;
-      sendPending();
-      return;
-    }
-    if (message.kind === "failed" && (!ready || message.requestId == null)) {
-      fail(message.reason || "source worker initialization failed");
-      return;
-    }
-    if (!pending || message.requestId !== pending.message.requestId) return;
-    if (message.kind === "noReply") { settle(cancelledOperation()); return; }
-    // Engine errors do not trigger synchronous fallback: retrying malformed input on the UI
-    // thread would do the same failing work again and defeat isolation.
-    if (message.kind === "failed") { settle(new Error(message.reason || "source operation failed")); return; }
-    if (pending.message.kind === "sourceDeck") {
-      if (message.kind !== "sourceDeckRendered" || typeof message.svg !== "string" ||
-          !Array.isArray(message.warnings) ||
-          (message.manifest != null && (typeof message.manifest !== "object" || Array.isArray(message.manifest)))) {
-        fail("mismatched graph-deck worker response");
-        return;
-      }
-      settle(null, { svg: message.svg, manifest: message.manifest ?? null, warnings: message.warnings });
-      return;
-    }
-    const rendering = pending.message.kind === "sourceRender";
-    const editReply = pending.message.kind === "sourceDelete" ? "sourceDeleted" :
-      pending.message.kind === "sourceInsert" ? "sourceInserted" :
-      pending.message.kind === "sourceBatch" ? "sourceBatchEdited" : "sourceEdited";
-    const valid = rendering
-      ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
-      : message.kind === editReply && typeof message.response?.result?.updatedSource === "string" &&
-        Array.isArray(message.response?.snapshot?.bindings) &&
-        (pending.message.kind !== "sourceBatch" || Array.isArray(message.response.result.changes));
-    if (!valid) { fail("mismatched source worker response"); return; }
-    settle(null, rendering ? { svg: message.svg, snapshot: message.snapshot } : message.response);
-  };
-  worker.onerror = (event) => fail(event.message || "source worker crashed");
-  worker.onmessageerror = () => fail("source worker response could not be decoded");
-  initTimer = setTimeout(() => fail("source worker initialization timed out"), initTimeoutMs);
-  try {
-    worker.postMessage({ kind: "init", moduleUrl, config,
-      capabilities: { worker: true, offscreenCanvas: false, canvasTransferred: false } });
-  } catch (error) { fail(error.message || error); }
-
   function request(kind, input, extra = {}) {
     if (closed) return Promise.reject(cancelledOperation());
-    if (failure) return Promise.reject(failure);
+    if (bootstrapFailure) return Promise.reject(bootstrapFailure);
     cancel();
-    if (failure) return Promise.reject(failure);
+    if (bootstrapFailure) return Promise.reject(bootstrapFailure);
     if (!Number.isSafeInteger(nextId)) return Promise.reject(new Error("Worker request IDs exhausted; reopen the editor."));
     return new Promise((resolve, reject) => {
-      pending = { resolve, reject, sent: false, message: { kind, requestId: nextId++, input, ...extra } };
+      pending = { resolve, reject, message: { kind, requestId: nextId++, input, ...extra } };
+      start();
       sendPending();
     });
   }
+  start();
+  if (bootstrapFailure) throw bootstrapFailure;
   return {
     renderSource: (input) => request("sourceRender", input),
     renderDeck: (input) => request("sourceDeck", input),
@@ -521,14 +580,15 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     dispose() {
       if (closed) return;
       closed = true;
-      clearTimeout(initTimer);
-      settle(cancelledOperation());
-      worker.terminate();
+      if (current) retire(current);
+      settle(pending, cancelledOperation());
     },
   };
 }
 
-/** Worker-first authoring, with explicit synchronous fallback only for transport failures. */
+/** Worker-first authoring. Only initial worker unavailability permits synchronous fallback;
+ * dispatched work is never replayed on the UI thread after a crash or execution timeout.
+ */
 export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
   let client = null;
   let localModule = null;

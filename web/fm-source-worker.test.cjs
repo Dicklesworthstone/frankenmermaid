@@ -231,7 +231,7 @@ function mockTransport() {
       this.messages.push(message);
     }
     terminate() { this.terminated = true; }
-    emit(data) { this.onmessage({ data }); }
+    emit(data) { this.onmessage?.({ data }); }
     ready() { this.emit({ kind: "ready", target: "svgInWorker", sourceEditing: true }); }
     finish(input = "A") {
       const request = this.messages.findLast((message) => message.kind === "sourceRender" || message.kind === "sourceEdit");
@@ -296,22 +296,32 @@ test("client classifies engine errors separately and remains usable", async () =
   } finally { client.dispose(); }
 });
 
-test("client fails and terminates on crash, decode failure, stale package and bad response", async () => {
+test("client distinguishes bootstrap failure from interrupted work and recovers in isolation", async () => {
   const { createSourceWorkerClient } = await editorModule;
-  for (const trigger of [
-    (worker) => worker.onerror({ message: "crashed" }),
-    (worker) => worker.onmessageerror(),
-    (worker) => worker.emit({ kind: "ready", sourceEditing: false }),
-    (worker) => { worker.ready(); worker.emit({ kind: "sourceEdited", requestId: 1, response: {} }); },
-    (worker) => { worker.failPost = true; worker.ready(); },
+  for (const [trigger, interrupted] of [
+    [(worker) => worker.onerror({ message: "crashed" }), false],
+    [(worker) => worker.onmessageerror(), false],
+    [(worker) => worker.emit({ kind: "ready", sourceEditing: false }), false],
+    [(worker) => { worker.ready(); worker.emit({ kind: "sourceEdited", requestId: 1, response: {} }); }, true],
+    [(worker) => { worker.failPost = true; worker.ready(); }, true],
   ]) {
     const transport = mockTransport(), client = createSourceWorkerClient(transport), worker = transport.instances[0];
-    const pending = client.renderSource("A");
-    trigger(worker);
-    await assert.rejects(pending, { name: "SourceWorkerUnavailable" });
-    assert.equal(worker.terminated, true);
-    await assert.rejects(client.renderSource("B"), { name: "SourceWorkerUnavailable" });
-    client.dispose();
+    try {
+      const pending = client.renderSource("A");
+      trigger(worker);
+      await assert.rejects(pending, { name: interrupted ? "SourceWorkerInterrupted" : "SourceWorkerUnavailable" });
+      assert.equal(worker.terminated, true);
+      if (interrupted) {
+        const next = client.renderSource("B");
+        const replacement = transport.instances[1];
+        assert.notEqual(replacement, worker);
+        replacement.ready();
+        replacement.finish("B");
+        assert.equal((await next).svg, "<svg>B</svg>");
+      } else {
+        await assert.rejects(client.renderSource("B"), { name: "SourceWorkerUnavailable" });
+      }
+    } finally { client.dispose(); }
   }
 });
 
@@ -361,7 +371,7 @@ test("backend renders and edits through the worker without loading main-thread W
   } finally { backend.dispose(); }
 });
 
-test("backend falls back after transport failure, not after an engine failure", async () => {
+test("backend falls back after initial transport failure, not after an engine failure", async () => {
   const { createSourceEditorBackend } = await editorModule;
   for (const transportFailure of [false, true]) {
     const transport = mockTransport();
@@ -372,8 +382,9 @@ test("backend falls back after transport failure, not after an engine failure", 
     } });
     try {
       const worker = transport.instances[0], pending = backend.renderSource("A");
-      worker.ready();
       if (transportFailure) {
+        // Only failure BEFORE dispatch is eligible for synchronous fallback. Execution
+        // crashes/timeouts are covered by fm-worker-recovery.test.cjs and stay isolated.
         worker.onerror({ message: "crashed" });
         assert.equal((await pending).svg, "<svg>A</svg>");
         assert.match(backend.target, /main-thread.*synchronous/);
@@ -381,6 +392,7 @@ test("backend falls back after transport failure, not after an engine failure", 
         await backend.renderSource("B");
         assert.equal(mainLoads, 1);
       } else {
+        worker.ready();
         worker.emit({ kind: "failed", requestId: 1, reason: "parse failed" });
         await assert.rejects(pending, /parse failed/);
         assert.equal(mainLoads, 0);
