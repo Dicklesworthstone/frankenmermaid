@@ -96,6 +96,25 @@ export async function encodeShareHash(document, { Compression = globalThis.Compr
   return hash;
 }
 
+/** Export only source plus fixed editor defaults, never host configuration or recovery data. */
+export async function encodeMermaidLiveHash(source, { Compression = globalThis.CompressionStream } = {}) {
+  const checked = checkedDocument({ source, name: "diagram.mmd" });
+  // Mermaid Live State uses a JSON string for mermaid, not a configuration object.
+  const state = { code: checked.source, mermaid: "{}", updateDiagram: true, rough: false, editorMode: "code" };
+  let bytes = new TextEncoder().encode(JSON.stringify(state)), encoding = "base64";
+  if (typeof Compression === "function") {
+    try {
+      const compressed = await boundedBytes(new Blob([bytes]).stream().pipeThrough(new Compression("deflate")), MAX_PAYLOAD_BYTES + 1024);
+      if (compressed.length < bytes.length) { bytes = compressed; encoding = "pako"; }
+    } catch {
+      // The upstream legacy base64 format needs no compression codec.
+    }
+  }
+  const hash = `#${encoding}:${base64url(bytes)}`;
+  if (hash.length > MAX_SHARE_HASH_CHARS) throw new Error("Share link is too long; download the source instead.");
+  return hash;
+}
+
 /** Decode native or Mermaid Live fragments. Import source only, never foreign settings. */
 export async function decodeShareHash(hash, { Decompression = globalThis.DecompressionStream } = {}) {
   if (typeof hash !== "string") throw new TypeError("Share fragment must be text.");
@@ -180,6 +199,19 @@ export function mountShareControls({ panelEl, workspace }) {
     panelEl.append(element);
     return element;
   }
+  const formatLabel = make("label", "Share link destination", "share-format-label");
+  const format = make("select", "", "share-format");
+  formatLabel.htmlFor = format.id;
+  for (const [value, text] of [["frankenmermaid", "FrankenMermaid (this playground)"], ["mermaid-live", "Mermaid Live (source only)"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    format.append(option);
+  }
+  format.value = "frankenmermaid";
+  const formatNotice = make("p", "FrankenMermaid links keep the current filename and source in this playground.", "share-format-notice");
+  formatNotice.setAttribute("role", "status");
+  format.setAttribute("aria-describedby", formatNotice.id);
   const generate = make("button", "Create share link", "share-create");
   const label = make("label", "Editable diagram link", "share-label");
   const link = make("input", "", "share-url");
@@ -277,22 +309,25 @@ export function mountShareControls({ panelEl, workspace }) {
   }
   async function createLink() {
     if (disposed) return false;
-    const ticket = ++operation;
+    const ticket = ++operation, destination = format.value;
     clearLink();
     generate.disabled = true;
     status.textContent = "Creating share link…";
     try {
+      if (destination !== "frankenmermaid" && destination !== "mermaid-live") throw new Error("Choose a supported share destination.");
       const snapshot = workspace.sourceSnapshot();
       revision = snapshot.revision;
-      const hash = await encodeShareHash(snapshot);
-      if (disposed || ticket !== operation) return false;
+      const hash = await (destination === "mermaid-live" ? encodeMermaidLiveHash(snapshot.source) : encodeShareHash(snapshot));
+      if (disposed || ticket !== operation || destination !== format.value) return false;
       sourceChanged();
-      if (ticket !== operation) return false;
-      currentUrl = shareUrl(host.location.href, hash);
+      if (disposed || ticket !== operation || destination !== format.value) return false;
+      currentUrl = destination === "mermaid-live" ? `https://mermaid.live/edit${hash}` : shareUrl(host.location.href, hash);
       link.value = currentUrl;
       link.hidden = label.hidden = false;
       copy.disabled = false;
-      status.textContent = "Link ready. Anyone with it can read the source. Longer links may exceed the limits of messaging services; source download is the alternative.";
+      status.textContent = destination === "mermaid-live" ?
+        "Mermaid Live link ready. Opening it sends you to Mermaid Live with this source. Anyone with the link can read it. FrankenMermaid-only syntax may not render there; filename and playground settings are not included." :
+        "Link ready. Anyone with it can read the source. Longer links may exceed the limits of messaging services; source download is the alternative.";
       return true;
     } catch (error) {
       if (!disposed && ticket === operation) status.textContent = `Cannot share: ${error.message || error}`;
@@ -383,6 +418,17 @@ export function mountShareControls({ panelEl, workspace }) {
   const onReopen = () => { void openCurrentLink(); };
   const onGenerate = () => { void createLink(); };
   const onCopy = () => { void copyLink(); };
+  const onFormat = () => {
+    if (disposed) return;
+    operation += 1; // Even an A -> B -> A switch revokes pending compression results.
+    revision = null;
+    clearLink();
+    generate.disabled = false;
+    status.textContent = "Destination changed. Create a new link for the selected destination.";
+    formatNotice.textContent = format.value === "mermaid-live" ?
+      "Opening these links uses the external Mermaid Live editor. Only source is included; FrankenMermaid-only syntax may not render there." :
+      "FrankenMermaid links keep the current filename and source in this playground.";
+  };
   const onImport = () => { void importLink(); };
   const onImportInput = () => cancelImport("Link changed. Import again to open the new link; current document retained.");
   const onImportKey = event => {
@@ -392,6 +438,7 @@ export function mountShareControls({ panelEl, workspace }) {
     if (!importButton.disabled) void importLink();
   };
   generate.addEventListener("click", onGenerate);
+  format.addEventListener("change", onFormat);
   copy.addEventListener("click", onCopy);
   reopen.addEventListener("click", onReopen);
   importButton.addEventListener("click", onImport);
@@ -417,6 +464,8 @@ export function mountShareControls({ panelEl, workspace }) {
       reopen.removeEventListener("click", onReopen);
       reopen.disabled = true;
       generate.removeEventListener("click", onGenerate);
+      format.removeEventListener("change", onFormat);
+      format.disabled = true;
       copy.removeEventListener("click", onCopy);
       clearLink();
       generate.disabled = true;

@@ -126,8 +126,25 @@ def main():
         assert page.locator("img, script").count() == 0
         checked.append("hostile source stays inert text")
 
+        destination = page.get_by_label("Share link destination", exact=True)
+        assert destination.input_value() == "frankenmermaid"
+        destination.select_option("mermaid-live")
+        assert "external Mermaid Live" in page.locator("#share-format-notice").inner_text()
+        assert page.evaluate("window.controls.createLink()") is True
+        exported = page.get_by_label("Editable diagram link", exact=True).input_value()
+        assert exported.startswith("https://mermaid.live/edit#pako:")
+        payload = exported.split("#pako:", 1)[1]
+        decoded = json.loads(zlib.decompress(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))))
+        assert decoded == {"code": hostile, "mermaid": "{}", "updateDiagram": True, "rough": False, "editorMode": "code"}
+        assert page.url == "about:blank"
+        destination.select_option("frankenmermaid")
+        assert page.locator("#share-url").input_value() == ""
+        assert page.get_by_role("button", name="Copy link", exact=True).is_disabled()
+        checked.append("opt-in external export independently decodes, preserves history and clears stale links on destination change")
+
         page.evaluate("window.controls.dispose()")
         assert button.is_disabled() and field.is_disabled()
+        assert destination.is_disabled()
         assert page.evaluate("window.controls.importLink()") is False
         assert requests == [], requests
         assert errors == [], errors

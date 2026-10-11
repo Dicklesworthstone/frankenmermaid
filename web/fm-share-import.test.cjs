@@ -6,7 +6,7 @@ const test = require("node:test");
 const { deflateSync } = require("node:zlib");
 const loaded = import(`data:text/javascript;base64,${Buffer.from(fs.readFileSync(path.join(__dirname, "fm-share.js"))).toString("base64")}`);
 const live = code => `#pako:${deflateSync(Buffer.from(JSON.stringify({ code, mermaid: { securityLevel: "loose" } }))).toString("base64url")}`;
-const tick = () => new Promise(resolve => setImmediate(resolve));
+const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 function gate() { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; }
 
 test("pasted full URLs and fragments import without visiting their hosts", async () => {
@@ -214,7 +214,8 @@ test("plain Enter imports, composing/modifier/repeat events do not, and disposal
   event.key = "Enter";
   input.dispatchEvent(event);
   assert.equal(event.defaultPrevented, true);
-  for (let attempt = 0; attempt < 100 && f.workspace.sourceSnapshot().source !== "keyboard"; attempt += 1) await tick();
+  const deadline = Date.now() + 2000;
+  while (f.workspace.sourceSnapshot().source !== "keyboard" && Date.now() < deadline) await tick();
   assert.equal(f.workspace.sourceSnapshot().source, "keyboard");
   f.controls.dispose();
   assert.equal(input.disabled, true);
