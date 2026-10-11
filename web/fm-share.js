@@ -4,6 +4,7 @@
 export const MAX_SHARE_HASH_CHARS = 64 * 1024;
 export const MAX_SHARE_SOURCE_BYTES = 256 * 1024;
 const MAX_PAYLOAD_BYTES = MAX_SHARE_SOURCE_BYTES * 6 + 4096; // Worst-case JSON escaping.
+const MAX_SHARE_INPUT_CHARS = MAX_SHARE_HASH_CHARS + 4096;
 const PREFIX = "#fm:";
 
 function isShareHash(hash) {
@@ -131,6 +132,29 @@ export async function decodeShareHash(hash, { Decompression = globalThis.Decompr
   return checkedDocument(JSON.parse(text));
 }
 
+/** Read a pasted link locally. Never fetch its host, path, query, or embedded resources. */
+export async function decodeShareLink(input, options) {
+  if (typeof input !== "string") throw new TypeError("Share link must be text.");
+  if (input.length > MAX_SHARE_INPUT_CHARS) throw new Error("Share link exceeds the input size limit.");
+  const text = input.trim();
+  if (!text || /[\u0000-\u0020\u007f]/.test(text)) {
+    throw new Error("Paste one complete share URL or share fragment without internal whitespace.");
+  }
+  let hash = text;
+  if (!text.startsWith("#")) {
+    let url;
+    try { url = new URL(text); }
+    catch { throw new Error("Paste a full HTTP or HTTPS share URL, or a supported share fragment."); }
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      throw new Error("Only HTTP or HTTPS share URLs can be imported.");
+    }
+    if (url.username || url.password) throw new Error("Remove credentials from the share URL before importing.");
+    hash = url.hash;
+  }
+  if (!isShareHash(hash)) throw new Error("The link has no supported source fragment (#fm:, #pako:, or #base64:).");
+  return decodeShareHash(hash, options);
+}
+
 export function shareUrl(base, hash) {
   const url = new URL(base);
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Serve the playground over HTTP or HTTPS to share it.");
@@ -148,6 +172,7 @@ export function mountShareControls({ panelEl, workspace }) {
   const document = panelEl.ownerDocument, host = document.defaultView;
   let disposed = false, operation = 0, revision = null, currentUrl = "";
   let navigation = 0, observedHash = null, opening = false, openedRevision = null;
+  let importOperation = 0, importing = false;
   function make(tag, text, id) {
     const element = document.createElement(tag);
     element.id = id;
@@ -174,6 +199,61 @@ export function mountShareControls({ panelEl, workspace }) {
   const navigationStatus = make("p", "", "share-navigation-status");
   navigationStatus.setAttribute("role", "status");
   navigationStatus.hidden = true;
+  const importLabel = make("label", "Import a FrankenMermaid or Mermaid Live link", "share-import-label");
+  const importInput = make("input", "", "share-import-url");
+  importInput.type = "text";
+  importInput.autocomplete = "off";
+  importInput.spellcheck = false;
+  importInput.maxLength = MAX_SHARE_INPUT_CHARS;
+  importInput.placeholder = "Paste a share URL or #pako: / #base64: / #fm: fragment";
+  importLabel.htmlFor = importInput.id;
+  const importButton = make("button", "Import linked source", "share-import");
+  importButton.type = "button";
+  importButton.disabled = true;
+  const importStatus = make("p", "Links are decoded locally without visiting their websites. Only source is imported; embedded settings are not applied.", "share-import-status");
+  importStatus.setAttribute("role", "status");
+  importInput.setAttribute("aria-describedby", importStatus.id);
+  function cancelImport(message) {
+    importOperation += 1;
+    if (importing) importStatus.textContent = message;
+    importing = false;
+    importButton.disabled = disposed || !importInput.value.trim();
+  }
+  async function importLink() {
+    if (disposed || importing) return false;
+    const value = importInput.value, ticket = ++navigation, importTicket = ++importOperation;
+    importing = true;
+    importButton.disabled = true;
+    // A pasted link supersedes pending address-bar imports without changing history.
+    opening = false;
+    openedRevision = null;
+    reopen.disabled = false;
+    importStatus.textContent = "Importing linked source…";
+    const isCurrent = () => !disposed && ticket === navigation && importTicket === importOperation &&
+      importInput.value === value;
+    try {
+      const opened = await workspace.openSharedSource(() => decodeShareLink(value), { isCurrent });
+      if (!isCurrent()) return false;
+      sourceChanged();
+      if (!isCurrent()) return false;
+      importStatus.textContent = opened ?
+        "Linked source imported. Embedded settings were not applied. Download or save it to keep a local file; the address bar was not changed." :
+        "Linked source was not imported; current document retained. See the source-file status for details.";
+      if (opened && isShareHash(host.location.hash)) {
+        navigationStatus.hidden = false;
+        navigationStatus.textContent = "Current source came from the pasted link. The address bar still contains the previous shared source.";
+      }
+      return opened;
+    } catch (error) {
+      if (isCurrent()) importStatus.textContent = `Cannot import link: ${error.message || error}. Current document retained.`;
+      return false;
+    } finally {
+      if (!disposed && importTicket === importOperation) {
+        importing = false;
+        importButton.disabled = !importInput.value.trim();
+      }
+    }
+  }
   function clearLink() {
     currentUrl = "";
     link.value = "";
@@ -249,6 +329,7 @@ export function mountShareControls({ panelEl, workspace }) {
     // Traversal can emit both popstate and hashchange. Never reset editor selection/undo
     // twice, or retry a declined replacement without another explicit user action.
     if (!force && hash === observedHash) return false;
+    cancelImport("Address-bar navigation cancelled the pending link import. Current document retained.");
     const previousHash = observedHash;
     observedHash = hash;
     const ticket = ++navigation;
@@ -292,7 +373,7 @@ export function mountShareControls({ panelEl, workspace }) {
     // intervening navigation must invalidate an A decode still in flight (ABA guard).
     // Completed opens are not repeated for these obsolete notifications.
     if (event.newURL && new URL(event.newURL).hash !== host.location.hash) {
-      if (!opening) return;
+      if (!opening && !importing) return;
       navigation += 1;
       observedHash = null;
     }
@@ -302,19 +383,35 @@ export function mountShareControls({ panelEl, workspace }) {
   const onReopen = () => { void openCurrentLink(); };
   const onGenerate = () => { void createLink(); };
   const onCopy = () => { void copyLink(); };
+  const onImport = () => { void importLink(); };
+  const onImportInput = () => cancelImport("Link changed. Import again to open the new link; current document retained.");
+  const onImportKey = event => {
+    if (event.key !== "Enter" || event.defaultPrevented || event.repeat || event.isComposing ||
+        event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+    event.preventDefault();
+    if (!importButton.disabled) void importLink();
+  };
   generate.addEventListener("click", onGenerate);
   copy.addEventListener("click", onCopy);
   reopen.addEventListener("click", onReopen);
+  importButton.addEventListener("click", onImport);
+  importInput.addEventListener("input", onImportInput);
+  importInput.addEventListener("keydown", onImportKey);
   host.addEventListener("hashchange", onLocationChange);
   host.addEventListener("popstate", onLocationChange);
   const ready = restoreLocation();
   return {
-    ready, createLink, copyLink, sourceChanged, openCurrentLink,
+    ready, createLink, copyLink, sourceChanged, openCurrentLink, importLink,
     dispose() {
       if (disposed) return;
       disposed = true;
       operation += 1;
       navigation += 1;
+      cancelImport("Link import cancelled because the sharing controls were closed.");
+      importInput.disabled = true;
+      importButton.removeEventListener("click", onImport);
+      importInput.removeEventListener("input", onImportInput);
+      importInput.removeEventListener("keydown", onImportKey);
       host.removeEventListener("hashchange", onLocationChange);
       host.removeEventListener("popstate", onLocationChange);
       reopen.removeEventListener("click", onReopen);
