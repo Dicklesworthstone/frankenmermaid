@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Native renderer SVG -> production browser adapter, without a substitute SVG renderer.
+
+Uses unchanged Rust-renderer goldens, plus hostile inputs and independent pixel comparisons.
+It does not run the Rust/WASM compiler or engine. Run from any directory with Playwright and
+Chromium installed. FM_SVG_MODULE can select the original adapter to reproduce the regressions.
+"""
+import os
+from pathlib import Path
+import shutil
+import unittest
+from playwright.sync_api import sync_playwright
+
+ROOT = Path(__file__).resolve().parent.parent
+GOLDENS = ROOT / "crates/fm-cli/tests/golden"
+NATIVE_FONT = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');"
+SVG_MODULE = Path(os.environ.get("FM_SVG_MODULE", ROOT / "web/mermaid-svg.mjs"))
+MODULE = SVG_MODULE.read_text()
+
+
+class NativeSvgTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        executable = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium") or shutil.which("google-chrome")
+        cls.browser = cls.playwright.chromium.launch(headless=True, executable_path=executable, args=["--no-sandbox"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    def setUp(self):
+        self.context = self.browser.new_context(viewport={"width": 800, "height": 600})
+        self.requests, self.errors = [], []
+        self.context.route("**/*", self.route)
+        self.context.on("page", lambda page: page.on("pageerror", lambda error: self.errors.append(str(error))))
+        self.page = self.context.new_page()
+        self.page.set_content('<!doctype html><html><body><main id="host"></main></body></html>')
+        self.page.evaluate("""async source => {
+          const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+          try { window.adapter = await import(url); } finally { URL.revokeObjectURL(url); }
+          window.check = (value, reason) => { if (!value) throw new Error(reason); };
+          window.wrap = body => `<svg xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
+        }""", MODULE)
+
+    def route(self, route):
+        if route.request.url.startswith(("http:", "https:")):
+            self.requests.append(route.request.url)
+            route.abort()
+        else:
+            route.continue_()
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual(self.errors, [], "browser page errors")
+        self.assertEqual(self.requests, [], "adapter attempted a network request")
+
+    def test_native_architecture_and_pie_preserve_all_content_and_geometry(self):
+        for name, expected_nodes, expected_edges in [("architecture_basic", 3, 2), ("pie_basic", 3, 0)]:
+            with self.subTest(name=name):
+                svg = (GOLDENS / f"{name}.svg").read_text()
+                self.page.evaluate(r"""({svg, name, expectedNodes, expectedEdges}) => {
+                  const before = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
+                  const result = adapter.prepareSvg(svg, name, document);
+                  const after = result.element;
+                  const content = root => [root, ...root.querySelectorAll('*')].filter(n=>n.localName!=='style').map(n=>({
+                    tag:n.localName,
+                    attributes:[...n.attributes].filter(a=>!['id','marker-end','marker-start','href'].includes(a.localName))
+                      .map(a=>[a.name,a.value]).sort(),
+                    text:[...n.childNodes].filter(n=>n.nodeType===3).map(n=>n.nodeValue)
+                  }));
+                  check(JSON.stringify(content(before))===JSON.stringify(content(after)), 'native geometry/text/metadata changed');
+                  check(after.getAttribute('data-nodes')===String(expectedNodes), 'fixture node count');
+                  check(after.getAttribute('data-edges')===String(expectedEdges), 'fixture edge count');
+                  check(after.querySelectorAll('path').length>0 && after.querySelectorAll('text').length>=3, 'empty fixture');
+                  check(after.querySelectorAll('[id]').length===before.querySelectorAll('[id]').length, 'lost an addressable element');
+                  check(result.presentationWarnings.length===1 && /Inter/.test(result.presentationWarnings[0]), 'font fallback not reported');
+                  check(!result.svg.includes('@import') && !result.svg.includes('fonts.googleapis.com'), 'font resource survived');
+                  document.getElementById('host').replaceChildren(after);
+                  for (const path of after.querySelectorAll('[marker-end]')) {
+                    const match=path.getAttribute('marker-end').match(/#([^"')]+)/);
+                    check(match && after.querySelector(`[id="${match[1]}"]`)?.localName==='marker', 'arrow reference lost');
+                    check(getComputedStyle(path).stroke!=='none','edge became invisible');
+                  }
+                  if (name==='pie_basic') check(after.querySelectorAll('.fm-pie-slice').length===3, 'pie slices lost');
+                }""", {"svg": svg, "name": name, "expectedNodes": expected_nodes, "expectedEdges": expected_edges})
+
+    def test_native_pixels_equal_the_independent_local_font_reference(self):
+        for name in ["architecture_basic", "pie_basic"]:
+            with self.subTest(name=name):
+                svg = (GOLDENS / f"{name}.svg").read_text()
+                reference = self.context.new_page()
+                reference.set_content('<!doctype html><style>html,body{margin:0}</style>')
+                # This reference does NOT use the adapter: remove the exact optional font rule
+                # independently in the XML DOM, then render the otherwise unchanged native SVG.
+                reference.evaluate("""({svg, font}) => {
+                  const root=new DOMParser().parseFromString(svg,'image/svg+xml').documentElement;
+                  for(const style of root.querySelectorAll('style')) style.textContent=style.textContent.replace(font,'');
+                  root.style.width='800px';root.style.height='600px';
+                  document.body.append(document.importNode(root,true));
+                }""", {"svg": svg, "font": NATIVE_FONT})
+                reference.evaluate("document.fonts.ready")
+                expected = reference.screenshot(animations="disabled")
+                self.page.evaluate("""svg => {
+                  const root=adapter.prepareSvg(svg,'pixels',document).element;
+                  document.documentElement.style.margin='0';document.body.style.margin='0';
+                  root.style.width='800px';root.style.height='600px';
+                  document.body.replaceChildren(root);
+                }""", svg)
+                self.page.evaluate("document.fonts.ready")
+                actual = self.page.screenshot(animations="disabled")
+                self.assertEqual(actual, expected, f"{name}: native pixel output changed")
+                reference.close()
+
+    def test_native_font_omission_is_reported_once_and_only_when_present(self):
+        self.page.evaluate(r"""font => {
+          font=font.replaceAll('&','&amp;');
+          const prepared=adapter.prepareSvg(wrap(`<style>${font}${font}rect{fill:red}</style><rect width="10" height="10"/>`),'font',document);
+          check(prepared.presentationWarnings.length===1,'duplicate font warning');
+          check(!prepared.svg.includes('@import'),'import survived');
+          const local=adapter.prepareSvg(wrap('<style>rect{fill:blue}</style><rect/>'),'local',document);
+          check(local.presentationWarnings.length===0,'invented fallback');
+          const comment=adapter.prepareSvg(wrap(`<style>/* ${font} */ rect{fill:blue}</style><rect/>`),'comment',document);
+          check(comment.presentationWarnings.length===0,'comment treated as import');
+          const single=adapter.prepareSvg(wrap(`<style>${font}</style><rect/>`),'single',document);
+          check(single.presentationWarnings.length===1,'font-only stylesheet failed');
+          const double=adapter.prepareSvg(wrap(`<style>${font.replaceAll("'",'"')}</style><rect/>`),'double',document);
+          check(double.presentationWarnings.length===1,'quoted native declaration failed');
+        }""", NATIVE_FONT)
+
+    def test_other_external_stylesheets_and_disguised_native_imports_still_fail(self):
+        self.page.evaluate(r"""font => {
+          const css=[
+            '@import "https://example.com/x.css";', '@import url(https://example.com/x.css);',
+            font.replace('fonts.googleapis.com','fonts.googleapis.com.evil.test'),
+            font.replace('https://','http://'), font.replace('https://','https://name:secret@'),
+            font.replace('display=swap','display=swap&extra=1'), font.replace('display=swap','display=swap#extra'),
+            font.replace(');',') screen;'), font.replace('400;500','400;501'),
+            font.slice(0,-1), font.replace('@import','@im\\port'),
+            `@media screen{${font}rect{fill:red}}`, `rect${font}{fill:red}`,
+            `rect[data-x=${font}]{fill:red}`, `:is(rect,${font}){fill:red}`,
+            `${font}@import "https://example.com/x.css";rect{fill:red}`,
+            '@font-face{font-family:Bad;src:url(https://example.com/x.woff)}',
+            '@namespace url(https://example.com/ns);', '/* unfinished', 'rect{font-family:"unfinished}'
+          ];
+          for(const text of css) {
+            let failed=false;
+            try{adapter.prepareSvg(wrap(`<style>${text.replaceAll('&','&amp;')}</style><rect/>`),'bad',document);}catch{failed=true;}
+            check(failed,'unsupported stylesheet admitted: '+text);
+          }
+          check(!document.querySelector('svg'),'failure inserted SVG');
+        }""", NATIVE_FONT)
+
+    def test_native_font_rule_does_not_allow_active_markup_or_other_remote_resources(self):
+        self.page.evaluate(r"""font => {
+          for(const body of [
+            '<script>alert(1)</script>', '<foreignObject/>', '<rect onclick="alert(1)"/>',
+            '<a href="javascript:alert(1)"><text>bad</text></a>',
+            '<image href="https://example.com/x.png"/>', '<use href="https://example.com/x.svg#node"/>',
+            '<rect fill="url(https://example.com/paint)"/>', '<rect style="fill:url(https://example.com/paint)"/>',
+            '<style>rect{fill:url(https://example.com/paint)}</style>',
+            '<style>rect{background-image:image-set("https://example.com/x" 1x)}</style>',
+            '<style>@keyframes bad{to{fill:url(https://example.com/paint)}}</style>',
+            '<set attributeName="href" to="javascript:alert(1)"/>',
+            '<g id="dup"/><g id="dup"/>', '<rect fill="url(#missing)"/>',
+            '<g aria-labelledby="missing"/>'
+          ]) {
+            let failed=false;
+            try{adapter.prepareSvg(wrap(`<style>${font.replaceAll('&','&amp;')}</style>${body}`),'bad',document);}catch{failed=true;}
+            check(failed,'unsafe SVG accepted: '+body);
+          }
+          check(!document.querySelector('svg'),'failure inserted SVG');
+        }""", NATIVE_FONT)
+
+    def test_local_styles_and_markers_remain_isolated_with_native_font_fallback(self):
+        self.page.evaluate(r"""font => {
+          const make=(id,color)=>adapter.prepareSvg(wrap(`<style>${font.replaceAll('&','&amp;')}
+            :root{--paint:${color}} rect{fill:var(--paint)} #node{stroke-width:3}
+            @keyframes pulse{from{opacity:1}to{opacity:0.5}}
+            @media (min-width:1px){rect{animation:pulse 100s linear infinite}}
+            @supports (display:block){path{stroke:var(--paint)}}
+            </style><defs><marker id="arrow"><path d="M0 0L5 3L0 6Z"/></marker></defs>
+            <rect id="node" width="20" height="20"/><path marker-end="url(#arrow)" d="M0 0L50 50"/>`),id,document).element;
+          const first=make('first','red'), second=make('second','blue');
+          const outside=document.createElementNS('http://www.w3.org/2000/svg','svg');
+          outside.innerHTML='<rect id="outside" width="1" height="1"/>';
+          document.body.replaceChildren(first,second,outside);
+          const a=first.querySelector('rect'),b=second.querySelector('rect');
+          check(getComputedStyle(a).fill==='rgb(255, 0, 0)' && getComputedStyle(b).fill==='rgb(0, 0, 255)','themes leaked');
+          check(getComputedStyle(document.getElementById('outside')).fill==='rgb(0, 0, 0)','stylesheet escaped');
+          check(getComputedStyle(a).strokeWidth==='3px','ID selector lost');
+          check(getComputedStyle(a).animationName!==getComputedStyle(b).animationName,'animation collision');
+          const ids=[...document.querySelectorAll('[id]')].map(n=>n.id);
+          check(new Set(ids).size===ids.length,'duplicate IDs');
+          for(const svg of [first,second]) {
+            const marker=svg.querySelector('[marker-end]').getAttribute('marker-end');
+            check(marker.includes('#'+svg.querySelector('marker').id),'marker escaped its diagram');
+          }
+        }""", NATIVE_FONT)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

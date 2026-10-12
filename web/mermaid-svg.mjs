@@ -4,6 +4,60 @@ const XML_NS = "http://www.w3.org/XML/1998/namespace";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 const FORBIDDEN = new Set(["script", "foreignObject", "iframe", "object", "embed", "animate", "animateMotion", "animateTransform", "set"]);
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u;
+// FontSpec::default in fm-render-svg/src/theme.rs emits this optional stylesheet.
+// The host may preload Inter; embedding a diagram must never fetch it implicitly.
+const NATIVE_FONT_URL = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
+
+function nativeStylesheet(text, presentationWarnings) {
+  // Only this engine-owned font declaration may degrade to the existing system-font
+  // stack. Other imports, escaped CSS, and document-global font definitions still fail.
+  // Scan strings/comments rather than removing a matching substring: an import-looking
+  // label in a CSS string is data, and semicolons in the font URL are not rule boundaries.
+  if (/\\|@font-face\b|@namespace\b/iu.test(text)) throw new Error("SVG contains unsupported external or escaped CSS.");
+  let depth = 0, parentheses = 0, brackets = 0, boundary = true, copied = 0, index = 0;
+  const chunks = [];
+  while (index < text.length) {
+    const character = text[index];
+    if (text.startsWith("/*", index)) {
+      const end = text.indexOf("*/", index + 2);
+      if (end === -1) throw new Error("SVG stylesheet has an unterminated comment.");
+      index = end + 2;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      const end = text.indexOf(character, index + 1);
+      if (end === -1 || /[\r\n\f]/u.test(text.slice(index + 1, end))) {
+        throw new Error("SVG stylesheet has an invalid string.");
+      }
+      index = end + 1;
+      if (depth === 0) boundary = false;
+      continue;
+    }
+    if (character === "@" && /^@import\b/iu.test(text.slice(index, index + 8))) {
+      const match = /^@import\s+url\(\s*(['"])([^'"\r\n]*)\1\s*\)\s*;/iu.exec(text.slice(index));
+      if (depth !== 0 || parentheses !== 0 || brackets !== 0 || !boundary || !match || match[2] !== NATIVE_FONT_URL) {
+        throw new Error("SVG contains unsupported external or escaped CSS.");
+      }
+      chunks.push(text.slice(copied, index));
+      index += match[0].length;
+      copied = index;
+      presentationWarnings.add("The renderer's optional Inter stylesheet was omitted to keep the SVG network-free. Preload Inter in the host page or use the existing system-font fallback.");
+      continue;
+    }
+    if (character === "{") { depth += 1; boundary = false; }
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0 && parentheses === 0 && brackets === 0) boundary = true;
+    } else if (character === "(") { parentheses += 1; boundary = false; }
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") { brackets += 1; boundary = false; }
+    else if (character === "]") brackets -= 1;
+    else if (depth === 0 && parentheses === 0 && brackets === 0 && !/\s/u.test(character)) boundary = character === ";";
+    index += 1;
+  }
+  chunks.push(text.slice(copied));
+  return chunks.join("");
+}
 
 export function checkRenderId(id) {
   if (typeof id !== "string" || !ID_RE.test(id)) {
@@ -44,14 +98,13 @@ function linkUrl(value, ids, document) {
 // CSSOM, not a second CSS parser, handles selector lists, strings and nested media/supports
 // rules. Scope both the SVG root and descendants. Keyframe names need the same isolation as
 // element IDs: otherwise two independently themed diagrams share a document-global animation.
-function scopedStyles(styleNodes, ids, id, window) {
+function scopedStyles(styleNodes, ids, id, window, presentationWarnings) {
   if (styleNodes.length && typeof window.CSSStyleSheet !== "function") throw new Error("SVG styling requires browser CSSOM support.");
   const sheets = styleNodes.map((node) => {
     const sheet = new window.CSSStyleSheet();
-    const text = node.textContent;
-    // CSSOM drops @import in constructed stylesheets; reject it rather than silently change it.
-    // Rust emits no imports, escape-encoded identifiers, or document-global font definitions.
-    if (/\\|@import\b|@font-face\b|@namespace\b/iu.test(text)) throw new Error("SVG contains unsupported external or escaped CSS.");
+    const text = nativeStylesheet(node.textContent, presentationWarnings);
+    // Never attach the unvalidated stylesheet. CSSOM scopes the remaining local rules;
+    // nativeStylesheet has already rejected every import except the omitted font rule.
     sheet.replaceSync(text);
     if (text.trim() && !sheet.cssRules.length) throw new Error("SVG stylesheet cannot be parsed.");
     return sheet;
@@ -98,7 +151,10 @@ function scopedStyles(styleNodes, ids, id, window) {
   return declarations;
 }
 
-/** Namespace the exact engine SVG for insertion into a shared browser document. */
+/** Namespace the engine SVG for insertion into a shared browser document.
+ * presentationWarnings reports host-side font fallback separately from native diagnostics.
+ * Native geometry and text are retained; the optional remote font is never loaded here.
+ */
 export function prepareSvg(svg, id, document) {
   checkRenderId(id);
   const window = document?.defaultView;
@@ -141,9 +197,11 @@ export function prepareSvg(svg, id, document) {
     if (element.localName === "a" && element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
   }
   root.setAttribute("id", id);
-  const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window);
+  const presentationWarnings = new Set();
+  const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window, presentationWarnings);
   if (declarations) for (const element of elements) if (element.hasAttribute("style")) declarations(element.style);
-  return { svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true) };
+  return { svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true),
+    presentationWarnings: [...presentationWarnings] };
 }
 
 /** Callback names are opaque registry keys, never expressions or window property paths. */
