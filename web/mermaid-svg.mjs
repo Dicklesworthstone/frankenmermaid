@@ -2,8 +2,15 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XML_NS = "http://www.w3.org/XML/1998/namespace";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
-const FORBIDDEN = new Set(["script", "foreignObject", "iframe", "object", "embed", "animate", "animateMotion", "animateTransform", "set"]);
+const FORBIDDEN = new Set(["script", "foreignobject", "iframe", "object", "embed", "animate", "animatemotion", "animatetransform", "set"]);
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u;
+const ARIA_REFERENCES = new Set(["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns",
+  "aria-flowto", "aria-details", "aria-errormessage", "aria-activedescendant"]);
+const TEXT_ATTRIBUTES = new Set(["class", "role", "lang", "title", "font-family"]);
+// Strings/comments are indivisible; the word alternative prevents matching `url` inside
+// `curl` or a non-ASCII identifier. CSSOM still owns CSS parsing, validity, and serialization.
+const CSS_VALUE_TOKENS = /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|url\s*\(\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^()'"\s]*)\s*\)|[-_A-Za-z0-9\u0080-\uFFFF]+/giu;
+const CSS_SELECTOR_TOKENS = /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|#[-_A-Za-z0-9\u0080-\uFFFF]+|:root(?![-_A-Za-z0-9\u0080-\uFFFF])/giu;
 // FontSpec::default in fm-render-svg/src/theme.rs emits this optional stylesheet.
 // The host may preload Inter; embedding a diagram must never fetch it implicitly.
 const NATIVE_FONT_URL = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
@@ -13,7 +20,7 @@ function nativeStylesheet(text, presentationWarnings) {
   // stack. Other imports, escaped CSS, and document-global font definitions still fail.
   // Scan strings/comments rather than removing a matching substring: an import-looking
   // label in a CSS string is data, and semicolons in the font URL are not rule boundaries.
-  if (/\\|@font-face\b|@namespace\b/iu.test(text)) throw new Error("SVG contains unsupported external or escaped CSS.");
+  if (text.includes("\\")) throw new Error("SVG contains unsupported external or escaped CSS.");
   let depth = 0, parentheses = 0, brackets = 0, boundary = true, copied = 0, index = 0;
   const chunks = [];
   while (index < text.length) {
@@ -32,6 +39,9 @@ function nativeStylesheet(text, presentationWarnings) {
       index = end + 1;
       if (depth === 0) boundary = false;
       continue;
+    }
+    if (character === "@" && /^@(?:font-face|namespace)\b/iu.test(text.slice(index, index + 12))) {
+      throw new Error("SVG contains unsupported external or escaped CSS.");
     }
     if (character === "@" && /^@import\b/iu.test(text.slice(index, index + 8))) {
       const match = /^@import\s+url\(\s*(['"])([^'"\r\n]*)\1\s*\)\s*;/iu.exec(text.slice(index));
@@ -78,10 +88,23 @@ function localUrl(value, ids) {
 }
 
 function paintUrls(value, ids) {
-  if (!/url\s*\(/iu.test(value)) return value;
-  const pattern = /url\s*\(\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^()'"\s]*))\s*\)/giu;
-  if (/url\s*\(/iu.test(value.replace(pattern, ""))) throw new Error("SVG contains a malformed resource URL.");
-  return value.replace(pattern, (_, double, single, bare) => `url("${localUrl(double ?? single ?? bare, ids)}")`);
+  // Presentation attributes need the same escape/resource policy as CSS declarations.
+  // Inert labels and metadata do not enter this function.
+  if (value.includes("\\")) throw new Error("SVG contains unsupported escaped CSS.");
+  if (!/(?:url|image-set|cross-fade|paint)\s*\(/iu.test(value)) return value;
+  return value.replace(CSS_VALUE_TOKENS, (token, offset) => {
+    if (token[0] === '"' || token[0] === "'" || token.startsWith("/*")) return token;
+    if (/^url\s*\(/iu.test(token)) {
+      const match = /^url\s*\(\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^()'"\s]*))\s*\)$/iu.exec(token);
+      if (!match) throw new Error("SVG contains a malformed resource URL.");
+      return `url("${localUrl(match[1] ?? match[2] ?? match[3], ids)}")`;
+    }
+    if (/^\s*\(/u.test(value.slice(offset + token.length))) {
+      if (/^url$/iu.test(token)) throw new Error("SVG contains a malformed resource URL.");
+      if (/(?:^|-)(?:image-set|cross-fade|paint)$/iu.test(token)) throw new Error("SVG contains unsupported CSS resources.");
+    }
+    return token;
+  });
 }
 
 function linkUrl(value, ids, document) {
@@ -118,7 +141,7 @@ function scopedStyles(styleNodes, ids, id, window, presentationWarnings) {
   };
   sheets.forEach((sheet) => collect(sheet.cssRules));
   function declarations(style) {
-    if (/\\|(?:image-set|cross-fade|paint)\s*\(/iu.test(style.cssText)) throw new Error("SVG contains unsupported CSS resources.");
+    if (style.cssText.includes("\\")) throw new Error("SVG contains unsupported escaped CSS.");
     for (const property of [...style]) {
       let value = paintUrls(style.getPropertyValue(property), ids);
       if (property === "animation" || property === "animation-name") {
@@ -133,10 +156,12 @@ function scopedStyles(styleNodes, ids, id, window, presentationWarnings) {
         rule.name = animations.get(rule.name);
         transform(rule.cssRules, true);
       } else if (rule.type === 1) {
-        // Engine selectors use ASCII IDs. Match a complete token, never a prefix or a color.
-        let selector = rule.selectorText.replace(/#[A-Za-z_][A-Za-z0-9_-]*/gu,
-          (token) => ids.has(token.slice(1)) ? `#${ids.get(token.slice(1))}` : token);
-        selector = selector.replace(/:root\b/gu, `#${id}`);
+        // A hash/root token inside a quoted attribute selector is authored text, not an
+        // ID reference. Changing it would make source-ID selectors stop matching.
+        const selector = rule.selectorText.replace(CSS_SELECTOR_TOKENS, (token) => {
+          if (token.toLowerCase() === ":root") return `#${id}`;
+          return token[0] === "#" && ids.has(token.slice(1)) ? `#${ids.get(token.slice(1))}` : token;
+        });
         rule.selectorText = `#${id}:is(${selector}), #${id} :is(${selector})`;
         declarations(rule.style);
       } else if (inKeyframes && rule.type === 8) declarations(rule.style);
@@ -167,10 +192,16 @@ export function prepareSvg(svg, id, document) {
   if (parsed.doctype || parsed.querySelector("parsererror") || root?.localName !== "svg" || root.namespaceURI !== SVG_NS) {
     throw new Error("Engine returned invalid SVG.");
   }
+  if (parsed.createTreeWalker(parsed, window.NodeFilter.SHOW_PROCESSING_INSTRUCTION).nextNode()) {
+    throw new Error("Engine SVG contains a processing instruction.");
+  }
   const elements = [root, ...root.querySelectorAll("*")];
   const ids = new Map();
   for (const element of elements) {
-    if (element.namespaceURI !== SVG_NS || FORBIDDEN.has(element.localName)) throw new Error("Engine SVG contains active or unsupported markup.");
+    const tag = element.localName.toLowerCase();
+    if (element.namespaceURI !== SVG_NS || FORBIDDEN.has(tag) || (tag === "style" && element.localName !== "style")) {
+      throw new Error("Engine SVG contains active or unsupported markup.");
+    }
     const original = element.getAttribute("id");
     if (original !== null) {
       if (!/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(original) || ids.has(original)) throw new Error("Engine SVG has invalid or duplicate IDs.");
@@ -179,19 +210,27 @@ export function prepareSvg(svg, id, document) {
   }
   for (const element of elements) {
     for (const attr of [...element.attributes]) {
-      const name = attr.localName;
+      const name = attr.localName.toLowerCase();
       if (/^on/iu.test(name) || name === "base" || (attr.namespaceURI && ![XML_NS, XLINK_NS, "http://www.w3.org/2000/xmlns/"].includes(attr.namespaceURI))) {
         throw new Error("Engine SVG contains active attributes.");
+      }
+      // XML is case-sensitive; HTML insertion folds these names. Do not publish a second,
+      // unvalidated interpretation of an ID, URL, or inline stylesheet in result.svg.
+      if (["id", "href", "style"].includes(name) && attr.localName !== name) {
+        throw new Error("Engine SVG contains a non-canonical attribute name.");
       }
       let value = attr.value;
       if (name === "id") value = ids.get(value);
       else if (name === "href") value = element.localName === "a" ? linkUrl(value, ids, document) : localUrl(value, ids);
-      else if (["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns"].includes(name)) {
-        value = value.trim().split(/\s+/u).map((token) => {
+      else if (ARIA_REFERENCES.has(name)) {
+        value = value.trim();
+        value = value ? value.split(/\s+/u).map((token) => {
           if (!ids.has(token)) throw new Error("SVG accessibility reference is unresolved.");
           return ids.get(token);
-        }).join(" ");
-      } else if (name !== "style") value = paintUrls(value, ids);
+        }).join(" ") : "";
+      } else if (name !== "style" && !name.startsWith("data-") && !name.startsWith("aria-") && !TEXT_ATTRIBUTES.has(name)) {
+        value = paintUrls(value, ids);
+      }
       element.setAttributeNS(attr.namespaceURI, attr.name, value);
     }
     if (element.localName === "a" && element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");

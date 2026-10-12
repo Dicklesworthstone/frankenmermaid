@@ -173,6 +173,114 @@ class NativeSvgTests(unittest.TestCase):
           check(!document.querySelector('svg'),'failure inserted SVG');
         }""", NATIVE_FONT)
 
+    def test_literal_labels_and_metadata_survive_dom_and_serialized_publication(self):
+        self.page.evaluate(r"""() => {
+          const labels=['Fetch url(https://example.com/diagram)', 'url(#node)',
+            'image-set(x) @font-face :root #node', '東京 \\ путь <script> text'];
+          for(const text of labels) {
+            const input=new DOMParser().parseFromString(wrap('<g id="node"><text/></g>'),'image/svg+xml');
+            const node=input.querySelector('g');
+            for(const name of ['data-id','data-tooltip','aria-label','aria-description','aria-roledescription','title']) node.setAttribute(name,text);
+            node.querySelector('text').textContent=text;
+            const output=adapter.prepareSvg(new XMLSerializer().serializeToString(input),'literal',document);
+            document.getElementById('host').innerHTML=output.svg;
+            for(const root of [output.element,document.querySelector('#host svg')]) {
+              const element=root.querySelector('g');
+              for(const name of ['data-id','data-tooltip','aria-label','aria-description','aria-roledescription','title']) {
+                check(element.getAttribute(name)===text,'literal attribute rewritten: '+name);
+              }
+              check(element.querySelector('text').textContent===text,'label changed');
+            }
+          }
+        }""")
+
+    def test_callbacks_receive_the_authored_url_like_source_identity(self):
+        self.page.evaluate(r"""() => {
+          const output=adapter.prepareSvg(wrap('<g id="node" data-id="url(#node)" data-callback="choose" aria-label="url(#node)"><rect x="10" y="10" width="60" height="40"/></g>'),'interactive',document);
+          window.selections=[];
+          const choose=id=>selections.push(id);
+          const bind=adapter.createSvgBinder(output.element,{resolveCallback:name=>name==='choose'?choose:undefined});
+          document.getElementById('host').replaceChildren(output.element);
+          bind(output.element);
+        }""")
+        self.page.locator('g[data-callback="choose"]').click()
+        self.page.locator('g[data-callback="choose"]').focus()
+        self.page.keyboard.press("Enter")
+        self.page.keyboard.press("Space")
+        self.assertEqual(self.page.evaluate("selections"), ["url(#node)"] * 3)
+
+    def test_css_strings_are_literal_but_real_paint_references_are_rewritten(self):
+        self.page.evaluate(r"""() => {
+          const literal='url(https://example.com/private) image-set(x) @font-face @namespace :root #paint';
+          const output=adapter.prepareSvg(wrap(`<defs><linearGradient id="paint"><stop stop-color="red"/></linearGradient></defs>
+            <style>rect{--literal:"${literal}";--local:url('#paint');--word:curl(#paint);fill:var(--local)}</style>
+            <rect style='--literal:"${literal}";stroke:url(#paint)' width="40" height="40"/>`),'values',document);
+          document.getElementById('host').innerHTML=output.svg;
+          const rect=document.querySelector('#host rect'), style=getComputedStyle(rect);
+          check(style.getPropertyValue('--literal')==='"'+literal+'"','quoted CSS text changed');
+          check(style.getPropertyValue('--word')==='curl(#paint)','identifier substring changed');
+          const paint=document.querySelector('#host linearGradient').id;
+          check(style.fill.includes('#'+paint) && style.stroke.includes('#'+paint),'real URL not rebound');
+          const comment=adapter.prepareSvg(wrap('<style>/* @font-face @namespace */ rect{fill:red}</style><rect/>'),'comment',document);
+          check(comment.presentationWarnings.length===0,'comment interpreted as a resource');
+        }""")
+
+    def test_hash_and_root_text_in_attribute_selectors_is_not_rewritten(self):
+        self.page.evaluate(r"""() => {
+          const output=adapter.prepareSvg(wrap('<style>:root{--color:red}[data-id="#node"]{fill:var(--color)}[aria-label=":root"]{stroke:blue}#node{stroke-width:7}</style><rect id="node" data-id="#node" aria-label=":root" width="10" height="10"/>'),'selectors',document);
+          document.getElementById('host').innerHTML=output.svg;
+          const rect=document.querySelector('#host rect'), style=getComputedStyle(rect);
+          check(style.fill==='rgb(255, 0, 0)','source-ID selector lost');
+          check(style.stroke==='rgb(0, 0, 255)','literal :root selector lost');
+          check(style.strokeWidth==='7px','actual ID selector lost');
+          check(rect.getAttribute('data-id')==='#node' && rect.getAttribute('aria-label')===':root','metadata changed');
+        }""")
+
+    def test_accessibility_relationships_resolve_inside_each_diagram(self):
+        self.page.evaluate(r"""() => {
+          const names=['aria-labelledby','aria-describedby','aria-controls','aria-owns',
+            'aria-flowto','aria-details','aria-errormessage','aria-activedescendant'];
+          const source=wrap(`<g id="node" ${names.map(n=>`${n}="target"`).join(' ')}/><text id="target">Details</text>`);
+          for(const id of ['first','second']) {
+            const output=adapter.prepareSvg(source,id,document);
+            document.getElementById('host').append(output.element);
+            for(const name of names) check(output.element.querySelector('g').getAttribute(name)===output.element.querySelector('text').id,'broken '+name);
+          }
+          for(const name of names) {
+            let failed=false;
+            try{adapter.prepareSvg(wrap(`<g ${name}="missing"/>`),'missing',document);}catch{failed=true;}
+            check(failed,'unresolved '+name+' accepted');
+            const empty=adapter.prepareSvg(wrap(`<g ${name}=""/>`),'empty',document);
+            check(empty.element.querySelector('g').getAttribute(name)==='', 'empty IDREF changed');
+          }
+          const ids=[...document.querySelectorAll('[id]')].map(n=>n.id);
+          check(new Set(ids).size===ids.length,'relationship scopes collide');
+        }""")
+
+    def test_resource_escapes_case_folding_and_processing_instructions_are_rejected(self):
+        self.page.evaluate(r"""() => {
+          const bodies=[
+            '<rect fill="u\\72l(https://example.com/p)"/>', '<rect filter="u\\000072l(https://example.com/p)"/>',
+            '<rect cursor="u\\72 l(https://example.com/p),auto"/>',
+            '<STYLE>@import "https://example.com/x.css";</STYLE>',
+            '<foreignobject><img src="https://example.com/x.png"/></foreignobject>',
+            '<sCrIpT href="https://example.com/x.js"/>', '<a HREF="javascript:alert(1)"/>',
+            '<rect STYLE="fill:url(https://example.com/p)"/>', '<g ID="upper"/>',
+            '<?xml-stylesheet type="text/css" href="https://example.com/x.css"?><rect/>',
+            '<rect marker-end="url(https://example.com/p)"/>', '<rect mask="url(#missing)"/>',
+            '<rect style="fill:url(#missing)"/>', '<rect fill="url(&quot;#missing&quot;"/>'
+          ];
+          for(const body of bodies) {
+            let failed=false;
+            try{adapter.prepareSvg(wrap(body),'bad',document);}catch{failed=true;}
+            check(failed,'resource policy bypass: '+body);
+          }
+          let failed=false;
+          try{adapter.prepareSvg('<?xml-stylesheet type="text/css" href="https://example.com/x.css"?>'+wrap('<rect/>'),'bad',document);}catch{failed=true;}
+          check(failed,'document-level processing instruction accepted');
+          check(!document.querySelector('svg'),'failed result was inserted');
+        }""")
+
     def test_local_styles_and_markers_remain_isolated_with_native_font_fallback(self):
         self.page.evaluate(r"""font => {
           const make=(id,color)=>adapter.prepareSvg(wrap(`<style>${font.replaceAll('&','&amp;')}

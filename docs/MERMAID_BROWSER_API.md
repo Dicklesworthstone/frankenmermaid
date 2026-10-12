@@ -7,18 +7,18 @@
 <script type="module">
   import mermaid from './web/mermaid.mjs';
   mermaid.initialize({ startOnLoad: false, theme: 'dark' });
-  const { svg, diagnostics, warnings } = await mermaid.render(
+  const { svg, diagnostics, warnings, presentationWarnings } = await mermaid.render(
     'orders-diagram',
     'flowchart LR\nOrder-->Payment\nPayment-->Shipping'
   );
   document.getElementById('graph').innerHTML = svg;
-  console.log(diagnostics, warnings);
+  console.log(diagnostics, warnings, presentationWarnings);
 </script>
 ```
 
 `initialize` is synchronous and replaces the instance's configuration. Each async operation captures its own deep snapshot: caller mutations and later initialization cannot change an already submitted render. The Rust `validateConfig` export validates each configuration before parsing/rendering; unsupported keys fail explicitly rather than becoming silent defaults. WASM loading is lazy, shared by concurrent calls, and retryable after initialization failure. No call mutates the raw engine's global `init` configuration.
 
-`render(id, source, container?)` returns a promise with `{ svg, diagramType, diagnostics, warnings, bindFunctions? }`. The optional binding function activates registered node callbacks after insertion, as described below. The optional element supplies its owning document; it is never cleared or populated by `render`. Render IDs must start with an ASCII letter or underscore and contain at most 128 letters, digits, underscores, or hyphens. Use different IDs for diagrams that coexist. Source is limited to 2 MiB of UTF-8; returned SVG is limited to 16 MiB.
+`render(id, source, container?)` returns a promise with `{ svg, diagramType, diagnostics, warnings, presentationWarnings, bindFunctions? }`. The optional binding function activates registered node callbacks after insertion, as described below. The optional element supplies its owning document; it is never cleared or populated by `render`. Render IDs must start with an ASCII letter or underscore and contain at most 128 letters, digits, underscores, or hyphens. Use different IDs for diagrams that coexist. Source is limited to 2 MiB of UTF-8; returned SVG is limited to 16 MiB.
 
 ## Worker isolation, stop, and recovery
 
@@ -127,6 +127,26 @@ Factory-created instances are manual by default. Pass `autoStart: true` to opt a
 The adapter namespaces the engine's SVG IDs, local paint/marker/use references, accessibility references, CSS selectors, and keyframe names. This allows multiple differently themed diagrams in the same light DOM without marker, style, or animation collisions. Text, geometry, and source remain engine-owned. Authored links and SVG tooltips are retained; new-tab links receive `noopener noreferrer`.
 
 SVG processing requires a browser `Document`, XML DOM, and constructable CSS stylesheets. It rejects active markup, event-handler attributes, document-global CSS rules, escaped CSS, unresolved internal references, and remote resource loads. It is a constrained adapter for native SVG output, not a general arbitrary-SVG sanitizer. The raw API remains available for applications that intentionally own a broader SVG policy.
+
+The Rust renderer's optional default Inter stylesheet is a narrow exception to import
+rejection: the adapter recognizes that exact native declaration and **omits it**, without
+loading the resource. The existing font-family stack remains intact. Preload Inter in the
+host page to use it, or let the browser use the existing system-font fallback. Native path
+geometry, labels, and layout coordinates are not recomputed; font availability can still
+change glyph metrics and appearance. `render()` returns the omission in
+`presentationWarnings`, separate from native parser `warnings` and `diagnostics`. The array
+is empty when no fallback was needed, and repeated copies of the declaration produce one
+warning. `run()` uses the same font policy but retains its void return value. Other font
+imports, altered URLs, nested imports, and document-global font definitions are rejected.
+
+Literal text is not a resource reference. Accessible labels, tooltips, source IDs and
+other `data-*` metadata retain text such as `url(#node)` or `url(https://example.com)`
+verbatim. Quoted CSS values and attribute-selector text likewise remain literal; actual
+paint URLs, ID selectors and `:root` tokens are scoped. Accessibility ID relationships,
+including `aria-details`, `aria-errormessage`, `aria-flowto` and `aria-activedescendant`,
+resolve inside their own diagram. Unresolved relationships fail before publication.
+The adapter rejects processing instructions and non-canonical URL/style/ID attributes
+that could change interpretation when serialized SVG is inserted through HTML.
 
 ## Parsing and errors
 
@@ -237,6 +257,7 @@ node --test web/mermaid-compat.test.mjs web/mermaid-worker.test.mjs
 python web/mermaid-compat.browser.test.py
 python web/mermaid-interactions.browser.test.py
 python web/mermaid-worker.browser.test.py
+python web/mermaid-native-svg.browser.test.py
 ```
 
 The browser tests execute production DOM/CSS handling and real pointer/keyboard input in
@@ -253,3 +274,10 @@ initialization, validation, parse/render deadlines, explicit stop, and disposal.
 UI responsiveness, no failed-input replay, queue recovery, source retention, immediate
 same-element retry, callbacks, and oversized reply rejection. Only static module URL
 bindings are substituted for offline loading; the WASM fixture is not the Rust renderer.
+
+The native SVG suite uses unchanged architecture and pie goldens from the Rust renderer,
+not a substitute SVG generator. It checks all-element geometry/text preservation and
+exact Chromium pixel equality against an independent local-font reference, plus literal
+source-identity callbacks, CSS/ARIA isolation, hostile resources and both DOM/serialized
+publication paths. It consumes checked-in renderer artifacts rather than executing a new
+Rust/WASM build. `FM_SVG_MODULE` can select an earlier adapter for regression reproduction.
