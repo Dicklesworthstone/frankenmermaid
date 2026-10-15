@@ -2,6 +2,8 @@ import { checkCallbackName, checkRenderId, createSvgBinder, prepareSvg } from ".
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
+// Private transport hook: AbortSignals stay on the host, never in WASM arguments or postMessage.
+const CANCELLABLE_CALL = Symbol("fm-cancellable-engine-call");
 const activeNodes = new WeakMap();
 let nextDocumentId = 0;
 const MAX_DOCUMENT_DIAGRAMS = 64;
@@ -27,6 +29,23 @@ function cancelledError() {
   const error = new MermaidError("The Mermaid operation was cancelled.", "cancelled");
   error.name = "AbortError";
   return error;
+}
+
+function operationSignal(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Mermaid operation options must be an object.");
+  }
+  const signal = options.signal;
+  if (signal == null) return undefined;
+  if (typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"
+    || typeof signal.removeEventListener !== "function") throw new TypeError("signal must be an AbortSignal.");
+  return signal;
+}
+
+function callEngine(module, method, args, signal) {
+  return module[CANCELLABLE_CALL]
+    ? module[CANCELLABLE_CALL](method, args, signal)
+    : module[method](...args);
 }
 
 function sourceText(source) {
@@ -117,29 +136,31 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   function assertLive() {
     if (disposed) throw new MermaidError("This Mermaid instance has been disposed.", "disposed");
   }
-  function assertCurrent(epoch) {
+  function assertCurrent(epoch, signal) {
     assertLive();
-    if (epoch !== operationEpoch) throw cancelledError();
+    if (epoch !== operationEpoch || signal?.aborted) throw cancelledError();
   }
   // Settle logical operations immediately even when a host loader/callback never resolves.
   // This does not stop host code: checkpoints revoke its authority to continue our pipeline.
   // The worker factory additionally terminates synchronous WASM at the execution boundary.
-  function inOperation(promise, epoch) {
+  function inOperation(promise, epoch, signal) {
     return new Promise((resolve, reject) => {
       let done = false;
       const finish = (success, value) => {
         if (done) return;
         done = true;
         pendingWaits.delete(cancel);
+        signal?.removeEventListener("abort", cancel);
         if (success) resolve(value); else reject(value);
       };
       const cancel = () => {
-        try { assertCurrent(epoch); } catch (error) { finish(false, error); }
+        try { assertCurrent(epoch, signal); } catch (error) { finish(false, error); }
       };
       pendingWaits.add(cancel);
+      signal?.addEventListener("abort", cancel, { once: true });
       // Observe rejection even when this operation has already been cancelled.
       Promise.resolve(promise).then(value => {
-        try { assertCurrent(epoch); finish(true, value); } catch (error) { finish(false, error); }
+        try { assertCurrent(epoch, signal); finish(true, value); } catch (error) { finish(false, error); }
       }, error => finish(false, error));
       cancel();
     });
@@ -158,37 +179,49 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     }).catch((error) => { loading = undefined; throw error; });
     return loading;
   }
-  async function validate(module, snapshot, epoch) {
-    assertCurrent(epoch);
-    let pending = checkedConfigs.get(snapshot);
-    if (!pending) {
-      pending = Promise.resolve().then(() => {
-        assertCurrent(epoch);
-        return module.validateConfig(snapshot.json);
+  async function validate(module, snapshot, epoch, signal) {
+    assertCurrent(epoch, signal);
+    let validation = checkedConfigs.get(snapshot);
+    if (!validation) {
+      validation = { controller: new AbortController(), waiters: 0, settled: false, promise: null };
+      validation.promise = Promise.resolve().then(() => {
+        assertCurrent(epoch, validation.controller.signal);
+        return callEngine(module, "validateConfig", [snapshot.json], validation.controller.signal);
       }).then((raw) => {
         const report = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (!report || !Array.isArray(report.errors)) throw new MermaidError("Engine returned an invalid configuration report.", "engine-contract");
         if (report.errors.length) throw new MermaidError(report.errors.map((error) => `${error.field}: ${error.message}`).join("\n"), "config", report.errors);
-      }).catch((error) => {
+      }).then(() => { validation.settled = true; }).catch((error) => {
+        validation.settled = true;
         // A failed worker bootstrap/validation must not poison this configuration forever.
         // The next explicit call may start a fresh worker; never replay failed work here.
-        if (checkedConfigs.get(snapshot) === pending) checkedConfigs.delete(snapshot);
+        if (checkedConfigs.get(snapshot) === validation) checkedConfigs.delete(snapshot);
         throw error;
       });
-      checkedConfigs.set(snapshot, pending);
+      checkedConfigs.set(snapshot, validation);
     }
-    await pending;
-    assertLive();
+    // Validation is shared, but cancellation is not. Retire its work only after its last
+    // waiter leaves; an aborted first caller must not poison another diagram's config.
+    validation.waiters += 1;
+    try { await inOperation(validation.promise, epoch, signal); }
+    finally {
+      validation.waiters -= 1;
+      if (!validation.waiters && !validation.settled) {
+        if (checkedConfigs.get(snapshot) === validation) checkedConfigs.delete(snapshot);
+        validation.controller.abort();
+      }
+    }
+    assertCurrent(epoch, signal);
   }
-  async function inspect(source, snapshot, epoch) {
-    assertCurrent(epoch);
+  async function inspect(source, snapshot, epoch, signal) {
+    assertCurrent(epoch, signal);
     sourceText(source);
-    const module = await inOperation(engine(), epoch);
-    assertCurrent(epoch);
-    await inOperation(validate(module, snapshot, epoch), epoch);
-    assertCurrent(epoch);
-    const parsed = await inOperation(module.parse(source), epoch);
-    assertCurrent(epoch);
+    const module = await inOperation(engine(), epoch, signal);
+    assertCurrent(epoch, signal);
+    await validate(module, snapshot, epoch, signal);
+    assertCurrent(epoch, signal);
+    const parsed = await inOperation(callEngine(module, "parse", [source], signal), epoch, signal);
+    assertCurrent(epoch, signal);
     const type = parsed?.ir?.diagram_type;
     const diagramType = Object.hasOwn(TYPES, type) ? TYPES[type] : undefined;
     const diagnostics = parsed?.ir?.diagnostics;
@@ -207,15 +240,15 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       catch (hookError) { report(hookError); }
     }
   }
-  async function renderSnapshot(id, source, snapshot, ownerDocument, interactions, operation) {
-    assertCurrent(operation);
+  async function renderSnapshot(id, source, snapshot, ownerDocument, interactions, operation, signal) {
+    assertCurrent(operation, signal);
     checkRenderId(id);
     const { epoch, registered } = interactions;
     const allowed = allowsCallbacks(snapshot);
-    const parsed = await inOperation(inspect(source, snapshot, operation), operation);
-    assertCurrent(operation);
-    const svg = await inOperation(parsed.module.renderSvg(source, snapshot.value), operation);
-    assertCurrent(operation);
+    const parsed = await inOperation(inspect(source, snapshot, operation, signal), operation, signal);
+    assertCurrent(operation, signal);
+    const svg = await inOperation(callEngine(parsed.module, "renderSvg", [source, snapshot.value], signal), operation, signal);
+    assertCurrent(operation, signal);
     const output = prepareSvg(svg, id, ownerDocument);
     const bindFunctions = output.element.querySelector("[data-callback]") ? createSvgBinder(output.element, {
       isLive: () => !disposed,
@@ -399,26 +432,36 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     },
     async parse(source, options = {}) {
       const epoch = operationEpoch;
+      let signal;
       try {
-        const { diagramType, diagnostics, warnings } = await inOperation(inspect(source, site, epoch), epoch);
-        assertCurrent(epoch);
+        signal = operationSignal(options);
+        const { diagramType, diagnostics, warnings } = await inOperation(inspect(source, site, epoch, signal), epoch, signal);
+        assertCurrent(epoch, signal);
         return { diagramType, diagnostics, warnings };
       } catch (error) {
-        if (options.suppressErrors === true) return false;
+        // Explicit caller cancellation is control flow, not a suppressible syntax failure.
+        if (signal?.aborted) throw cancelledError();
+        if (options?.suppressErrors === true) return false;
         notify(error); throw error;
       }
     },
-    async render(id, source, container) {
+    async render(id, source, container, options = {}) {
       const epoch = operationEpoch;
+      let signal;
       try {
+        signal = operationSignal(options);
+        assertCurrent(epoch, signal);
         if (container !== undefined && (!container?.ownerDocument || container.nodeType !== 1)) {
           throw new TypeError("render's optional container must be a DOM element, not a callback.");
         }
         const { element, ...result } = await inOperation(renderSnapshot(id, source, site,
-          container?.ownerDocument || document, captureInteractions(), epoch), epoch);
-        assertCurrent(epoch);
+          container?.ownerDocument || document, captureInteractions(), epoch, signal), epoch, signal);
+        assertCurrent(epoch, signal);
         return result;
-      } catch (error) { notify(error); throw error; }
+      } catch (error) {
+        if (signal?.aborted) throw cancelledError();
+        notify(error); throw error;
+      }
     },
     run,
     async contentLoaded() {
@@ -481,6 +524,9 @@ function workerEngine(engineUrl, requestTimeoutMs) {
     }
   }
   function settle(job, error, value) {
+    if (job.settled) return;
+    job.settled = true;
+    job.signal?.removeEventListener("abort", job.abort);
     queuedBytes -= job.bytes;
     if (error) job.reject(error); else job.resolve(value);
   }
@@ -556,6 +602,9 @@ function workerEngine(engineUrl, requestTimeoutMs) {
   function pump() {
     if (disposed || active) return;
     clearTimeout(idleTimer);
+    // One signal can cancel several queued jobs in the same event dispatch. Do not start
+    // another cancelled job while its abort listener is still waiting to be called.
+    while (queue.length && queue[0].signal?.aborted) settle(queue.shift(), cancelledError());
     if (!queue.length) {
       if (worker) idleTimer = setTimeout(retire, 60_000);
       return;
@@ -575,16 +624,37 @@ function workerEngine(engineUrl, requestTimeoutMs) {
       fail(workerError(`Cannot send render request: ${error.message || error}`, "worker-protocol"), false);
     }
   }
-  function request(method, args) {
+  function abortJob(job) {
+    if (job.settled || !job.signal.aborted) return;
+    if (active === job) {
+      active = null;
+      // postMessage cannot interrupt synchronous WASM. Terminate only its execution
+      // generation, never replay it, and keep independent queued work in FIFO order.
+      retire();
+    } else {
+      const index = queue.indexOf(job);
+      if (index === -1) return;
+      queue.splice(index, 1);
+      if (!active && !queue.length) retire();
+    }
+    settle(job, cancelledError());
+    pump();
+  }
+  function request(method, args, signal) {
     if (disposed) return Promise.reject(workerError("This Mermaid instance has been disposed.", "disposed"));
+    if (signal?.aborted) return Promise.reject(cancelledError());
     const bytes = encoder.encode(JSON.stringify(args)).length;
     if (queue.length + (active ? 1 : 0) >= MAX_QUEUED_REQUESTS || queuedBytes + bytes > MAX_QUEUED_BYTES) {
       return Promise.reject(workerError("Render worker queue is full. Await earlier diagrams before submitting more.", "worker-queue-full"));
     }
     if (sequence === Number.MAX_SAFE_INTEGER) return Promise.reject(workerError("Render request IDs exhausted; create a new instance.", "worker-limit"));
     return new Promise((resolve, reject) => {
+      const job = { id: ++sequence, method, args, bytes, resolve, reject, signal, settled: false };
+      job.abort = () => abortJob(job);
       queuedBytes += bytes;
-      queue.push({ id: ++sequence, method, args, bytes, resolve, reject });
+      queue.push(job);
+      signal?.addEventListener("abort", job.abort, { once: true });
+      if (signal?.aborted) { abortJob(job); return; }
       pump();
     });
   }
@@ -597,6 +667,7 @@ function workerEngine(engineUrl, requestTimeoutMs) {
   }
   return {
     module: Object.freeze({
+      [CANCELLABLE_CALL]: request,
       parse: (source) => request("parse", [source]),
       renderSvg: (source, config) => request("renderSvg", [source, config]),
       validateConfig: (json) => request("validateConfig", [json]),

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getEventListeners } from "node:events";
 import { createMermaid, createWorkerMermaid } from "./mermaid-compat.mjs";
 
 // Transport boundary fixture. The browser suite separately runs the production endpoint in
@@ -393,4 +394,229 @@ test("operation waiting preserves even falsy host rejection reasons", async (t) 
     assert.equal(result.status, "rejected");
     assert.equal(result.reason, reason);
   }
+});
+
+test("AbortSignal rejects pre-aborted parse/render without loading or reporting a syntax error", async (t) => {
+  const f = fixture(t), controller = new AbortController(), reports = [];
+  f.api.parseError = (error) => reports.push(error);
+  controller.abort();
+  await assert.rejects(f.api.parse("never", { signal: controller.signal, suppressErrors: true }), { name: "AbortError", code: "cancelled" });
+  await assert.rejects(f.api.render("never", "never", undefined, { signal: controller.signal }), { name: "AbortError", code: "cancelled" });
+  assert.equal(f.workers.length, 0);
+  assert.deepEqual(reports, []);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+});
+
+test("invalid signals and options fail before admitting work", async (t) => {
+  const f = fixture(t);
+  for (const signal of [{}, true, "signal", { aborted: false }, new AbortController()]) {
+    await assert.rejects(f.api.parse("source", { signal }), TypeError);
+    await assert.rejects(f.api.render("id", "source", undefined, { signal }), TypeError);
+  }
+  for (const options of [null, [], true]) await assert.rejects(f.api.parse("source", options), TypeError);
+  assert.equal(f.workers.length, 0);
+});
+
+test("aborting the active request retires only its worker and preserves independent FIFO work", async (t) => {
+  let lateMessage;
+  const f = fixture(t, { call(worker, message) {
+    if (message.args[0] === "hang") { lateMessage = worker.onmessage; return false; }
+  } });
+  const controller = new AbortController();
+  const old = f.api.parse("hang", { signal: controller.signal });
+  const cancelled = assert.rejects(old, { name: "AbortError", code: "cancelled" });
+  const good = [f.api.parse("b"), f.api.parse("c")];
+  await until(() => lateMessage);
+  controller.abort();
+  const results = await Promise.all(good);
+  await cancelled;
+  lateMessage({ data: { protocol: PROTOCOL, kind: "result", requestId: 1, value: parsed("wrong") } });
+  assert.deepEqual(results.map((result) => result.warnings[0]), ["b", "c"]);
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.workers[0].terminated, 1);
+  assert.equal(f.workers[1].terminated, 0);
+  assert.deepEqual(f.calls().filter((m) => m.method === "parse").map((m) => m.args[0]), ["hang", "b", "c"]);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+});
+
+test("a queued abort never terminates the independent active worker or dispatches cancelled source", async (t) => {
+  let held;
+  const f = fixture(t, { call(worker, message) {
+    if (message.args[0] === "active") { held = [worker, message]; return false; }
+  } });
+  const controller = new AbortController();
+  const first = f.api.parse("active");
+  const skipped = assert.rejects(f.api.parse("skip", { signal: controller.signal }), { name: "AbortError" });
+  const last = f.api.parse("last");
+  await until(() => held);
+  controller.abort();
+  await skipped;
+  assert.equal(f.workers[0].terminated, 0);
+  held[0].result(held[1], parsed("active"));
+  assert.deepEqual((await Promise.all([first, last])).map((r) => r.warnings[0]), ["active", "last"]);
+  assert.equal(f.workers.length, 1);
+  assert.deepEqual(f.calls().filter((m) => m.method === "parse").map((m) => m.args[0]), ["active", "last"]);
+});
+
+test("a shared signal cannot briefly dispatch its cancelled queued siblings during abort", async (t) => {
+  const f = fixture(t, { call(_worker, message) { if (message.args[0] === "active") return false; } });
+  await f.api.parse("warm");
+  const controller = new AbortController();
+  const stopped = Promise.allSettled(["active", "skip1", "skip2"].map((source) => f.api.parse(source, { signal: controller.signal })));
+  const survivor = f.api.parse("survivor");
+  await until(() => f.calls().some((m) => m.args[0] === "active"));
+  controller.abort();
+  assert.ok((await stopped).every((r) => r.status === "rejected" && r.reason.name === "AbortError"));
+  assert.equal((await survivor).warnings[0], "survivor");
+  assert.equal(f.workers.length, 2);
+  assert.deepEqual(f.calls().filter((m) => m.method === "parse").map((m) => m.args[0]), ["warm", "active", "survivor"]);
+});
+
+test("aborting one validation waiter does not cancel or poison another caller's shared validation", async (t) => {
+  let held;
+  const f = fixture(t, { call(worker, message) {
+    if (message.method === "validateConfig") { held = [worker, message]; return false; }
+  } });
+  const controller = new AbortController();
+  const old = assert.rejects(f.api.parse("old", { signal: controller.signal }), { name: "AbortError" });
+  const survivor = f.api.parse("survivor");
+  await until(() => held);
+  controller.abort();
+  await old;
+  assert.equal(f.workers[0].terminated, 0);
+  held[0].result(held[1], { errors: [] });
+  assert.equal((await survivor).warnings[0], "survivor");
+  await f.api.parse("cached");
+  assert.deepEqual(f.calls().map((m) => m.method), ["validateConfig", "parse", "parse"]);
+});
+
+test("the last aborted validation waiter releases a stuck worker and allows immediate config retry", async (t) => {
+  let held, block = true;
+  const f = fixture(t, { call(worker, message) {
+    if (block && message.method === "validateConfig") { held = [worker, message]; return false; }
+  } });
+  const controller = new AbortController();
+  const old = assert.rejects(f.api.parse("old", { signal: controller.signal }), { name: "AbortError" });
+  await until(() => held);
+  controller.abort(); block = false;
+  const retry = f.api.parse("retry");
+  await old;
+  assert.equal((await retry).warnings[0], "retry");
+  assert.equal(f.workers[0].terminated, 1);
+  assert.deepEqual(f.calls().map((m) => m.method), ["validateConfig", "validateConfig", "parse"]);
+});
+
+test("aborting during bootstrap discards the abandoned generation without waiting for timeout", async (t) => {
+  let lateReady, attempts = 0;
+  const f = fixture(t, { init(worker) {
+    if (++attempts === 1) lateReady = worker.onmessage; else worker.emit({ kind: "ready" });
+  } });
+  const controller = new AbortController();
+  const old = assert.rejects(f.api.parse("old", { signal: controller.signal }), { name: "AbortError" });
+  await until(() => lateReady);
+  controller.abort();
+  const retry = f.api.parse("new");
+  await old;
+  lateReady({ data: { protocol: PROTOCOL, kind: "ready" } });
+  assert.equal((await retry).warnings[0], "new");
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.workers[0].terminated, 1);
+  assert.equal(f.workers[0].messages.length, 1);
+});
+
+test("abort after a transport reply revokes publication but does not terminate a completed worker", async (t) => {
+  const controller = new AbortController();
+  const f = fixture(t, { call(worker, message) {
+    if (message.args[0] !== "race") return;
+    worker.result(message, parsed("must not escape")); controller.abort(); return false;
+  } });
+  await assert.rejects(f.api.parse("race", { signal: controller.signal }), { name: "AbortError" });
+  assert.equal((await f.api.parse("fresh")).warnings[0], "fresh");
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.workers[0].terminated, 0);
+});
+
+test("successful and failed requests remove abort listeners; later abort cannot kill unrelated work", async (t) => {
+  const f = fixture(t, { call(worker, message) {
+    if (message.args[0] !== "error") return;
+    worker.emit({ kind: "failed", requestId: message.requestId, message: "expected" }); return false;
+  } });
+  for (const source of ["good", "error"]) {
+    const controller = new AbortController();
+    const result = await Promise.allSettled([f.api.parse(source, { signal: controller.signal })]);
+    assert.equal(result[0].status, source === "good" ? "fulfilled" : "rejected");
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    controller.abort();
+    assert.equal(f.workers[0].terminated, 0);
+  }
+  assert.equal((await f.api.parse("next")).warnings[0], "next");
+});
+
+test("queued abort returns its admission slot without evicting any other request", async (t) => {
+  let hold = false;
+  const f = fixture(t, { call(_worker, message) { if (hold && message.method === "parse") return false; } });
+  await f.api.parse("warm"); hold = true;
+  const controller = new AbortController();
+  const jobs = [f.api.parse("active"), f.api.parse("cancel me", { signal: controller.signal }),
+    ...Array.from({ length: 126 }, (_, index) => f.api.parse(`queued ${index}`))];
+  const settled = Promise.allSettled(jobs);
+  await until(() => f.calls().some((m) => m.args[0] === "active"));
+  await assert.rejects(f.api.parse("overflow"), { code: "worker-queue-full" });
+  controller.abort();
+  const admitted = Promise.allSettled([f.api.parse("replacement")]);
+  await new Promise(setImmediate);
+  f.api.dispose();
+  assert.equal((await admitted)[0].reason.code, "disposed", "replacement was admitted, not queue-rejected");
+  const results = await settled;
+  assert.equal(results.filter((r) => r.reason.name === "AbortError").length, 1);
+  assert.equal(results.filter((r) => r.reason.code === "disposed").length, 127);
+});
+
+test("custom loader abort settles only its caller and preserves native function signatures", async (t) => {
+  let release;
+  const calls = [], loading = new Promise((resolve) => { release = resolve; });
+  const api = createMermaid({ loadEngine: () => loading });
+  t.after(() => api.dispose());
+  const controller = new AbortController();
+  const old = assert.rejects(api.parse("old", { signal: controller.signal }), { name: "AbortError" });
+  const current = api.parse("current");
+  controller.abort();
+  await old;
+  release({ validateConfig(...args) { assert.equal(args.length, 1); return { errors: [] }; },
+    renderSvg: () => "<svg/>", parse(...args) { assert.equal(args.length, 1); calls.push(args[0]); return parsed(args[0]); } });
+  assert.equal((await current).warnings[0], "current");
+  assert.deepEqual(calls, ["current"]);
+});
+
+test("aborting a custom asynchronous parse discards its late rejection and never starts SVG rendering", async (t) => {
+  let rejectParse, started = false, renders = 0;
+  const api = createMermaid({ loadEngine: () => ({ validateConfig: () => ({ errors: [] }),
+    parse: () => { started = true; return new Promise((_, reject) => { rejectParse = reject; }); },
+    renderSvg: () => { renders += 1; return "<svg/>"; } }) });
+  t.after(() => api.dispose());
+  const controller = new AbortController();
+  const old = assert.rejects(api.render("id", "source", undefined, { signal: controller.signal }), { name: "AbortError" });
+  await until(() => started);
+  controller.abort(); await old;
+  rejectParse(new Error("late native error"));
+  await new Promise(setImmediate);
+  assert.equal(renders, 0);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+});
+
+test("active SVG render abort retires its WASM worker while an independent parse survives", async (t) => {
+  let rendering = false;
+  const f = fixture(t, { call(_worker, message) {
+    if (message.method === "renderSvg") { rendering = true; assert.equal(message.args.length, 2); return false; }
+  } });
+  const controller = new AbortController();
+  const stopped = assert.rejects(f.api.render("id", "source", undefined, { signal: controller.signal }), { name: "AbortError" });
+  await until(() => rendering);
+  const survivor = f.api.parse("survivor");
+  await new Promise(setImmediate);
+  controller.abort(); await stopped;
+  assert.equal((await survivor).warnings[0], "survivor");
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.calls().filter((m) => m.method === "renderSvg").length, 1);
+  assert.ok(f.calls().every((m) => !Object.hasOwn(m, "signal")), "signals never cross postMessage");
 });
