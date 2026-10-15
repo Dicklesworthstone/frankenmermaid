@@ -327,6 +327,160 @@ SCENARIOS = [
   await api.run({nodes: [first, second]});
   check(second.querySelector('svg'), 'fresh document run did not recover');
 '''),
+('per-request abort interrupts infinite WASM without losing independent queued renders', r'''
+  const api = await make({requestTimeoutMs: 10000}), controller = new AbortController();
+  const reports = []; api.parseError = error => reports.push(error);
+  let ticks = 0; const timer = setInterval(() => ticks++, 10);
+  const old = api.render('old', 'hang-render', undefined, {signal: controller.signal}).catch(error => error);
+  await until(() => calls().some(m => m.method === 'renderSvg' && m.args[0] === 'hang-render'));
+  const siblings = [api.render('next', 'next'), api.parse('last')];
+  await sleep(80); controller.abort();
+  const error = await old, results = await Promise.all(siblings); clearInterval(timer);
+  check(error.name === 'AbortError' && error.code === 'cancelled', 'signal did not preempt WASM');
+  check(ticks >= 5 && results[0].svg.includes('next') && results[1].warnings[0] === 'last', 'UI or siblings lost');
+  check(workers.length === 2 && workers[0].stops === 1, 'active worker was not retired');
+  check(calls().filter(m => m.method === 'renderSvg' && m.args[0] === 'hang-render').length === 1, 'cancelled work replayed');
+  check(reports.length === 0 && !JSON.stringify(calls()).includes('"signal"'), 'abort became syntax error or crossed wire');
+'''),
+('queued abort never terminates an unrelated running worker or starts the cancelled diagram', r'''
+  const api = await make({requestTimeoutMs: 10000});
+  const activeController = new AbortController(), queuedController = new AbortController();
+  const active = api.parse('hang-parse', {signal: activeController.signal}).catch(error => error);
+  await until(() => calls().some(m => m.args[0] === 'hang-parse'));
+  const skipped = api.render('skip', 'skip', undefined, {signal: queuedController.signal}).catch(error => error);
+  const survivor = api.render('survivor', 'survivor');
+  await sleep(30); queuedController.abort();
+  check((await skipped).name === 'AbortError' && workers[0].stops === 0, 'queued abort killed active work');
+  activeController.abort(); check((await active).name === 'AbortError', 'active abort failed');
+  check((await survivor).svg.includes('survivor'), 'independent work lost');
+  check(!calls().some(m => m.args[0] === 'skip'), 'cancelled queued source was dispatched');
+'''),
+('pre-aborted document runs reject even empty or suppressed batches without side effects', r'''
+  const api = await make(), controller = new AbortController(); controller.abort();
+  const source = document.createElement('pre'); source.textContent = 'untouched'; document.body.append(source);
+  let callbacks = 0, reports = 0; api.parseError = () => reports++;
+  for (const nodes of [[], [source]]) {
+    const error = await api.run({nodes, signal: controller.signal, suppressErrors: true,
+      postRenderCallback: () => callbacks++}).catch(error => error);
+    check(error?.name === 'AbortError' && error.code === 'cancelled', 'pre-aborted run resolved');
+  }
+  check(!workers.length && !callbacks && !reports && source.textContent === 'untouched', 'pre-aborted run had side effects');
+'''),
+('aborting a document render preserves its source and permits an immediate same-element retry', r'''
+  const api = await make({requestTimeoutMs: 10000}), controller = new AbortController();
+  const first = document.createElement('pre'), second = document.createElement('pre'), independent = document.createElement('pre');
+  first.textContent = 'hang-render'; second.textContent = 'not started'; independent.textContent = 'independent';
+  document.body.append(first, second, independent);
+  let oldCallbacks = 0, freshCallbacks = 0;
+  const old = api.run({nodes: [first, second], signal: controller.signal, suppressErrors: true,
+    postRenderCallback: () => oldCallbacks++}).catch(error => error);
+  await until(() => calls().some(m => m.method === 'renderSvg'));
+  const sibling = api.run({nodes: [independent]});
+  controller.abort();
+  check(first.textContent === 'hang-render' && !first.hasAttribute('data-processed'), 'abort overwrote source');
+  first.textContent = 'corrected';
+  const retry = api.run({nodes: [first], postRenderCallback: () => freshCallbacks++});
+  check((await old).name === 'AbortError', 'signal cancellation was suppressed or aggregated');
+  await Promise.all([sibling, retry]);
+  check(first.querySelector('svg') && independent.querySelector('svg') && freshCallbacks === 1 && oldCallbacks === 0, 'ownership/callback failure');
+  check(second.textContent === 'not started' && !calls().some(m => m.args[0] === 'not started'), 'cancelled run consumed next source');
+'''),
+('aborting a coalesced follower does not cancel the run that owns its diagram', r'''
+  const api = await make(), controller = new AbortController();
+  const source = document.createElement('pre'); source.textContent = 'slow shared'; document.body.append(source);
+  let ownerCallbacks = 0, followerCallbacks = 0;
+  const owner = api.run({nodes: [source], postRenderCallback: () => ownerCallbacks++});
+  await until(() => calls().some(m => m.method === 'parse'));
+  const follower = api.run({nodes: [source], signal: controller.signal,
+    postRenderCallback: () => followerCallbacks++}).catch(error => error);
+  controller.abort();
+  check((await follower).name === 'AbortError', 'follower failed to cancel');
+  await owner;
+  check(source.querySelector('svg') && ownerCallbacks === 1 && followerCallbacks === 0, 'follower owned publication');
+  check(workers.length === 1 && workers[0].stops === 0, 'follower retired owner worker');
+  check(calls().filter(m => m.method === 'renderSvg').length === 1, 'coalescing caused duplicate rendering');
+'''),
+('aborting an owner releases coalesced waiters without duplicating their shared diagram', r'''
+  const api = await make({requestTimeoutMs: 10000}), controller = new AbortController();
+  const shared = document.createElement('pre'), other = document.createElement('pre');
+  shared.textContent = 'hang-render'; other.textContent = 'other'; document.body.append(shared, other);
+  const owner = api.run({nodes: [shared], signal: controller.signal}).catch(error => error);
+  await until(() => calls().some(m => m.method === 'renderSvg'));
+  const follower = api.run({nodes: [shared, other]}).catch(error => error);
+  controller.abort();
+  check((await owner).name === 'AbortError', 'owner did not cancel');
+  const error = await follower;
+  check(error instanceof AggregateError && error.errors[0].code === 'cancelled', 'follower lost shared failure');
+  check(shared.textContent === 'hang-render' && other.querySelector('svg'), 'follower replayed shared work or lost independent work');
+  check(calls().filter(m => m.method === 'renderSvg' && m.args[0] === 'hang-render').length === 1, 'shared work replayed');
+'''),
+('batch abort in post-render callback keeps published interactions and does not enter the next diagram', r'''
+  const api = await make(), controller = new AbortController(); let activations = 0;
+  api.initialize({securityLevel: 'loose'}); api.registerCallback('show', () => activations++);
+  const first = document.createElement('pre'), next = document.createElement('pre');
+  first.textContent = 'published'; next.textContent = 'remaining'; document.body.append(first, next);
+  const error = await api.run({nodes: [first, next], signal: controller.signal,
+    postRenderCallback() { controller.abort(); }}).catch(error => error);
+  check(error.name === 'AbortError' && first.dataset.processed === 'true', 'published content rolled back');
+  first.querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0}));
+  check(activations === 1 && next.textContent === 'remaining' && !calls().some(m => m.args[0] === 'remaining'), 'abort removed interactions or ran remaining diagram');
+  await api.run({nodes: [first, next]}); check(next.querySelector('svg'), 'resume failed');
+'''),
+('batch abort settles a stuck host callback and prevents its late completion from resuming work', r'''
+  const api = await make(), controller = new AbortController();
+  const first = document.createElement('pre'), next = document.createElement('pre');
+  first.textContent = 'published'; next.textContent = 'remaining'; document.body.append(first, next);
+  let release;
+  const pending = api.run({nodes: [first, next], signal: controller.signal,
+    postRenderCallback: () => new Promise(resolve => { release = resolve; })}).catch(error => error);
+  await until(() => release);
+  controller.abort(); check((await pending).name === 'AbortError', 'host callback wait did not settle');
+  check((await api.parse('unrelated')).warnings[0] === 'unrelated', 'host callback blocked independent work');
+  release(); await sleep(30);
+  check(first.querySelector('svg') && !calls().some(m => m.args[0] === 'remaining'), 'late host callback resumed cancelled batch');
+'''),
+('AbortSignal raised by an interaction reporter revokes publication and cleans installed listeners', r'''
+  const controller = new AbortController();
+  const api = await make({reportError() { controller.abort(); }});
+  api.initialize({securityLevel: 'loose'});
+  const source = document.createElement('pre'); source.textContent = 'retain source'; document.body.append(source);
+  const error = await api.run({nodes: [source], signal: controller.signal}).catch(error => error);
+  check(error.name === 'AbortError' && source.textContent === 'retain source' && !source.hasAttribute('data-processed'), 'binding abort published');
+  let activations = 0; api.registerCallback('show', () => activations++);
+  await api.run({nodes: [source]});
+  source.querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0}));
+  check(activations === 1, 'binding retry installed duplicate callbacks');
+'''),
+('aborting after successful publication does not revoke returned SVG bindings', r'''
+  const api = await make(), controller = new AbortController(); let activations = 0;
+  api.initialize({securityLevel: 'loose'}); api.registerCallback('show', () => activations++);
+  const result = await api.render('complete', 'complete', undefined, {signal: controller.signal});
+  controller.abort();
+  const host = document.createElement('div'); host.innerHTML = result.svg; document.body.append(host);
+  result.bindFunctions(host);
+  host.querySelector('[data-callback]').dispatchEvent(new MouseEvent('click', {bubbles: true, button: 0}));
+  check(activations === 1 && workers[0].stops === 0, 'completed operation still owned abort resources');
+'''),
+('all abandoned config-validation waiters preempt WASM and allow a different config to continue', r'''
+  const api = await make({requestTimeoutMs: 10000}), one = new AbortController(), two = new AbortController();
+  api.initialize({theme: 'hang-validate'});
+  const first = api.parse('first', {signal: one.signal}).catch(error => error);
+  const second = api.parse('second', {signal: two.signal}).catch(error => error);
+  await until(() => calls().some(m => m.method === 'validateConfig'));
+  one.abort(); check((await first).name === 'AbortError' && workers[0].stops === 0, 'first waiter killed shared validation');
+  api.initialize({theme: 'dark'}); const survivor = api.render('good', 'good');
+  two.abort(); check((await second).name === 'AbortError', 'last waiter did not cancel');
+  check((await survivor).svg.includes('data-theme="dark"') && workers[0].stops === 1, 'abandoned validation kept independent work blocked');
+  check(!calls().some(m => m.method === 'parse' && ['first', 'second'].includes(m.args[0])), 'aborted validation resumed parsing');
+'''),
+('per-request bootstrap abort releases its worker before the deadline', r'''
+  const api = await make({engineUrl: hangBootUrl, requestTimeoutMs: 10000}), controller = new AbortController();
+  const pending = api.parse('never runs', {signal: controller.signal}).catch(error => error);
+  await until(() => workers.length === 1); await sleep(30);
+  controller.abort(); check((await pending).name === 'AbortError', 'bootstrap cancellation failed');
+  await until(() => workers[0].stops === 1);
+  check(calls().length === 0, 'aborted bootstrap entered parse');
+'''),
 ]
 
 results = []

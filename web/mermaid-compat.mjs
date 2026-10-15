@@ -95,6 +95,15 @@ function configuration(config = {}) {
 /** Mermaid-shaped browser API over the native engine; not a second Mermaid implementation.
  * loadEngine returns the wasm-bindgen module (optionally already initialized). This factory
  * allows applications to own loading/caching and gives independent widgets isolated config.
+ *
+ * Cancellation: parse(source, {signal}), render(id, source, container, {signal}), and
+ * run({nodes, signal}) accept AbortSignals. Explicit abort rejects AbortError/code=cancelled
+ * even with suppressErrors, without calling parseError. A run retains already-published
+ * diagrams, stops before its next node/callback, and leaves unfinished sources unchanged.
+ * A coalesced follower may cancel its own wait without cancelling the element's owner;
+ * cancelling the owner also fails the shared render for its followers (never replayed).
+ * Custom loaders cannot be forcibly interrupted: their late results are only discarded.
+ * The worker factory additionally terminates the active engine, preserving unrelated work.
  */
 export function createMermaid({ loadEngine, document = globalThis.document, wasmInput, autoStart = false,
   reportError = (error) => globalThis.console?.error(error),
@@ -309,14 +318,14 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       && node.innerHTML === item.markup && node.childNodes.length === item.children.length
       && item.children.every((child, index) => node.childNodes[index] === child);
   }
-  async function renderNode(item, snapshot, interactions, epoch) {
-    assertCurrent(epoch);
+  async function renderNode(item, snapshot, interactions, epoch, signal) {
+    assertCurrent(epoch, signal);
     const { node } = item;
     // Another run may have completed this node since our selection snapshot. Never reparse
     // its SVG as Mermaid source. Removing data-processed is the caller's explicit retry/edit.
     if (node.getAttribute("data-processed") === "true") return undefined;
     let existing = activeNodes.get(node);
-    if (existing?.owner === owner && existing.epoch !== epoch) {
+    if (existing?.owner === owner && (existing.epoch !== epoch || existing.signal?.aborted)) {
       // An immediate retry must not await or inherit a cancelled run's ownership.
       // Its publication checkpoints and identity-checked cleanup remain revoked.
       activeNodes.delete(node);
@@ -325,18 +334,19 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     if (existing) {
       if (existing.owner !== owner || existing.snapshot !== snapshot || existing.callbackRevision !== interactions.revision || existing.markup !== item.markup
         || existing.source !== item.source) throw new MermaidError("A different render already owns this element.", "element-busy");
-      await inOperation(existing.promise, epoch);
+      // A follower may stop waiting without cancelling the run which owns this element.
+      await inOperation(existing.promise, epoch, signal);
       return undefined; // The owning run performs the callback exactly once.
     }
-    const job = { owner, snapshot, epoch, callbackRevision: interactions.revision, markup: item.markup, source: item.source };
+    const job = { owner, snapshot, epoch, signal, callbackRevision: interactions.revision, markup: item.markup, source: item.source };
     job.promise = Promise.resolve().then(async () => {
-      assertCurrent(epoch);
+      assertCurrent(epoch, signal);
       if (!unchanged(item)) throw new MermaidError("Diagram source changed before rendering; it was not replaced.", "stale-source");
       let id;
       do { id = `fm-mermaid-${++nextDocumentId}`; }
       while (item.document.getElementById(id) || item.root.getElementById?.(id));
-      const result = await inOperation(renderSnapshot(id, item.source, snapshot, item.document, interactions, epoch), epoch);
-      assertCurrent(epoch);
+      const result = await inOperation(renderSnapshot(id, item.source, snapshot, item.document, interactions, epoch, signal), epoch, signal);
+      assertCurrent(epoch, signal);
       if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
         throw new MermaidError("Diagram source changed while rendering; it was not replaced.", "stale-source");
       }
@@ -348,7 +358,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       const unbind = result.bindFunctions?.(result.element);
       try {
         // A missing-handler reporter is host code and may edit source or dispose this owner.
-        assertCurrent(epoch);
+        assertCurrent(epoch, signal);
         if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
           throw new MermaidError("Diagram source changed during interaction binding; it was not replaced.", "stale-source");
         }
@@ -361,7 +371,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       return id;
     });
     activeNodes.set(node, job);
-    try { return await inOperation(job.promise, epoch); }
+    try { return await inOperation(job.promise, epoch, signal); }
     finally { if (activeNodes.get(node) === job) activeNodes.delete(node); }
   }
   async function run(options = {}) {
@@ -370,21 +380,29 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     const interactions = captureInteractions();
     const suppress = options?.suppressErrors === true;
     const callback = options?.postRenderCallback;
-    let items;
-    try { items = selectedSources(options); }
+    let items, signal;
+    try {
+      signal = operationSignal(options);
+      assertCurrent(epoch, signal);
+      items = selectedSources(options);
+    }
     catch (error) {
+      if (signal?.aborted) throw cancelledError();
       if (suppress) { report(error); return; }
       notify(error); throw error;
     }
     const failures = [];
     for (const item of items) {
       try {
-        assertCurrent(epoch);
-        const id = await inOperation(renderNode(item, snapshot, interactions, epoch), epoch);
-        assertCurrent(epoch);
-        if (id && callback) await inOperation(callback(id), epoch);
-        assertCurrent(epoch);
+        assertCurrent(epoch, signal);
+        const id = await inOperation(renderNode(item, snapshot, interactions, epoch, signal), epoch, signal);
+        assertCurrent(epoch, signal);
+        if (id && callback) await inOperation(callback(id), epoch, signal);
+        assertCurrent(epoch, signal);
       } catch (error) {
+        // Cancellation ends this batch immediately, even under suppressErrors. Previously
+        // published diagrams stay published; untouched source nodes are never replaced.
+        if (signal?.aborted) throw cancelledError();
         if (suppress) report(error);
         else { notify(error); failures.push(error); }
         // A stopped document batch may not start its next diagram in a fresh worker.
