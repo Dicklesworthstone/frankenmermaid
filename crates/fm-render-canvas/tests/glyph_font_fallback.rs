@@ -1,8 +1,10 @@
 //! Font-stack coverage without a GPU, system fonts, font downloads or skipped tests.
 #![cfg(feature = "webgpu")]
 
-use fm_render_canvas::glyph_raster::{GlyphFont, rasterize_atlas, rasterize_atlas_with_fallbacks};
-use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
+use fm_render_canvas::glyph_raster::{
+    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas, rasterize_atlas_with_fallbacks,
+};
+use fm_render_canvas::{CanvasRenderConfig, GlyphAtlasPlan, GpuRenderPlan};
 
 fn plan_for(label: &str) -> GpuRenderPlan {
     let ir = fm_parser::parse(&format!("flowchart LR\n  A[{label}]\n")).ir;
@@ -58,7 +60,7 @@ fn rectangle(width: i16, bottom: i16, top: i16) -> Vec<u8> {
 /// Space and zero-width space map to the empty glyph; format-12 cmap also supports non-BMP tests.
 fn font_bytes(character: char, width: i16, ascent: i16, descent: i16) -> Vec<u8> {
     let notdef = rectangle(100, 0, 600);
-    let visible = rectangle(width, 0, 600);
+    let visible = rectangle(width, descent.min(0), ascent);
     let mut glyf = notdef.clone();
     glyf.extend_from_slice(&visible);
     let mut loca = Vec::new();
@@ -89,8 +91,9 @@ fn font_bytes(character: char, width: i16, ascent: i16, descent: i16) -> Vec<u8>
     set_u32(&mut head, 0, 0x0001_0000);
     set_u32(&mut head, 12, 0x5f0f_3cf5);
     set_u16(&mut head, 18, 1000); // unitsPerEm
+    set_i16(&mut head, 38, descent.min(0));
     set_i16(&mut head, 40, width.max(100));
-    set_i16(&mut head, 42, 600);
+    set_i16(&mut head, 42, ascent.max(600));
     set_u16(&mut head, 46, 8);
     set_i16(&mut head, 48, 2);
     set_i16(&mut head, 50, 1); // long loca offsets
@@ -277,4 +280,113 @@ fn a_fallback_can_cover_a_non_bmp_character() {
     assert_eq!(atlas.rendered, 1);
     assert!(atlas.missing.is_empty());
     assert_eq!(atlas, rasterize_atlas(&plan.glyph_atlas, &fallback));
+}
+
+#[test]
+fn deep_descenders_fit_instead_of_being_cropped_at_the_bottom_of_the_cell() {
+    let deep = GlyphFont::from_bytes(&font_bytes('g', 200, 800, -400)).expect("deep face parses");
+    let plan = plan_for("g");
+    let cell = plan.glyph_atlas.cell_px as f32;
+    let baseline = plan.glyph_atlas.baseline_px;
+    let old_px = cell * baseline / deep.ascent(cell).expect("face has line metrics");
+    let old_raster = deep.rasterize('g', old_px).expect("old size has ink");
+    assert!(
+        -(old_raster.ymin as f32) > cell - baseline.round(),
+        "control: ascent-only sizing must overflow this face's descenders"
+    );
+    let fitted = fitted_pixel_size(&plan.glyph_atlas, &deep).expect("face fits");
+    assert!(fitted > 0.0 && fitted < old_px);
+    assert!(baseline_fits_font(&plan.glyph_atlas, &deep));
+    let atlas = rasterize_atlas(&plan.glyph_atlas, &deep);
+    assert_eq!(atlas.rendered, 1);
+    assert!(atlas.missing.is_empty());
+    assert!(
+        atlas.clipped.is_empty(),
+        "descender was cropped: {:?}",
+        atlas.clipped
+    );
+}
+
+#[test]
+fn fallback_faces_with_different_line_metrics_are_fitted_independently() {
+    let primary = font('A', 200);
+    let fallback =
+        GlyphFont::from_bytes(&font_bytes('中', 200, 600, -600)).expect("fallback face parses");
+    let plan = plan_for("A中");
+    let a = fitted_pixel_size(&plan.glyph_atlas, &primary).expect("primary fits");
+    let b = fitted_pixel_size(&plan.glyph_atlas, &fallback).expect("fallback fits");
+    assert!(
+        b < a,
+        "deep fallback must not inherit the primary's pixel size"
+    );
+    assert!(baseline_fits_font(&plan.glyph_atlas, &primary));
+    assert!(baseline_fits_font(&plan.glyph_atlas, &fallback));
+    let atlas = rasterize_atlas_with_fallbacks(&plan.glyph_atlas, &[&primary, &fallback]);
+    assert_eq!(atlas.rendered, 2);
+    assert!(atlas.missing.is_empty());
+    assert!(atlas.clipped.is_empty());
+}
+
+#[test]
+fn fractional_baselines_budget_the_rows_used_by_the_blitter() {
+    let deep = GlyphFont::from_bytes(&font_bytes('g', 200, 800, -400)).expect("deep face parses");
+    let mut plan = plan_for("g");
+    for fraction in [0.19, 0.21, 0.79, 0.8, 0.81] {
+        plan.glyph_atlas.baseline_px = plan.glyph_atlas.cell_px as f32 * fraction;
+        assert!(baseline_fits_font(&plan.glyph_atlas, &deep));
+        let atlas = rasterize_atlas(&plan.glyph_atlas, &deep);
+        assert_eq!(atlas.rendered, 1);
+        assert!(
+            atlas.clipped.is_empty(),
+            "baseline fraction {fraction} clipped"
+        );
+    }
+}
+
+#[test]
+fn outline_scaling_does_not_round_a_fitted_face_outside_its_cell() {
+    // The unconservative f32 fit can round the descent to 7.0000005 or the ascent to
+    // 7.0000005 pixels here. Outward rounding then turns that into an eighth row.
+    for (cell, ascent, descent, baseline) in [
+        (32, 1925, -749, 24.677_412),
+        (16, 869, -256, 7.012_917),
+    ] {
+        let face = GlyphFont::from_bytes(&font_bytes('g', 200, ascent, descent))
+            .expect("boundary face parses");
+        let mut plan = GlyphAtlasPlan::for_texts(["g"], cell);
+        plan.baseline_px = baseline;
+        assert!(baseline_fits_font(&plan, &face));
+        let atlas = rasterize_atlas(&plan, &face);
+        assert_eq!(atlas.rendered, 1);
+        assert!(
+            atlas.clipped.is_empty(),
+            "cell {cell} baseline {baseline} clipped"
+        );
+    }
+}
+
+#[test]
+fn non_finite_baselines_do_not_produce_a_claimed_fit() {
+    let face = font('A', 200);
+    let mut plan = plan_for("A");
+    for baseline in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        plan.glyph_atlas.baseline_px = baseline;
+        assert!(fitted_pixel_size(&plan.glyph_atlas, &face).is_none());
+        assert!(!baseline_fits_font(&plan.glyph_atlas, &face));
+    }
+    for baseline in [-100.0, plan.glyph_atlas.cell_px as f32 + 100.0] {
+        plan.glyph_atlas.baseline_px = baseline;
+        let px = fitted_pixel_size(&plan.glyph_atlas, &face).expect("finite edge baseline");
+        assert!(px.abs() < f32::EPSILON);
+        assert!(!baseline_fits_font(&plan.glyph_atlas, &face));
+    }
+}
+
+#[test]
+fn invalid_pixel_sizes_do_not_reach_the_font_rasteriser() {
+    let face = font('A', 200);
+    for px in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -32.0, 0.0] {
+        assert!(face.rasterize('A', px).is_none());
+    }
+    assert!(face.rasterize('A', 32.0).is_some());
 }

@@ -54,12 +54,13 @@ impl GlyphFont {
 
     /// Coverage bitmap and its dimensions for one glyph at `px`.
     ///
-    /// Returns `None` for an unsupported character or a glyph with no raster. In particular,
+    /// Returns `None` for a non-finite/non-positive size, an unsupported character or an empty
+    /// raster. In particular,
     /// an unsupported character must not rasterise the font's `.notdef` replacement box: that
     /// would hide missing coverage and prevent a caller from selecting a fallback font.
     #[must_use]
     pub fn rasterize(&self, glyph: char, px: f32) -> Option<RasterizedGlyph> {
-        if !self.has_glyph(glyph) {
+        if !px.is_finite() || px <= 0.0 || !self.has_glyph(glyph) {
             return None;
         }
         let (metrics, coverage) = self.font.rasterize(glyph, px);
@@ -87,48 +88,67 @@ impl GlyphFont {
     }
 }
 
-/// The pixel size to rasterise at so this font's ascent lands exactly on the plan's baseline.
-///
-/// ⚠️ NOT `cell_px`, and that mistake is worth stating because it is the obvious thing to do. A cell
-/// is one em square, but a text face's `hhea` ascent plus descent usually EXCEEDS its em — DejaVu
-/// Sans measures 29.70px of ascent alone at 32px, against a 32px cell — so rasterising at the cell
-/// size guarantees the tall letters overflow the cell no matter where the baseline sits. There is no
-/// baseline ratio that rescues it; the size itself is wrong.
-///
-/// Scaling so that `ascent(px) == baseline_px` makes ascenders reach the baseline exactly and leaves
-/// the rest of the cell for descenders. For DejaVu Sans and a 0.8 baseline this lands at ~27.6px in
-/// a 32px cell, which is also why 0.8 is a good convention rather than a lucky one: it is close to
-/// the ascent share of the face's own line box.
-///
-/// # Errors
-/// Returns `None` when the font reports no horizontal line metrics.
-#[must_use]
-pub fn fitted_pixel_size(plan: &GlyphAtlasPlan, font: &GlyphFont) -> Option<f32> {
-    let cell = plan.cell_px.max(1) as f32;
-    let ascent_at_cell = font.ascent(cell)?;
-    if ascent_at_cell <= 0.0 {
+/// Space above and below both the declared baseline and the pixel row used by the blitter.
+/// Taking the smaller spaces matters for fractional baselines: rounding 25.6 to row 26 leaves
+/// only six rows below it in a 32px cell, not the 6.4 suggested by the unrounded coordinate.
+fn baseline_space(plan: &GlyphAtlasPlan) -> Option<(f32, f32)> {
+    if !plan.baseline_px.is_finite() {
         return None;
     }
-    Some(cell * plan.baseline_px / ascent_at_cell)
+    let cell = plan.cell_px.max(1) as f32;
+    let baseline = plan.baseline_px.clamp(0.0, cell);
+    let row = baseline.round();
+    Some((baseline.min(row), (cell - baseline).min(cell - row)))
 }
 
-/// Does this font's DESCENT fit below the plan's baseline once scaled to it?
+/// A pixel size whose ascent AND descent fit around the shared atlas baseline.
 ///
-/// Ascenders fit by construction — [`fitted_pixel_size`] chooses the size that makes them fit. What
-/// can still overflow is the descender space: a face with unusually deep descenders needs more than
-/// the `1 - GLYPH_BASELINE_RATIO` of the cell left underneath. This lets a caller ask in advance
-/// instead of reading it back out of [`AtlasCoverage::clipped`].
+/// Fitting only the ascent assumes every face has the same ascent/descent ratio. A fallback with
+/// deeper descenders then loses the bottoms of its letters even though its ascenders fit perfectly.
+/// Limit the size by both spaces, including baseline rounding, and apply that one size to the whole
+/// face. This never shrinks individual glyphs independently or changes the plan's UV rectangles.
+/// Glyph outlines extending beyond their face's line metrics can still be reported as clipped.
+///
+/// Returns `None` for a non-finite baseline or missing/invalid horizontal line metrics. A baseline
+/// at an edge can leave zero room for the face, in which case the fitted size is zero.
+#[must_use]
+pub fn fitted_pixel_size(plan: &GlyphAtlasPlan, font: &GlyphFont) -> Option<f32> {
+    let (above, below) = baseline_space(plan)?;
+    let cell = plan.cell_px.max(1) as f32;
+    let metrics = font.font.horizontal_line_metrics(cell)?;
+    if !metrics.ascent.is_finite() || !metrics.descent.is_finite() || metrics.ascent <= 0.0 {
+        return None;
+    }
+    let mut px = cell * (above / metrics.ascent);
+    if metrics.descent < 0.0 {
+        px = px.min(cell * (below / -metrics.descent));
+    }
+    // The rasteriser scales outlines again, then rounds their extents outward to whole pixels.
+    // A few ulps of headroom prevent a rounded product just beyond an exact boundary from costing
+    // an entire row. This is one negligible, uniform adjustment per face, not per-glyph resizing.
+    px *= 1.0 - 4.0 * f32::EPSILON;
+    px.is_finite().then_some(px)
+}
+
+/// Whether the fitted face has positive size and fits both sides of the pixel-aligned baseline.
+/// Invalid baselines or unavailable metrics cannot establish a fit and return `false`.
 #[must_use]
 pub fn baseline_fits_font(plan: &GlyphAtlasPlan, font: &GlyphFont) -> bool {
     let Some(px) = fitted_pixel_size(plan, font) else {
-        return true;
+        return false;
     };
+    if px <= 0.0 {
+        return false;
+    }
     let Some(metrics) = font.font.horizontal_line_metrics(px) else {
-        return true;
+        return false;
     };
-    // `descent` is negative below the baseline.
-    let below = plan.cell_px as f32 - plan.baseline_px;
-    -metrics.descent <= below
+    let Some((above, below)) = baseline_space(plan) else {
+        return false;
+    };
+    // A second metrics scaling can round a few ulps beyond the computed constraint.
+    let tolerance = f32::EPSILON * plan.cell_px.max(1) as f32 * 4.0;
+    metrics.ascent <= above + tolerance && -metrics.descent <= below + tolerance
 }
 
 /// One glyph's 8-bit coverage bitmap.
@@ -193,10 +213,7 @@ pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage
 /// as missing. Unsupported characters never paint `.notdef` boxes. This is character fallback,
 /// not script shaping, bidi reordering, ligature substitution or color-emoji rendering.
 #[must_use]
-pub fn rasterize_atlas_with_fallbacks(
-    plan: &GlyphAtlasPlan,
-    fonts: &[&GlyphFont],
-) -> AtlasCoverage {
+pub fn rasterize_atlas_with_fallbacks(plan: &GlyphAtlasPlan, fonts: &[&GlyphFont]) -> AtlasCoverage {
     let width = plan.texture_px[0].max(1) as usize;
     let height = plan.texture_px[1].max(1) as usize;
     let mut bitmap = vec![0_u8; width * height];
