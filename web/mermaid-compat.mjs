@@ -5,6 +5,10 @@ const encoder = new TextEncoder();
 // Private transport hook: AbortSignals stay on the host, never in WASM arguments or postMessage.
 const CANCELLABLE_CALL = Symbol("fm-cancellable-engine-call");
 const activeNodes = new WeakMap();
+// Weak DOM ownership prevents two live widgets (including independent API instances)
+// from replacing each other. Detached view/container cycles can still be collected.
+const viewOwners = new WeakMap();
+const viewRoots = new Set();
 let nextDocumentId = 0;
 const MAX_DOCUMENT_DIAGRAMS = 64;
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
@@ -40,6 +44,25 @@ function operationSignal(options) {
   if (typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function"
     || typeof signal.removeEventListener !== "function") throw new TypeError("signal must be an AbortSignal.");
   return signal;
+}
+
+function containsView(ancestor, node) {
+  while (node) {
+    if (ancestor === node || ancestor.contains(node)) return true;
+    node = node.getRootNode?.().host;
+  }
+  return false;
+}
+
+function checkViewBoundary(container, except) {
+  for (const reference of viewRoots) {
+    const root = reference.deref();
+    if (!root) { viewRoots.delete(reference); continue; }
+    if (viewOwners.get(root) !== except &&
+        (containsView(container, root) || containsView(root, container))) {
+      throw new MermaidError("A managed view owns this element or a nested target. Dispose it before replacing its contents.", "element-busy");
+    }
+  }
 }
 
 function callEngine(module, method, args, signal) {
@@ -122,6 +145,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   const callbacks = new Map();
   const bindingRoots = new Set();
   const bindingCleanup = new WeakMap();
+  const views = new Set();
   let callbackEpoch = 0;
   let callbackRevision = 0;
   const captureInteractions = () => ({ epoch: callbackEpoch, revision: callbackRevision, registered: new Map(callbacks) });
@@ -291,6 +315,146 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     assertCurrent(operation, signal);
     return { ...output, bindFunctions: interactionBinder(output, snapshot, interactions) };
   }
+
+  /** Own a preview without owning its source editor. render() supersedes only this view's
+   * previous request; failed/cancelled replacements retain its last good SVG and bindings.
+   * The returned render promise must be observed (supersession rejects AbortError).
+   * dispose() cancels pending work and unbinds interactions, but leaves the visible diagram.
+   */
+  function createView(container, options = {}) {
+    assertLive();
+    if (!container || container.nodeType !== 1 || container.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
+        !container.ownerDocument?.defaultView || typeof container.replaceChildren !== "function") {
+      throw new TypeError("createView requires an HTML container with an owning browser Document.");
+    }
+    if (!options || typeof options !== "object" || Array.isArray(options) ||
+        Object.keys(options).some(key => key !== "id")) throw new TypeError("createView accepts {id}.");
+    checkViewBoundary(container);
+    if (activeNodes.has(container)) throw new MermaidError("A document render already owns this element.", "element-busy");
+    const doc = container.ownerDocument;
+    let id = options.id;
+    if (id === undefined) {
+      do { id = `fm-view-${++nextDocumentId}`; }
+      while (doc.getElementById(id) || container.getRootNode().getElementById?.(id));
+    }
+    checkRenderId(id);
+    let active = null, closed = false, displayed = null, displayedSource = null, unbind;
+    const reference = new WeakRef(container);
+    function assertOpen() {
+      assertLive();
+      if (closed) throw new MermaidError("This diagram view has been disposed.", "disposed");
+    }
+    function finish(job) {
+      job.external?.removeEventListener("abort", job.abort);
+      if (active !== job) return;
+      active = null;
+      if (container.getAttribute("aria-busy") === "true") {
+        if (job.previousBusy === null) container.removeAttribute("aria-busy");
+        else container.setAttribute("aria-busy", job.previousBusy);
+      }
+    }
+    function cancel() {
+      if (!active) return false;
+      const job = active;
+      finish(job); // Revoke ownership before delivering synchronous abort listeners.
+      job.controller.abort();
+      return true;
+    }
+    const view = Object.freeze({
+      get id() { return id; },
+      get element() { return displayed; },
+      get source() { return displayedSource; },
+      get busy() { return active !== null; },
+      get disposed() { return closed; },
+      cancel,
+      async render(source, renderOptions = {}) {
+        let job, candidateCleanup;
+        try {
+          assertOpen();
+          const external = operationSignal(renderOptions);
+          sourceText(source); // An invalid new request must not cancel valid admitted work.
+          if (external?.aborted) throw cancelledError();
+          checkViewBoundary(container, view);
+          cancel();
+          const epoch = operationEpoch, snapshot = site, interactions = captureInteractions();
+          job = { controller: new AbortController(), external,
+            previousBusy: container.getAttribute("aria-busy"),
+            root: container.getRootNode(), connected: container.isConnected,
+            children: [...container.childNodes], markup: container.innerHTML };
+          job.abort = () => job.controller.abort();
+          active = job;
+          container.setAttribute("aria-busy", "true");
+          external?.addEventListener("abort", job.abort, { once: true });
+          if (external?.aborted) job.abort();
+          const current = () => {
+            assertOpen();
+            assertCurrent(epoch, job.controller.signal);
+            if (active !== job) throw cancelledError();
+            checkViewBoundary(container, view);
+            if (container.ownerDocument !== doc || container.getRootNode() !== job.root ||
+                container.isConnected !== job.connected || container.childNodes.length !== job.children.length ||
+                job.children.some((child, index) => container.childNodes[index] !== child) ||
+                container.innerHTML !== job.markup) {
+              throw new MermaidError("View contents or attachment changed while rendering; they were not replaced.", "stale-source");
+            }
+          };
+          current();
+          const result = await inOperation(renderSnapshot(id, source, snapshot, doc, interactions,
+            epoch, job.controller.signal), epoch, job.controller.signal);
+          current();
+          const checkIds = () => {
+            const ids = new Set([result.element.id, ...[...result.element.querySelectorAll("[id]")].map(node => node.id)]);
+            for (const root of new Set([doc, job.root])) {
+              for (const node of root.querySelectorAll("[id]")) {
+                if (ids.has(node.id) && (node === container || !container.contains(node))) {
+                  throw new MermaidError("A rendered SVG ID is already used outside this view.", "id-conflict");
+                }
+              }
+            }
+          };
+          checkIds();
+          candidateCleanup = result.bindFunctions?.(result.element);
+          // A missing-handler reporter may synchronously replace source, cancel, or dispose.
+          current();
+          checkIds();
+          const focused = job.root.activeElement || doc.activeElement;
+          const sourceId = displayed?.contains(focused) ? focused.closest("[data-id]")?.getAttribute("data-id") : null;
+          container.replaceChildren(result.element);
+          unbind?.();
+          unbind = candidateCleanup;
+          candidateCleanup = undefined;
+          displayed = result.element;
+          displayedSource = source;
+          finish(job); // Publication is complete before focus events can start another edit.
+          if (sourceId !== null) {
+            const target = [...displayed.querySelectorAll("[data-id]")].find(node => node.getAttribute("data-id") === sourceId && node.tabIndex >= 0);
+            target?.focus({ preventScroll: true });
+          }
+          const { element, bindFunctions, ...output } = result;
+          return output;
+        } catch (error) {
+          candidateCleanup?.();
+          if (job?.controller.signal.aborted) throw cancelledError();
+          if (error?.code !== "cancelled") notify(error);
+          throw error;
+        } finally { if (job) finish(job); }
+      },
+      dispose() {
+        if (closed) return;
+        closed = true;
+        cancel();
+        unbind?.();
+        unbind = undefined;
+        if (viewOwners.get(container) === view) viewOwners.delete(container);
+        viewRoots.delete(reference);
+        views.delete(reference);
+      },
+    });
+    viewOwners.set(container, view);
+    viewRoots.add(reference);
+    views.add(reference);
+    return view;
+  }
   function report(error) {
     // A host error reporter is observational; it must not turn a suppressed failure into an
     // unhandled rejection or prevent processing the remaining independent diagrams.
@@ -319,6 +483,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
         || !node.ownerDocument?.defaultView || typeof node.replaceChildren !== "function") {
         throw new TypeError("run nodes must be HTML elements with an owning browser Document.");
       }
+      checkViewBoundary(node);
       if (nodes.some((other) => other !== node && node.contains(other))) {
         throw new Error("Mermaid target elements must not contain one another.");
       }
@@ -382,6 +547,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       try {
         // A missing-handler reporter is host code and may edit source or dispose this owner.
         assertCurrent(epoch, signal);
+        checkViewBoundary(node);
         if (!unchanged(item) || node.getAttribute("data-processed") === "true") {
           throw new MermaidError("Diagram source changed during interaction binding; it was not replaced.", "stale-source");
         }
@@ -531,6 +697,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
         notify(error); throw error;
       }
     },
+    createView,
     run,
     async contentLoaded() {
       if (disposed || startupFinished) return;
@@ -548,6 +715,11 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
     dispose() {
       if (disposed) return;
       disposed = true;
+      for (const reference of views) {
+        const root = reference.deref();
+        if (root) viewOwners.get(root)?.dispose();
+      }
+      views.clear();
       for (const cancel of pendingWaits) cancel();
       callbacks.clear();
       clearBindings();
