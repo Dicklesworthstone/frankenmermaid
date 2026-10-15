@@ -1,4 +1,4 @@
-import { checkCallbackName, checkRenderId, createSvgBinder, prepareSvg } from "./mermaid-svg.mjs";
+import { checkCallbackName, checkRenderId, createSvgBinder, prepareSvg, prepareDeck, snapshotDeckResult } from "./mermaid-svg.mjs";
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -252,13 +252,17 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
   async function renderSnapshot(id, source, snapshot, ownerDocument, interactions, operation, signal) {
     assertCurrent(operation, signal);
     checkRenderId(id);
-    const { epoch, registered } = interactions;
-    const allowed = allowsCallbacks(snapshot);
     const parsed = await inOperation(inspect(source, snapshot, operation, signal), operation, signal);
     assertCurrent(operation, signal);
     const svg = await inOperation(callEngine(parsed.module, "renderSvg", [source, snapshot.value], signal), operation, signal);
     assertCurrent(operation, signal);
     const output = prepareSvg(svg, id, ownerDocument);
+    return { ...output, bindFunctions: interactionBinder(output, snapshot, interactions),
+      diagramType: parsed.diagramType, diagnostics: parsed.diagnostics, warnings: parsed.warnings };
+  }
+  function interactionBinder(output, snapshot, interactions) {
+    const { epoch, registered } = interactions;
+    const allowed = allowsCallbacks(snapshot);
     const bindFunctions = output.element.querySelector("[data-callback]") ? createSvgBinder(output.element, {
       isLive: () => !disposed,
       resolveCallback: (name) => allowed && epoch === callbackEpoch &&
@@ -266,7 +270,26 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       reportError: (error) => { if (allowed && epoch === callbackEpoch) report(error); },
       onBind: trackBinding,
     }) : undefined;
-    return { ...output, bindFunctions, diagramType: parsed.diagramType, diagnostics: parsed.diagnostics, warnings: parsed.warnings };
+    return bindFunctions;
+  }
+  async function renderDeckSnapshot(id, source, snapshot, ownerDocument, interactions, operation, signal) {
+    assertCurrent(operation, signal);
+    checkRenderId(id);
+    sourceText(source);
+    const module = await inOperation(engine(), operation, signal);
+    assertCurrent(operation, signal);
+    if (typeof module.renderDeck !== "function") {
+      throw new MermaidError("Engine has no renderDeck export. Rebuild the WASM package.", "engine-capability");
+    }
+    await validate(module, snapshot, operation, signal);
+    assertCurrent(operation, signal);
+    // One engine call owns both artifacts. inspect()/renderSvg() would parse/layout again
+    // and could produce IDs or geometry that disagree with this manifest.
+    const result = await inOperation(callEngine(module, "renderDeck", [source, snapshot.value], signal), operation, signal);
+    assertCurrent(operation, signal);
+    const output = prepareDeck(result, id, ownerDocument);
+    assertCurrent(operation, signal);
+    return { ...output, bindFunctions: interactionBinder(output, snapshot, interactions) };
   }
   function report(error) {
     // A host error reporter is observational; it must not turn a suppressed failure into an
@@ -481,6 +504,33 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
         notify(error); throw error;
       }
     },
+    /** FrankenMermaid extension: return a paired, namespaced {svg, manifest, warnings,
+     * presentationWarnings, bindFunctions?}. Native deck diagnostics stay structured;
+     * no resolved deck returns manifest:null. Neither this method nor render() inserts DOM.
+     * Load the canonical FmDeckRuntime separately, then, when manifest is non-null:
+     *   FmDeckRuntime.mount({stage, svg: result.svg, manifest: result.manifest});
+     * IDs/geometry must remain paired. Supported manifest schemas are 1.0.0 and 1.1.0.
+     * options.signal cancels only this operation, including synchronous worker execution;
+     * worker deadlines, FIFO limits and instance-wide cancelPending() still apply.
+     */
+    async renderDeck(id, source, container, options = {}) {
+      const epoch = operationEpoch;
+      let signal;
+      try {
+        signal = operationSignal(options);
+        assertCurrent(epoch, signal);
+        if (container !== undefined && (!container?.ownerDocument || container.nodeType !== 1)) {
+          throw new TypeError("renderDeck's optional container must be a DOM element.");
+        }
+        const { element, ...result } = await inOperation(renderDeckSnapshot(id, source, site,
+          container?.ownerDocument || document, captureInteractions(), epoch, signal), epoch, signal);
+        assertCurrent(epoch, signal);
+        return result;
+      } catch (error) {
+        if (signal?.aborted) throw cancelledError();
+        notify(error); throw error;
+      }
+    },
     run,
     async contentLoaded() {
       if (disposed || startupFinished) return;
@@ -516,7 +566,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
 // Importing it into an ordinary worker has no side effects: only this fragment opts in.
 const WORKER_PROTOCOL = "fm-mermaid-engine/1";
 const WORKER_FRAGMENT = "#fm-mermaid-engine";
-const WORKER_METHODS = new Set(["parse", "renderSvg", "validateConfig"]);
+const WORKER_METHODS = new Set(["parse", "renderSvg", "validateConfig", "renderDeck"]);
 const MAX_QUEUED_REQUESTS = 128;
 const MAX_QUEUED_BYTES = 32 * 1024 * 1024;
 const MAX_REPLY_BYTES = 16 * 1024 * 1024;
@@ -688,6 +738,7 @@ function workerEngine(engineUrl, requestTimeoutMs) {
       [CANCELLABLE_CALL]: request,
       parse: (source) => request("parse", [source]),
       renderSvg: (source, config) => request("renderSvg", [source, config]),
+      renderDeck: (source, config) => request("renderDeck", [source, config]),
       validateConfig: (json) => request("validateConfig", [json]),
     }),
     cancelPending() {
@@ -738,7 +789,7 @@ function serveWorker(scope) {
       initializing = true;
       try {
         const loaded = await import(/* @vite-ignore */ data.engineUrl);
-        for (const name of WORKER_METHODS) {
+        for (const name of ["parse", "renderSvg", "validateConfig"]) {
           if (typeof loaded[name] !== "function") throw new Error(`Engine has no ${name} export. Rebuild the WASM package.`);
         }
         if (typeof loaded.default === "function") await loaded.default();
@@ -750,10 +801,12 @@ function serveWorker(scope) {
     const { requestId, method, args } = data;
     try {
       if (!module || busy || data.kind !== "call" || !Number.isSafeInteger(requestId) || requestId < 1 ||
-          !WORKER_METHODS.has(method) || !Array.isArray(args) || args.length !== (method === "renderSvg" ? 2 : 1) ||
+          !WORKER_METHODS.has(method) || !Array.isArray(args) || args.length !== (["renderSvg", "renderDeck"].includes(method) ? 2 : 1) ||
           typeof args[0] !== "string") throw workerError("Invalid render-worker request.", "worker-protocol");
       busy = true;
+      if (typeof module[method] !== "function") throw workerError(`Engine has no ${method} export. Rebuild the WASM package.`, "engine-capability");
       let value = await module[method](...args);
+      if (method === "renderDeck") value = snapshotDeckResult(value);
       if (method === "parse") {
         // The public adapter consumes type/diagnostics/warnings, not the entire graph IR.
         // Keep the Rust reports verbatim; do not invent success defaults for missing fields.

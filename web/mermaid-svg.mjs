@@ -181,6 +181,11 @@ function scopedStyles(styleNodes, ids, id, window, presentationWarnings) {
  * Native geometry and text are retained; the optional remote font is never loaded here.
  */
 export function prepareSvg(svg, id, document) {
+  const { ids, ...output } = prepareSvgDocument(svg, id, document, false);
+  return output;
+}
+
+function prepareSvgDocument(svg, id, document, deck = false) {
   checkRenderId(id);
   const window = document?.defaultView;
   if (!window?.DOMParser || !window.XMLSerializer) throw new Error("Rendering requires a browser Document with XML DOM support.");
@@ -205,7 +210,13 @@ export function prepareSvg(svg, id, document) {
     const original = element.getAttribute("id");
     if (original !== null) {
       if (!/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(original) || ids.has(original)) throw new Error("Engine SVG has invalid or duplicate IDs.");
-      ids.set(original, element === root ? id : `${id}--${ids.size}`);
+      // The deck runtime recognizes fm-node/edge/cluster prefixes and follower suffixes.
+      // Inject a length-delimited namespace AFTER the prefix, so a mirror-header still
+      // belongs to its base node and two different render IDs cannot alias each other.
+      const family = deck && /^(fm-(?:node|edge|cluster)-)(.*)$/u.exec(original);
+      const namespaced = family ? `${family[1]}deck-${id.length}_${id}--${family[2]}` :
+        deck ? `fm-deck-${id.length}_${id}--${ids.size}` : `${id}--${ids.size}`;
+      ids.set(original, element === root ? id : namespaced);
     }
   }
   for (const element of elements) {
@@ -239,8 +250,187 @@ export function prepareSvg(svg, id, document) {
   const presentationWarnings = new Set();
   const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window, presentationWarnings);
   if (declarations) for (const element of elements) if (element.hasAttribute("style")) declarations(element.style);
-  return { svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true),
+  return { ids, svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true),
     presentationWarnings: [...presentationWarnings] };
+}
+
+/** Snapshot the paired native renderDeck result without lossy JSON coercion. Shared by
+ * worker transport and direct loaders. Maps from older wasm-bindgen builds become records;
+ * non-finite numbers, getters, cycles, sparse arrays and oversized payloads fail explicitly.
+ */
+export function snapshotDeckResult(result) {
+  const maximum = 16 * 1024 * 1024, encoder = new TextEncoder(), ancestors = new Set();
+  let entries = 0, bytes = 0;
+  function text(value) {
+    if (value.length > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+    bytes += encoder.encode(value).length;
+    if (bytes > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+    for (const character of value) {
+      const code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) throw new Error("Graph-deck result contains invalid Unicode.");
+    }
+    return value;
+  }
+  function copy(value, depth = 0) {
+    if (++entries > 200_000 || depth > 24) throw new Error("Graph-deck result exceeds its structural limit.");
+    if (typeof value === "string") return text(value);
+    if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return value;
+    if (!value || typeof value !== "object" || ancestors.has(value)) throw new Error("Graph-deck result must contain finite acyclic data.");
+    ancestors.add(value);
+    let output;
+    if (value instanceof Map) {
+      output = Object.create(null);
+      for (const [key, item] of Map.prototype.entries.call(value)) {
+        if (typeof key !== "string") throw new Error("Graph-deck map keys must be strings.");
+        output[text(key)] = copy(item, depth + 1);
+      }
+    } else {
+      const array = Array.isArray(value);
+      if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+        throw new Error("Graph-deck result must contain plain records.");
+      }
+      const keys = Reflect.ownKeys(value);
+      if (keys.length > 200_000 || (array && value.length > 200_000)) throw new Error("Graph-deck result exceeds its structural limit.");
+      output = array ? [] : Object.create(null);
+      for (const key of keys) {
+        if (array && key === "length") continue;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor.enumerable) continue;
+        if (typeof key !== "string" || descriptor.get || descriptor.set ||
+            (array && !/^(?:0|[1-9][0-9]*)$/u.test(key))) throw new Error("Graph-deck result contains unsupported properties.");
+        output[text(key)] = copy(descriptor.value, depth + 1);
+      }
+      if (array && (output.length !== value.length || Object.keys(output).length !== value.length)) {
+        throw new Error("Graph-deck result contains a sparse array.");
+      }
+    }
+    ancestors.delete(value);
+    return output;
+  }
+  const output = copy(result);
+  if (!output || typeof output.svg !== "string" ||
+      !Array.isArray(output.warnings) || output.warnings.some(warning => typeof warning !== "string" &&
+        (!warning || Array.isArray(warning) || typeof warning !== "object" || typeof warning.message !== "string")) ||
+      (output.manifest != null && (Array.isArray(output.manifest) || typeof output.manifest !== "object"))) {
+    throw new Error("Invalid graph-deck result: expected SVG, manifest or null, and warnings.");
+  }
+  // WasmDeckOutput skips a None manifest and carries Vec<Diagnostic>, not parse()'s
+  // string warnings. Preserve structured diagnostic fields; normalize absence explicitly.
+  if (!Object.hasOwn(output, "manifest")) output.manifest = null;
+  // Include JSON escaping in the bound, not just the unescaped strings counted above.
+  if (encoder.encode(JSON.stringify(output)).length > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+  return { svg: output.svg, manifest: output.manifest, warnings: output.warnings };
+}
+
+function freezeDeck(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeDeck);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Prepare one native SVG/manifest pair. Only DOM join keys change: source IDs, slide IDs,
+ * geometry, narrative and native reveal order are retained. No graph or layout is rebuilt.
+ */
+export function prepareDeck(result, id, document) {
+  const deck = snapshotDeckResult(result);
+  if (deck.manifest === null) return { ...prepareSvg(deck.svg, id, document), manifest: null, warnings: deck.warnings };
+  const { ids, ...output } = prepareSvgDocument(deck.svg, id, document, true);
+  const manifest = deck.manifest;
+  const invalid = reason => { throw new Error(`Invalid deck manifest: ${reason}.`); };
+  const record = value => value && typeof value === "object" && !Array.isArray(value);
+  const natural = value => Number.isSafeInteger(value) && value >= 0;
+  const rect = value => record(value) && [value.x, value.y, value.width, value.height].every(Number.isFinite) && value.width >= 0 && value.height >= 0;
+  const reference = original => {
+    if (typeof original !== "string" || !ids.has(original) || ids.get(original) === id) invalid("missing SVG element reference");
+    return ids.get(original);
+  };
+  // Unknown future schemas can introduce new ID-bearing fields; do not publish a half-
+  // namespaced manifest while pretending that those fields still refer to the paired SVG.
+  if (!["1.0.0", "1.1.0"].includes(manifest.schemaVersion)) invalid("unsupported schema version");
+  if (!rect(manifest.viewBox) || manifest.viewBox.width <= 0 || manifest.viewBox.height <= 0) invalid("viewBox");
+  const viewBox = (output.element.getAttribute("viewBox") || "").trim().split(/[\s,]+/u).map(Number);
+  if (viewBox.length !== 4 || viewBox.some((value, index) => !Number.isFinite(value) ||
+      Math.abs(value - [manifest.viewBox.x, manifest.viewBox.y, manifest.viewBox.width, manifest.viewBox.height][index]) > 0.011)) invalid("SVG/viewBox mismatch");
+  const options = manifest.options;
+  if (!record(options) || !Number.isFinite(options.fitMargin) || options.fitMargin < 0 ||
+      !Number.isFinite(options.zoomMax) || options.zoomMax <= 0 || !Number.isFinite(options.dimOpacity) ||
+      options.dimOpacity < 0 || options.dimOpacity > 1 || !natural(options.autoAdvanceMs) || options.autoAdvanceMs > 600_000) invalid("playback options");
+  if (!Array.isArray(manifest.slides) || !manifest.slides.length || manifest.slides.length > 1024) invalid("slide list");
+  if (manifest.title !== undefined && typeof manifest.title !== "string") invalid("title");
+  const slideIds = new Set(), nodeIds = new Set(), owners = new Map();
+  for (const slide of manifest.slides) {
+    if (!record(slide) || typeof slide.id !== "string" || !slide.id || slideIds.has(slide.id) ||
+        typeof slide.title !== "string" || (slide.caption !== undefined && typeof slide.caption !== "string") ||
+        !rect(slide.bounds) || !Number.isFinite(slide.fitMargin) || slide.fitMargin < 0 ||
+        !Number.isFinite(slide.zoomMax) || slide.zoomMax <= 0 || !natural(slide.maxStep) || slide.maxStep > 200_000 ||
+        !Array.isArray(slide.nodes)) invalid("slide geometry or identity");
+    slideIds.add(slide.id);
+    const members = new Map();
+    for (const kind of ["nodes", "edges", "clusters"]) {
+      const list = slide[kind] ?? [];
+      if (!Array.isArray(list)) invalid("membership list");
+      for (const member of list) {
+        if (!record(member) || !natural(member.step) || member.step > slide.maxStep || members.has(member.elementId)) invalid("membership or step");
+        const original = member.elementId;
+        members.set(original, member.step);
+        member.elementId = reference(original);
+        if (member.tooltip !== undefined && member.tooltip !== null && typeof member.tooltip !== "string") invalid("tooltip");
+        if ((member.index !== undefined && !natural(member.index)) ||
+            (member.sourceId !== undefined && typeof member.sourceId !== "string") ||
+            [member.touching, member.cameraContained].some(value => value !== undefined && typeof value !== "boolean")) invalid("member metadata");
+        if (kind === "nodes") {
+          nodeIds.add(original);
+          if (!owners.has(original)) owners.set(original, []);
+          owners.get(original).push(slide.id);
+        }
+      }
+    }
+    const steps = slide.steps ?? [], revealed = new Set();
+    if (!Array.isArray(steps) || steps.length !== slide.maxStep) invalid("reveal sequence");
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      if (!record(step) || step.step !== index + 1 || !Array.isArray(step.elementIds)) invalid("reveal sequence");
+      step.elementIds = step.elementIds.map(original => {
+        if (members.get(original) !== step.step || revealed.has(original)) invalid("reveal/membership mismatch");
+        revealed.add(original);
+        return reference(original);
+      });
+    }
+    for (const [original, step] of members) if (step > 0 && !revealed.has(original)) invalid("missing reveal member");
+  }
+  if (manifest.overview != null) {
+    const overview = manifest.overview;
+    if (!record(overview) || (overview.enabled !== undefined && typeof overview.enabled !== "boolean") ||
+        (overview.tour !== undefined && typeof overview.tour !== "boolean") ||
+        [overview.title, overview.caption].some(value => value !== undefined && typeof value !== "string")) invalid("overview");
+  }
+  const geometry = manifest.nodeGeometry ?? Object.create(null);
+  if (!record(geometry)) invalid("node geometry");
+  if (manifest.schemaVersion === "1.1.0") {
+    for (const original of nodeIds) if (!Object.hasOwn(geometry, original)) invalid("missing node geometry");
+  }
+  function remapRecord(value, check) {
+    if (!record(value)) invalid("reference record");
+    return Object.fromEntries(Object.entries(value).map(([original, item]) => {
+      check(original, item);
+      return [reference(original), item];
+    }));
+  }
+  if (manifest.nodeGeometry !== undefined) manifest.nodeGeometry = remapRecord(geometry, (_original, box) => { if (!rect(box)) invalid("node geometry"); });
+  if (manifest.edgeEndpoints !== undefined) manifest.edgeEndpoints = remapRecord(manifest.edgeEndpoints, (_original, ends) => {
+    if (!record(ends) || !Object.hasOwn(geometry, ends.fromElementId) || !Object.hasOwn(geometry, ends.toElementId)) invalid("edge endpoint geometry");
+    ends.fromElementId = reference(ends.fromElementId);
+    ends.toElementId = reference(ends.toElementId);
+  });
+  if (!record(manifest.nodeSlideIndex)) invalid("node/slide index");
+  manifest.nodeSlideIndex = remapRecord(manifest.nodeSlideIndex, (original, slides) => {
+    const expected = owners.get(original) || [];
+    if (!Array.isArray(slides) || slides.length !== expected.length || slides.some((slide, index) => slide !== expected[index])) invalid("node/slide membership mismatch");
+  });
+  for (const original of nodeIds) if (!Object.hasOwn(manifest.nodeSlideIndex, reference(original))) invalid("missing node/slide index");
+  return { ...output, manifest: freezeDeck(manifest), warnings: deck.warnings };
 }
 
 /** Callback names are opaque registry keys, never expressions or window property paths. */
