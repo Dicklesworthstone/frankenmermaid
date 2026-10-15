@@ -33,6 +33,8 @@ mod gpu_plan;
 /// as the WebGPU path does.
 pub mod interaction;
 mod renderer;
+/// Stable multi-node picking, marquee selection, and selection-ring rendering.
+pub mod selection;
 mod shapes;
 mod viewport;
 
@@ -51,6 +53,10 @@ pub use gpu_plan::{
 };
 pub use interaction::{HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test};
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
+pub use selection::{
+    NodeSelectionSet, SelectionBox, SelectionContainment, SelectionMode,
+    draw_multi_selection_overlay, render_to_canvas_with_multi_selection,
+};
 pub use viewport::{Viewport, ViewportTransform};
 
 use fm_core::MermaidDiagramIr;
@@ -170,6 +176,16 @@ pub fn draw_selection_overlay<C: Canvas2dContext>(
     let Some(bounds) = selection.selected_bounds(ir, layout) else {
         return 0;
     };
+    draw_selection_bounds(context, viewport, bounds, style)
+}
+
+// Single- and multi-selection share the same pixel-space ring and drawing-state contract.
+pub(crate) fn draw_selection_bounds<C: Canvas2dContext>(
+    context: &mut C,
+    viewport: &Viewport,
+    bounds: fm_layout::LayoutRect,
+    style: &CanvasSelectionStyle,
+) -> usize {
     if !viewport.zoom.is_finite()
         || viewport.zoom <= 0.0
         || !viewport.offset_x.is_finite()
