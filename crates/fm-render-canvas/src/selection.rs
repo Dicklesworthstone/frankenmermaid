@@ -13,6 +13,13 @@ use crate::{
     Canvas2dContext, CanvasRenderConfig, CanvasRenderResult, CanvasSelectionStyle, Viewport,
 };
 
+/// Maximum lasso vertices, including an optional repeated closing point.
+pub const MAX_LASSO_POINTS: usize = 4096;
+
+// Keep orientation products finite, even when a host supplies unreasonable coordinates.
+// This exceeds the entire f32 layout domain by many orders of magnitude.
+const MAX_LASSO_COORDINATE: f64 = 1.0e100;
+
 /// How a query changes the selected author IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionMode {
@@ -26,12 +33,13 @@ pub enum SelectionMode {
     Toggle,
 }
 
-/// Whether a marquee must cover a whole node box or just touch it.
+/// Whether a region must cover a whole node box or just touch it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionContainment {
     /// Include boxes which overlap or touch the region boundary.
     Intersects,
     /// Include only boxes entirely inside the region, including its boundary.
+    /// A lasso stroke cutting the box's interior disqualifies it, including retraced strokes.
     Contains,
 }
 
@@ -63,6 +71,144 @@ impl SelectionBox {
     }
 }
 
+/// Shape of a selection query or a live drag preview.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SelectionRegion<'a> {
+    /// Rectangular marquee, dragged in either direction.
+    Box(SelectionBox),
+    /// Automatically closed freehand polygon, with even-odd fill and inclusive boundaries.
+    /// Repeated points and self-intersections are allowed. Fewer than three non-collinear
+    /// points, more than `MAX_LASSO_POINTS`, non-finite coordinates, or coordinates with
+    /// absolute value above 1e100 are invalid and leave selection unchanged.
+    Lasso(&'a [(f64, f64)]),
+}
+
+impl SelectionRegion<'_> {
+    fn query(
+        self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        containment: SelectionContainment,
+    ) -> Option<BTreeSet<String>> {
+        let matches = match self {
+            Self::Box(region) => {
+                let region = region.normalized()?;
+                nodes(ir, layout)
+                    .filter(|(_, bounds)| region.matches(Bounds::from(*bounds), containment))
+                    .map(|(id, _)| id.to_owned())
+                    .collect()
+            }
+            Self::Lasso(points) => {
+                let polygon = Polygon::new(points)?;
+                nodes(ir, layout)
+                    .filter(|(_, bounds)| polygon.matches(Bounds::from(*bounds), containment))
+                    .map(|(id, _)| id.to_owned())
+                    .collect()
+            }
+        };
+        Some(matches)
+    }
+
+    fn query_canvas(
+        self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        viewport: &Viewport,
+        containment: SelectionContainment,
+    ) -> Option<BTreeSet<String>> {
+        if !valid_viewport(viewport) {
+            return None;
+        }
+        match self {
+            Self::Box(region) => Self::Box(SelectionBox {
+                start: viewport.canvas_to_diagram(region.start.0, region.start.1),
+                end: viewport.canvas_to_diagram(region.end.0, region.end.1),
+            })
+            .query(ir, layout, containment),
+            Self::Lasso(points) => {
+                // Bound allocation and reject malformed input BEFORE transforming it.
+                Polygon::new(points)?;
+                let mapped: Vec<_> = points
+                    .iter()
+                    .map(|&(x, y)| viewport.canvas_to_diagram(x, y))
+                    .collect();
+                SelectionRegion::Lasso(&mapped).query(ir, layout, containment)
+            }
+        }
+    }
+}
+
+/// One drag's immutable starting selection and modifier policy.
+///
+/// Every preview is recomputed from this baseline, NOT the preceding preview: moving a toggle
+/// lasso cannot repeatedly flip the same node, and an additive drag does not accumulate nodes
+/// outside its current region. A successful pointer-up commits the current preview by simply
+/// dropping this value. Call `cancel` on Escape/lost capture, before starting another gesture.
+/// The host owns pointer IDs, drag thresholds, and capture; only one gesture may edit a set.
+#[derive(Debug)]
+pub struct SelectionGesture {
+    baseline: NodeSelectionSet,
+    mode: SelectionMode,
+    containment: SelectionContainment,
+}
+
+impl SelectionGesture {
+    /// Update a live drag in layout coordinates. Invalid regions leave the preview untouched.
+    /// Returns whether the visible selection changed, not whether the region was valid.
+    pub fn preview(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        selection: &mut NodeSelectionSet,
+        region: SelectionRegion<'_>,
+    ) -> bool {
+        let Some(matches) = region.query(ir, layout, self.containment) else {
+            return false;
+        };
+        self.publish(ir, layout, selection, matches)
+    }
+
+    /// Update a live drag in backing-store pixels using the viewport from the current draw.
+    pub fn preview_canvas(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        viewport: &Viewport,
+        selection: &mut NodeSelectionSet,
+        region: SelectionRegion<'_>,
+    ) -> bool {
+        let Some(matches) = region.query_canvas(ir, layout, viewport, self.containment) else {
+            return false;
+        };
+        self.publish(ir, layout, selection, matches)
+    }
+
+    /// Restore the starting selection, excluding nodes removed since pointer-down.
+    /// Consumes the gesture so a cancelled drag cannot subsequently publish another preview.
+    pub fn cancel(
+        mut self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        selection: &mut NodeSelectionSet,
+    ) -> bool {
+        self.baseline.reconcile(ir, layout);
+        selection.apply(self.baseline.ids, SelectionMode::Replace)
+    }
+
+    fn publish(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        selection: &mut NodeSelectionSet,
+        matches: BTreeSet<String>,
+    ) -> bool {
+        let mut next = self.baseline.clone();
+        next.reconcile(ir, layout);
+        next.apply(matches, self.mode);
+        selection.apply(next.ids, SelectionMode::Replace)
+    }
+}
+
 /// A deterministic set of author IDs, independent of node indices and layout iteration order.
 ///
 /// Keep the IR/layout pair used for drawing and picking together. Call `reconcile` after a
@@ -74,6 +220,20 @@ pub struct NodeSelectionSet {
 }
 
 impl NodeSelectionSet {
+    /// Capture the immutable baseline for a live box/lasso drag. See `SelectionGesture`.
+    #[must_use]
+    pub fn begin_gesture(
+        &self,
+        mode: SelectionMode,
+        containment: SelectionContainment,
+    ) -> SelectionGesture {
+        SelectionGesture {
+            baseline: self.clone(),
+            mode,
+            containment,
+        }
+    }
+
     /// Selected author IDs in lexical order, suitable for stable event payloads.
     pub fn selected_node_ids(&self) -> impl DoubleEndedIterator<Item = &str> + ExactSizeIterator {
         self.ids.iter().map(String::as_str)
@@ -168,13 +328,9 @@ impl NodeSelectionSet {
         mode: SelectionMode,
         containment: SelectionContainment,
     ) -> bool {
-        let Some(region) = region.normalized() else {
+        let Some(matches) = SelectionRegion::Box(region).query(ir, layout, containment) else {
             return false;
         };
-        let matches = nodes(ir, layout)
-            .filter(|(_, bounds)| region.matches(Bounds::from(*bounds), containment))
-            .map(|(id, _)| id.to_owned())
-            .collect();
         self.apply(matches, mode)
     }
 
@@ -189,19 +345,46 @@ impl NodeSelectionSet {
         mode: SelectionMode,
         containment: SelectionContainment,
     ) -> bool {
-        if !valid_viewport(viewport) {
+        let Some(matches) =
+            SelectionRegion::Box(region).query_canvas(ir, layout, viewport, containment)
+        else {
             return false;
-        }
-        self.select_box(
-            ir,
-            layout,
-            SelectionBox {
-                start: viewport.canvas_to_diagram(region.start.0, region.start.1),
-                end: viewport.canvas_to_diagram(region.end.0, region.end.1),
-            },
-            mode,
-            containment,
-        )
+        };
+        self.apply(matches, mode)
+    }
+
+    /// Select by a freehand polygon in layout coordinates. See `SelectionRegion::Lasso` for
+    /// input limits and fill semantics. A valid empty-space Replace clears selection.
+    pub fn select_lasso(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        points: &[(f64, f64)],
+        mode: SelectionMode,
+        containment: SelectionContainment,
+    ) -> bool {
+        let Some(matches) = SelectionRegion::Lasso(points).query(ir, layout, containment) else {
+            return false;
+        };
+        self.apply(matches, mode)
+    }
+
+    /// Freehand polygon in backing-store pixels, inverse-mapped with the current draw viewport.
+    pub fn select_lasso_canvas(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        viewport: &Viewport,
+        points: &[(f64, f64)],
+        mode: SelectionMode,
+        containment: SelectionContainment,
+    ) -> bool {
+        let Some(matches) =
+            SelectionRegion::Lasso(points).query_canvas(ir, layout, viewport, containment)
+        else {
+            return false;
+        };
+        self.apply(matches, mode)
     }
 
     /// Remove IDs whose nodes disappeared or no longer have usable geometry.
@@ -282,6 +465,15 @@ impl From<LayoutRect> for Bounds {
 }
 
 impl Bounds {
+    fn corners(self) -> [(f64, f64); 4] {
+        [
+            (self.left, self.top),
+            (self.right, self.top),
+            (self.right, self.bottom),
+            (self.left, self.bottom),
+        ]
+    }
+
     fn contains_point(self, (x, y): (f64, f64), closed: bool) -> bool {
         x >= self.left
             && y >= self.top
@@ -305,6 +497,134 @@ impl Bounds {
                     && other.bottom >= self.top
                     && other.left <= self.right
                     && other.top <= self.bottom
+            }
+        }
+    }
+
+    fn intersects_segment(self, a: (f64, f64), b: (f64, f64), open: bool) -> bool {
+        // Separating axes: the rectangle's x/y axes and the segment's normal. No division
+        // or clipping parameter is needed, avoiding loss of a narrow box on a long segment.
+        let overlaps = if open {
+            a.0.max(b.0) > self.left
+                && a.0.min(b.0) < self.right
+                && a.1.max(b.1) > self.top
+                && a.1.min(b.1) < self.bottom
+        } else {
+            a.0.max(b.0) >= self.left
+                && a.0.min(b.0) <= self.right
+                && a.1.max(b.1) >= self.top
+                && a.1.min(b.1) <= self.bottom
+        };
+        if !overlaps || a == b {
+            return overlaps;
+        }
+        let signs = self.corners().map(|point| orientation(a, b, point));
+        if open {
+            signs.iter().any(|&value| value < 0.0) && signs.iter().any(|&value| value > 0.0)
+        } else {
+            signs.iter().any(|&value| value <= 0.0) && signs.iter().any(|&value| value >= 0.0)
+        }
+    }
+}
+
+fn orientation(a: (f64, f64), b: (f64, f64), point: (f64, f64)) -> f64 {
+    (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0)
+}
+
+struct Polygon<'a> {
+    points: &'a [(f64, f64)],
+    bounds: Bounds,
+}
+
+impl<'a> Polygon<'a> {
+    fn new(points: &'a [(f64, f64)]) -> Option<Self> {
+        if !(3..=MAX_LASSO_POINTS).contains(&points.len())
+            || points.iter().any(|&(x, y)| {
+                !x.is_finite()
+                    || !y.is_finite()
+                    || x.abs() > MAX_LASSO_COORDINATE
+                    || y.abs() > MAX_LASSO_COORDINATE
+            })
+        {
+            return None;
+        }
+        let first = points[0];
+        let &second = points.iter().find(|&&point| point != first)?;
+        // Signed polygon area would incorrectly reject a bow-tie with two valid lobes.
+        if !points
+            .iter()
+            .any(|&point| orientation(first, second, point) != 0.0)
+        {
+            return None;
+        }
+        let mut bounds = Bounds {
+            left: first.0,
+            top: first.1,
+            right: first.0,
+            bottom: first.1,
+        };
+        for &(x, y) in points {
+            bounds.left = bounds.left.min(x);
+            bounds.top = bounds.top.min(y);
+            bounds.right = bounds.right.max(x);
+            bounds.bottom = bounds.bottom.max(y);
+        }
+        Some(Self { points, bounds })
+    }
+
+    fn edges(&self) -> impl Iterator<Item = ((f64, f64), (f64, f64))> + '_ {
+        self.points
+            .iter()
+            .copied()
+            .zip(self.points.iter().copied().cycle().skip(1))
+    }
+
+    fn contains_point(&self, point: (f64, f64)) -> bool {
+        if !self.bounds.contains_point(point, true) {
+            return false;
+        }
+        let mut inside = false;
+        for (a, b) in self.edges() {
+            let side = orientation(a, b, point);
+            if side == 0.0
+                && point.0 >= a.0.min(b.0)
+                && point.0 <= a.0.max(b.0)
+                && point.1 >= a.1.min(b.1)
+                && point.1 <= a.1.max(b.1)
+            {
+                return true;
+            }
+            if (a.1 > point.1) != (b.1 > point.1) && (side > 0.0) == (b.1 > a.1) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    fn matches(&self, bounds: Bounds, containment: SelectionContainment) -> bool {
+        if !self.bounds.matches(bounds, containment) {
+            return false;
+        }
+        let corners = bounds.corners();
+        match containment {
+            SelectionContainment::Intersects => {
+                corners.iter().any(|&point| self.contains_point(point))
+                    || self
+                        .edges()
+                        .any(|(a, b)| bounds.intersects_segment(a, b, false))
+            }
+            SelectionContainment::Contains => {
+                corners.iter().all(|&point| self.contains_point(point))
+                    // Coincident boundary strokes can enclose no even-odd area (for example
+                    // tracing the same box twice). Corners on that stroke are not sufficient.
+                    && self.contains_point((
+                        bounds.left + (bounds.right - bounds.left) / 2.0,
+                        bounds.top + (bounds.bottom - bounds.top) / 2.0,
+                    ))
+                    // Corners alone miss a concave notch or hole entering the box interior.
+                    && !self
+                        .edges()
+                        .any(|(a, b)| bounds.intersects_segment(a, b, true))
             }
         }
     }
