@@ -64,6 +64,7 @@ SETUP = r'''async ({svg, compat, engine}) => {
   window.until = async test => {for(let i=0;i<500;i++){if(test())return;await sleep(10)}throw new Error('condition not reached')};
   window.calls = () => workers.flatMap(worker => worker.sent.filter(call => call.kind==='call'));
   window.host = () => {const node=document.createElement('div');document.body.append(node);return node;};
+  window.textarea = (value='initial') => {const node=document.createElement('textarea');node.value=value;document.body.append(node);return node;};
   window.make = (options={}) => {const api=modules.createWorkerMermaid({engineUrl,requestTimeoutMs:1000,
     reportError:error => reports.push(error),...options});clients.push(api);return api;};
   window.rejects = async (promise, code) => {
@@ -267,6 +268,165 @@ class ViewTests(unittest.TestCase):
           const view=api.createView(child);const error=await pending;
           check(error instanceof AggregateError && error.errors[0].code==='element-busy','document run overwrote view');
           check(child.parentNode===parent && child.textContent==='slow document','source lost');await view.render('owned');
+        }''')
+
+    def test_source_connection_initial_render_debounce_and_exact_source(self):
+        self.page.evaluate(r'''async () => {
+          const api=make(), view=api.createView(host()), src=textarea('initial'), rendered=[];
+          const binding=view.connectSource(src,{debounceMs:40,onRender:(result,source)=>rendered.push([result.warnings[0],source])});
+          check(Object.isFrozen(binding) && binding.pending && !workers.length,'connection rendered synchronously');
+          for(let i=0;i<50;i++){src.value='revision '+i;src.dispatchEvent(new Event('input'));}
+          src.value='flowchart LR\nA["東京 café 😀"]-->B';src.dispatchEvent(new Event('input'));
+          await until(()=>view.source===src.value && !binding.pending);
+          check(rendered.length===1 && rendered[0][0]===src.value && rendered[0][1]===src.value,'source changed or duplicate notification');
+          check(calls().filter(call=>call.method==='parse').length===1,'debounce dispatched obsolete text');
+        }''')
+
+    def test_source_connection_validation_keeps_existing_binding_and_work(self):
+        self.page.evaluate('''async () => {
+          const api=make(), node=host(), view=api.createView(node), src=textarea();
+          const binding=view.connectSource(src,{debounceMs:30});
+          const nested=document.createElement('textarea');node.append(nested);
+          for(const target of [document.querySelector('input'),nested,node,null]) {
+            let error;try{view.connectSource(target)}catch(e){error=e}check(error,'invalid source admitted');
+          }
+          for(const options of [null,[],{debounceMs:-1},{debounceMs:1.5},{debounceMs:60001},
+            {debounceMs:Infinity},{onRender:7},{onError:false},{renderOnConnect:1},{unused:1}]) {
+            let error;try{view.connectSource(src,options)}catch(e){error=e}check(error,'invalid options admitted');
+          }
+          check(!binding.disconnected && binding.pending,'invalid replacement disconnected editor');
+          await until(()=>view.source==='initial');check(src.value==='initial','source overwritten');
+        }''')
+
+    def test_source_input_preempts_infinite_wasm_before_debounce_and_preserves_siblings(self):
+        self.page.evaluate('''async () => {
+          const api=make({requestTimeoutMs:10000}), view=api.createView(host()), sibling=api.createView(host()), src=textarea('good');
+          const binding=view.connectSource(src,{debounceMs:300,renderOnConnect:false});await binding.flush();const old=view.element;
+          src.value='hang-render';const hung=binding.flush().catch(error=>error);
+          await until(()=>calls().some(call=>call.method==='renderSvg' && call.args[0]==='hang-render'));await sleep(60);
+          const other=sibling.render('other');src.value='corrected';src.dispatchEvent(new Event('input'));
+          check(workers[0].stops===1 && view.element===old,'input did not preempt immediately or removed old diagram');
+          check((await hung).name==='AbortError','old source not cancelled');
+          await other;check(sibling.source==='other' && !calls().some(call=>call.args[0]==='corrected'),'sibling stalled or debounce bypassed');
+          await until(()=>view.source==='corrected');check(src.value==='corrected','editor changed');
+        }''')
+
+    def test_source_composition_never_publishes_partial_text_and_flush_refuses_it(self):
+        self.page.evaluate('''async () => {
+          const api=make({requestTimeoutMs:10000}), view=api.createView(host()), src=textarea('good');
+          const binding=view.connectSource(src,{debounceMs:20,renderOnConnect:false});await binding.flush();
+          src.value='hang-parse';const old=binding.flush().catch(error=>error);
+          await until(()=>calls().some(call=>call.args[0]==='hang-parse'));await sleep(30);
+          src.dispatchEvent(new CompositionEvent('compositionstart'));
+          check((await old).name==='AbortError','composition failed to stop old work');
+          for(const text of ['t','to','とう']){src.value=text;src.dispatchEvent(new InputEvent('input',{isComposing:true}));}
+          await sleep(70);await rejects(binding.flush(),'source-composing');
+          check(view.source==='good' && !calls().some(call=>['t','to','とう'].includes(call.args[0])),'partial composition rendered');
+          src.value='東京';src.dispatchEvent(new CompositionEvent('compositionend'));src.dispatchEvent(new InputEvent('input'));
+          await until(()=>view.source==='東京');check(calls().filter(call=>call.method==='parse' && call.args[0]==='東京').length===1,'composition commit duplicated');
+        }''')
+
+    def test_source_changes_without_input_or_during_binding_cannot_publish(self):
+        self.page.evaluate('''async () => {
+          let intervene=()=>{};const api=make({reportError:()=>intervene()}), view=api.createView(host()), src=textarea('good'), errors=[];
+          const binding=view.connectSource(src,{renderOnConnect:false,onError:e=>errors.push(e.code)});await binding.flush();const good=view.element;
+          src.value='slow old';const pending=binding.flush().catch(error=>error);
+          await until(()=>calls().some(call=>call.args[0]==='slow old'));src.value='new without event';
+          check((await pending).code==='stale-source' && view.element===good,'programmatic edit lost');
+          api.initialize({securityLevel:'loose'});intervene=()=>{src.value='changed by reporter'};
+          await rejects(binding.flush(),'stale-source');check(view.element===good && src.value==='changed by reporter','binding race published');
+          intervene=()=>{};await binding.flush();check(view.source==='changed by reporter' && errors.length===2,'retry or error hooks wrong');
+        }''')
+
+    def test_source_cancel_global_stop_and_manual_render_revoke_queued_refresh(self):
+        self.page.evaluate('''async () => {
+          const api=make(), view=api.createView(host()), src=textarea(), binding=view.connectSource(src,{debounceMs:40});
+          api.cancelPending();await sleep(70);check(!workers.length && !binding.pending && !binding.disconnected,'global stop resurrected pending refresh');
+          src.value='cancelled';src.dispatchEvent(new Event('input'));check(view.cancel(),'view stop did not see timer');
+          await sleep(70);check(!workers.length && !binding.pending,'view cancel left debounce');
+          src.value='queued';src.dispatchEvent(new Event('input'));await view.render('manual');await sleep(70);
+          check(view.source==='manual' && !calls().some(call=>call.args[0]==='queued'),'manual render overwritten by queued source');
+          src.value='next input';src.dispatchEvent(new Event('input'));await until(()=>view.source==='next input');
+          src.value='connection cancelled';src.dispatchEvent(new Event('input'));check(binding.cancel(),'connection cancel false');
+          await sleep(70);check(view.source==='next input','cancelled refresh ran');
+        }''')
+
+    def test_source_disconnect_reconnect_and_disposal_release_listeners_and_timers(self):
+        self.page.evaluate('''async () => {
+          const api=make(), view=api.createView(host()), first=textarea('first'), second=textarea('second');
+          const a=view.connectSource(first,{debounceMs:40}), b=view.connectSource(second,{debounceMs:10});
+          check(a.disconnected && !a.pending,'reconnect retained first binding');
+          first.value='old listener';first.dispatchEvent(new Event('input'));await until(()=>view.source==='second');
+          check(!calls().some(call=>['first','old listener'].includes(call.args[0])),'old listener dispatch');
+          b.disconnect();b.disconnect();second.value='after disconnect';second.dispatchEvent(new Event('input'));
+          await sleep(60);check(view.source==='second' && !view.disposed,'disconnect disposed view or kept listening');
+          await rejects(b.flush(),'disposed');const c=view.connectSource(first,{debounceMs:40});view.dispose();
+          await sleep(60);check(c.disconnected && !c.pending && view.element.isConnected,'view dispose leaked connection or removed last diagram');
+          const other=api.createView(host()), d=other.connectSource(second,{debounceMs:40});api.dispose();await sleep(60);
+          check(d.disconnected && !d.pending && other.disposed,'API dispose leaked source connection');
+        }''')
+
+    def test_source_failures_and_async_hook_failures_are_observed_without_losing_last_good(self):
+        self.page.evaluate('''async () => {
+          const api=make(), view=api.createView(host()), src=textarea('good'), seen=[];
+          const binding=view.connectSource(src,{debounceMs:10,onRender:async (_output,source)=>{seen.push(source);throw new Error('render hook');},
+            onError:async (error,source)=>{seen.push(source+':'+error.code);throw new Error('error hook');}});
+          await until(()=>view.source==='good' && reports.length===1);const old=view.element;
+          src.value='bad';src.dispatchEvent(new Event('input'));await until(()=>reports.length===2 && !binding.pending);
+          check(view.element===old && view.source==='good' && src.value==='bad','parse failure destroyed last good or editor');
+          check(seen[0]==='good' && seen[1]==='bad:parse','hooks missing source/error');
+          binding.disconnect();view.connectSource(src,{debounceMs:10});await until(()=>reports.length===3);
+          check(reports[2].code==='parse','automatic failures unreported');
+        }''')
+
+    def test_source_callbacks_may_reenter_render_or_disconnect_without_stale_notifications(self):
+        self.page.evaluate('''async () => {
+          const api=make(), view=api.createView(host()), src=textarea('first'), notified=[];
+          let binding;binding=view.connectSource(src,{debounceMs:10,onRender:(_output,source)=>{
+            notified.push(source);if(source==='first'){src.value='second';src.dispatchEvent(new Event('input'));}else binding.disconnect();
+          }});
+          await until(()=>binding.disconnected);check(view.source==='second' && notified.join(',')==='first,second','reentrant source update lost');
+          src.value='third';src.dispatchEvent(new Event('input'));await sleep(40);check(notified.length===2,'disconnected notification');
+        }''')
+
+    def test_source_detachment_and_moving_editor_into_view_reject_before_publication(self):
+        self.page.evaluate('''async () => {
+          const api=make(), node=host(), view=api.createView(node), src=textarea('good');
+          const binding=view.connectSource(src,{renderOnConnect:false,onError:()=>{}});await binding.flush();const good=view.element;
+          src.value='slow detached';const pending=binding.flush().catch(error=>error);src.remove();
+          check((await pending).code==='stale-source' && view.element===good,'detached editor published');
+          document.body.append(src);await binding.flush();const last=view.element;
+          src.value='slow moved';const moved=binding.flush().catch(error=>error);node.append(src);
+          check((await moved).code==='stale-source' && src.parentNode===node && last.parentNode===node,'nested editor erased');
+        }''')
+
+    def test_actual_typing_undo_and_focus_remain_owned_by_textarea(self):
+        self.page.evaluate('''() => {
+          const api=make();window.liveView=api.createView(host());window.liveSource=textarea('');liveSource.id='live-source';
+          window.binding=liveView.connectSource(liveSource,{debounceMs:30,renderOnConnect:false});liveSource.focus();
+        }''')
+        self.page.keyboard.type('flowchart LR\nA-->B')
+        self.page.wait_for_function('liveView.source === liveSource.value')
+        state = self.page.evaluate('({value:liveSource.value,start:liveSource.selectionStart,end:liveSource.selectionEnd,focus:document.activeElement.id})')
+        self.assertEqual(state['value'], 'flowchart LR\nA-->B')
+        self.assertEqual(state['start'], len(state['value']))
+        self.assertEqual(state['end'], len(state['value']))
+        self.assertEqual(state['focus'], 'live-source')
+        self.page.keyboard.press('Control+z')
+        self.page.wait_for_function('liveSource.value !== "flowchart LR\\nA-->B"')
+        undone = self.page.locator('#live-source').input_value()
+        self.page.wait_for_function('!binding.pending')
+        self.assertEqual(self.page.locator('#live-source').input_value(), undone)
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'live-source')
+
+    def test_source_flush_bypasses_delay_and_only_latest_success_notifies(self):
+        self.page.evaluate('''async () => {
+          const api=make(), view=api.createView(host()), src=textarea('slow first'), seen=[];
+          const binding=view.connectSource(src,{debounceMs:60000,renderOnConnect:false,onRender:(_result,source)=>seen.push(source)});
+          const old=binding.flush().catch(error=>error);await until(()=>calls().some(call=>call.args[0]==='slow first'));
+          src.value='latest';src.dispatchEvent(new Event('input'));check(binding.pending,'input did not schedule');
+          const result=await binding.flush();check((await old).name==='AbortError','supersession not cancellation');
+          check(result.warnings[0]==='latest' && view.source==='latest' && seen.join(',')==='latest' && !binding.pending,'flush or notification mismatch');
         }''')
 
     def test_cold_custom_loader_cancellation_discards_obsolete_result(self):

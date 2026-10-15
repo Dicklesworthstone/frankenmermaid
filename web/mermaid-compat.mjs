@@ -320,6 +320,25 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
    * previous request; failed/cancelled replacements retain its last good SVG and bindings.
    * The returned render promise must be observed (supersession rejects AbortError).
    * dispose() cancels pending work and unbinds interactions, but leaves the visible diagram.
+   *
+   * const preview = mermaid.createView(document.querySelector('#preview'));
+   * const statusEl = document.querySelector('#status');
+   * const source = preview.connectSource(document.querySelector('textarea'), {
+   *   debounceMs: 120,
+   *   onRender(result, text) { statusEl.textContent = result.warnings.join(' '); },
+   *   onError(error, text) { statusEl.textContent = String(error?.message || error); },
+   * });
+   * // Stop: preview.cancel(); render immediately: await source.flush();
+   * // Component teardown: preview.dispose(); (also disconnects the textarea).
+   *
+   * connectSource defaults to rendering on connection. renderOnConnect:false leaves the
+   * initial preview untouched. debounceMs is an integer from 0 through 60000. The textarea
+   * is never written or focused by the connection. Its value and attachment are checked
+   * again before publication, including programmatic value changes without input events.
+   * Reconnect after moving the textarea into another DOM root. Empty/invalid source keeps
+   * the last good preview; onError receives the failure instead of replacing source text.
+   * Manual render and instance/view Stop clear queued source refreshes, but the next input
+   * remains live. source.disconnect() removes the connection without closing the view.
    */
   function createView(container, options = {}) {
     assertLive();
@@ -338,7 +357,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       while (doc.getElementById(id) || container.getRootNode().getElementById?.(id));
     }
     checkRenderId(id);
-    let active = null, closed = false, displayed = null, displayedSource = null, unbind;
+    let active = null, closed = false, displayed = null, displayedSource = null, unbind, connection;
     const reference = new WeakRef(container);
     function assertOpen() {
       assertLive();
@@ -353,21 +372,18 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
         else container.setAttribute("aria-busy", job.previousBusy);
       }
     }
-    function cancel() {
+    function cancelRender() {
       if (!active) return false;
       const job = active;
       finish(job); // Revoke ownership before delivering synchronous abort listeners.
       job.controller.abort();
       return true;
     }
-    const view = Object.freeze({
-      get id() { return id; },
-      get element() { return displayed; },
-      get source() { return displayedSource; },
-      get busy() { return active !== null; },
-      get disposed() { return closed; },
-      cancel,
-      async render(source, renderOptions = {}) {
+    function cancel() {
+      const scheduled = connection?.cancel() || false;
+      return cancelRender() || scheduled;
+    }
+    async function renderView(source, renderOptions = {}, sourceGuard) {
         let job, candidateCleanup;
         try {
           assertOpen();
@@ -375,7 +391,10 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
           sourceText(source); // An invalid new request must not cancel valid admitted work.
           if (external?.aborted) throw cancelledError();
           checkViewBoundary(container, view);
-          cancel();
+          // Manual rendering stops a queued source refresh, but the connection remains
+          // attached for the next input. Its own dispatch must not invalidate itself.
+          if (!sourceGuard) connection?.cancel();
+          cancelRender();
           const epoch = operationEpoch, snapshot = site, interactions = captureInteractions();
           job = { controller: new AbortController(), external,
             previousBusy: container.getAttribute("aria-busy"),
@@ -390,6 +409,7 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
             assertOpen();
             assertCurrent(epoch, job.controller.signal);
             if (active !== job) throw cancelledError();
+            sourceGuard?.();
             checkViewBoundary(container, view);
             if (container.ownerDocument !== doc || container.getRootNode() !== job.root ||
                 container.isConnected !== job.connected || container.childNodes.length !== job.children.length ||
@@ -438,11 +458,131 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
           if (error?.code !== "cancelled") notify(error);
           throw error;
         } finally { if (job) finish(job); }
-      },
+    }
+
+    /** Bind an external textarea without rewriting source, selection or undo history.
+     * Input revokes obsolete work immediately; only dispatch is debounced. IME composition
+     * never renders partial text. flush() returns a render promise; automatic dispatches
+     * observe their own rejection. onRender(result, source)/onError(error, source) are
+     * observational hooks; hook failures go to the instance reporter, not the render.
+     * cancel() stops the pending refresh but keeps listening; disconnect() releases it.
+     */
+    function connectSource(sourceEl, sourceOptions = {}) {
+      assertOpen();
+      if (!(sourceEl instanceof doc.defaultView.HTMLTextAreaElement) || sourceEl.ownerDocument !== doc ||
+          containsView(container, sourceEl) || containsView(sourceEl, container)) {
+        throw new TypeError("connectSource requires an external textarea in the view's Document.");
+      }
+      if (!sourceOptions || typeof sourceOptions !== "object" || Array.isArray(sourceOptions) ||
+          Object.keys(sourceOptions).some(key => !["debounceMs", "renderOnConnect", "onRender", "onError"].includes(key))) {
+        throw new TypeError("connectSource accepts {debounceMs, renderOnConnect, onRender, onError}.");
+      }
+      const { debounceMs = 120, renderOnConnect = true, onRender, onError } = sourceOptions;
+      if (!Number.isSafeInteger(debounceMs) || debounceMs < 0 || debounceMs > 60_000 ||
+          typeof renderOnConnect !== "boolean" || [onRender, onError].some(hook => hook !== undefined && typeof hook !== "function")) {
+        throw new TypeError("Invalid source connection options: debounceMs must be 0–60000 and hooks must be functions.");
+      }
+      // Validate the replacement before disconnecting a working editor.
+      connection?.disconnect();
+      let disconnected = false, composing = false, timer, pending = null, generation = {};
+      const sourceRoot = sourceEl.getRootNode(), connected = sourceEl.isConnected;
+      function checkSource(ticket, source) {
+        assertOpen();
+        if (disconnected || composing || ticket !== generation) throw cancelledError();
+        if (sourceEl.ownerDocument !== doc || sourceEl.getRootNode() !== sourceRoot ||
+            sourceEl.isConnected !== connected || sourceEl.value !== source ||
+            containsView(container, sourceEl) || containsView(sourceEl, container)) {
+          throw new MermaidError("Connected source or attachment changed; its obsolete preview was not published.", "stale-source");
+        }
+      }
+      function stop() {
+        const changed = timer !== undefined || pending !== null;
+        generation = {};
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+        const previous = pending;
+        pending = null;
+        previous?.controller.abort();
+        return changed;
+      }
+      function emit(hook, value, source) {
+        try { Promise.resolve(hook(value, source)).catch(report); }
+        catch (error) { report(error); }
+      }
+      async function flush() {
+        assertOpen();
+        if (disconnected) throw new MermaidError("This source connection has been disconnected.", "disposed");
+        if (composing) throw new MermaidError("Finish text composition before rendering the connected source.", "source-composing");
+        stop();
+        const ticket = generation, source = sourceEl.value;
+        const operation = { controller: new AbortController() };
+        pending = operation;
+        try {
+          checkSource(ticket, source);
+          const output = await renderView(source, { signal: operation.controller.signal }, () => checkSource(ticket, source));
+          if (ticket === generation && !disconnected && sourceEl.value === source && onRender) emit(onRender, output, source);
+          return output;
+        } catch (error) {
+          if (ticket === generation && !disconnected && error?.code !== "cancelled") {
+            if (onError) emit(onError, error, source); else report(error);
+          }
+          throw error;
+        } finally { if (pending === operation) pending = null; }
+      }
+      function schedule() {
+        if (disconnected || closed || disposed) return;
+        stop();
+        // Even an empty/invalid edit revokes the older valid source now, rather than
+        // allowing it to publish during the debounce window. Keep the last good SVG.
+        cancelRender();
+        if (composing) return;
+        timer = setTimeout(() => {
+          timer = undefined;
+          void flush().catch(() => {}); // flush already delivered the non-cancellation error.
+        }, debounceMs);
+      }
+      function input(event) {
+        if (event.isComposing) composing = true;
+        schedule();
+      }
+      function startComposition() { composing = true; schedule(); }
+      function endComposition() { composing = false; schedule(); }
+      const binding = Object.freeze({
+        get pending() { return timer !== undefined || pending !== null; },
+        get disconnected() { return disconnected; },
+        flush,
+        cancel: stop,
+        disconnect() {
+          if (disconnected) return;
+          disconnected = true;
+          stop();
+          sourceEl.removeEventListener("input", input);
+          sourceEl.removeEventListener("compositionstart", startComposition);
+          sourceEl.removeEventListener("compositionend", endComposition);
+          if (connection === binding) connection = undefined;
+        },
+      });
+      connection = binding;
+      sourceEl.addEventListener("input", input);
+      sourceEl.addEventListener("compositionstart", startComposition);
+      sourceEl.addEventListener("compositionend", endComposition);
+      if (renderOnConnect) schedule();
+      return binding;
+    }
+    const view = Object.freeze({
+      get id() { return id; },
+      get element() { return displayed; },
+      get source() { return displayedSource; },
+      get busy() { return active !== null; },
+      get disposed() { return closed; },
+      cancel,
+      render: (source, renderOptions) => renderView(source, renderOptions),
+      connectSource,
       dispose() {
         if (closed) return;
         closed = true;
-        cancel();
+        connection?.disconnect();
+        cancelRender();
         unbind?.();
         unbind = undefined;
         if (viewOwners.get(container) === view) viewOwners.delete(container);
@@ -710,6 +850,11 @@ export function createMermaid({ loadEngine, document = globalThis.document, wasm
       if (disposed) return;
       operationEpoch = {};
       checkedConfigs = new WeakMap();
+      // Debounced source refreshes have no engine wait yet; Stop must revoke those too.
+      for (const reference of views) {
+        const root = reference.deref();
+        if (root) viewOwners.get(root)?.cancel();
+      }
       for (const cancel of pendingWaits) cancel();
     },
     dispose() {
