@@ -437,6 +437,19 @@ impl CanvasSession {
         self.frame = Some(CanvasFrame { ir, layout, config });
     }
 
+    /// Change raster styling or fit/padding without copying or recomputing the retained geometry.
+    ///
+    /// Cancels provisional selection and invalidates the old pointer map before the next redraw.
+    /// Typography changes that affect node dimensions still require a newly laid-out pair through
+    /// [`Self::set_diagram`]; this method does not pretend to resize boxes for a different font.
+    /// Before a diagram is supplied this is a no-op, not a way to manufacture an empty frame.
+    pub fn set_render_config(&mut self, config: crate::CanvasRenderConfig) {
+        self.invalidate();
+        if let Some(frame) = &mut self.frame {
+            frame.config = config;
+        }
+    }
+
     /// Draw the retained diagram at the context's CURRENT size and refresh the pointer map.
     /// Returns `None` before a diagram is supplied; in that case the context is untouched.
     pub fn redraw<C: crate::Canvas2dContext>(
@@ -1630,5 +1643,58 @@ mod session_tests {
         ).is_none());
         assert_eq!(session.active_selection_gesture(), None);
         assert!(selected(&session).is_empty());
+    }
+
+    #[test]
+    fn session_reconfiguration_rolls_back_preview_and_reuses_the_same_geometry() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        let layout = Arc::clone(&session.frame.as_ref().unwrap().layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 7.0,
+            node_fill: "#123456".to_string(),
+            label_color: "#abcdef".to_string(),
+            ..CanvasRenderConfig::default()
+        };
+        session.set_render_config(config.clone());
+        assert_eq!(selected(&session), ["A"]);
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert_eq!(session.active_selection_gesture(), None);
+        assert!(!session.commit_selection_gesture(token, [200.0, 120.0]));
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), None);
+        assert!(Arc::ptr_eq(&layout, &session.frame.as_ref().unwrap().layout));
+
+        let mut context = MockCanvas2dContext::new(400.0, 200.0);
+        session.redraw(&mut context).unwrap();
+        let (x, y) = drawn_label(&context, "Alpha");
+        assert!((x - 47.0).abs() < 1e-6 && (y - 52.0).abs() < 1e-6);
+        assert_eq!(session.hit_test_node(x, y, [400.0, 200.0]), Some("A"));
+        assert_eq!(session.frame.as_ref().unwrap().config.node_fill, "#123456");
+        assert_eq!(session.frame.as_ref().unwrap().config.label_color, "#abcdef");
+        let mut expected = MockCanvas2dContext::new(400.0, 200.0);
+        let frame = session.frame.as_ref().unwrap();
+        let mut selection = session.selection_set.clone();
+        render_to_canvas_with_multi_selection(
+            &frame.ir,
+            &frame.layout,
+            &mut expected,
+            &config,
+            &mut selection,
+            &session.selection_style,
+        );
+        assert_eq!(context.operations(), expected.operations());
+    }
+
+    #[test]
+    fn session_reconfiguration_without_a_diagram_does_not_invent_a_frame() {
+        let mut session = CanvasSession::default();
+        session.set_render_config(CanvasRenderConfig::default());
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        assert!(session.redraw(&mut context).is_none());
+        assert!(context.operations().is_empty());
+        assert!(selected(&session).is_empty());
+        assert!(session.last_result([200.0, 120.0]).is_none());
     }
 }
