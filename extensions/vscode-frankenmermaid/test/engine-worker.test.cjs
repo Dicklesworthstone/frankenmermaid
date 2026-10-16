@@ -28,7 +28,7 @@ export { __wbg_init as default, renderSvg, parse, parseLens, applyParseLensEdit 
 `;
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 function harness(t, options = {}) {
-  const sources = new Map(), workers = [], fetches = [], revoked = [], timers = new Map();
+  const sources = new Map(), workers = [], fetches = [], revoked = [], timers = new Map(), requests = [];
   let timerId = 0;
   // Only the platform boundary is adapted. Production create() builds its real self-contained
   // worker module, then a Node worker thread runs that module and production attach().
@@ -45,6 +45,7 @@ function harness(t, options = {}) {
       this.thread.on("message", (data) => {
         if (data.entered) this.entered.resolve();
         for (const fn of this.listeners.get("message") || []) fn({data});
+        options.afterMessage?.(data);
       });
       this.thread.on("error", (error) => {
         for (const fn of this.listeners.get("error") || []) fn({message:error.message,preventDefault(){}});
@@ -54,7 +55,10 @@ function harness(t, options = {}) {
     }
     addEventListener(type, fn) { if (!this.listeners.has(type)) this.listeners.set(type,new Set()); this.listeners.get(type).add(fn); }
     removeEventListener(type, fn) { this.listeners.get(type)?.delete(fn); }
-    postMessage(message, transfer) { this.thread.postMessage(message, transfer); }
+    postMessage(message, transfer) {
+      requests.push({ method: message.method, source: message.source });
+      this.thread.postMessage(message, transfer);
+    }
     terminate() { this.terminated = true; void this.thread.terminate(); }
   }
   const api = create({ moduleUrl:"module", workerUrl:"worker", binaryUrl:"binary",
@@ -67,9 +71,10 @@ function harness(t, options = {}) {
         arrayBuffer:async () => bytes.slice().buffer};
     },
     ...(options.manualTimers ? {setTimer(fn){const id=++timerId;timers.set(id,fn);return id;},clearTimer(id){timers.delete(id);}} : {}),
+    ...options.cacheOptions,
   });
   t.after(() => api.destroy());
-  return {api,workers,fetches,revoked,timers,sources};
+  return {api,workers,fetches,revoked,timers,sources,requests};
 }
 
 test("real worker loads explicit WASM bytes and preserves Unicode receipts without copying graph IR", async (t) => {
@@ -180,4 +185,182 @@ test("worker endpoint refuses unknown operations and work before initialization"
   await receive({data:{id:2,method:'constructor',source:'x'}});
   assert.deepEqual(replies.map((r)=>r.ok),[false,false]);
   assert.match(replies[0].error,/Unavailable/);
+});
+
+const reads = (h, method, source) => h.requests.filter(request => request.method === method
+  && (source === undefined || request.source === source)).length;
+
+test("unchanged diagrams reuse their exact SVG and source-inspection results across edits", async (t) => {
+  const h = harness(t); await h.api.default();
+  const sources = Array.from({ length: 64 }, (_, index) => `flowchart LR\nN${index}[café 😀]`);
+  const render = async (inputs) => {
+    const results = [];
+    for (const source of inputs) results.push([await h.api.parseLens(source), await h.api.renderSvg(source)]);
+    return results;
+  };
+  const first = await render(sources);
+  assert.equal(reads(h, 'renderSvg'), 64); assert.equal(reads(h, 'parseLens'), 64);
+  h.api.cancelPending(); // The preview invalidates on every document change, including prose.
+  const proseOnly = await render(sources);
+  assert.deepEqual(proseOnly, first);
+  assert.equal(reads(h, 'renderSvg'), 64); assert.equal(reads(h, 'parseLens'), 64);
+  const edited = [...sources]; edited[31] += '\nN31-->new';
+  h.api.cancelPending();
+  const second = await render(edited);
+  assert.notDeepEqual(second[31], first[31]);
+  assert.deepEqual(second.filter((_, i) => i !== 31), first.filter((_, i) => i !== 31));
+  assert.equal(reads(h, 'renderSvg'), 65); assert.equal(reads(h, 'parseLens'), 65);
+  h.api.cancelPending();
+  assert.deepEqual(await render([...sources].reverse()), [...first].reverse());
+  assert.equal(reads(h, 'renderSvg'), 65); assert.equal(reads(h, 'parseLens'), 65);
+});
+
+test("cache identity includes exact Unicode, line endings, directives, whitespace and method", async (t) => {
+  const h = harness(t); await h.api.default();
+  const sources = ['A', 'A ', 'A\nB', 'A\r\nB', 'é', 'e\u0301', '😀', 'parse:A',
+    '__proto__', 'A\u0000B', '%%{init: {theme:"dark"}}%%\nA'];
+  for (const source of sources) {
+    const svg = await h.api.renderSvg(source), lens = await h.api.parseLens(source);
+    const parsed = await h.api.parse(source);
+    assert.equal(svg, `<svg>${source}</svg>`); assert.equal(lens.bindings[0].snippet, source);
+    assert.equal(await h.api.renderSvg(source), svg);
+    assert.deepEqual(await h.api.parseLens(source), lens);
+    assert.deepEqual(await h.api.parse(source), parsed);
+  }
+  for (const method of ['renderSvg','parseLens','parse']) assert.equal(reads(h, method), sources.length);
+});
+
+test("cache never lends mutable binding or diagnostic objects to callers", async (t) => {
+  const h = harness(t); await h.api.default();
+  const original = await h.api.parseLens('A[😀]'), expected = structuredClone(original);
+  original.bindings[0].snippet = 'wrong source'; original.bindings.push({elementId:'invented'});
+  original.parsed.ir.diagnostics[0].message = 'corrupted'; original.parsed.warnings.push('invented');
+  const cached = await h.api.parseLens('A[😀]');
+  assert.deepEqual(cached, expected); assert.notEqual(cached, original);
+  cached.bindings[0].elementId = 'another'; cached.parsed.ir.diagnostics.length = 0;
+  assert.deepEqual(await h.api.parseLens('A[😀]'), expected);
+  assert.equal(reads(h, 'parseLens'), 1);
+});
+
+test("cached reads survive cancellation of real WASM without restarting the worker", {timeout:5000}, async (t) => {
+  const h = harness(t); await h.api.default();
+  const expected = await h.api.parseLens('safe'); await h.api.renderSvg('safe');
+  const hung = h.api.renderSvg('HANG'), rejected = assert.rejects(hung, {name:'AbortError'});
+  await h.workers[0].entered.promise; h.api.cancelPending(); await rejected;
+  await h.workers[0].exited.promise;
+  assert.equal(await h.api.renderSvg('safe'), '<svg>safe</svg>');
+  assert.deepEqual(await h.api.parseLens('safe'), expected);
+  assert.equal(h.workers.length, 1); assert.equal(reads(h, 'renderSvg', 'safe'), 1);
+  assert.equal(reads(h, 'parseLens', 'safe'), 1);
+  assert.equal(await h.api.renderSvg('changed'), '<svg>changed</svg>');
+  assert.equal(h.workers.length, 2); assert.equal(h.fetches.length, 3);
+});
+
+test("cache hits still reject synchronous cancellation and disposal before delivery", async (t) => {
+  const h = harness(t); await h.api.default(); await h.api.renderSvg('cached');
+  const cancelled = h.api.renderSvg('cached'); h.api.cancelPending();
+  await assert.rejects(cancelled, {name:'AbortError'});
+  assert.equal(await h.api.renderSvg('cached'), '<svg>cached</svg>');
+  const disposed = h.api.renderSvg('cached'); h.api.destroy();
+  await assert.rejects(disposed, {name:'AbortError'});
+  await assert.rejects(h.api.renderSvg('cached'), {name:'AbortError'});
+  assert.equal(reads(h, 'renderSvg'), 1);
+});
+
+test("cancellation between worker response and delivery cannot seed a stale cache entry", async (t) => {
+  let api, cancelOnce = true;
+  const h = harness(t, {afterMessage(message) {
+    if (cancelOnce && message.value === '<svg>racing</svg>') { cancelOnce = false; api.cancelPending(); }
+  }});
+  api = h.api; await api.default();
+  await assert.rejects(api.renderSvg('racing'), {name:'AbortError'});
+  assert.equal(await api.renderSvg('racing'), '<svg>racing</svg>');
+  assert.equal(reads(h, 'renderSvg', 'racing'), 2);
+});
+
+test("worker errors are retried while successful sibling results remain reusable", async (t) => {
+  const h = harness(t); await h.api.default(); await h.api.renderSvg('good');
+  for (let i = 0; i < 3; i++) await assert.rejects(h.api.renderSvg('THROW'), /fixture render rejected/);
+  assert.equal(reads(h, 'renderSvg', 'THROW'), 3);
+  assert.equal(await h.api.renderSvg('good'), '<svg>good</svg>');
+  assert.equal(reads(h, 'renderSvg', 'good'), 1);
+});
+
+test("source-edit receipts are never cached, including identical repeated replacements", async (t) => {
+  const h = harness(t); await h.api.default(); await h.api.parseLens('before');
+  const a = await h.api.applyParseLensEdit('before', 'node', 'after');
+  const b = await h.api.applyParseLensEdit('before', 'node', 'after');
+  assert.deepEqual(a, b); assert.notEqual(a, b);
+  assert.equal(reads(h, 'applyParseLensEdit'), 2);
+  assert.equal((await h.api.parseLens('before')).bindings[0].snippet, 'before');
+  assert.equal(reads(h, 'parseLens'), 1);
+});
+
+test("LRU eviction keeps recently read entries, not just recently written ones", async (t) => {
+  const h = harness(t, {cacheOptions:{maxCachedEntries:2}}); await h.api.default();
+  await h.api.renderSvg('A'); await h.api.renderSvg('B'); await h.api.renderSvg('A');
+  await h.api.renderSvg('C'); await h.api.renderSvg('A');
+  assert.equal(reads(h, 'renderSvg', 'A'), 1);
+  await h.api.renderSvg('B'); assert.equal(reads(h, 'renderSvg', 'B'), 2);
+});
+
+test("retained UTF-16 key-plus-JSON payload obeys the configured byte budget", async (t) => {
+  const cost = source => 2 * (`renderSvg:${source}`.length + JSON.stringify(`<svg>${source}</svg>`).length);
+  const h = harness(t, {cacheOptions:{maxCachedBytes:cost('é😀')}}); await h.api.default();
+  await h.api.renderSvg('é😀'); await h.api.renderSvg('é😀');
+  assert.equal(reads(h, 'renderSvg', 'é😀'), 1);
+  await h.api.renderSvg('B'); // There is only room for one of these two entries.
+  await h.api.renderSvg('é😀'); assert.equal(reads(h, 'renderSvg', 'é😀'), 2);
+  const tooSmall = harness(t, {cacheOptions:{maxCachedBytes:cost('é😀') - 1}}); await tooSmall.api.default();
+  await tooSmall.api.renderSvg('é😀'); await tooSmall.api.renderSvg('é😀');
+  assert.equal(reads(tooSmall, 'renderSvg'), 2);
+});
+
+test("oversized results pass through without evicting the useful small cache", async (t) => {
+  const h = harness(t, {cacheOptions:{maxCachedBytes:256}}); await h.api.default();
+  await h.api.renderSvg('small'); const big = 'large'.repeat(1000);
+  assert.equal(await h.api.renderSvg(big), `<svg>${big}</svg>`);
+  assert.equal(await h.api.renderSvg(big), `<svg>${big}</svg>`);
+  await h.api.renderSvg('small');
+  assert.equal(reads(h, 'renderSvg', big), 2); assert.equal(reads(h, 'renderSvg', 'small'), 1);
+});
+
+for (const cacheOptions of [{maxCachedEntries:0}, {maxCachedBytes:0}]) {
+  test(`zero cache capacity disables retention: ${JSON.stringify(cacheOptions)}`, async (t) => {
+    const h = harness(t, {cacheOptions}); await h.api.default();
+    await h.api.renderSvg('same'); await h.api.renderSvg('same');
+    assert.equal(reads(h, 'renderSvg'), 2);
+  });
+}
+
+test("result caches are client-local and cannot leak between engine asset sets", async (t) => {
+  const a = harness(t), b = harness(t); await a.api.default(); await b.api.default();
+  await a.api.renderSvg('identical'); await b.api.renderSvg('identical');
+  assert.equal(reads(a, 'renderSvg'), 1); assert.equal(reads(b, 'renderSvg'), 1);
+  a.api.destroy(); assert.equal(await b.api.renderSvg('identical'), '<svg>identical</svg>');
+  assert.equal(reads(b, 'renderSvg'), 1);
+});
+
+for (const [name, value, verify] of [
+  ['undefined property', '{message:"diagnostic", optional:undefined}', result => assert.ok(Object.hasOwn(result,'optional'))],
+  ['negative zero', '{message:"diagnostic", value:-0}', result => assert.ok(Object.is(result.value,-0))],
+  ['nonfinite number', '{message:"diagnostic", value:NaN}', result => assert.ok(Number.isNaN(result.value))],
+  ['Map', '{message:"diagnostic", value:new Map([["node","café"]])}', result => assert.equal(result.value.get('node'),'café')],
+  ['sparse array', '{message:"diagnostic", value:Array(2)}', result => assert.equal(0 in result.value,false)],
+  ['shared references', '(() => { const value={}; return {message:"diagnostic", a:value,b:value}; })()', result => assert.equal(result.a,result.b)],
+  ['cycle', '(() => { const value={message:"diagnostic"}; value.self=value; return value; })()', result => assert.equal(result.self,result)],
+]) {
+  test(`non-JSON ${name} retains structured-clone semantics without caching`, async (t) => {
+    const custom = fixture.replace("[{message:'diagnostic'}]", `[${value}]`);
+    const h = harness(t,{fixture:custom}); await h.api.default();
+    verify((await h.api.parse('A')).ir.diagnostics[0]);
+    verify((await h.api.parse('A')).ir.diagnostics[0]);
+    assert.equal(reads(h,'parse'),2);
+  });
+}
+
+test("invalid retention limits fail before downloading or creating a worker", (t) => {
+  for (const cacheOptions of [{maxCachedBytes:-1}, {maxCachedBytes:NaN}, {maxCachedBytes:1.5},
+    {maxCachedBytes:129*1024*1024}, {maxCachedEntries:-1}, {maxCachedEntries:Infinity},
+    {maxCachedEntries:2049}]) assert.throws(() => harness(t, {cacheOptions}), /read-cache limits/);
 });
