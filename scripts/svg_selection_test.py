@@ -62,6 +62,7 @@ def main() -> int:
           window.markup = markup;
           window.fresh = (options = {}) => {
             window.controller?.dispose();
+            document.body.removeAttribute('style');
             document.body.innerHTML = markup;
             window.svg = document.querySelector('svg');
             window.errors = []; window.changes = []; window.activations = 0;
@@ -86,7 +87,7 @@ def main() -> int:
             nonlocal checks
             checks += 1
             try:
-                page.evaluate("() => { " + script + " }")
+                script() if callable(script) else page.evaluate("() => { " + script + " }")
                 print(json.dumps({"scenario_id": name, "surface": "svg", "passed": True}))
             except Exception as error:
                 failures.append(name)
@@ -227,6 +228,145 @@ def main() -> int:
         p = page.evaluate("center('B')")
         page.mouse.click(p["x"], p["y"])
         check("dispose-restores-host-activation", "expect(activations === 1); expect(location.hash === '#activated');")
+        # Pointer-capture, rollback and polygon-region tests exercise the same export.
+        def frames():
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+        def drag_case(name, options, initial, points, assertion, during=None, modifiers=()):
+            def run():
+                page.evaluate("fresh(" + options + "); " + initial + "; window.pointerId = null; "
+                    "window.addEventListener('pointerdown', e => pointerId = e.pointerId, {once:true,capture:true});")
+                for modifier in modifiers:
+                    page.keyboard.down(modifier)
+                try:
+                    page.mouse.move(*points[0])
+                    page.mouse.down()
+                    for point in points[1:]:
+                        page.mouse.move(*point)
+                    frames()
+                    if during:
+                        during() if callable(during) else page.evaluate("() => { " + during + " }")
+                    page.mouse.up()
+                    frames()
+                    page.evaluate("() => { " + assertion + " }")
+                finally:
+                    page.mouse.up()
+                    for modifier in modifiers:
+                        page.keyboard.up(modifier)
+            check(name, run)
+
+        rectangle = [(40, 40), (180, 140)]
+        drag_case("box-preview-and-commit", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['A']); expect(controller.selectionState().activeGesture === null); "
+            "expect(!svg.querySelector('[data-fm-selection-region]')); expect(activations === 0);",
+            "equal(ids(), ['A']); expect(typeof controller.selectionState().activeGesture === 'string'); "
+            "expect(svg.querySelector('[data-fm-selection-region]'));")
+        drag_case("shift-drag-adds", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['A','B']);", modifiers=("Shift",))
+        drag_case("alt-drag-removes", "{}", "controller.selectNodes(['A','B'])", rectangle,
+            "equal(ids(), ['B']);", modifiers=("Alt",))
+
+        def retrace():
+            page.evaluate("equal(ids(), ['B'])")
+            page.mouse.move(45, 45)
+            frames()
+            page.evaluate("equal(ids(), ['A','B'])")
+            page.mouse.move(180, 140)
+            frames()
+            page.evaluate("equal(ids(), ['B'])")
+
+        drag_case("toggle-preview-is-baseline-relative", "{}", "controller.selectNodes(['A','B'])", rectangle,
+            "equal(ids(), ['B']); expect(activations === 0);", during=retrace, modifiers=("Control",))
+        drag_case("escape-rolls-back-not-clears", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            during=lambda: page.keyboard.press("Escape"))
+        drag_case("explicit-cancel-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(!controller.cancel());",
+            "expect(controller.cancel()); equal(ids(), ['B']);")
+        drag_case("pointercancel-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "svg.dispatchEvent(new PointerEvent('pointercancel', {pointerId, bubbles:true}));")
+        drag_case("lost-capture-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "svg.releasePointerCapture(pointerId);")
+        drag_case("source-replacement-revokes-gesture", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "controller.beforeRender(); svg.innerHTML = new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement.innerHTML; "
+            "controller.refresh(); equal(ids(), ['B']);")
+        drag_case("viewbox-change-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "svg.setAttribute('viewBox', '0 0 1280 840');")
+        drag_case("ancestor-transform-change-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "document.body.style.transform = 'translate(5px, 10px)';")
+        drag_case("blur-rolls-back", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']);", "window.dispatchEvent(new Event('blur'));")
+        drag_case("second-touch-cancels-first-gesture", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(controller.selectionState().activeGesture === null);",
+            "svg.dispatchEvent(new PointerEvent('pointerdown', {pointerId:pointerId + 1, pointerType:'touch', isPrimary:false, bubbles:true}));")
+        drag_case("tool-change-cancels-gesture", "{}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']);", "controller.setTool('lasso');")
+        drag_case("dispose-during-gesture-releases-capture", "{}", "controller.selectNode('B')", rectangle,
+            "expect(!svg.hasPointerCapture(pointerId)); expect(!svg.querySelector('[data-fm-selection-overlay]')); "
+            "expect(svg.style.touchAction === ''); equal(ids(), []);", "controller.dispose();")
+        drag_case("partial-box-intersects", "{containment:'intersects'}", "", [(40, 40), (70, 70)],
+            "equal(ids(), ['A']);")
+        drag_case("partial-box-does-not-contain", "{containment:'contains'}", "", [(40, 40), (70, 70)],
+            "equal(ids(), []);")
+        drag_case("full-box-contains", "{containment:'contains'}", "", rectangle, "equal(ids(), ['A']);")
+        drag_case("lasso-encloses-node", "{tool:'lasso',containment:'contains'}", "",
+            [(40, 40), (180, 40), (180, 140), (40, 140), (40, 40)], "equal(ids(), ['A']);")
+        notch = [(40, 40), (90, 40), (90, 90), (125, 90), (125, 40), (180, 40), (180, 140), (40, 140), (40, 40)]
+        drag_case("concave-lasso-corners-are-not-enough", "{tool:'lasso',containment:'contains'}", "", notch,
+            "equal(ids(), []);")
+        drag_case("concave-lasso-still-intersects", "{tool:'lasso',containment:'intersects'}", "", notch,
+            "equal(ids(), ['A']);")
+        drag_case("edge-crossing-with-no-vertex-inside", "{tool:'lasso'}", "",
+            [(100, 30), (105, 30), (105, 160), (100, 160), (100, 30)], "equal(ids(), ['A']);")
+        drag_case("self-crossing-lasso-even-odd", "{tool:'lasso'}", "",
+            [(40, 40), (180, 140), (40, 140), (180, 40), (40, 40)], "equal(ids(), ['A']);")
+        drag_case("degenerate-lasso-restores-baseline", "{tool:'lasso'}", "controller.selectNode('B')",
+            [(40, 40), (180, 40), (200, 40)], "equal(ids(), ['B']);")
+        drag_case("final-pointer-up-position-is-flushed", "{}", "", [(40, 40), (80, 80)],
+            "equal(ids(), ['A','B']); expect(controller.selectionState().activeGesture === null);",
+            "svg.dispatchEvent(new PointerEvent('pointerup', {pointerId, clientX:360, clientY:140, bubbles:true, cancelable:true}));")
+        drag_case("oversized-coalesced-batch-rolls-back", "{tool:'lasso'}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(errors.length === 1 && errors[0].includes('4096'));",
+            "const event = new PointerEvent('pointermove', {pointerId,clientX:200,clientY:150,buttons:1,bubbles:true}); "
+            "Object.defineProperty(event, 'getCoalescedEvents', {value: () => Array(4097).fill({clientX:200,clientY:150})}); "
+            "svg.dispatchEvent(event);")
+        drag_case("bounded-total-lasso-samples-roll-back", "{tool:'lasso'}", "controller.selectNode('B')", rectangle,
+            "equal(ids(), ['B']); expect(errors.length === 1 && errors[0].includes('4096'));",
+            "const event = new PointerEvent('pointermove', {pointerId,clientX:200,clientY:150,buttons:1,bubbles:true}); "
+            "Object.defineProperty(event, 'getCoalescedEvents', {value: () => Array.from({length:4096}, (_,i) => ({clientX:200+i/100,clientY:150}))}); "
+            "svg.dispatchEvent(event);")
+        check("zero-threshold-still-allows-click", lambda: (
+            page.evaluate("fresh({dragThreshold:0})"), page.mouse.click(100, 80),
+            page.evaluate("equal(ids(), ['A'])")))
+        check("gesture-options-validated-before-ownership", """
+          fresh(); controller.dispose(); let count = 0;
+          for (const options of [{tool:'invalid'}, {containment:'invalid'}, {dragThreshold:NaN}, {dragThreshold:65}]) {
+            try { bind({svg,...options}); } catch { count++; }
+          }
+          expect(count === 4); expect(svg.style.touchAction === '');
+          controller = bind({svg}); controller.selectNode('A'); equal(ids(), ['A']);
+        """)
+        drag_case("lasso-inner-hole-is-not-full-containment", "{tool:'lasso',containment:'contains'}", "",
+            [(40, 40), (180, 40), (180, 140), (40, 140), (40, 40),
+             (85, 75), (120, 75), (120, 100), (85, 100), (85, 75), (40, 40)], "equal(ids(), []);")
+        check("touch-action-priority-and-host-edits-restored", """
+          fresh(); controller.dispose(); svg.style.setProperty('touch-action','pan-y','important');
+          controller = bind({svg}); expect(svg.style.touchAction === 'none'); controller.dispose();
+          expect(svg.style.touchAction === 'pan-y' && svg.style.getPropertyPriority('touch-action') === 'important');
+          controller = bind({svg}); svg.style.setProperty('touch-action','pan-x'); controller.dispose();
+          expect(svg.style.touchAction === 'pan-x');
+        """)
+        check("geometry-errors-do-not-activate-authored-handlers", """
+          fresh(); node('C').dataset.id = 'A';
+          const event = new MouseEvent('click', {bubbles:true,cancelable:true});
+          node('B').dispatchEvent(event); expect(event.defaultPrevented); expect(activations === 0);
+          expect(errors.some(error => error.includes('Ambiguous')));
+        """)
         browser.close()
         if page_errors:
             failures.append("uncaught-browser-errors")
