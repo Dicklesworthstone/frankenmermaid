@@ -332,6 +332,26 @@ mod tests {
     }
 
     #[test]
+    fn outline_suppresses_specialized_pie_title_and_legend_but_keeps_geometry() {
+        let ir = fm_parser::parse(
+            "pie title Snacks\n  \"Cats\" : 70\n  \"Dogs\" : 30\n",
+        )
+        .ir;
+        let mut config = TermRenderConfig::rich();
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Outline,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+        let result = render_term_with_config(&ir, &config, 80, 24);
+
+        assert!(!result.output.is_empty(), "pie outline must retain wedge geometry");
+        for text in ["Snacks", "Cats", "Dogs"] {
+            assert!(!result.output.contains(text), "outline leaked label {text:?}");
+        }
+        assert!(result.output.chars().any(|ch| "#*@+=~%&".contains(ch)));
+    }
+
+    #[test]
     fn hide_labels_degradation_does_not_change_manual_label_limits() {
         let mut config = TermRenderConfig::rich();
         let limits = (config.max_label_chars, config.max_label_lines);
