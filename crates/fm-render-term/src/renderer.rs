@@ -37,6 +37,107 @@ pub struct TermRenderResult {
     /// cannot see, so a caller can warn instead of presenting a clean, plausible, incomplete
     /// diagram. Zero whenever the diagram fits.
     pub occluded_node_count: usize,
+    /// Layout-quality metrics shown by the optional debug overlay.
+    ///
+    /// `None` is the default so existing callers and byte snapshots do not pay for diagnostics.
+    pub debug_metrics: Option<TermDebugMetrics>,
+}
+
+/// Deterministic layout-quality metrics for the terminal debug panel.
+///
+/// `symmetry_permille` measures horizontal center-of-mass balance: 1000 is perfectly balanced
+/// around the layout center and 0 is maximally one-sided. It is intentionally dimensionless so the
+/// value is stable across terminal sizes and render modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermDebugMetrics {
+    pub crossings: usize,
+    pub bends: usize,
+    pub symmetry_permille: u16,
+}
+
+impl TermDebugMetrics {
+    fn from_layout(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Self {
+        let bends = layout
+            .edges
+            .iter()
+            .filter(|edge| !edge.bundled && !is_invisible_edge(ir, edge))
+            .map(|edge| edge.points.len().saturating_sub(2))
+            .sum();
+        Self {
+            crossings: layout.stats.crossing_count,
+            bends,
+            symmetry_permille: horizontal_symmetry_permille(layout),
+        }
+    }
+}
+
+fn horizontal_symmetry_permille(layout: &DiagramLayout) -> u16 {
+    let center = f64::from(layout.bounds.x) + f64::from(layout.bounds.width) / 2.0;
+    if !center.is_finite() || !layout.bounds.width.is_finite() || layout.bounds.width <= 0.0 {
+        return 1000;
+    }
+
+    let mut left = 0.0_f64;
+    let mut right = 0.0_f64;
+    for node in &layout.nodes {
+        let node_center = f64::from(node.bounds.x) + f64::from(node.bounds.width) / 2.0;
+        if !node_center.is_finite() {
+            continue;
+        }
+        let offset = node_center - center;
+        if offset < 0.0 {
+            left += -offset;
+        } else {
+            right += offset;
+        }
+    }
+    let total = left + right;
+    if !total.is_finite() || total <= f64::EPSILON {
+        return 1000;
+    }
+    let score = (1.0 - (left - right).abs() / total).clamp(0.0, 1.0);
+    (score * 1000.0).round() as u16
+}
+
+fn overlay_debug_panel(output: &mut String, width: usize, height: usize, metrics: TermDebugMetrics) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut lines: Vec<Vec<char>> = output
+        .split('\n')
+        .map(|line| {
+            let mut chars: Vec<char> = line.chars().take(width).collect();
+            chars.resize(width, ' ');
+            chars
+        })
+        .collect();
+    lines.resize_with(height, || vec![' '; width]);
+    lines.truncate(height);
+
+    let labels = [
+        "[layout debug]".to_string(),
+        format!(
+            "crossings={} bends={} symmetry={}/1000",
+            metrics.crossings, metrics.bends, metrics.symmetry_permille
+        ),
+    ];
+    for (row, label) in labels.iter().take(height).enumerate() {
+        for (column, ch) in label.chars().take(width).enumerate() {
+            lines[row][column] = ch;
+        }
+    }
+
+    output.clear();
+    for (row, line) in lines.iter().enumerate() {
+        if row > 0 {
+            output.push('\n');
+        }
+        let end = line
+            .iter()
+            .rposition(|ch| *ch != ' ')
+            .map_or(0, |index| index + 1);
+        output.extend(line[..end].iter());
+    }
 }
 
 /// Count nodes whose box is completely covered by nodes drawn after them.
@@ -369,6 +470,13 @@ impl TermRenderer {
 
         self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
         let mut output = buffer.to_output_string();
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
+        }
         let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
 
         TermRenderResult {
@@ -386,6 +494,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            debug_metrics,
         }
     }
 
@@ -775,6 +884,13 @@ impl TermRenderer {
             scale_x,
             scale_y,
         );
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
+        }
         let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
 
         TermRenderResult {
@@ -792,6 +908,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            debug_metrics,
         }
     }
 
