@@ -364,3 +364,286 @@ export function bindCanvasSelection({ canvas, diagram, tool = "box", containment
     dispose,
   });
 }
+
+const svgOwners = new WeakMap();
+
+/** Retained selection for rendered FrankenMermaid SVG, independent of WASM.
+ * Node identity is .fm-node[data-id], not the generated/scoped DOM id. Picking uses
+ * transformed node boxes (including labels), not shape contours. While bound,
+ * selection consumes node clicks/Enter/Space; it never activates authored links
+ * or callbacks. Call beforeRender()/refresh() around source replacement, redraw()
+ * after changing an ancestor transform, and dispose() before discarding the SVG.
+ * Charts without addressable node groups have an empty selection surface.
+ */
+export function bindSvgSelection({ svg, onSelectionChange = () => {},
+  onError = error => globalThis.console?.error(error),
+} = {}) {
+  const ns = "http://www.w3.org/2000/svg";
+  if (svg?.namespaceURI !== ns || svg.localName !== "svg" || !svg.ownerDocument?.defaultView) {
+    throw new TypeError("SVG selection requires a browser SVG element.");
+  }
+  if (svgOwners.has(svg)) throw new Error("This SVG already has a selection controller.");
+  if (typeof onSelectionChange !== "function" || typeof onError !== "function") {
+    throw new TypeError("Selection callbacks must be functions.");
+  }
+  const document = svg.ownerDocument, window = document.defaultView;
+  const owner = {}, listeners = [], owned = new WeakSet(), tabIndices = new Map();
+  const originalTabIndex = svg.getAttribute("tabindex");
+  let nodes = [], selected = new Set(), primary = null, disposed = false, suspended = false;
+  let layer = null, frame = null, observer = null, resizeObserver = null, previous = null;
+  const matrixFinite = m => m && [m.a, m.b, m.c, m.d, m.e, m.f].every(Number.isFinite)
+    && Number.isFinite(m.a * m.d - m.b * m.c) && m.a * m.d !== m.b * m.c;
+  const transform = (m, x, y) => [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
+  const modeOf = event => event.altKey ? "remove" : event.ctrlKey || event.metaKey ? "toggle" : event.shiftKey ? "add" : "replace";
+  const report = error => { try { onError(error); } catch { /* Observational callbacks cannot break input. */ } };
+  const checkMode = mode => {
+    if (!["replace", "add", "toggle", "remove"].includes(mode)) throw new RangeError("Invalid selection mode.");
+  };
+  const available = () => !disposed && !suspended;
+
+  function readNodes() {
+    if (!svg.isConnected) return [];
+    const result = [], ids = new Set();
+    for (const element of svg.querySelectorAll(".fm-node[data-id]")) {
+      if (element.closest("defs, symbol, clipPath, mask")) continue;
+      const id = element.getAttribute("data-id");
+      if (ids.has(id)) throw new Error(`Ambiguous SVG selection identity: ${JSON.stringify(id)}.`);
+      ids.add(id);
+      let hidden = false;
+      for (let parent = element; parent; parent = parent.parentElement) {
+        const style = window.getComputedStyle(parent);
+        if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse"
+          || Number(style.opacity) === 0 || parent.getAttribute("aria-hidden") === "true") {
+          hidden = true; break;
+        }
+      }
+      if (hidden) continue;
+      let bounds, matrix, inverse;
+      try {
+        bounds = element.getBBox(); matrix = element.getScreenCTM();
+        if (!matrixFinite(matrix)) continue;
+        inverse = matrix.inverse();
+      } catch { continue; } // Detached/non-rendering SVG elements need not expose geometry.
+      if (!matrixFinite(inverse) || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+        || bounds.width <= 0 || bounds.height <= 0) continue;
+      const { x, y, width, height } = bounds;
+      const points = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]
+        .map(([px, py]) => transform(matrix, px, py));
+      if (!points.flat().every(Number.isFinite)) continue;
+      result.push({ id, element, bounds, inverse, points,
+        center: transform(matrix, x + width / 2, y + height / 2) });
+    }
+    return result;
+  }
+  function reconcile() {
+    nodes = readNodes();
+    for (const [element, original] of tabIndices) {
+      if (svg.contains(element)) continue;
+      if (original === null && element.getAttribute("tabindex") === "-1") element.removeAttribute("tabindex");
+      tabIndices.delete(element);
+    }
+    const ids = new Set(nodes.map(node => node.id));
+    selected = new Set([...selected].filter(id => ids.has(id)));
+    if (!selected.has(primary)) primary = nodes.find(node => selected.has(node.id))?.id ?? null;
+  }
+  function selectionState() {
+    return Object.freeze({ selectedNodeIds: Object.freeze(nodes.filter(node => selected.has(node.id)).map(node => node.id)),
+      primaryNodeId: primary, frameAvailable: available() && svg.isConnected });
+  }
+  function notify() {
+    if (disposed) return;
+    const state = selectionState(), key = JSON.stringify(state);
+    if (previous === key) return;
+    previous = key;
+    try { onSelectionChange(state); } catch (error) { report(error); }
+  }
+  function draw() {
+    if (layer) layer.replaceChildren();
+    if (!available() || selected.size === 0) return;
+    const matrix = svg.getScreenCTM();
+    if (!matrixFinite(matrix)) return;
+    const inverse = matrix.inverse();
+    if (!matrixFinite(inverse)) return;
+    if (!layer) {
+      layer = document.createElementNS(ns, "g"); owned.add(layer);
+      layer.setAttribute("data-fm-selection-overlay", "");
+      layer.setAttribute("aria-hidden", "true");
+      layer.style.pointerEvents = "none";
+    }
+    if (layer.parentNode !== svg) svg.appendChild(layer);
+    for (const node of nodes) {
+      if (!selected.has(node.id)) continue;
+      const outline = document.createElementNS(ns, "polygon"); owned.add(outline);
+      outline.setAttribute("data-node-id", node.id);
+      outline.setAttribute("points", node.points.map(([x, y]) => transform(inverse, x, y).join(",")).join(" "));
+      outline.setAttribute("fill", "var(--fm-selection-color, #2563eb)");
+      outline.setAttribute("fill-opacity", "0.12");
+      outline.setAttribute("stroke", "var(--fm-selection-color, #2563eb)");
+      outline.setAttribute("stroke-width", node.id === primary ? "2.5" : "1.5");
+      outline.setAttribute("vector-effect", "non-scaling-stroke");
+      layer.appendChild(outline);
+    }
+  }
+  function refresh() {
+    if (disposed) return false;
+    suspended = false;
+    reconcile(); draw(); notify();
+    return true;
+  }
+  function update(hits, mode) {
+    checkMode(mode);
+    const before = JSON.stringify(selectionState());
+    if (mode === "replace") selected = new Set(hits);
+    else for (const id of hits) {
+      if (mode === "remove" || (mode === "toggle" && selected.has(id))) selected.delete(id);
+      else selected.add(id);
+    }
+    primary = [...hits].reverse().find(id => selected.has(id))
+      ?? (selected.has(primary) ? primary : nodes.find(node => selected.has(node.id))?.id ?? null);
+    draw();
+    const changed = before !== JSON.stringify(selectionState());
+    notify();
+    return changed;
+  }
+  function selectNodes(ids, mode = "replace") {
+    checkMode(mode);
+    if (!Array.isArray(ids) || ids.some(id => typeof id !== "string")) throw new TypeError("Node IDs must be an array of strings.");
+    if (!available()) return false;
+    reconcile();
+    const valid = new Set(nodes.map(node => node.id));
+    // Reject the whole command, rather than partially applying a misspelled selection.
+    if (ids.some(id => !valid.has(id))) { draw(); notify(); return false; }
+    return update([...new Set(ids)], mode);
+  }
+  function pick(x, y) {
+    return [...nodes].reverse().find(node => {
+      const [px, py] = transform(node.inverse, x, y), b = node.bounds;
+      return px >= b.x && py >= b.y && px < b.x + b.width && py < b.y + b.height;
+    });
+  }
+  function selectAt(x, y, mode = "replace") {
+    checkMode(mode);
+    if (!available() || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    reconcile();
+    const hit = pick(x, y);
+    return update(hit ? [hit.id] : [], mode);
+  }
+  function focusPrimary() {
+    if (!available()) return;
+    const element = nodes.find(node => node.id === primary)?.element ?? svg;
+    if (!element.hasAttribute("tabindex")) {
+      if (!tabIndices.has(element)) tabIndices.set(element, null);
+      element.setAttribute("tabindex", "-1");
+    }
+    element.focus({ preventScroll: true });
+  }
+  function navigate(direction, extend = false) {
+    if (!["left", "right", "up", "down"].includes(direction)) throw new RangeError("Invalid navigation direction.");
+    if (!available()) return false;
+    reconcile();
+    const from = nodes.find(node => node.id === primary);
+    let target = nodes[0];
+    if (from) {
+      const horizontal = direction === "left" || direction === "right";
+      const sign = direction === "left" || direction === "up" ? -1 : 1;
+      let best = Infinity;
+      target = null;
+      for (const candidate of nodes) {
+        const dx = candidate.center[0] - from.center[0], dy = candidate.center[1] - from.center[1];
+        const along = sign * (horizontal ? dx : dy), across = Math.abs(horizontal ? dy : dx);
+        if (along <= 0) continue;
+        // Prefer the closest node in the intended direction; DOM order breaks exact ties.
+        const score = Math.hypot(along, across) + across * 2;
+        if (score < best) { best = score; target = candidate; }
+      }
+    }
+    if (!target) { draw(); notify(); return false; }
+    const changed = update([target.id], extend ? "add" : "replace");
+    focusPrimary();
+    return changed;
+  }
+  const editable = target => target?.closest?.("input, textarea, select, button, [contenteditable]:not([contenteditable='false'])");
+  const targetNode = target => nodes.find(node => node.element === target?.closest?.(".fm-node[data-id]"));
+  function click(event) {
+    if (!available() || event.defaultPrevented || event.button !== 0 || editable(event.target)) return;
+    reconcile();
+    const node = event.detail === 0 ? targetNode(event.target) : pick(event.clientX, event.clientY);
+    // Capture before authored click handlers and native <a> navigation.
+    event.preventDefault(); event.stopImmediatePropagation();
+    update(node ? [node.id] : [], modeOf(event)); focusPrimary();
+  }
+  function key(event) {
+    if (!available() || event.defaultPrevented || editable(event.target)) return;
+    const direction = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" }[event.key];
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopImmediatePropagation(); selectNodes([]); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a" && !event.altKey) {
+      event.preventDefault(); event.stopImmediatePropagation(); reconcile(); update(nodes.map(node => node.id), "replace"); return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      reconcile();
+      const node = targetNode(event.target);
+      if (!node) return;
+      event.preventDefault(); event.stopImmediatePropagation(); update([node.id], modeOf(event));
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (direction) {
+      event.preventDefault(); event.stopImmediatePropagation(); navigate(direction, event.shiftKey); return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault(); event.stopImmediatePropagation(); reconcile();
+      const node = event.key === "Home" ? nodes[0] : nodes.at(-1);
+      if (node) { update([node.id], event.shiftKey ? "add" : "replace"); focusPrimary(); }
+    }
+  }
+  function listen(target, name, handler, options) {
+    const guarded = event => { if (!disposed) { try { handler(event); } catch (error) { report(error); } } };
+    target.addEventListener(name, guarded, options);
+    listeners.push(() => target.removeEventListener(name, guarded, options));
+  }
+  function schedule() {
+    if (!available() || frame !== null) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = null;
+      if (!available()) return;
+      try { refresh(); } catch (error) { layer?.replaceChildren(); report(error); }
+    });
+  }
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    if (frame !== null) window.cancelAnimationFrame(frame);
+    for (const remove of listeners) remove();
+    observer?.disconnect(); resizeObserver?.disconnect(); layer?.remove();
+    for (const [element, original] of tabIndices) {
+      if (original === null && element.getAttribute("tabindex") === "-1") element.removeAttribute("tabindex");
+    }
+    if (originalTabIndex === null && svg.getAttribute("tabindex") === "0") svg.removeAttribute("tabindex");
+    if (svgOwners.get(svg) === owner) svgOwners.delete(svg);
+    nodes = []; selected.clear(); primary = null;
+  }
+  svgOwners.set(svg, owner);
+  try {
+    if (originalTabIndex === null) svg.setAttribute("tabindex", "0");
+    listen(svg, "click", click, true); listen(svg, "keydown", key, true);
+    listen(window, "resize", schedule); listen(window, "scroll", schedule, true);
+    observer = new window.MutationObserver(records => {
+      if (records.some(record => !owned.has(record.target)
+        && !(record.type === "childList" && [...record.addedNodes, ...record.removedNodes].every(node => owned.has(node))))) schedule();
+    });
+    observer.observe(svg, { subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: ["transform", "viewBox", "width", "height", "x", "y", "class", "style", "data-id", "aria-hidden"] });
+    if (typeof window.ResizeObserver === "function") {
+      resizeObserver = new window.ResizeObserver(schedule); resizeObserver.observe(svg);
+    }
+    reconcile(); draw();
+  } catch (error) { dispose(); throw error; }
+  return Object.freeze({ selectionState,
+    selectNode: (id, mode = "replace") => selectNodes([id], mode), selectNodes, selectAt, navigate,
+    clear: () => selectNodes([]), redraw: () => { if (!available()) return false; return refresh(); },
+    beforeRender: () => { if (!disposed) { suspended = true; layer?.replaceChildren(); } },
+    refresh, dispose,
+  });
+}
