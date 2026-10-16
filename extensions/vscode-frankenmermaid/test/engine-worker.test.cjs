@@ -364,3 +364,147 @@ test("invalid retention limits fail before downloading or creating a worker", (t
     {maxCachedBytes:129*1024*1024}, {maxCachedEntries:-1}, {maxCachedEntries:Infinity},
     {maxCachedEntries:2049}]) assert.throws(() => harness(t, {cacheOptions}), /read-cache limits/);
 });
+
+test("concurrent identical diagram requests share exactly one worker operation", async (t) => {
+  const h = harness(t); await h.api.default();
+  const values = await Promise.all(Array.from({length:128}, () => h.api.renderSvg('shared diagram')));
+  assert.deepEqual(values, Array(128).fill('<svg>shared diagram</svg>'));
+  assert.equal(reads(h,'renderSvg','shared diagram'),1);
+  assert.equal(h.workers.length,1);
+});
+
+test("coalesced source inspection returns independent binding trees to every subscriber", async (t) => {
+  const h = harness(t); await h.api.default();
+  const [a,b,c] = await Promise.all([h.api.parseLens('same'),h.api.parseLens('same'),h.api.parseLens('same')]);
+  assert.deepEqual(a,b); assert.deepEqual(b,c); assert.notEqual(a,b); assert.notEqual(a.bindings,b.bindings);
+  a.bindings[0].snippet='changed'; a.parsed.warnings.push('mutation');
+  assert.equal(b.bindings[0].snippet,'same'); assert.deepEqual(c.parsed.warnings,['notice']);
+  assert.equal((await h.api.parseLens('same')).bindings[0].snippet,'same');
+  assert.equal(reads(h,'parseLens'),1);
+});
+
+test("coalescing is exact by method and source, independent of completed-cache capacity", async (t) => {
+  const h = harness(t,{cacheOptions:{maxCachedBytes:0}}); await h.api.default();
+  const inputs = ['same','same ','same\r\n','same\n','😀','same'];
+  const values = await Promise.all(inputs.map(source => h.api.renderSvg(source)));
+  assert.deepEqual(values,inputs.map(source=>`<svg>${source}</svg>`));
+  assert.equal(reads(h,'renderSvg'),5);
+  await Promise.all([h.api.parse('same'),h.api.parseLens('same'),h.api.renderSvg('same')]);
+  assert.equal(reads(h,'parse'),1); assert.equal(reads(h,'parseLens'),1); assert.equal(reads(h,'renderSvg'),6);
+});
+
+test("coalescing preserves non-JSON Maps and internal aliases without sharing between subscribers", async (t) => {
+  const custom = fixture.replace("[{message:'diagnostic'}]",
+    '[(() => { const map=new Map([["A","B"]]); return {message:"diagnostic",map,alias:map}; })()]');
+  const h=harness(t,{fixture:custom}); await h.api.default();
+  const [a,b]=await Promise.all([h.api.parse('same'),h.api.parse('same')]);
+  const left=a.ir.diagnostics[0], right=b.ir.diagnostics[0];
+  assert.equal(left.map,left.alias); assert.equal(right.map,right.alias); assert.notEqual(left.map,right.map);
+  left.map.set('A','changed'); assert.equal(right.map.get('A'),'B');
+  assert.equal(reads(h,'parse'),1);
+  assert.equal((await h.api.parse('same')).ir.diagnostics[0].map.get('A'),'B');
+  assert.equal(reads(h,'parse'),2,'unsupported retention does not disable in-flight sharing');
+});
+
+test("concurrent source edits remain distinct native transactions", async (t) => {
+  const h=harness(t); await h.api.default();
+  const [a,b]=await Promise.all([h.api.applyParseLensEdit('A','node','B'),h.api.applyParseLensEdit('A','node','B')]);
+  assert.deepEqual(a,b); assert.notEqual(a,b); assert.equal(reads(h,'applyParseLensEdit'),2);
+});
+
+test("all subscribers to an executing WASM read are cancelled without retaining a partial result", {timeout:5000}, async (t) => {
+  const h=harness(t); await h.api.default();
+  const pending=Array.from({length:32},()=>h.api.renderSvg('HANG'));
+  const rejected=Promise.all(pending.map(promise=>assert.rejects(promise,{name:'AbortError'})));
+  await h.workers[0].entered.promise;
+  assert.equal(reads(h,'renderSvg','HANG'),1);
+  h.api.cancelPending(); await rejected; await h.workers[0].exited.promise;
+  assert.equal(await h.api.renderSvg('new generation'),'<svg>new generation</svg>');
+  assert.equal(h.workers.length,2);
+});
+
+test("a single watchdog failure rejects every subscriber and releases admission capacity", {timeout:5000}, async (t) => {
+  const h=harness(t,{manualTimers:true}); await h.api.default();
+  const pending=Array.from({length:32},()=>h.api.renderSvg('HANG'));
+  const rejected=Promise.all(pending.map(promise=>assert.rejects(promise,/time budget/)));
+  await h.workers[0].entered.promise;
+  assert.equal(h.timers.size,1); assert.equal(reads(h,'renderSvg','HANG'),1);
+  h.timers.values().next().value(); await Promise.all([rejected]); await h.workers[0].exited.promise;
+  assert.equal(h.timers.size,0);
+  assert.deepEqual(await Promise.all(Array.from({length:32},()=>h.api.renderSvg('recovered'))),
+    Array(32).fill('<svg>recovered</svg>'));
+  assert.equal(reads(h,'renderSvg','recovered'),1);
+});
+
+test("coalesced failures are not cached and can be retried immediately", async (t) => {
+  const h=harness(t); await h.api.default();
+  await Promise.all(Array.from({length:16},()=>assert.rejects(h.api.renderSvg('THROW'),/fixture render rejected/)));
+  assert.equal(reads(h,'renderSvg','THROW'),1);
+  await assert.rejects(h.api.renderSvg('THROW'),/fixture render rejected/);
+  assert.equal(reads(h,'renderSvg','THROW'),2);
+});
+
+test("cancellation settles read subscribers during hanging asset initialization", async (t) => {
+  const h=harness(t,{manualTimers:true,fetchFile:()=>new Promise(()=>{})});
+  const first=h.api.renderSvg('first'), second=h.api.renderSvg('first');
+  const rejected=Promise.all([first,second].map(promise=>assert.rejects(promise,{name:'AbortError'})));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.fetches.length,3); assert.equal(h.workers.length,0);
+  h.api.cancelPending(); await rejected;
+  const next=h.api.renderSvg('latest'), nextRejected=assert.rejects(next,{name:'AbortError'});
+  await new Promise(resolve=>setImmediate(resolve));
+  h.api.cancelPending(); await nextRejected;
+  h.api.destroy(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.timers.size,0); assert.equal(h.sources.size,0); assert.equal(h.workers.length,0);
+});
+
+test("old-generation cleanup cannot delete a replacement operation with the same source key", async (t) => {
+  const gate=deferred();
+  const h=harness(t,{fetchFile:async url=>{
+    await gate.promise;
+    return {ok:true,status:200,text:async()=>url==='module'?fixture:workerSource,
+      arrayBuffer:async()=>bytes.slice().buffer};
+  }});
+  const old=h.api.renderSvg('same'), oldRejected=assert.rejects(old,{name:'AbortError'});
+  await new Promise(resolve=>setImmediate(resolve));
+  h.api.cancelPending();
+  const fresh=h.api.renderSvg('same');
+  const another=Promise.resolve().then(()=>h.api.renderSvg('same'));
+  await oldRejected; gate.resolve();
+  assert.deepEqual(await Promise.all([fresh,another]),['<svg>same</svg>','<svg>same</svg>']);
+  assert.equal(reads(h,'renderSvg','same'),1); assert.equal(h.workers.length,1);
+});
+
+test("distinct queued reads keep the existing 64-operation bound", async (t) => {
+  const h=harness(t); await h.api.default();
+  const values=await Promise.allSettled(Array.from({length:65},(_,i)=>h.api.renderSvg(`diagram ${i}`)));
+  assert.equal(values.filter(value=>value.status==='fulfilled').length,64);
+  assert.equal(values[64].status,'rejected'); assert.match(values[64].reason.message,/Too many queued/);
+  assert.equal(reads(h,'renderSvg'),64);
+  assert.equal(await h.api.renderSvg('after capacity released'),'<svg>after capacity released</svg>');
+});
+
+test("duplicate subscribers have their own bound and cancellation releases it", {timeout:5000}, async (t) => {
+  const h=harness(t); await h.api.default();
+  const pending=Array.from({length:256},()=>h.api.renderSvg('HANG'));
+  const rejected=Promise.all(pending.map(promise=>assert.rejects(promise,{name:'AbortError'})));
+  await h.workers[0].entered.promise;
+  await assert.rejects(h.api.renderSvg('HANG'),/read subscribers/);
+  assert.equal(reads(h,'renderSvg','HANG'),1);
+  h.api.cancelPending(); await rejected; await h.workers[0].exited.promise;
+  assert.equal(await h.api.renderSvg('after cancel'),'<svg>after cancel</svg>');
+});
+
+test("disposal rejects all coalesced readers and cannot start work from a late asset reply", async (t) => {
+  const gate=deferred();
+  const h=harness(t,{fetchFile:async url=>{
+    await gate.promise;
+    return {ok:true,status:200,text:async()=>url==='module'?fixture:workerSource,
+      arrayBuffer:async()=>bytes.slice().buffer};
+  }});
+  const pending=Array.from({length:16},()=>h.api.renderSvg('same'));
+  const rejected=Promise.all(pending.map(promise=>assert.rejects(promise,{name:'AbortError'})));
+  await new Promise(resolve=>setImmediate(resolve)); h.api.destroy(); await rejected;
+  gate.resolve(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.workers.length,0); assert.equal(h.sources.size,0);
+});

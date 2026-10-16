@@ -135,6 +135,7 @@
     maxCachedBytes = 32 * 1024 * 1024, maxCachedEntries = 192,
   }) {
     if (typeof WorkerType !== "function") throw new Error("This preview requires Web Worker support.");
+    if (typeof root.structuredClone !== "function") throw new Error("This preview requires structured-clone support.");
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error("Invalid engine time budget.");
     if (!Number.isSafeInteger(maxCachedBytes) || maxCachedBytes < 0 || maxCachedBytes > 128 * 1024 * 1024
       || !Number.isSafeInteger(maxCachedEntries) || maxCachedEntries < 0 || maxCachedEntries > 2048) {
@@ -146,6 +147,7 @@
     // line numbers, node indexes and hashes are not identities. Completed reads survive source
     // invalidation/worker restart, but never leave this client or survive its destruction.
     const readCache = createReadCache(maxCachedBytes, maxCachedEntries);
+    const inFlightReads = new Map(), readSubscribers = new Set();
     const api = { default: initialize, renderSvg: (source) => call("renderSvg", { source }), cancelPending, destroy };
     function assertLive(generation) { if (disposed || generation !== epoch) throw abortError(); }
     async function loadResources() {
@@ -267,6 +269,32 @@
         await Promise.resolve(); assertLive(generation);
         const cached = readCache.get(key);
         if (cached) return cached.value;
+        if (readSubscribers.size >= 256) throw new Error("Too many engine read subscribers.");
+        let job = inFlightReads.get(key);
+        if (!job) {
+          if (inFlightReads.size >= 64) throw new Error("Too many queued engine operations.");
+          job = { key, method, payload, generation };
+          const cancelled = new Promise((_, reject) => {
+            job.cancel = () => { job.payload = null; reject(abortError()); };
+          });
+          inFlightReads.set(key, job);
+          job.promise = Promise.race([executeRead(job), cancelled]).finally(() => {
+            // A cancelled generation may already have been replaced by the SAME source.
+            // Its cleanup must not remove the new generation's pending operation.
+            if (inFlightReads.get(job.key) === job) inFlightReads.delete(job.key);
+            job.key = null; job.payload = null;
+          });
+        }
+        const ticket = {};
+        readSubscribers.add(ticket);
+        try {
+          const value = await job.promise;
+          assertLive(generation);
+          // No subscriber sees the promise's private response object. Use structuredClone,
+          // not JSON coercion: native Maps, aliases, cycles and undefined remain intact even
+          // when their result is deliberately ineligible for completed-result retention.
+          return root.structuredClone(value);
+        } finally { readSubscribers.delete(ticket); }
       }
       const loaded = await loadResources(); assertLive(generation);
       const workerState = ensureWorker(loaded);
@@ -274,11 +302,25 @@
       if (!capabilities.includes(method)) throw new Error(`Engine has no ${method} export.`);
       const value = await request(workerState, method, payload);
       assertLive(generation);
-      if (key !== null) readCache.put(key, value);
       return value;
+    }
+    async function executeRead(job) {
+      const loaded = await loadResources(); assertLive(job.generation);
+      const workerState = ensureWorker(loaded);
+      const capabilities = await workerState.ready; assertLive(job.generation);
+      if (!capabilities.includes(job.method)) throw new Error(`Engine has no ${job.method} export.`);
+      const value = await request(workerState, job.method, job.payload);
+      assertLive(job.generation);
+      readCache.put(job.key, value);
+      return value;
+    }
+    function releaseReads() {
+      for (const job of inFlightReads.values()) job.cancel();
+      inFlightReads.clear(); readSubscribers.clear();
     }
     function cancelPending() {
       epoch += 1;
+      releaseReads(); // Settle subscribers even when asset initialization is still pending.
       // Synchronous WASM cannot process cancellation messages while executing. Termination
       // interrupts the computation itself, not just the eventual display of its obsolete reply.
       if (state?.pending.size) stop(abortError());
@@ -286,6 +328,7 @@
     function destroy() {
       if (disposed) return;
       disposed = true; epoch += 1; downloads?.abort(); stop(abortError());
+      releaseReads();
       readCache.clear();
       if (resources) urls.revokeObjectURL(resources.url);
       resources = undefined;
