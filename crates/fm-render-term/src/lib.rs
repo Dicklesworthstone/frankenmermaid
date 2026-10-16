@@ -313,6 +313,37 @@ mod tests {
     }
 
     #[test]
+    fn outline_degradation_is_a_real_textless_skeleton() {
+        let ir = sample_ir();
+        let mut config = TermRenderConfig::rich();
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Outline,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+
+        assert!(!config.show_labels);
+        let result = render_term_with_config(&ir, &config, 80, 24);
+
+        assert!(!result.output.is_empty(), "outline must retain structural geometry");
+        assert!(!result.output.contains("Start"));
+        assert!(!result.output.contains("End"));
+        assert!(result.width <= 80);
+        assert!(result.height <= 24);
+    }
+
+    #[test]
+    fn hide_labels_degradation_does_not_change_manual_label_limits() {
+        let mut config = TermRenderConfig::rich();
+        let limits = (config.max_label_chars, config.max_label_lines);
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            hide_labels: true,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+        assert!(!config.show_labels);
+        assert_eq!((config.max_label_chars, config.max_label_lines), limits);
+    }
+
+    #[test]
     fn debug_overlay_is_opt_in_and_preserves_render_bounds() {
         let ir = sample_ir();
         let plain = render_term_with_config(&ir, &TermRenderConfig::default(), 80, 24);
