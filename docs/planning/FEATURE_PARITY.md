@@ -155,9 +155,10 @@ Current status in this file is grounded in:
 ### Rendering-Level
 
 - Terminal fidelity-tier selection still needs an evidence-backed parity audit against
-  FrankenTUI's `Outline` / `Compact` / `Normal` / `Rich` model. Frankenmermaid currently resolves
-  `Compact` / `Normal` / `Rich` plus auto sizing, while degradation maps `Outline` onto its most
-  conservative compact path.
+  FrankenTUI's exact `Outline` / `Compact` / `Normal` / `Rich` thresholds and presentation rules.
+  Frankenmermaid now gives `Outline` distinct skeleton semantics: it uses the compact cell renderer
+  but suppresses textual labels/titles/legends/annotations explicitly while retaining structural
+  geometry. `Compact` / `Normal` / `Rich` and auto sizing remain separate resolved tiers.
 - The debug overlay is now mapped onto terminal output as an opt-in, viewport-bounded plain-text
   panel with crossing count, rendered polyline bend count, and a deterministic horizontal
   symmetry score. Exact reference-panel presentation semantics remain to be audited.
