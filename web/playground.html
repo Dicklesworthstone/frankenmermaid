@@ -40,6 +40,12 @@
   #config-editor-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   #out [data-source-editable] { cursor: pointer; }
   #out [data-source-selected], #out [data-source-editable]:focus { outline: 3px solid #2563eb; outline-offset: 3px; }
+  #explorer { padding: 8px 12px; border-bottom: 1px solid #cbd5e1; flex-shrink: 0; }
+  #explorer-controls { border: 0; margin: 0; padding: 0; }
+  #explorer-search, #explorer-results { display: block; width: 100%; box-sizing: border-box; }
+  #explorer-results { max-height: 7em; }
+  #explorer-selection, #explorer-message { display: block; overflow-wrap: anywhere; }
+  #out[inert] { opacity: .6; }
 </style>
 
 <textarea id="src" spellcheck="false">flowchart TD
@@ -52,6 +58,7 @@
   <section id="document-toolbar" aria-label="Source files and recovery"></section>
   <section id="share-toolbar" aria-label="Share editable diagram"></section>
   <div id="editor-toolbar">
+    <button id="explore" type="button" aria-expanded="false" aria-controls="explorer">Explore / select nodes</button>
     <button id="edit-source" type="button">Edit diagram source (SVG)</button>
     <button id="edit-deck" type="button">Present / export graph deck</button>
     <button id="edit-config" type="button">Theme / layout settings</button>
@@ -60,6 +67,19 @@
   <section id="source-editor" aria-label="Diagram source editor" hidden></section>
   <section id="deck-editor" aria-label="Graph deck authoring" hidden></section>
   <section id="config-editor" aria-label="Diagram configuration editor" hidden></section>
+  <section id="explorer" aria-label="Diagram explorer" hidden>
+    <fieldset id="explorer-controls" disabled>
+      <label>Selection tool <select id="explorer-tool"><option value="box">Box</option><option value="lasso">Lasso</option></select></label>
+      <button id="explorer-clear" type="button">Clear selection</button>
+      <label for="explorer-search">Find a node by ID or label</label>
+      <input id="explorer-search" type="search" autocomplete="off" placeholder="Search nodes; Enter selects the first match" />
+      <select id="explorer-results" size="3" aria-label="Matching nodes"></select>
+      <output id="explorer-search-count"></output>
+    </fieldset>
+    <output id="explorer-selection" aria-live="polite"></output>
+    <span id="explorer-message" role="status"></span>
+    <small>Click or drag to select. Shift adds, Ctrl/Command toggles, Alt removes. Arrow keys navigate; Escape cancels a drag or clears selection. Selection never activates links.</small>
+  </section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
@@ -91,6 +111,173 @@
   let documentWorkspace = null;
   let shareControls = null;
   let sourceEditorFactory = null;
+  let previewModeRevision = 0;
+  let svgPreview = false;
+  let explorerActive = false;
+  let explorerFactory = null;
+  let explorerSelection = null;
+  let explorerNodes = [];
+  let retainedNodeIds = [];
+  let retainedPrimary = null;
+  let restoringExplorer = false;
+  const explorerPanel = document.getElementById("explorer");
+  const explorerControls = document.getElementById("explorer-controls");
+  const explorerMessage = document.getElementById("explorer-message");
+  const explorerSummary = document.getElementById("explorer-selection");
+  const explorerSearch = document.getElementById("explorer-search");
+  const explorerResults = document.getElementById("explorer-results");
+
+  function stopPreviewWorker() {
+    const previous = worker;
+    worker = null;
+    workerReady = false;
+    clearTimeout(initTimer);
+    initTimer = null;
+    liveRequestId = nextRequestId++; // Also revoke any pending main-thread fallback.
+    previous?.terminate();
+  }
+
+  function explorerChanged(state) {
+    if (!explorerActive || disposed || restoringExplorer) return;
+    retainedNodeIds = [...state.selectedNodeIds];
+    retainedPrimary = state.primaryNodeId;
+    const listed = retainedNodeIds.slice(0, 8).join(", ");
+    explorerSummary.textContent = `${retainedNodeIds.length} nodes selected${listed ? `: ${listed}` : ""}${retainedNodeIds.length > 8 ? ", …" : ""}`;
+  }
+
+  function filterExplorerNodes() {
+    const query = explorerSearch.value.trim().toLowerCase();
+    const matching = explorerNodes.filter(node => `${node.id}\n${node.label}`.toLowerCase().includes(query));
+    explorerResults.replaceChildren();
+    for (const node of matching.slice(0, 200)) {
+      const option = document.createElement("option");
+      option.value = node.id;
+      option.textContent = node.label && node.label !== node.id ? `${node.id} — ${node.label}` : node.id;
+      explorerResults.append(option);
+    }
+    document.getElementById("explorer-search-count").textContent =
+      `${matching.length} matching nodes${matching.length > 200 ? " (first 200 shown; refine the search)" : ""}`;
+    explorerResults.selectedIndex = -1;
+  }
+
+  function suspendExplorer() {
+    if (!explorerActive) return;
+    explorerSelection?.beforeRender(); // Roll back a preview before retaining its stable IDs.
+    if (explorerSelection) explorerChanged(explorerSelection.selectionState());
+    explorerControls.disabled = true;
+    outEl.inert = true;
+    explorerMessage.textContent = "Rendering current source… previous preview is not interactive.";
+  }
+
+  function releaseExplorerSelection() {
+    explorerSelection?.dispose();
+    explorerSelection = null;
+    explorerNodes = [];
+  }
+
+  function adoptExplorer() {
+    if (!explorerActive || !explorerFactory || disposed) return;
+    releaseExplorerSelection();
+    const root = outEl.querySelector(":scope > svg");
+    try {
+      if (!root) throw new Error("The renderer did not return an addressable SVG root.");
+      explorerSelection = explorerFactory({ svg: root,
+        tool: document.getElementById("explorer-tool").value,
+        onSelectionChange: explorerChanged,
+        onError: error => { explorerMessage.textContent = String(error.message || error); },
+      });
+      explorerNodes = [...root.querySelectorAll(".fm-node[data-id]")].map(element => ({
+        id: element.getAttribute("data-id"), element,
+        label: [...element.querySelectorAll("text")].map(text => text.textContent).join(" ").trim(),
+      }));
+      const available = new Set(explorerNodes.map(node => node.id));
+      const retained = retainedNodeIds.filter(id => available.has(id));
+      restoringExplorer = true;
+      try {
+        // Try the common path atomically. A now-hidden node must not discard all other IDs.
+        if (retained.length && !explorerSelection.selectNodes(retained)) {
+          for (const id of retained) explorerSelection.selectNode(id, "add");
+        }
+        if (retainedPrimary && retained.includes(retainedPrimary)) explorerSelection.selectNode(retainedPrimary, "add");
+      } finally { restoringExplorer = false; }
+      outEl.inert = false;
+      explorerControls.disabled = false;
+      explorerChanged(explorerSelection.selectionState());
+      filterExplorerNodes();
+      explorerMessage.textContent = explorerNodes.length ? "Selection is ready for the current source." :
+        "This diagram has no addressable node groups; its SVG remains visible.";
+    } catch (error) {
+      releaseExplorerSelection();
+      explorerControls.disabled = true;
+      outEl.inert = true;
+      explorerMessage.textContent = `Explorer unavailable: ${error.message || error}`;
+    }
+  }
+
+  function closeExplorer() {
+    previewModeRevision += 1;
+    explorerActive = false;
+    releaseExplorerSelection();
+    retainedNodeIds = [];
+    retainedPrimary = null;
+    explorerPanel.hidden = true;
+    outEl.inert = false;
+    const button = document.getElementById("explore");
+    button.setAttribute("aria-expanded", "false");
+    button.textContent = "Explore / select nodes";
+  }
+
+  function chooseExplorerNode(id) {
+    if (!explorerActive || explorerControls.disabled || !explorerSelection) return;
+    try {
+      explorerSelection.selectNode(id);
+      if (explorerSelection.selectionState().primaryNodeId !== id) {
+        explorerMessage.textContent = "That node has no visible selectable geometry.";
+        return;
+      }
+      explorerNodes.find(node => node.id === id)?.element.scrollIntoView({ block: "nearest", inline: "nearest" });
+      explorerMessage.textContent = `Selected ${id}.`;
+    } catch (error) { explorerMessage.textContent = String(error.message || error); }
+  }
+
+  document.getElementById("explore").addEventListener("click", async () => {
+    if (explorerActive) { closeExplorer(); return; }
+    const modeRevision = ++previewModeRevision;
+    explorerActive = true;
+    explorerPanel.hidden = false;
+    document.getElementById("explore").setAttribute("aria-expanded", "true");
+    document.getElementById("explore").textContent = "Close explorer";
+    suspendExplorer();
+    try {
+      const { bindSvgSelection } = await import("./mermaid.mjs");
+      if (disposed || modeRevision !== previewModeRevision || !explorerActive) return;
+      explorerFactory = bindSvgSelection;
+      sourceEditor?.dispose();
+      sourceEditor = null;
+      document.getElementById("source-editor").hidden = true;
+      document.getElementById("edit-source").disabled = false;
+      stopPreviewWorker();
+      // Deliberately select SVG-in-worker, rather than moving parsing/layout to the UI thread.
+      svgPreview = true;
+      mainThread = false;
+      canvasEl.remove();
+      startWorker();
+    } catch (error) {
+      if (disposed || modeRevision !== previewModeRevision) return;
+      closeExplorer();
+      log(`explorer unavailable: ${error.message || error}`, "err");
+    }
+  });
+  explorerSearch.addEventListener("input", filterExplorerNodes);
+  explorerSearch.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    const id = explorerResults.options[0]?.value;
+    if (id !== undefined) chooseExplorerNode(id);
+  });
+  explorerResults.addEventListener("change", () => chooseExplorerNode(explorerResults.value));
+  document.getElementById("explorer-tool").addEventListener("change", event => explorerSelection?.setTool(event.target.value));
+  document.getElementById("explorer-clear").addEventListener("click", () => explorerSelection?.clear());
 
   function mountSourceEditorInstance() {
     return sourceEditorFactory({
@@ -117,7 +304,13 @@
     const roundTrip = Math.round(performance.now() - startedAt);
     switch (msg.kind) {
       case "completed":
-        if (typeof msg.svg === "string") outEl.innerHTML = msg.svg;
+        if (typeof msg.svg === "string") {
+          releaseExplorerSelection();
+          outEl.innerHTML = msg.svg;
+          adoptExplorer();
+        } else if (explorerActive) {
+          explorerMessage.textContent = "The current renderer returned no SVG; selection remains suspended.";
+        }
         log(
           `#${msg.requestId} completed in ${roundTrip}ms` +
             (msg.timings ? ` (parse ${msg.timings.parseMs}ms, layout ${msg.timings.layoutMs}ms, render ${msg.timings.renderMs}ms)` : "") +
@@ -129,6 +322,7 @@
         log(`#${msg.requestId} superseded`, "warn");
         break;
       case "failed":
+        if (explorerActive) explorerMessage.textContent = "Rendering failed; selection stays suspended until a successful render.";
         log(`#${msg.requestId} failed: ${msg.reason}`, "err");
         break;
       default:
@@ -185,6 +379,7 @@
 
   function render() {
     if (disposed) return;
+    suspendExplorer();
     // Source edits and undo/redo can change the textarea without dispatching an input event.
     documentWorkspace?.sourceChanged();
     shareControls?.sourceChanged();
@@ -255,7 +450,7 @@
       };
 
       const capabilities = {
-        offscreenCanvas: typeof OffscreenCanvas !== "undefined",
+        offscreenCanvas: !svgPreview && typeof OffscreenCanvas !== "undefined",
         worker: true,
         canvasTransferred: false,
       };
@@ -283,11 +478,16 @@
   // No debounce: this sample exercises supersession rather than hiding it behind a timer.
   srcEl.addEventListener("input", render);
   document.getElementById("edit-source")?.addEventListener("click", async (event) => {
+    closeExplorer(); // Source-span editing and node selection cannot own the same pointer.
+    const modeRevision = previewModeRevision;
     const button = event.currentTarget;
     button.disabled = true;
     try {
       const { mountSourceEditor } = await import("./fm-source-editor.js");
-      if (disposed) return;
+      if (disposed || modeRevision !== previewModeRevision) {
+        if (!disposed) button.disabled = false;
+        return;
+      }
       sourceEditorFactory = mountSourceEditor;
       sourceEditor = mountSourceEditorInstance();
       // This is an explicit mode change, not a worker failure. Editing needs addressable SVG.
@@ -348,6 +548,7 @@
   globalThis.addEventListener("pagehide", (event) => {
     if (event.persisted) return; // A back/forward-cache restore resumes this instance.
     disposed = true;
+    closeExplorer();
     sourceEditor?.dispose();
     deckEditor?.dispose();
     configEditor?.dispose();
@@ -365,6 +566,11 @@
     documentWorkspace = mountDocumentWorkspace({
       sourceEl: srcEl, initialSource, panelEl: document.getElementById("document-toolbar"), onChange: render,
       onDocumentChange: () => {
+        // Equal authored IDs in a different file are not the same user selection.
+        retainedNodeIds = [];
+        retainedPrimary = null;
+        releaseExplorerSelection();
+        if (explorerActive) suspendExplorer();
         if (sourceEditor) {
           sourceEditor.dispose();
           document.getElementById("source-editor").replaceChildren();
