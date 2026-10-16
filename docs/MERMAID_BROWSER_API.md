@@ -148,6 +148,61 @@ resolve inside their own diagram. Unresolved relationships fail before publicati
 The adapter rejects processing instructions and non-canonical URL/style/ID attributes
 that could change interpretation when serialized SVG is inserted through HTML.
 
+## Interactive Canvas2D selection
+
+The raw WASM `Diagram` API retains the exact parsed IR, layout, draw viewport, and
+selection state for a Canvas2D surface. `web/mermaid.mjs` exports
+`bindCanvasSelection({ canvas, diagram, ... })` to connect browser pointer and keyboard
+input to that native session without reimplementing geometry in JavaScript.
+
+```js
+import init, { Diagram } from './pkg/frankenmermaid.js';
+import { bindCanvasSelection } from './web/mermaid.mjs';
+
+await init();
+const canvas = document.querySelector('canvas');
+const diagram = new Diagram(canvas);
+diagram.render('flowchart LR\nA-->B\nB-->C');
+
+const selection = bindCanvasSelection({
+  canvas,
+  diagram,
+  tool: 'box',
+  containment: 'intersects',
+  onSelectionChange(state) {
+    console.log(state.selectedNodeIds, state.primaryNodeId);
+  },
+});
+
+selection.beforeRender();
+diagram.render('flowchart LR\nA-->C\nC-->D');
+selection.refresh();
+
+selection.dispose();
+diagram.destroy();
+```
+
+Pointer coordinates are converted from CSS pixels to backing-store pixels exactly once.
+The native session then applies the viewport from the actual draw, including fit, padding,
+zoom, and layout-origin normalization. Clicks support replace/add/toggle/remove semantics;
+arrow keys move the primary selection and Shift+Arrow extends it. Box and lasso drags are
+transactional: previews start from the pointer-down selection, Escape/lost capture rolls
+them back, and pointer-up commits only the current gesture token. Selection never follows
+links or invokes authored callbacks; use `hitTestInteraction` when a host intentionally
+wants to inspect raster interaction metadata.
+
+`Diagram.selectionState()` returns stable authored node IDs, the primary keyboard anchor,
+the active gesture token as a decimal string, and `frameAvailable`. `Diagram.redraw()`
+repaints retained geometry and selection without parsing or laying out again.
+`Diagram.invalidateFrame()` must be called after an external canvas clear/reset,
+including assigning the same width/height; resize detection otherwise invalidates stale
+picking automatically. Source replacement reconciles committed selection by author ID and
+revokes provisional gestures.
+
+The binding fails explicitly against an older `pkg/` that lacks the session exports.
+After changing Rust/WASM selection code, run the canonical `build-wasm.sh` before treating
+this browser path as qualified; source-only commits do not update the checked-in package.
+
 ## Parsing and errors
 
 The native Venn, Wardley, and Event Modeling families are accepted by this adapter as
@@ -258,6 +313,8 @@ python web/mermaid-compat.browser.test.py
 python web/mermaid-interactions.browser.test.py
 python web/mermaid-worker.browser.test.py
 python web/mermaid-native-svg.browser.test.py
+node --experimental-vm-modules --test scripts/canvas_selection_test.mjs
+python web/mermaid-canvas.browser.test.py
 ```
 
 The browser tests execute production DOM/CSS handling and real pointer/keyboard input in
