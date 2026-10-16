@@ -125,7 +125,7 @@ Current status in this file is grounded in:
 | Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers |
 | Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
 | SVG renderer | Partial | 21 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
-| Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs |
+| Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs, and opt-in bounded debug metrics overlay (crossings/bends/horizontal symmetry) |
 | Canvas/WASM | Partial | Canvas2D with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, and mock-context coverage; compiled package qualification remains separate |
 | Diff engine | Complete | Structural node/edge diffing with change classification |
 | Minimap | Complete | Density-aware scaling with viewport indicator |
@@ -154,11 +154,13 @@ Current status in this file is grounded in:
 
 ### Rendering-Level
 
-- Terminal fidelity-tier selection and overlay behavior still need an
-  evidence-backed parity audit against FrankenTUI's `Outline` / `Compact` /
-  `Normal` / `Rich` model
-- Debug overlay panel (crossings, bends, symmetry metrics) — TUI-specific and
-  not yet mapped into frankenmermaid surfaces
+- Terminal fidelity-tier selection still needs an evidence-backed parity audit against
+  FrankenTUI's `Outline` / `Compact` / `Normal` / `Rich` model. Frankenmermaid currently resolves
+  `Compact` / `Normal` / `Rich` plus auto sizing, while degradation maps `Outline` onto its most
+  conservative compact path.
+- The debug overlay is now mapped onto terminal output as an opt-in, viewport-bounded plain-text
+  panel with crossing count, rendered polyline bend count, and a deterministic horizontal
+  symmetry score. Exact reference-panel presentation semantics remain to be audited.
 - Interactive selection state is now mapped into Canvas/WASM: retained author-ID highlight,
   directional navigation, modifier selection, and transactional box/lasso gestures share the
   renderer's actual viewport. Remaining work is package rebuild/browser qualification and any
