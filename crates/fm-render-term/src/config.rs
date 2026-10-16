@@ -34,6 +34,11 @@ pub struct TermRenderConfig {
     pub max_label_chars: usize,
     /// Maximum label lines before truncation.
     pub max_label_lines: usize,
+    /// Whether textual labels, titles, legends, and annotations are rendered.
+    ///
+    /// This is distinct from label length limits: zero limits remain clamped for ordinary callers,
+    /// while degradation can explicitly request a true skeleton-only surface.
+    pub show_labels: bool,
     /// Show selection highlighting.
     pub show_selection: bool,
     /// Show cluster decorations.
@@ -70,6 +75,7 @@ impl Default for TermRenderConfig {
             max_height: 40,
             max_label_chars: 24,
             max_label_lines: 2,
+            show_labels: true,
             show_selection: false,
             show_clusters: true,
             diagonal_edges: true,
@@ -121,8 +127,7 @@ impl TermRenderConfig {
             self.show_clusters = false;
         }
         if plan.hide_labels {
-            self.max_label_chars = 0;
-            self.max_label_lines = 0;
+            self.show_labels = false;
         }
         match plan.target_fidelity {
             fm_core::MermaidFidelity::Compact => {
@@ -134,6 +139,7 @@ impl TermRenderConfig {
                 self.render_mode = MermaidRenderMode::CellOnly;
                 self.show_clusters = false;
                 self.diagonal_edges = false;
+                self.show_labels = false;
             }
             _ => {}
         }
@@ -181,6 +187,7 @@ pub struct ResolvedConfig {
     pub rows: usize,
     pub max_label_chars: usize,
     pub max_label_lines: usize,
+    pub show_labels: bool,
     pub show_clusters: bool,
     pub diagonal_edges: bool,
     pub padding: usize,
@@ -231,6 +238,7 @@ impl ResolvedConfig {
             rows: available_rows,
             max_label_chars,
             max_label_lines,
+            show_labels: config.show_labels,
             show_clusters: config.show_clusters && !matches!(tier, MermaidTier::Compact),
             diagonal_edges: config.diagonal_edges,
             padding: config.padding,
@@ -280,7 +288,8 @@ mod tests {
         assert_eq!(config.tier, MermaidTier::Compact);
         assert_eq!(config.render_mode, MermaidRenderMode::CellOnly);
         assert!(!config.show_clusters);
-        assert_eq!(config.max_label_chars, 0);
+        assert!(!config.show_labels);
+        assert_eq!(config.max_label_chars, 48);
     }
 
     #[test]
@@ -304,6 +313,7 @@ mod tests {
         assert_eq!(config.tier, MermaidTier::Compact);
         assert!(!config.show_clusters);
         assert!(!config.diagonal_edges);
+        assert!(!config.show_labels);
     }
 
     #[test]
@@ -327,6 +337,19 @@ mod tests {
     }
 
     #[test]
+    fn resolved_zero_label_limits_stay_safe_without_becoming_a_hide_signal() {
+        let config = TermRenderConfig {
+            max_label_chars: 0,
+            max_label_lines: 0,
+            ..TermRenderConfig::default()
+        };
+        let resolved = ResolvedConfig::resolve(&config, 80, 24);
+        assert!(resolved.show_labels);
+        assert_eq!(resolved.max_label_chars, 1);
+        assert_eq!(resolved.max_label_lines, 1);
+    }
+
+    #[test]
     fn braille_has_2x4_multiplier() {
         let config = ResolvedConfig {
             render_mode: MermaidRenderMode::Braille,
@@ -336,6 +359,7 @@ mod tests {
             rows: 24,
             max_label_chars: 24,
             max_label_lines: 2,
+            show_labels: true,
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,
