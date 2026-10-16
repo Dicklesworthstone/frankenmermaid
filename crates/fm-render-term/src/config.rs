@@ -44,6 +44,12 @@ pub struct TermRenderConfig {
     pub padding: usize,
     /// Overlay a minimap onto the rendered terminal output.
     pub show_minimap: bool,
+    /// Overlay deterministic layout-quality metrics on the diagram.
+    ///
+    /// This is deliberately plain text with no ANSI escapes so terminal output remains safe to
+    /// pipe to files. The panel reports crossings, rendered polyline bends, and a 0..=1000
+    /// horizontal symmetry score. It occupies existing cells rather than growing the viewport.
+    pub debug_overlay: bool,
     /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
     ///
     /// SUPPLIED, NEVER READ FROM THE CLOCK, exactly as `SvgRenderConfig::gantt_today` and
@@ -69,6 +75,7 @@ impl Default for TermRenderConfig {
             diagonal_edges: true,
             padding: 1,
             show_minimap: false,
+            debug_overlay: false,
             gantt_today: None,
         }
     }
@@ -177,6 +184,8 @@ pub struct ResolvedConfig {
     pub show_clusters: bool,
     pub diagonal_edges: bool,
     pub padding: usize,
+    /// Whether to overlay layout-quality metrics inside the resolved viewport.
+    pub debug_overlay: bool,
     /// [`TermRenderConfig::gantt_today`] resolved to an epoch day number, or `None` when no date
     /// was supplied or the one supplied is not a calendar date.
     ///
@@ -225,6 +234,7 @@ impl ResolvedConfig {
             show_clusters: config.show_clusters && !matches!(tier, MermaidTier::Compact),
             diagonal_edges: config.diagonal_edges,
             padding: config.padding,
+            debug_overlay: config.debug_overlay,
             gantt_today_day: config
                 .gantt_today
                 .as_deref()
@@ -329,6 +339,7 @@ mod tests {
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,
+            debug_overlay: false,
             gantt_today_day: None,
         };
         assert_eq!(config.subcell_multiplier(), (2, 4));
