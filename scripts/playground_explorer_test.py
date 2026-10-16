@@ -48,6 +48,11 @@ window.center = id => {
   const node = [...document.querySelectorAll('#out .fm-node')].find(el => el.dataset.id === id);
   const r = node.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
 };
+window.camera = () => { const r = document.querySelector('#out svg').viewBox.baseVal;
+  return {x:r.x,y:r.y,width:r.width,height:r.height}; };
+window.near = (a,b,tolerance=.002) => expect(Math.abs(a-b)<=tolerance, a+' not near '+b);
+window.at = (x,y) => new DOMPoint(x,y).matrixTransform(document.querySelector('#out svg').getScreenCTM().inverse());
+window.frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 '''
 STUBS = {
     '/web/mermaid-compat.mjs': '''export function createWorkerMermaid() { return {}; }
@@ -113,8 +118,9 @@ def main():
         def open_explorer(svg=SVG):
             if page.get_attribute('#explore', 'aria-expanded') == 'true':
                 page.click('#explore')
+            previous_workers = page.evaluate('workers.length')
             page.click('#explore')
-            page.wait_for_function('workers.at(-1)?.latest && !workers.at(-1).terminated && !workers.at(-1).init.capabilities.offscreenCanvas')
+            page.wait_for_function('(count) => workers.length > count && workers.at(-1)?.latest && !workers.at(-1).terminated && !workers.at(-1).init.capabilities.offscreenCanvas', arg=previous_workers)
             page.evaluate('(svg) => finish(svg)', svg)
             page.wait_for_function('!document.querySelector("#explorer-controls").disabled')
 
@@ -196,6 +202,141 @@ expect(document.querySelector('#explorer-search-count').textContent.includes('26
             page.evaluate("expect(document.querySelector('#explorer').hidden); expect(!document.querySelector('#out').inert); expect(workers.at(-1).terminated);")))
         check('explorer-can-replace-source-editor', lambda: (
             open_explorer(), page.evaluate("expect(editorDisposed===1); expect(document.querySelector('#source-editor').hidden); expect(!document.querySelector('#edit-source').disabled);")))
+        check('zoom-buttons-do-not-reparse-or-change-source', lambda: (
+            page.evaluate("window.beforeCamera=camera(); window.messageCount=workerMessages.length; window.beforeSource=document.querySelector('#src').value;"),
+            page.click('#explorer-zoom-in'), page.evaluate("near(camera().width,beforeCamera.width/1.25); expect(workerMessages.length===messageCount); expect(document.querySelector('#src').value===beforeSource);"),
+            page.click('#explorer-zoom-out'), page.evaluate("near(camera().width,beforeCamera.width);")))
+
+        def wheel_anchor():
+            page.click('#explorer-fit')
+            p = page.evaluate("center('B')")
+            page.evaluate('(p) => { window.anchor=at(p.x,p.y); window.oldWidth=camera().width; }', p)
+            page.mouse.move(p['x'], p['y'])
+            page.mouse.wheel(0, -140)
+            page.wait_for_function('camera().width < oldWidth')
+            page.evaluate('(p) => {const now=at(p.x,p.y); near(now.x,anchor.x); near(now.y,anchor.y);}', p)
+
+        check('wheel-zoom-keeps-pointer-anchor', wheel_anchor)
+        check('zoom-extremes-are-bounded-and-finite', '''
+const root=document.querySelector('#out svg'), r=root.getBoundingClientRect();
+for (let i=0;i<30;i++) root.dispatchEvent(new WheelEvent('wheel',{deltaY:-600,clientX:r.x+r.width/2,clientY:r.y+r.height/2,bubbles:true,cancelable:true}));
+expect(document.querySelector('#explorer-zoom').textContent==='51200% of fit'); expect(Object.values(camera()).every(Number.isFinite));
+for (let i=0;i<30;i++) root.dispatchEvent(new WheelEvent('wheel',{deltaY:600,clientX:r.x+r.width/2,clientY:r.y+r.height/2,bubbles:true,cancelable:true}));
+expect(document.querySelector('#explorer-zoom').textContent==='5% of fit'); expect(Object.values(camera()).every(Number.isFinite));
+''')
+        check('fit-diagram-restores-home', lambda: (
+            page.click('#explorer-fit'), page.evaluate("expect(document.querySelector('#explorer-zoom').textContent==='100% of fit');")))
+        check('fit-selection-frames-selected-node', lambda: (
+            click_node('A'), page.click('#explorer-fit-selection'), page.evaluate('''
+equal(ids(),['A']); const view=camera(); expect(view.x<=30 && view.x+view.width>=130);
+expect(view.y<=35 && view.y+view.height>=85); expect(view.width<540);
+const overlay=document.querySelector('[data-node-id="A"]').getBoundingClientRect();
+const node=document.querySelector('.fm-node[data-id="A"]').getBoundingClientRect();
+near(overlay.x,node.x); near(overlay.y,node.y); near(overlay.width,node.width);
+''')))
+        check('fit-empty-selection-is-explicit', lambda: (
+            page.click('#explorer-clear'), page.click('#explorer-fit-selection'),
+            page.evaluate("expect(document.querySelector('#explorer-message').textContent.includes('Select one or more')); expect(Object.values(camera()).every(Number.isFinite));")))
+
+        def pan_camera(button='middle', dx=40, dy=25):
+            page.click('#explorer-fit')
+            click_node('A')
+            p = page.evaluate("center('B')")
+            before = page.evaluate("center('A')")
+            page.mouse.move(p['x'], p['y'])
+            page.mouse.down(button=button)
+            page.mouse.move(p['x']+dx, p['y']+dy)
+            page.mouse.up(button=button)
+            page.evaluate('([before,dx,dy]) => {const now=center("A"); near(now.x,before.x+dx); near(now.y,before.y+dy); equal(ids(),["A"]);}', [before,dx,dy])
+
+        check('middle-pan-preserves-selection', pan_camera)
+
+        def left_pan():
+            page.select_option('#explorer-tool','pan')
+            page.click('#explorer-fit')
+            before = page.evaluate("center('A')")
+            p = page.evaluate("center('B')")
+            page.mouse.move(p['x'],p['y'])
+            page.mouse.down()
+            page.mouse.move(p['x']-45,p['y']+20)
+            page.mouse.up()
+            page.evaluate('(before) => {const now=center("A"); near(now.x,before.x-45); near(now.y,before.y+20); equal(ids(),["A"]);}', before)
+
+        check('pan-tool-left-drag-is-camera-only', left_pan)
+        check('pan-keyboard-moves-without-changing-selection', lambda: (
+            page.evaluate("window.oldPoint=center('A'); document.querySelector('#out svg').focus();"),
+            page.keyboard.press('ArrowRight'), page.evaluate("near(center('A').x,oldPoint.x-50); equal(ids(),['A']);")))
+        check('keyboard-fit-and-zoom', lambda: (
+            page.keyboard.press('0'), page.evaluate("expect(document.querySelector('#explorer-zoom').textContent==='100% of fit'); window.oldWidth=camera().width;"),
+            page.keyboard.press('+'), page.evaluate("near(camera().width,oldWidth/1.25);"),
+            page.keyboard.press('f'), page.evaluate("expect(camera().width<540); equal(ids(),['A']);")))
+
+        def pinch():
+            page.click('#explorer-fit')
+            r = page.locator('#out svg').bounding_box()
+            x, y = r['x']+r['width']/2, r['y']+r['height']/2
+            session = page.context.new_cdp_session(page)
+            point = lambda id, px: {'id': id, 'x': px, 'y': y, 'radiusX': 1, 'radiusY': 1, 'force': 1}
+            page.evaluate('([x,y])=>{window.pinchAnchor=at(x,y);window.pinchWidth=camera().width;}',[x,y])
+            session.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[point(1,x-40)]})
+            session.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[point(1,x-40),point(2,x+40)]})
+            session.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[point(1,x-80),point(2,x+80)]})
+            session.send('Input.dispatchTouchEvent',{'type':'touchEnd','touchPoints':[]})
+            page.evaluate('([x,y])=>{near(camera().width,pinchWidth/2);const p=at(x,y);near(p.x,pinchAnchor.x);near(p.y,pinchAnchor.y);equal(ids(),["A"]);}',[x,y])
+            session.detach()
+
+        check('real-two-touch-pinch-keeps-midpoint-anchor', pinch)
+        check('camera-and-selection-survive-source-refresh', '''
+window.beforeCamera=camera(); typeSource('same geometry, new source'); finish(testSvg.replace('Alpha','Alpha revised'));
+const now=camera(); for(const key of Object.keys(now)) near(now[key],beforeCamera[key]); equal(ids(),['A']);
+''')
+        check('document-switch-resets-camera', '''
+openTestDocument('new document'); finish(); expect(document.querySelector('#explorer-zoom').textContent==='100% of fit'); equal(ids(),[]);
+''')
+
+        def box_after_zoom():
+            page.select_option('#explorer-tool','box')
+            page.click('#explorer-fit')
+            page.click('#explorer-zoom-in')
+            r = page.locator('#out .fm-node[data-id="C"]').bounding_box()
+            page.mouse.move(r['x']-5,r['y']-5)
+            page.mouse.down()
+            page.mouse.move(r['x']+r['width']+5,r['y']+r['height']+5)
+            page.mouse.up()
+            page.evaluate("equal(ids(),['C']);")
+
+        check('box-selection-uses-camera-transformed-geometry', box_after_zoom)
+
+        def pan_revoked_by_source():
+            page.select_option('#explorer-tool','pan')
+            p = page.evaluate("center('C')")
+            page.mouse.move(p['x'],p['y'])
+            page.mouse.down()
+            page.mouse.move(p['x']+15,p['y']+10)
+            page.evaluate("typeSource('typing cancels pan'); window.pendingCamera=camera(); expect(document.querySelector('#out').inert);")
+            page.mouse.move(p['x']+75,p['y']+50)
+            page.mouse.up()
+            page.evaluate("for(const key of Object.keys(camera())) near(camera()[key],pendingCamera[key]); finish(); equal(ids(),['C']);")
+
+        check('source-edit-revokes-pan-capture', pan_revoked_by_source)
+        check('nonfinite-wheel-input-does-not-corrupt-view', '''
+const root=document.querySelector('#out svg'), before=camera();
+// Native WheelEventInit rejects Infinity; a forged event exercises the defensive boundary.
+const event=new WheelEvent('wheel',{bubbles:true,cancelable:true});
+Object.defineProperty(event,'deltaY',{value:Infinity}); root.dispatchEvent(event); equal(camera(),before);
+''')
+
+        def resizing():
+            page.evaluate("window.preResize=camera();")
+            page.set_viewport_size({'width':1200,'height':950})
+            page.evaluate('frames()')
+            page.evaluate('''const now=camera(); near(now.x+now.width/2,preResize.x+preResize.width/2);
+near(now.y+now.height/2,preResize.y+preResize.height/2); equal(ids(),['C']);''')
+
+        check('resize-preserves-camera-center-and-selection', resizing)
+        check('closing-restores-original-viewbox', lambda: (
+            page.click('#explore'), page.evaluate("expect(document.querySelector('#out svg').getAttribute('viewBox')==='0 0 540 320'); expect(!document.querySelector('#out').hasAttribute('data-exploring'));"),
+            open_explorer()))
         check('pagehide-cleans-up-interaction-and-worker', '''
 const root=document.querySelector('#out svg'); window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));
 expect(workers.at(-1).terminated); expect(!root.querySelector('[data-fm-selection-overlay]'));

@@ -13,7 +13,7 @@
 <style>
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
   textarea { font: 13px/1.4 ui-monospace, monospace; border: 0; border-right: 1px solid #cbd5e1; padding: 12px; resize: none; }
-  #right { display: flex; flex-direction: column; min-width: 0; }
+  #right { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
   #status { padding: 8px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
   #out { flex: 1; overflow: auto; padding: 12px; }
   #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
@@ -46,6 +46,10 @@
   #explorer-results { max-height: 7em; }
   #explorer-selection, #explorer-message { display: block; overflow-wrap: anywhere; }
   #out[inert] { opacity: .6; }
+  #out[data-exploring] { flex: 1 0 20rem; min-height: 20rem; height: 40vh; overflow: hidden; padding: 0; }
+  #out[data-exploring] > svg { display: block; width: 100% !important; height: 100% !important; max-width: none !important; }
+  #out[data-explorer-tool="pan"] { cursor: grab; }
+  #explorer-zoom { display: inline-block; min-width: 8em; }
 </style>
 
 <textarea id="src" spellcheck="false">flowchart TD
@@ -69,8 +73,13 @@
   <section id="config-editor" aria-label="Diagram configuration editor" hidden></section>
   <section id="explorer" aria-label="Diagram explorer" hidden>
     <fieldset id="explorer-controls" disabled>
-      <label>Selection tool <select id="explorer-tool"><option value="box">Box</option><option value="lasso">Lasso</option></select></label>
+      <label>Pointer tool <select id="explorer-tool"><option value="box">Box</option><option value="lasso">Lasso</option><option value="pan">Pan / pinch</option></select></label>
       <button id="explorer-clear" type="button">Clear selection</button>
+      <button id="explorer-zoom-out" type="button" aria-label="Zoom out">−</button>
+      <button id="explorer-zoom-in" type="button" aria-label="Zoom in">+</button>
+      <button id="explorer-fit" type="button">Fit diagram</button>
+      <button id="explorer-fit-selection" type="button">Fit selection</button>
+      <output id="explorer-zoom" aria-label="Zoom relative to fitted diagram"></output>
       <label for="explorer-search">Find a node by ID or label</label>
       <input id="explorer-search" type="search" autocomplete="off" placeholder="Search nodes; Enter selects the first match" />
       <select id="explorer-results" size="3" aria-label="Matching nodes"></select>
@@ -79,6 +88,7 @@
     <output id="explorer-selection" aria-live="polite"></output>
     <span id="explorer-message" role="status"></span>
     <small>Click or drag to select. Shift adds, Ctrl/Command toggles, Alt removes. Arrow keys navigate; Escape cancels a drag or clears selection. Selection never activates links.</small>
+    <small>Wheel zooms at the pointer. Pan tool or middle-drag moves the camera; two touches pinch in Pan mode. +/− zoom, 0 fits the diagram, F fits selection. Camera changes do not edit exported source.</small>
   </section>
   <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
@@ -120,12 +130,230 @@
   let retainedNodeIds = [];
   let retainedPrimary = null;
   let restoringExplorer = false;
+  let explorerCamera = null;
+  let retainedCamera = null;
   const explorerPanel = document.getElementById("explorer");
   const explorerControls = document.getElementById("explorer-controls");
   const explorerMessage = document.getElementById("explorer-message");
   const explorerSummary = document.getElementById("explorer-selection");
   const explorerSearch = document.getElementById("explorer-search");
   const explorerResults = document.getElementById("explorer-results");
+
+  // Camera-only navigation: change the root viewBox, never authored node coordinates,
+  // source, or the worker's layout. All pointer math uses the actual inverse screen CTM.
+  function mountExplorerCamera(root) {
+    const original = root.getAttribute("viewBox");
+    const values = (original || "").trim().split(/[\s,]+/u).map(Number);
+    const valid = box => box && [box.x, box.y, box.width, box.height].every(Number.isFinite)
+      && box.width > 0 && box.height > 0;
+    let home = values.length === 4 ? { x: values[0], y: values[1], width: values[2], height: values[3] } : null;
+    if (!valid(home)) {
+      const box = root.getBBox();
+      home = { x: box.x, y: box.y, width: box.width, height: box.height };
+    }
+    if (!valid(home)) throw new Error("The diagram has no finite camera bounds.");
+    let view = { ...home }, navigated = false, closed = false, lastWritten = original;
+    let lastSize = "", suppressedPointer = null;
+    const pointers = new Map(), listeners = [];
+    const minimumZoom = .05, maximumZoom = 512;
+    const size = () => [root.clientWidth, root.clientHeight];
+    const ready = () => !closed && explorerActive && !explorerControls.disabled && root.isConnected;
+    const panMode = () => document.getElementById("explorer-tool").value === "pan";
+    const editable = event => event.target?.closest?.("input, textarea, select, button, [contenteditable]:not([contenteditable='false'])");
+    function inverse() {
+      const matrix = root.getScreenCTM();
+      if (!matrix || ![matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].every(Number.isFinite)
+        || !Number.isFinite(matrix.a * matrix.d - matrix.b * matrix.c) || matrix.a * matrix.d === matrix.b * matrix.c) return null;
+      const result = matrix.inverse();
+      return [result.a, result.b, result.c, result.d, result.e, result.f].every(Number.isFinite) ? result : null;
+    }
+    const point = (matrix, x, y) => ({ x: matrix.a * x + matrix.c * y + matrix.e, y: matrix.b * x + matrix.d * y + matrix.f });
+    function fitted(box) {
+      const [width, height] = size();
+      if (!valid(box) || width <= 0 || height <= 0) return null;
+      const padding = Math.min(24, width / 4, height / 4);
+      const scale = Math.max(box.width / (width - 2 * padding), box.height / (height - 2 * padding));
+      return { x: box.x + box.width / 2 - scale * width / 2, y: box.y + box.height / 2 - scale * height / 2,
+        width: scale * width, height: scale * height };
+    }
+    function write(box, manual = true) {
+      if (closed || !valid(box)) return false;
+      explorerSelection?.cancel(); // A camera change invalidates a lasso's captured geometry.
+      view = { ...box };
+      navigated = manual;
+      lastWritten = `${view.x} ${view.y} ${view.width} ${view.height}`;
+      root.setAttribute("viewBox", lastWritten);
+      explorerSelection?.redraw();
+      const full = fitted(home);
+      document.getElementById("explorer-zoom").textContent = full ? `${Math.round(full.width / view.width * 100)}% of fit` : "";
+      return true;
+    }
+    function fit(box = home, manual = false) {
+      const full = fitted(home), target = fitted(box);
+      if (!target || !full) return false;
+      const zoom = Math.max(minimumZoom, Math.min(maximumZoom, full.width / target.width));
+      const width = full.width / zoom, height = full.height / zoom;
+      return write({ x: box.x + box.width / 2 - width / 2, y: box.y + box.height / 2 - height / 2, width, height }, manual);
+    }
+    function snapshot() {
+      const full = fitted(home);
+      return { x: (view.x + view.width / 2 - home.x) / home.width,
+        y: (view.y + view.height / 2 - home.y) / home.height,
+        zoom: full ? full.width / view.width : 1, navigated };
+    }
+    function restore(state) {
+      const full = fitted(home);
+      if (!full) return false;
+      if (!state?.navigated || ![state.x, state.y, state.zoom].every(Number.isFinite) || state.zoom <= 0) return fit();
+      const zoom = Math.max(minimumZoom, Math.min(maximumZoom, state.zoom));
+      const width = full.width / zoom, height = full.height / zoom;
+      return write({ x: home.x + state.x * home.width - width / 2,
+        y: home.y + state.y * home.height - height / 2, width, height });
+    }
+    function zoomAt(factor, clientX, clientY) {
+      if (!ready() || !Number.isFinite(factor) || factor <= 0) return false;
+      const matrix = inverse(), full = fitted(home);
+      if (!matrix || !full) return false;
+      const currentZoom = full.width / view.width;
+      const nextZoom = Math.max(minimumZoom, Math.min(maximumZoom, currentZoom * factor));
+      const ratio = nextZoom / currentZoom;
+      const anchor = clientX === undefined ? { x: view.x + view.width / 2, y: view.y + view.height / 2 } : point(matrix, clientX, clientY);
+      if (![anchor.x, anchor.y].every(Number.isFinite)) return false;
+      return write({ x: anchor.x + (view.x - anchor.x) / ratio, y: anchor.y + (view.y - anchor.y) / ratio,
+        width: view.width / ratio, height: view.height / ratio });
+    }
+    function pan(dx, dy) {
+      const matrix = inverse();
+      if (!ready() || !matrix || ![dx, dy].every(Number.isFinite)) return false;
+      return write({ ...view, x: view.x - matrix.a * dx - matrix.c * dy,
+        y: view.y - matrix.b * dx - matrix.d * dy });
+    }
+    function fitSelection() {
+      if (!ready()) return false;
+      explorerSelection?.cancel();
+      if (!retainedNodeIds.length) return false;
+      const matrix = inverse();
+      if (!matrix) return false;
+      const ids = new Set(retainedNodeIds), points = [];
+      for (const node of explorerNodes) {
+        if (!ids.has(node.id)) continue;
+        const box = node.element.getBBox(), screen = node.element.getScreenCTM();
+        if (!valid(box) || !screen) continue;
+        for (const [x, y] of [[box.x, box.y], [box.x + box.width, box.y],
+          [box.x + box.width, box.y + box.height], [box.x, box.y + box.height]]) {
+          const mapped = point(screen, x, y);
+          const p = point(matrix, mapped.x, mapped.y);
+          if (Number.isFinite(p.x) && Number.isFinite(p.y)) points.push(p);
+        }
+      }
+      if (!points.length) return false;
+      // Reduction, not spread arguments: selecting a large graph must not overflow the call stack.
+      const box = points.reduce((b, p) => ({ x: Math.min(b.x, p.x), y: Math.min(b.y, p.y),
+        right: Math.max(b.right, p.x), bottom: Math.max(b.bottom, p.y) }), { x: Infinity, y: Infinity, right: -Infinity, bottom: -Infinity });
+      return fit({ x: box.x, y: box.y, width: box.right - box.x, height: box.bottom - box.y }, true);
+    }
+    function cancel() {
+      const ids = [...pointers.keys()];
+      pointers.clear();
+      for (const id of ids) {
+        suppressedPointer = id;
+        try { if (outEl.hasPointerCapture(id)) outEl.releasePointerCapture(id); } catch { /* Browser may release first. */ }
+      }
+      return ids.length > 0;
+    }
+    const consume = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+    function listen(target, name, handler, options) {
+      const guarded = event => {
+        try { handler(event); }
+        catch (error) { cancel(); explorerMessage.textContent = String(error.message || error); }
+      };
+      target.addEventListener(name, guarded, options);
+      listeners.push(() => target.removeEventListener(name, guarded, options));
+    }
+    listen(outEl, "wheel", event => {
+      if (!ready() || editable(event) || !Number.isFinite(event.deltaY)) return;
+      cancel();
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientHeight : 1;
+      if (zoomAt(Math.exp(-Math.max(-600, Math.min(600, event.deltaY * unit)) * .002), event.clientX, event.clientY)) consume(event);
+    }, { capture: true, passive: false });
+    listen(outEl, "pointerdown", event => {
+      if (!ready() || editable(event) || event.defaultPrevented || (!panMode() && event.button !== 1)
+        || ![0, 1].includes(event.button) || ![event.clientX, event.clientY].every(Number.isFinite)) return;
+      if (pointers.size >= 2 || (pointers.size && event.pointerType !== "touch")) { consume(event); return; }
+      explorerSelection?.cancel();
+      outEl.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      suppressedPointer = null;
+      consume(event);
+      root.focus({ preventScroll: true });
+    }, true);
+    function move(event) {
+      if (!pointers.has(event.pointerId)) return;
+      if (!ready() || ![event.clientX, event.clientY].every(Number.isFinite)) { cancel(); return; }
+      const before = [...pointers.values()];
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const after = [...pointers.values()];
+      const midpoint = items => ({ x: items.reduce((sum, p) => sum + p.x, 0) / items.length,
+        y: items.reduce((sum, p) => sum + p.y, 0) / items.length });
+      const from = midpoint(before), to = midpoint(after);
+      pan(to.x - from.x, to.y - from.y);
+      if (before.length === 2) {
+        const distance = items => Math.hypot(items[0].x - items[1].x, items[0].y - items[1].y);
+        if (distance(before) > 1 && distance(after) > 1) zoomAt(distance(after) / distance(before), to.x, to.y);
+      }
+      consume(event);
+    }
+    listen(outEl, "pointermove", event => {
+      if (event.buttons === 0 && pointers.has(event.pointerId)) cancel(); else move(event);
+    }, true);
+    listen(outEl, "pointerup", event => {
+      if (!pointers.has(event.pointerId)) return;
+      move(event); // Include the terminal sample, even without a preceding pointermove.
+      pointers.delete(event.pointerId);
+      suppressedPointer = event.pointerId;
+      try { if (outEl.hasPointerCapture(event.pointerId)) outEl.releasePointerCapture(event.pointerId); } catch { /* Already released. */ }
+      consume(event);
+    }, true);
+    for (const name of ["pointercancel", "lostpointercapture"]) listen(outEl, name, event => {
+      if (pointers.has(event.pointerId)) cancel();
+    }, true);
+    listen(outEl, "click", event => {
+      if (suppressedPointer !== null && event.detail !== 0
+        && (event.pointerId === undefined || event.pointerId === suppressedPointer)) {
+        suppressedPointer = null; consume(event);
+      }
+    }, true);
+    listen(outEl, "keydown", event => {
+      if (!ready() || editable(event) || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+      const keys = { ArrowLeft: [50, 0], ArrowRight: [-50, 0], ArrowUp: [0, 50], ArrowDown: [0, -50] };
+      if (["+", "=", "-", "0", "f", "F"].includes(event.key)) {
+        cancel(); consume(event);
+        if (event.key === "0") fit();
+        else if (event.key.toLowerCase() === "f") fitSelection();
+        else zoomAt(event.key === "-" ? 1 / 1.25 : 1.25);
+      } else if (panMode() && keys[event.key]) { cancel(); consume(event); pan(...keys[event.key]); }
+      else if (event.key === "Escape" && cancel()) consume(event);
+    }, true);
+    listen(window, "blur", cancel);
+    listen(document, "visibilitychange", () => { if (document.hidden) cancel(); });
+    const observer = new ResizeObserver(() => {
+      const key = size().join(",");
+      if (key === lastSize) return;
+      lastSize = key;
+      if (ready()) { cancel(); restore(snapshot()); }
+    });
+    observer.observe(outEl);
+    restore(retainedCamera);
+    return { snapshot, cancel, zoomAt, fitSelection, fit: () => ready() && fit(),
+      dispose() {
+        closed = true; cancel(); observer.disconnect();
+        for (const remove of listeners) remove();
+        if (root.getAttribute("viewBox") === lastWritten) {
+          if (original === null) root.removeAttribute("viewBox"); else root.setAttribute("viewBox", original);
+        }
+      },
+    };
+  }
 
   function stopPreviewWorker() {
     const previous = worker;
@@ -162,6 +390,8 @@
 
   function suspendExplorer() {
     if (!explorerActive) return;
+    explorerCamera?.cancel();
+    if (explorerCamera) retainedCamera = explorerCamera.snapshot();
     explorerSelection?.beforeRender(); // Roll back a preview before retaining its stable IDs.
     if (explorerSelection) explorerChanged(explorerSelection.selectionState());
     explorerControls.disabled = true;
@@ -172,6 +402,8 @@
   function releaseExplorerSelection() {
     explorerSelection?.dispose();
     explorerSelection = null;
+    explorerCamera?.dispose();
+    explorerCamera = null;
     explorerNodes = [];
   }
 
@@ -181,8 +413,9 @@
     const root = outEl.querySelector(":scope > svg");
     try {
       if (!root) throw new Error("The renderer did not return an addressable SVG root.");
+      explorerCamera = mountExplorerCamera(root);
       explorerSelection = explorerFactory({ svg: root,
-        tool: document.getElementById("explorer-tool").value,
+        tool: document.getElementById("explorer-tool").value === "lasso" ? "lasso" : "box",
         onSelectionChange: explorerChanged,
         onError: error => { explorerMessage.textContent = String(error.message || error); },
       });
@@ -220,8 +453,11 @@
     releaseExplorerSelection();
     retainedNodeIds = [];
     retainedPrimary = null;
+    retainedCamera = null;
     explorerPanel.hidden = true;
     outEl.inert = false;
+    delete outEl.dataset.exploring;
+    delete outEl.dataset.explorerTool;
     const button = document.getElementById("explore");
     button.setAttribute("aria-expanded", "false");
     button.textContent = "Explore / select nodes";
@@ -235,7 +471,7 @@
         explorerMessage.textContent = "That node has no visible selectable geometry.";
         return;
       }
-      explorerNodes.find(node => node.id === id)?.element.scrollIntoView({ block: "nearest", inline: "nearest" });
+      explorerCamera?.fitSelection();
       explorerMessage.textContent = `Selected ${id}.`;
     } catch (error) { explorerMessage.textContent = String(error.message || error); }
   }
@@ -245,6 +481,8 @@
     const modeRevision = ++previewModeRevision;
     explorerActive = true;
     explorerPanel.hidden = false;
+    outEl.dataset.exploring = "";
+    outEl.dataset.explorerTool = document.getElementById("explorer-tool").value;
     document.getElementById("explore").setAttribute("aria-expanded", "true");
     document.getElementById("explore").textContent = "Close explorer";
     suspendExplorer();
@@ -276,8 +514,19 @@
     if (id !== undefined) chooseExplorerNode(id);
   });
   explorerResults.addEventListener("change", () => chooseExplorerNode(explorerResults.value));
-  document.getElementById("explorer-tool").addEventListener("change", event => explorerSelection?.setTool(event.target.value));
+  document.getElementById("explorer-tool").addEventListener("change", event => {
+    explorerCamera?.cancel();
+    explorerSelection?.cancel();
+    outEl.dataset.explorerTool = event.target.value;
+    explorerSelection?.setTool(event.target.value === "lasso" ? "lasso" : "box");
+  });
   document.getElementById("explorer-clear").addEventListener("click", () => explorerSelection?.clear());
+  document.getElementById("explorer-zoom-in").addEventListener("click", () => explorerCamera?.zoomAt(1.25));
+  document.getElementById("explorer-zoom-out").addEventListener("click", () => explorerCamera?.zoomAt(1 / 1.25));
+  document.getElementById("explorer-fit").addEventListener("click", () => explorerCamera?.fit());
+  document.getElementById("explorer-fit-selection").addEventListener("click", () => {
+    if (!explorerCamera?.fitSelection()) explorerMessage.textContent = "Select one or more visible nodes to fit.";
+  });
 
   function mountSourceEditorInstance() {
     return sourceEditorFactory({
@@ -569,6 +818,7 @@
         // Equal authored IDs in a different file are not the same user selection.
         retainedNodeIds = [];
         retainedPrimary = null;
+        retainedCamera = null;
         releaseExplorerSelection();
         if (explorerActive) suspendExplorer();
         if (sourceEditor) {
