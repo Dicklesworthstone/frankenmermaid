@@ -4431,42 +4431,41 @@ fn render_quadrant_cell(
     let labels = &quad_meta.quadrant_labels;
     if show_labels {
         if let Some(q1) = labels.first() {
-        // Q1: top-right
-        let x = mid_x + 2;
-        let y = margin_top + 1;
-        let label: String = q1.chars().take(chart_w / 2 - 3).collect();
-        buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
-    }
+            // Q1: top-right
+            let x = mid_x + 2;
+            let y = margin_top + 1;
+            let label: String = q1.chars().take(chart_w / 2 - 3).collect();
+            buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
+        }
         if let Some(q2) = labels.get(1) {
-        // Q2: top-left
-        let label: String = q2.chars().take(chart_w / 2 - 3).collect();
-        let x = mid_x.saturating_sub(2 + label.len());
-        buffer.set_string(x, margin_top + 1, &label);
-    }
+            // Q2: top-left
+            let label: String = q2.chars().take(chart_w / 2 - 3).collect();
+            let x = mid_x.saturating_sub(2 + label.len());
+            buffer.set_string(x, margin_top + 1, &label);
+        }
         if let Some(q3) = labels.get(2) {
-        // Q3: bottom-left
-        let label: String = q3.chars().take(chart_w / 2 - 3).collect();
-        let x = mid_x.saturating_sub(2 + label.len());
-        buffer.set_string(x, mid_y + 2, &label);
-    }
+            // Q3: bottom-left
+            let label: String = q3.chars().take(chart_w / 2 - 3).collect();
+            let x = mid_x.saturating_sub(2 + label.len());
+            buffer.set_string(x, mid_y + 2, &label);
+        }
         if let Some(q4) = labels.get(3) {
-        // Q4: bottom-right
-        let x = mid_x + 2;
-        let label: String = q4.chars().take(chart_w / 2 - 3).collect();
-        buffer.set_string(x.min(cell_width.saturating_sub(1)), mid_y + 2, &label);
-    }
+            // Q4: bottom-right
+            let x = mid_x + 2;
+            let label: String = q4.chars().take(chart_w / 2 - 3).collect();
+            buffer.set_string(x.min(cell_width.saturating_sub(1)), mid_y + 2, &label);
+        }
 
-    // X-axis labels.
+        // X-axis labels.
         if let Some(left) = &quad_meta.x_axis_left {
-        let label: String = left.chars().take(chart_w / 3).collect();
-        buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
-    }
+            let label: String = left.chars().take(chart_w / 3).collect();
+            buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
+        }
         if let Some(right) = &quad_meta.x_axis_right {
-        let label: String = right.chars().take(chart_w / 3).collect();
-        let x = (margin_left + chart_w).saturating_sub(label.len());
-        buffer.set_string(x, margin_top + chart_h + 1, &label);
-    }
-
+            let label: String = right.chars().take(chart_w / 3).collect();
+            let x = (margin_left + chart_w).saturating_sub(label.len());
+            buffer.set_string(x, margin_top + chart_h + 1, &label);
+        }
     }
     // Data points: render from layout node positions.
     let point_chars: &[char] = &['\u{25cf}', '\u{25cb}', '\u{25c6}', '\u{25a0}']; // ● ○ ◆ ■
