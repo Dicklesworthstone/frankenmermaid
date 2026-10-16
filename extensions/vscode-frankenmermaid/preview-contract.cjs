@@ -73,6 +73,66 @@ function markdownList(line, cursor, paragraph) {
     width: leading.consumed + marker.length + width };
 }
 
+const MARKDOWN_HTML_BLOCK_TAGS = new Set((
+  "address article aside base basefont blockquote body caption center col colgroup dd details " +
+  "dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 " +
+  "head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option " +
+  "p param search section summary table tbody td tfoot th thead title tr track ul"
+).split(" "));
+
+// CommonMark's complete-tag block condition, scanned without nested regex quantifiers over
+// arbitrarily long attribute values. This recognizes a literal block; it never executes HTML.
+function completeMarkdownTag(text) {
+  const tag = /^<\/?[A-Za-z][A-Za-z0-9-]*/u.exec(text);
+  if (!tag) return false;
+  const closing = text[1] === "/";
+  let index = tag[0].length;
+  while (index < text.length) {
+    const start = index;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] === ">") return /^[ \t]*$/u.test(text.slice(index + 1));
+    if (!closing && text.startsWith("/>", index)) return /^[ \t]*$/u.test(text.slice(index + 2));
+    if (closing || index === start) return false;
+    const attribute = /^[A-Za-z_:][A-Za-z0-9_.:-]*/u.exec(text.slice(index));
+    if (!attribute) return false;
+    index += attribute[0].length;
+    const afterName = index;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] !== "=") { index = afterName; continue; }
+    index += 1;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] === '"' || text[index] === "'") {
+      const end = text.indexOf(text[index], index + 1);
+      if (end < 0) return false;
+      index = end + 1;
+    } else {
+      const value = /^[^\s"'=<>`]+/u.exec(text.slice(index));
+      if (!value) return false;
+      index += value[0].length;
+    }
+  }
+  return false;
+}
+
+// CommonMark 0.31.2 section 4.6 is the contract here. In particular, declarations allow
+// lowercase ASCII letters and type 7 excludes opening pre/script/style/textarea tags.
+// markdown-it-py 4.2.0 differs on those cases; do not silently replace the written rules.
+function markdownHtmlEnd(line, paragraph) {
+  const match = /^ {0,3}(<.*)$/u.exec(line);
+  if (!match) return null;
+  const text = match[1];
+  if (/^<(?:pre|script|style|textarea)(?:[ \t>]|$)/iu.test(text)) return /<\/(?:pre|script|style|textarea)>/iu;
+  if (text.startsWith("<!--")) return /-->/u;
+  if (text.startsWith("<?")) return /\?>/u;
+  if (/^<![A-Za-z]/u.test(text)) return />/u;
+  if (text.startsWith("<![CDATA[")) return /\]\]>/u;
+  const tag = /^<\/?([A-Za-z][A-Za-z0-9-]*)(?:[ \t>]|\/>|$)/u.exec(text);
+  if ((tag && MARKDOWN_HTML_BLOCK_TAGS.has(tag[1].toLowerCase()))
+    || (!paragraph && !/^<(?:pre|script|style|textarea)(?:[ \t/>]|$)/iu.test(text)
+      && completeMarkdownTag(text))) return /^[ \t]*$/u;
+  return null;
+}
+
 // Track the container stack as well as ALL fences. A documentation example inside a longer
 // non-Mermaid fence is literal, even if it contains quotes/list markers. Fenced code is not a
 // lazy paragraph continuation: leaving its container ends it and reprocesses that same line.
@@ -92,6 +152,7 @@ function extractMermaidBlocks(document) {
   const containers = [];
   let paragraph = false;
   let fence;
+  let htmlEnd = null;
   function finish() {
     if (fence.mermaid) {
       if (blocks.length >= MAX_PREVIEW_DIAGRAMS) {
@@ -118,6 +179,12 @@ function extractMermaidBlocks(document) {
       }
       matched += 1;
     }
+    if (htmlEnd && matched === containers.length) {
+      if (htmlEnd.test(markdownTail(line, cursor))) htmlEnd = null;
+      paragraph = false;
+      continue;
+    }
+    if (htmlEnd) { htmlEnd = null; paragraph = false; }
     if (fence && matched === containers.length) {
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(markdownTail(line, cursor));
       if (close && close[1][0] === fence.marker && close[1].length >= fence.length) finish();
@@ -136,7 +203,7 @@ function extractMermaidBlocks(document) {
     // Retain a list/quote across a lazy ordinary paragraph continuation. A new block cannot
     // be lazy: in particular a root-level fence must not inherit the preceding quote prefix.
     const interrupts = /^ {0,3}(?:`{3,}|~{3,}|>|#{1,6}(?:\s|$)|[-*_][ \t]*[-*_])/u.test(tail)
-      || markdownList(line, cursor, true);
+      || markdownList(line, cursor, true) || markdownHtmlEnd(tail, true);
     if (matched < containers.length && paragraph && tail.trim() && !interrupts) continue;
     if (matched < containers.length) paragraph = false;
     containers.length = matched;
@@ -151,6 +218,12 @@ function extractMermaidBlocks(document) {
       paragraph = false;
     }
     const content = markdownTail(line, cursor);
+    const end = markdownHtmlEnd(content, paragraph);
+    if (end) {
+      htmlEnd = end.test(content) ? null : end;
+      paragraph = false;
+      continue;
+    }
     const open = /^( {0,3})(`{3,}|~{3,})(.*)$/u.exec(content);
     if (open && !(open[2][0] === "`" && open[3].includes("`"))) {
       fence = { marker: open[2][0], length: open[2].length, indent: open[1].length,
@@ -203,7 +276,7 @@ function lineStarts(source) {
   return starts;
 }
 
-function documentPosition(block, starts, offset) {
+function documentPosition(block, starts, offset, physicalLineStart = false) {
   let low = 0;
   let high = starts.length;
   while (low + 1 < high) {
@@ -214,6 +287,9 @@ function documentPosition(block, starts, offset) {
   const mapped = block.lineMap[low];
   if (!mapped) return undefined;
   const character = offset - starts[low];
+  // Whole-line structural patches own the physical prefix as well. This is never enabled
+  // for ordinary source bindings, where a virtual half-tab has no exact byte boundary.
+  if (physicalLineStart && character === 0) return { line: mapped.line, character: 0 };
   // A CRLF is one document line break, never two selectable characters beyond the line end.
   const virtual = mapped.virtualIndent || 0;
   if (character > mapped.text.length || character < virtual) return undefined;
@@ -399,8 +475,9 @@ function planStructuralEdit(document, snapshot, reports, message) {
 
   const markdown = !isMermaidDocument(document);
   const sourceStarts = lineStarts(source), starts = lineStarts(before);
-  const range = { start: documentPosition(block, sourceStarts, start),
-    end: documentPosition(block, sourceStarts, end) };
+  const physicalLineStart = fullLine || (operation === "insert-after" && nextNewline >= 0);
+  const range = { start: documentPosition(block, sourceStarts, start, physicalLineStart),
+    end: documentPosition(block, sourceStarts, end, physicalLineStart) };
   if (!range.start || !range.end) throw new Error("Structural edit does not resolve to document positions.");
   const last = block.lineMap.at(-1);
   // A closed Markdown fence contributes a native line terminator that is not part of the
@@ -557,7 +634,7 @@ function normalizePreviewDebounceMs(value) {
 class DebouncedRenderScheduler {
   constructor(delayMs, setTimer = setTimeout, clearTimer = clearTimeout) {
     this.setTimer = setTimer;
-    this.clearTimer = clearTimeout;
+    this.clearTimer = clearTimer;
     this.timer = undefined;
     this.disposed = false;
     this.setDelayMs(delayMs);
