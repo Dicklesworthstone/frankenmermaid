@@ -136,7 +136,7 @@ fn overlay_debug_panel(output: &mut String, width: usize, height: usize, metrics
             .iter()
             .rposition(|ch| *ch != ' ')
             .map_or(0, |index| index + 1);
-        output.extend(line[..end].iter());
+        output.extend(line[..end].iter().copied());
     }
 }
 
