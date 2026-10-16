@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod canvas_selection;
+
 use std::sync::{LazyLock, RwLock};
-// `Diagram::last_layout` is the only `Arc` user and lives behind `#[cfg(target_arch = "wasm32")]`,
-// so an ungated import is an `unused_imports` warning — and a `-D warnings` failure — on the host.
+// The browser Diagram transfers its layout into the retained CanvasSession by Arc.
 #[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 // NOT `std::time::Instant`: wasm32-unknown-unknown std has no clock, so `Instant::now()`
@@ -14,9 +16,8 @@ use web_time::Instant;
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::MermaidGuardReport;
-// The CGA hit-test helpers below are reachable only from the wasm32 `Diagram` bindings and from
-// tests, so both they and this import are dead on a host non-test build.
-#[cfg(any(target_arch = "wasm32", test))]
+// Raw-layout CGA helpers remain test oracles; browser picking uses the draw viewport.
+#[cfg(test)]
 use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
@@ -38,8 +39,6 @@ use fm_parser::{
     FlowchartParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
     apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
 };
-#[cfg(target_arch = "wasm32")]
-use fm_render_canvas::render_to_canvas_with_layout;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
@@ -1361,7 +1360,7 @@ fn compute_wasm_degradation_plan(
     })
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Option<&str> {
     if !(x.is_finite() && y.is_finite()) {
         return None;
@@ -1381,7 +1380,7 @@ fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Op
     })
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn hit_test_layout_edge(
     layout: &fm_layout::DiagramLayout,
     x: f64,
@@ -2369,6 +2368,7 @@ fn browser_supports_webgpu() -> bool {
 #[wasm_bindgen]
 pub struct Diagram {
     canvas: Option<web_sys::HtmlCanvasElement>,
+    offscreen_canvas: Option<web_sys::OffscreenCanvas>,
     canvas_width: u32,
     canvas_height: u32,
     context: web_sys::CanvasRenderingContext2d,
@@ -2377,7 +2377,7 @@ pub struct Diagram {
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
     layout_engine: fm_layout::IncrementalLayoutEngine,
-    last_layout: Option<Arc<fm_layout::DiagramLayout>>,
+    session: fm_render_canvas::interaction::CanvasSession,
     destroyed: bool,
 }
 
@@ -2392,6 +2392,7 @@ impl Diagram {
 
     fn from_canvas_context(
         canvas: Option<web_sys::HtmlCanvasElement>,
+        offscreen_canvas: Option<web_sys::OffscreenCanvas>,
         canvas_width: u32,
         canvas_height: u32,
         context: web_sys::CanvasRenderingContext2d,
@@ -2419,6 +2420,7 @@ impl Diagram {
 
         Ok(Self {
             canvas,
+            offscreen_canvas,
             canvas_width,
             canvas_height,
             context,
@@ -2427,7 +2429,7 @@ impl Diagram {
             canvas_config,
             pressure_config,
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
-            last_layout: None,
+            session: fm_render_canvas::interaction::CanvasSession::default(),
             destroyed: false,
         })
     }
@@ -2450,7 +2452,9 @@ impl Diagram {
             .map_err(|_| js_error("failed to cast context to CanvasRenderingContext2d"))?;
         let canvas_width = canvas.width();
         let canvas_height = canvas.height();
-        Self::from_canvas_context(Some(canvas), canvas_width, canvas_height, context, config)
+        Self::from_canvas_context(
+            Some(canvas), None, canvas_width, canvas_height, context, config,
+        )
     }
 
     /// Creates a renderer for an `OffscreenCanvas` transferred to a worker.
@@ -2473,11 +2477,17 @@ impl Diagram {
         let context = context_value
             .ok_or_else(|| js_error("offscreen canvas 2d context is unavailable"))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>();
-        Self::from_canvas_context(None, canvas_width, canvas_height, context, config)
+        Self::from_canvas_context(
+            None, Some(canvas), canvas_width, canvas_height, context, config,
+        )
     }
 
     pub fn render(&mut self, input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
         self.ensure_alive()?;
+        self.sync_canvas_size();
+        if self.canvas_width == 0 || self.canvas_height == 0 {
+            return Err(js_error("canvas backing store must have nonzero dimensions"));
+        }
 
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
@@ -2551,17 +2561,15 @@ impl Diagram {
         let render_start = Instant::now();
         let canvas_result = match renderer.actual {
             WebRendererKind::Canvas2d => {
-                let mut web_canvas = WebCanvas2dContext::new(
-                    self.canvas_width,
-                    self.canvas_height,
-                    self.context.clone(),
+                // Drawing and subsequent interaction share the exact same matched pair.
+                self.session.set_diagram(
+                    parsed.ir,
+                    Arc::clone(&traced_layout.layout),
+                    next_canvas.clone(),
                 );
-                render_to_canvas_with_layout(
-                    &parsed.ir,
-                    &traced_layout.layout,
-                    &mut web_canvas,
-                    &next_canvas,
-                )
+                self.redraw_canvas().ok_or_else(|| {
+                    js_error("canvas backing store must have nonzero dimensions")
+                })?
             }
             WebRendererKind::WebGpu => {
                 return Err(js_error(
@@ -2581,7 +2589,6 @@ impl Diagram {
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
         self.pressure_config = next_pressure;
-        self.last_layout = Some(Arc::clone(&traced_layout.layout));
 
         let output = DiagramRenderOutput::new(
             &traced_layout,
@@ -2594,37 +2601,28 @@ impl Diagram {
         to_js_value(&output)
     }
 
-    /// Return the laid-out node below a canvas-space pointer, if any.
-    ///
-    /// The query uses CGA rectangle containment against the latest render's layout, so it never
-    /// reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
-    /// return `None`.
+    /// Return the topmost node below a backing-store-pixel pointer, if any.
+    /// Uses the actual draw viewport, including fit, padding and origin normalization.
+    /// Resizing invalidates picking until redraw; this query never parses or lays out source.
     #[wasm_bindgen(js_name = hitTestNode)]
-    pub fn hit_test_node(&self, x: f64, y: f64) -> Result<Option<String>, JsValue> {
+    pub fn hit_test_node(&mut self, x: f64, y: f64) -> Result<Option<String>, JsValue> {
         self.ensure_alive()?;
-        Ok(self
-            .last_layout
-            .as_deref()
-            .and_then(|layout| hit_test_layout_node(layout, x, y))
-            .map(str::to_owned))
+        let size = self.sync_canvas_size();
+        Ok(self.session.hit_test_node(x, y, size).map(str::to_owned))
     }
 
-    /// Return the nearest rendered edge index within a canvas-space tolerance.
-    ///
-    /// The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
-    /// bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+    /// Return the nearest rendered edge within a backing-store-pixel tolerance.
+    /// Shares the draw viewport with node picking and excludes bundled-away paths.
     #[wasm_bindgen(js_name = hitTestEdge)]
     pub fn hit_test_edge(
-        &self,
+        &mut self,
         x: f64,
         y: f64,
         max_distance: f64,
     ) -> Result<Option<usize>, JsValue> {
         self.ensure_alive()?;
-        Ok(self
-            .last_layout
-            .as_deref()
-            .and_then(|layout| hit_test_layout_edge(layout, x, y, max_distance)))
+        let size = self.sync_canvas_size();
+        Ok(self.session.hit_test_edge(x, y, max_distance, size))
     }
 
     #[wasm_bindgen(js_name = setTheme)]
@@ -2637,6 +2635,7 @@ impl Diagram {
         };
         self.svg_config = merge_svg_config(&self.svg_config, &overrides, None).map_err(js_error)?;
         self.canvas_config = apply_canvas_theme_preset(self.canvas_config.clone(), preset);
+        self.session.set_render_config(self.canvas_config.clone());
         Ok(())
     }
 
@@ -2653,13 +2652,15 @@ impl Diagram {
         if self.destroyed {
             return;
         }
+        self.sync_canvas_size();
         self.context.clear_rect(
             0.0,
             0.0,
             f64::from(self.canvas_width),
             f64::from(self.canvas_height),
         );
-        self.last_layout = None;
+        self.session.clear();
+        self.layout_engine = fm_layout::IncrementalLayoutEngine::default();
         self.destroyed = true;
     }
 }
