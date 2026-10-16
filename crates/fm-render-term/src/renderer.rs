@@ -441,11 +441,30 @@ impl TermRenderer {
             && let Some(pie_meta) = &ir.pie_meta
             && !pie_meta.slices.is_empty()
         {
-            self::render_pie_cell(&mut buffer, pie_meta, cell_width, cell_height);
+            self::render_pie_cell(
+                &mut buffer,
+                pie_meta,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
-            render_gantt_cell(&mut buffer, ir, layout, cell_width, cell_height);
+            render_gantt_cell(
+                &mut buffer,
+                ir,
+                layout,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
-            render_xychart_cell(&mut buffer, ir, cell_width, cell_height);
+            render_xychart_cell(
+                &mut buffer,
+                ir,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::QuadrantChart
             && ir.quadrant_meta.is_some()
         {
@@ -457,6 +476,7 @@ impl TermRenderer {
                 cell_height,
                 scale_x,
                 scale_y,
+                self.config.show_labels,
             );
         } else {
             // Render nodes (foreground).
@@ -468,7 +488,9 @@ impl TermRenderer {
             }
         }
 
-        self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        if self.config.show_labels {
+            self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        }
         let mut output = buffer.to_output_string();
         let debug_metrics = self
             .config
@@ -477,7 +499,11 @@ impl TermRenderer {
         if let Some(metrics) = debug_metrics {
             overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
         }
-        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (legend_rows, legend_width) = if self.config.show_labels {
+            append_c4_legend(&mut output, ir)
+        } else {
+            (0, 0)
+        };
 
         TermRenderResult {
             output,
@@ -3012,6 +3038,9 @@ impl TermRenderer {
     }
 
     fn truncate_label(&self, text: &str) -> String {
+        if !self.config.show_labels {
+            return String::new();
+        }
         let max_chars = self.config.max_label_chars.max(1);
         let max_lines = self.config.max_label_lines.max(1);
         let bytes = text.as_bytes();
@@ -3957,6 +3986,7 @@ fn render_pie_cell(
     pie_meta: &fm_core::IrPieMeta,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     use std::f32::consts::PI;
 
@@ -3968,12 +3998,16 @@ fn render_pie_cell(
         .max(f32::EPSILON);
 
     // Reserve space for legend on the right.
-    let legend_width = slices
-        .iter()
-        .map(|s| s.label.len() + 8) // " X Label  "
-        .max()
-        .unwrap_or(10)
-        .min(cell_width / 3);
+    let legend_width = if show_labels {
+        slices
+            .iter()
+            .map(|s| s.label.len() + 8) // " X Label  "
+            .max()
+            .unwrap_or(10)
+            .min(cell_width / 3)
+    } else {
+        0
+    };
     let chart_width = cell_width.saturating_sub(legend_width + 2);
     let chart_height = cell_height.saturating_sub(2);
 
@@ -3982,7 +4016,7 @@ fn render_pie_cell(
     }
 
     // Title
-    if let Some(title) = &pie_meta.title {
+    if show_labels && let Some(title) = &pie_meta.title {
         let tx = chart_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4024,6 +4058,7 @@ fn render_pie_cell(
 
     // Render legend on the right side.
     let legend_x = chart_width + 2;
+    if show_labels {
     for (i, slice) in slices.iter().enumerate() {
         let row = i + 2;
         if row >= cell_height {
@@ -4036,6 +4071,7 @@ fn render_pie_cell(
         let truncated: String = entry.chars().take(legend_width).collect();
         buffer.set_string(legend_x, row, &truncated);
     }
+    }
 }
 
 /// Render gantt task bars in the terminal as horizontal block characters.
@@ -4045,19 +4081,24 @@ fn render_gantt_cell(
     layout: &DiagramLayout,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     let Some(gantt_meta) = &ir.gantt_meta else {
         return;
     };
 
-    let label_width = gantt_meta
-        .sections
-        .iter()
-        .map(|s| s.name.len())
-        .max()
-        .unwrap_or(0)
-        .min(cell_width / 3)
-        .max(8);
+    let label_width = if show_labels {
+        gantt_meta
+            .sections
+            .iter()
+            .map(|s| s.name.len())
+            .max()
+            .unwrap_or(0)
+            .min(cell_width / 3)
+            .max(8)
+    } else {
+        0
+    };
     let bar_area_width = cell_width.saturating_sub(label_width + 3);
     if bar_area_width < 4 {
         return;
@@ -4090,7 +4131,7 @@ fn render_gantt_cell(
         });
 
     // Title
-    if let Some(title) = &gantt_meta.title {
+    if show_labels && let Some(title) = &gantt_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4103,8 +4144,10 @@ fn render_gantt_cell(
             break;
         }
         // Section header (truncated by char count for UTF-8 safety).
-        let header: String = section.name.chars().take(label_width).collect();
-        buffer.set_string(0, row, &header);
+        if show_labels {
+            let header: String = section.name.chars().take(label_width).collect();
+            buffer.set_string(0, row, &header);
+        }
         // Separator line
         for col in label_width + 1..cell_width {
             buffer.set(col, row, '\u{2500}'); // ─
@@ -4129,8 +4172,10 @@ fn render_gantt_cell(
                         .or(Some(node.id.as_str()))
                 })
                 .unwrap_or("task");
-            let task_label: String = task_name.chars().take(label_width).collect();
-            buffer.set_string(0, row, &task_label);
+            if show_labels {
+                let task_label: String = task_name.chars().take(label_width).collect();
+                buffer.set_string(0, row, &task_label);
+            }
 
             let bar_origin = label_width + 2;
             let node_box = match &layout_nodes_by_index {
@@ -4176,12 +4221,13 @@ fn render_xychart_cell(
     ir: &MermaidDiagramIr,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     let Some(xy_meta) = &ir.xy_chart_meta else {
         return;
     };
 
-    let label_margin = 8_usize;
+    let label_margin = if show_labels { 8_usize } else { 0 };
     let chart_left = label_margin + 1;
     let chart_right = cell_width.saturating_sub(2);
     let chart_top = 2_usize;
@@ -4194,13 +4240,20 @@ fn render_xychart_cell(
     }
 
     // Title
-    if let Some(title) = &xy_meta.title {
+    if show_labels && let Some(title) = &xy_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
 
     if xy_meta.horizontal {
-        render_xychart_horizontal_cell(buffer, xy_meta, cell_width, chart_top, chart_bottom);
+        render_xychart_horizontal_cell(
+            buffer,
+            xy_meta,
+            cell_width,
+            chart_top,
+            chart_bottom,
+            show_labels,
+        );
         return;
     }
 
@@ -4217,7 +4270,7 @@ fn render_xychart_cell(
 
     // Category labels along x axis.
     let categories = &xy_meta.x_axis.categories;
-    if !categories.is_empty() {
+    if show_labels && !categories.is_empty() {
         let cat_spacing = chart_w / categories.len().max(1);
         for (i, cat) in categories.iter().enumerate() {
             let x = chart_left + 1 + i * cat_spacing;
@@ -4260,6 +4313,7 @@ fn render_xychart_horizontal_cell(
     cell_width: usize,
     chart_top: usize,
     chart_bottom: usize,
+    show_labels: bool,
 ) {
     let categories = &xy_meta.x_axis.categories;
     let rows = xy_meta
@@ -4270,12 +4324,16 @@ fn render_xychart_horizontal_cell(
         .unwrap_or(0)
         .max(categories.len())
         .max(1);
-    let label_width = categories
-        .iter()
-        .map(|category| category.chars().count())
-        .max()
-        .unwrap_or(0)
-        .clamp(1, cell_width / 3);
+    let label_width = if show_labels {
+        categories
+            .iter()
+            .map(|category| category.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(1, cell_width / 3)
+    } else {
+        0
+    };
     let axis_x = label_width + 1;
     let chart_right = cell_width.saturating_sub(2);
     let chart_w = chart_right.saturating_sub(axis_x + 1);
@@ -4300,7 +4358,7 @@ fn render_xychart_horizontal_cell(
         if band_top > chart_bottom {
             break;
         }
-        if let Some(category) = categories.get(index) {
+        if show_labels && let Some(category) = categories.get(index) {
             let label: String = category.chars().take(label_width).collect();
             let x = axis_x.saturating_sub(label.chars().count() + 1);
             buffer.set_string(x, band_top, &label);
@@ -4332,6 +4390,7 @@ fn render_quadrant_cell(
     cell_height: usize,
     scale_x: f32,
     scale_y: f32,
+    show_labels: bool,
 ) {
     let Some(quad_meta) = &ir.quadrant_meta else {
         return;
@@ -4350,7 +4409,7 @@ fn render_quadrant_cell(
     let mid_y = margin_top + chart_h / 2;
 
     // Title.
-    if let Some(title) = &quad_meta.title {
+    if show_labels && let Some(title) = &quad_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4370,6 +4429,7 @@ fn render_quadrant_cell(
 
     // Quadrant labels in the four corners.
     let labels = &quad_meta.quadrant_labels;
+    if show_labels {
     if let Some(q1) = labels.first() {
         // Q1: top-right
         let x = mid_x + 2;
@@ -4407,6 +4467,7 @@ fn render_quadrant_cell(
         buffer.set_string(x, margin_top + chart_h + 1, &label);
     }
 
+    }
     // Data points: render from layout node positions.
     let point_chars: &[char] = &['\u{25cf}', '\u{25cb}', '\u{25c6}', '\u{25a0}']; // ● ○ ◆ ■
     for (i, node_box) in layout.nodes.iter().enumerate() {
