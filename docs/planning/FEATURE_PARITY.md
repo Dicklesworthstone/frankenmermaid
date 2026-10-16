@@ -126,7 +126,7 @@ Current status in this file is grounded in:
 | Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
 | SVG renderer | Partial | 21 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
 | Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs |
-| Canvas/WASM | Partial | Canvas2D with mock context, viewport transforms |
+| Canvas/WASM | Partial | Canvas2D with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, and mock-context coverage; compiled package qualification remains separate |
 | Diff engine | Complete | Structural node/edge diffing with change classification |
 | Minimap | Complete | Density-aware scaling with viewport indicator |
 
@@ -159,8 +159,10 @@ Current status in this file is grounded in:
   `Normal` / `Rich` model
 - Debug overlay panel (crossings, bends, symmetry metrics) — TUI-specific and
   not yet mapped into frankenmermaid surfaces
-- Interactive selection state (node highlight, directional navigation) —
-  TUI-specific and not yet mapped into frankenmermaid surfaces
+- Interactive selection state is now mapped into Canvas/WASM: retained author-ID highlight,
+  directional navigation, modifier selection, and transactional box/lasso gestures share the
+  renderer's actual viewport. Remaining work is package rebuild/browser qualification and any
+  future mapping onto non-canvas surfaces.
 
 ### Areas Where frankenmermaid Is Ahead of FrankenTUI
 
