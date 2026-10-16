@@ -68,7 +68,7 @@ pub use minimap::{
     render_minimap_colored, viewport_to_minimap_rect,
 };
 pub use renderer::{
-    TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config,
+    TermDebugMetrics, TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config,
     render_diagram_with_layout_and_config,
 };
 
@@ -310,6 +310,53 @@ mod tests {
 
         // Rich should generally produce more detailed output.
         assert!(rich.width >= compact.width || rich.height >= compact.height);
+    }
+
+    #[test]
+    fn debug_overlay_is_opt_in_and_preserves_render_bounds() {
+        let ir = sample_ir();
+        let plain = render_term_with_config(&ir, &TermRenderConfig::default(), 80, 24);
+        assert!(plain.debug_metrics.is_none());
+
+        let config = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let debug = render_term_with_config(&ir, &config, 80, 24);
+        let metrics = debug.debug_metrics.expect("debug metrics must be exposed when enabled");
+
+        assert_eq!(debug.width, plain.width);
+        assert_eq!(debug.height, plain.height);
+        assert!(debug.width <= 80);
+        assert!(debug.height <= 24);
+        assert!(debug.output.contains("[layout debug]"));
+        assert!(debug.output.contains("crossings="));
+        assert!(debug.output.contains("bends="));
+        assert!(debug.output.contains("symmetry="));
+        assert!(!debug.output.contains('\u{1b}'));
+        assert!(metrics.symmetry_permille <= 1000);
+    }
+
+    #[test]
+    fn debug_overlay_reports_the_layout_stats_crossing_count() {
+        let ir = sample_ir();
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let rendered = render_term_with_layout_and_config(&ir, &layout, &config, 80, 24);
+        let metrics = rendered.debug_metrics.expect("debug metrics");
+        assert_eq!(metrics.crossings, layout.stats.crossing_count);
+        assert_eq!(
+            metrics.bends,
+            layout
+                .edges
+                .iter()
+                .filter(|edge| !edge.bundled)
+                .map(|edge| edge.points.len().saturating_sub(2))
+                .sum::<usize>()
+        );
     }
 
     proptest! {
