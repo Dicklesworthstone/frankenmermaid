@@ -4059,18 +4059,18 @@ fn render_pie_cell(
     // Render legend on the right side.
     let legend_x = chart_width + 2;
     if show_labels {
-    for (i, slice) in slices.iter().enumerate() {
-        let row = i + 2;
-        if row >= cell_height {
-            break;
+        for (i, slice) in slices.iter().enumerate() {
+            let row = i + 2;
+            if row >= cell_height {
+                break;
+            }
+            let ch = slice_chars[i % slice_chars.len()];
+            let pct = (slice.value.max(0.0) / total) * 100.0;
+            let entry = format!("{ch} {:.0}% {}", pct, slice.label);
+            // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
+            let truncated: String = entry.chars().take(legend_width).collect();
+            buffer.set_string(legend_x, row, &truncated);
         }
-        let ch = slice_chars[i % slice_chars.len()];
-        let pct = (slice.value.max(0.0) / total) * 100.0;
-        let entry = format!("{ch} {:.0}% {}", pct, slice.label);
-        // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
-        let truncated: String = entry.chars().take(legend_width).collect();
-        buffer.set_string(legend_x, row, &truncated);
-    }
     }
 }
 
@@ -4430,26 +4430,26 @@ fn render_quadrant_cell(
     // Quadrant labels in the four corners.
     let labels = &quad_meta.quadrant_labels;
     if show_labels {
-    if let Some(q1) = labels.first() {
+        if let Some(q1) = labels.first() {
         // Q1: top-right
         let x = mid_x + 2;
         let y = margin_top + 1;
         let label: String = q1.chars().take(chart_w / 2 - 3).collect();
         buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
     }
-    if let Some(q2) = labels.get(1) {
+        if let Some(q2) = labels.get(1) {
         // Q2: top-left
         let label: String = q2.chars().take(chart_w / 2 - 3).collect();
         let x = mid_x.saturating_sub(2 + label.len());
         buffer.set_string(x, margin_top + 1, &label);
     }
-    if let Some(q3) = labels.get(2) {
+        if let Some(q3) = labels.get(2) {
         // Q3: bottom-left
         let label: String = q3.chars().take(chart_w / 2 - 3).collect();
         let x = mid_x.saturating_sub(2 + label.len());
         buffer.set_string(x, mid_y + 2, &label);
     }
-    if let Some(q4) = labels.get(3) {
+        if let Some(q4) = labels.get(3) {
         // Q4: bottom-right
         let x = mid_x + 2;
         let label: String = q4.chars().take(chart_w / 2 - 3).collect();
@@ -4457,11 +4457,11 @@ fn render_quadrant_cell(
     }
 
     // X-axis labels.
-    if let Some(left) = &quad_meta.x_axis_left {
+        if let Some(left) = &quad_meta.x_axis_left {
         let label: String = left.chars().take(chart_w / 3).collect();
         buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
     }
-    if let Some(right) = &quad_meta.x_axis_right {
+        if let Some(right) = &quad_meta.x_axis_right {
         let label: String = right.chars().take(chart_w / 3).collect();
         let x = (margin_left + chart_w).saturating_sub(label.len());
         buffer.set_string(x, margin_top + chart_h + 1, &label);
