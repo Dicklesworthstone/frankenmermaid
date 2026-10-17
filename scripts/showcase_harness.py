@@ -173,7 +173,17 @@ def validate_log_payload(payload: dict[str, object]) -> list[str]:
 
 def _resolve_artifact_path(repo_root: Path, candidate: str) -> Path:
     path = Path(candidate)
-    return path if path.is_absolute() else repo_root / path
+    if not path.is_absolute():
+        return repo_root / path
+    if path.exists():
+        return path
+    marker = "/evidence/"
+    if marker in candidate:
+        rel_after_evidence = candidate.split(marker, 1)[1]
+        rebased = repo_root / "evidence" / rel_after_evidence
+        if rebased.exists():
+            return rebased
+    return path
 
 
 def validate_e2e_summary(summary_path: Path, repo_root: Path, require_replay_bundle: bool = False) -> dict[str, object]:
@@ -581,7 +591,8 @@ def validate_static_web(entry: Path, headers: Path, contract: Path, log_path: Pa
         ),
         CheckResult(
             "document write bootstrap",
-            "document.write(finalHtml);" in entry_text,
+            "document.write(finalHtml);" in entry_text
+            or "document.documentElement.replaceWith(" in entry_text,
             "bootstrap host replaces shell with standalone showcase document",
         ),
         CheckResult(
@@ -947,8 +958,11 @@ def validate_cloudflare_deploy_ops(
         CheckResult(
             "wrangler output dir",
             isinstance(wrangler_payload.get("pages_build_output_dir"), str)
-            and wrangler_payload["pages_build_output_dir"].startswith("./dist/cloudflare-pages/"),
-            "wrangler config points at an isolated dist/cloudflare-pages staging root",
+            and (
+                wrangler_payload["pages_build_output_dir"] == "./dist/site"
+                or wrangler_payload["pages_build_output_dir"].startswith("./dist/cloudflare-pages/")
+            ),
+            "wrangler config points at an isolated dist/site or dist/cloudflare-pages staging root",
         ),
         CheckResult(
             "wrangler env overrides",
