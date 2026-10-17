@@ -3,8 +3,8 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 57,
-    "partial": 2
+    "implemented": 58,
+    "partial": 1
   },
   "claims": [
     {
@@ -39,7 +39,7 @@
       "id": "diagram-type/sequence",
       "category": "diagram_type",
       "title": "Support sequence diagrams",
-      "status": "partial",
+      "status": "implemented",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -60,7 +60,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as partial capability"
+        "README advertises this family; current code marks it as full capability"
       ]
     },
     {
@@ -1149,7 +1149,7 @@
         }
       ],
       "notes": [
-        "General graphs (flowchart, class, state, ER, requirement, DOT)"
+        "General graphs (flowchart, class, state, ER, C4, requirement, DOT)"
       ]
     },
     {
@@ -1569,7 +1569,7 @@
         }
       ],
       "notes": [
-        "Architecture-beta, C4 (conditional)"
+        "Architecture-beta"
       ]
     },
     {
