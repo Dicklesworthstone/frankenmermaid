@@ -85,20 +85,23 @@ Replacing the 41 `BTreeMap`/`BTreeSet` instances in the layout engine with Swiss
 
 ## Timeline
 
-- Baseline + profiling: TBD (estimate: 1 session)
-- Implementation: TBD (estimate: 1 session, mechanical replacement)
-- Evaluation: TBD (estimate: 1 session)
-- Decision: TBD
+- Baseline + profiling: Completed (`bd-2gr9.1`, `bd-2gr9.2`)
+- Implementation: Completed (`72ffc1f`, `152d936`, 41 `FxHashMap`/`FxHashSet` sites in `fm-layout`, 20 in `fm-parser`)
+- Evaluation: Completed (`bd-6g0v`, `NEGATIVE_EVIDENCE.md:3373/3341/3261/11791`)
+- Decision: **RATIFIED — Selective Adoption (Items 1 & 2 Adopted; Items 3 & 4 Rejected on Measured Negative Evidence)** (2026-10-14)
+
+## Ratified Decision Contract
+
+1. **Adopted (Items 1 & 2):**
+   - Deterministic `FxHashMap`/`FxHashSet` (`fm_core::FxHashMap`) adopted across lookup-only hot paths (`41` sites in `crates/fm-layout/src/lib.rs`, `20` sites in `crates/fm-parser/src/ir_builder.rs`, `bd-2gr9.1`).
+   - Map pre-sizing (`with_capacity` / `with_capacity_and_hasher` / `reserve`) adopted across `33` sites in `fm-layout` and `11` sites in `ir_builder` (`bd-2gr9.2`), eliminating the ~5% `RawTable::reserve_rehash` cost.
+   - `TreeChildren` CSR flat storage adopted for adjacency lists in `fm-layout`.
+2. **Preserved `BTreeMap` Where Iteration Order Is Load-Bearing (`bd-6g0v`):**
+   - `LayoutDependencyGraph.regions` and `DirtySet.regions` use `BTreeMap` as a deterministic ordering mechanism (verified by `lib.rs:15716`); swapping them to hash maps would violate layout determinism.
+3. **Rejected (Items 3 & 4 — Direct `hashbrown::RawTable` & Hybrid Flat-Array Index):**
+   - Rejected based on measured negative evidence (`docs/NEGATIVE_EVIDENCE.md` rows `3373`, `3341`, `3261`, `11791`), where dense/flat-array rewrites of crossing counters and post-presize constant-factor container micro-opts regressed or measured ~0 gain.
 
 ## Reviewers
 
 Project maintainer (ubuntu)
 
-## Notes
-
-- hashbrown is already used internally by Rust's std HashMap (but with RandomState)
-- FxHasher is fastest for integer keys but has poor distribution for some patterns
-- ahash provides hardware-accelerated hashing with WASM support
-- Key insight: profile first. If BTreeMap is < 5% of layout time, reject early
-- Alternative: keep BTreeMap everywhere but add allocation caching (arena allocator)
-- Rust 2024 edition's std HashMap already uses hashbrown internally; the gain here is from using a deterministic, non-random hasher

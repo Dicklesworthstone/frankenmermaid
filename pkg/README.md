@@ -60,7 +60,7 @@ all seven.
 | **18 layout algorithms plus Auto** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet, architecture, treemap, radar — auto-selected per diagram type |
 | **4 cycle strategies** | Greedy, DFS back-edge, MFAS approximation, full cycle-aware with SCC detection and cluster collapse |
 | **Incremental layout** | Adapton-style self-adjusting computation, a cache-oblivious vEB layout index, and an epoch-based concurrent IR handle skip unchanged subgraphs on re-render |
-| **E-graph crossing minimization** | Egg-based equality saturation explores rank-order rewrites in parallel, with strict node-budget and timeout guards plus Sugiyama fallback |
+| **E-graph crossing minimization** | Bounded e-graph equality saturation (`egraph_crossing.rs`) explores rank-order rewrites with strict node-budget and timeout guards plus Sugiyama fallback |
 | **Conformal Geometric Algebra (CGA)** | Rotor-based transform composition and intersection queries for obstacle-aware edge routing |
 | **High-fidelity SVG** | Responsive `viewBox`, 23 node shapes, 30 arrow variants, gradients, drop shadows, glow effects, CSS animations, custom SVG icons, cluster backgrounds, accessible ARIA markup, 10 theme presets |
 | **Terminal rendering** | Braille (2×4), block (2×2), half-block, and cell-only sub-pixel modes with Unicode box-drawing, ASCII fallback, diff engine, and minimap |
@@ -76,7 +76,7 @@ all seven.
 | Algorithm | Serves | Notes |
 |---|---|---|
 | `auto` | All types | Selection by diagram type and graph topology; sugiyama default in the general selector |
-| `sugiyama` | General graphs (flowchart, class, state, ER, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
+| `sugiyama` | General graphs (flowchart, class, state, ER, C4, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
 | `force` | General (fallback for dense/cyclic) | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
 | `tree` | Tree-like graphs | Reingold-Tilford variant with direction support |
 | `radial` | Mindmap | Leaf-weighted angle allocation |
@@ -91,7 +91,7 @@ all seven.
 | `quadrant` | Quadrant charts | 2D scatter on [0,1] axes |
 | `gitgraph` | Git graphs | Lane-based commit positioning |
 | `packet` | Packet-beta | Grid-based field layout |
-| `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
+| `architecture` | Architecture-beta | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
 <!-- END GENERATED: layout-algorithms -->
@@ -134,7 +134,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 
 1. **Never waste user intent.** Malformed input degrades into best-effort IR + actionable diagnostics, not dead-end errors. If the parser can figure out what you probably meant, it will.
 2. **Determinism is a feature.** Every layout phase uses stable tie-breaking. Node ordering, rank assignment, coordinate computation, edge routing, and even FNX cache keys are deterministic. CI snapshot tests rely on this.
-3. **Layout quality beats minimal correctness.** Four cycle-breaking strategies, barycenter + transpose + sift crossing minimization, optional egg-based equality saturation, Brandes-Köpf coordinate assignment, obstacle-aware orthogonal edge routing, and 15 specialized algorithms.
+3. **Layout quality beats minimal correctness.** Four cycle-breaking strategies, barycenter + transpose + sift crossing minimization, optional e-graph equality saturation, Brandes-Köpf coordinate assignment, obstacle-aware orthogonal edge routing, and 18 concrete layout algorithms plus Auto.
 4. **One IR, many outputs.** A shared `MermaidDiagramIr` feeds SVG, terminal, Canvas2D, and WASM. Parse once, render everywhere. Layout statistics, decision ledgers, and diagnostics travel through the entire pipeline.
 5. **Polish is core product surface.** Typography, spacing, theming, accessibility, gradients, drop shadows, CSS animations, custom icons, and responsive sizing are all part of correctness.
 6. **Make the runtime auditable.** Every render carries a layout decision ledger, optional source-span attributes, an evidence bundle, and a witness block describing what was decided and why.
@@ -147,7 +147,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 | Parser recovery on malformed input | Best-effort with diagnostics | Often strict failure | Upstream behavior |
 | Fuzzy keyword detection | Levenshtein + heuristics | No | No |
 | Cycle-aware layout strategies | 4 strategies + cluster collapse | Basic | Upstream |
-| Specialized layout algorithms | 15 (auto-selected per type) | Varies | Upstream |
+| Specialized layout algorithms | 18 + Auto (auto-selected per type) | Varies | Upstream |
 | Incremental re-layout on small edits | Adapton DCG + epoch IR + cache-oblivious vEB | No | No |
 | E-graph crossing minimization | Yes (with budget + fallback) | No | No |
 | Graph-intelligence integration (centrality, SCC) | FNX (optional) | No | No |
@@ -170,7 +170,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 | Web rendering | SVG + Canvas2D in-browser via WASM | Server-side rendering only (no WASM port) | Server-side rendering only |
 | Terminal rendering | Built-in (braille / block / half-block / cell) | Third-party `dot2tex`-style hacks only | No |
 | Error recovery | Best-effort with diagnostics | Reject on first parse error | Reject on first parse error |
-| Layout algorithms | 15 specialized | `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`, `osage`, `patchwork` | Internal hierarchical / sequence |
+| Layout algorithms | 18 + Auto | `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`, `osage`, `patchwork` | Internal hierarchical / sequence |
 | Theme system | 10 built-in presets + Mermaid `themeVariables` | Attribute-based (no preset themes) | Skin system |
 | Sandbox-friendly | WASM (no FS / network access) | Native binary (sandbox externally) | JVM startup overhead |
 | Embedded incremental layout | Yes (Adapton DCG) | No | No |
@@ -184,7 +184,7 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | Diagram Type | Runtime Status |
 |--------------|----------------|
 | `flowchart` | Implemented |
-| `sequence` | Partial |
+| `sequence` | Implemented |
 | `class` | Implemented |
 | `state` | Implemented |
 | `er` | Implemented |
@@ -280,7 +280,7 @@ Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerl
 
 ### Crates.io status
 
-The workspace is at version `0.2.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.3.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -795,12 +795,12 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.2.0)
+├── Cargo.toml                 # Workspace root (version 0.3.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
 │   ├── fm-parser/             # Detection + Mermaid/DOT parsing + recovery + IR builder
-│   ├── fm-layout/             # 15 algorithms, cycle breaking, e-graph, FNX, incremental
+│   ├── fm-layout/             # 18 algorithms + Auto, cycle breaking, e-graph, FNX, incremental
 │   ├── fm-render-svg/         # Zero-dep SVG document/element/path/text/defs + theme system
 │   ├── fm-render-term/        # Terminal rendering (4 fidelity modes) + diff + minimap
 │   ├── fm-render-canvas/      # Canvas2D rendering with mock context for tests
@@ -808,6 +808,7 @@ frankenmermaid/
 │   ├── fm-cli/                # CLI surface (frankenmermaid + fm-cli binaries + evidence)
 │   └── fm-regression-harness/ # Real-world corpus ingestion + HTML thumbnail report
 ├── docs/                      # FNX integration guides + migration + compatibility matrix
+├── ios/                       # Universal iPhone/iPad/Mac Catalyst SwiftUI studio (bd-0fzf5)
 ├── legacy_mermaid_code/       # Reference corpus (gitignored gitlink)
 └── tests/                     # Cross-component integration tests
 ```
@@ -817,8 +818,8 @@ frankenmermaid/
 | Crate | Lines | Responsibility |
 |---|---|---|
 | `fm-core` | ~15,600 | Shared IR, 23 node shapes, 30 arrow types, config, diagnostics, CGA, evidence, canary state machine |
-| `fm-parser` | ~18,000 | 24-type detection + parsing + error recovery + DOT bridge + IR builder + interning |
-| `fm-layout` | ~34,100 | 15 algorithms, 4 cycle strategies, Brandes-Köpf coords, E-graph crossing, CGA routing, Adapton incremental, FNX adapter |
+| `fm-parser` | ~18,000 | 27-type detection + parsing + error recovery + DOT bridge + IR builder + interning |
+| `fm-layout` | ~34,100 | 18 algorithms + Auto, 4 cycle strategies, Brandes-Köpf coords, E-graph crossing, CGA routing, Adapton incremental, FNX adapter |
 | `fm-render-svg` | ~13,800 | Accessible themeable SVG with gradients/shadows/glows/CSS animations/custom icons + 10 theme presets |
 | `fm-render-term` | ~6,500 | Terminal renderer + diff engine + minimap + 4 fidelity modes |
 | `fm-render-canvas` | ~3,500 | Canvas2D rendering with trait-based abstraction and mock context |
@@ -856,7 +857,7 @@ frankenmermaid/
       │  • capability-aware dispatch │  config-aware algorithm selection
       │  • cycle strategy            │  4 modes (greedy/dfs/mfas/cycle-aware)
       │  • Brandes-Köpf coords       │
-      │  • E-graph crossing min      │  egg + budget + Sugiyama fallback
+      │  • E-graph crossing min      │  rewrite rules + budget + Sugiyama fallback
       │  • CGA orthogonal routing    │  obstacle-aware via intersection queries
       │  • incremental (Adapton)     │  dependency-graph cache, skip-on-clean
       │  • [optional] FNX advisory   │  centrality tiers, bridges, SCC/WCC
@@ -984,6 +985,9 @@ When `algorithm = "auto"` (the default), a **capability-aware dispatcher** consu
 | **Quadrant** | Quadrant chart | Four-quadrant scatter on `[0,1]` axes |
 | **GitGraph** | Git graph | Branch-lane layout with chronological commit stacking |
 | **Packet** | Packet-beta | Grid-derived packet-lane layout |
+| **Architecture** | Architecture-beta, C4 (conditional) | Direction-aware placement with group containers and junction routing |
+| **Treemap** | Treemap | Squarified hierarchical tile allocation |
+| **Radar** | Radar-beta | Polar axis spokes with closed cardinal-spline / polygon curves |
 
 ### The Sugiyama algorithm
 
@@ -1021,7 +1025,7 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 
 ### E-graph equality saturation for crossing minimization
 
-For graphs where greedy barycenter ordering leaves room on the table, `fm-layout` includes an optional **egg-based equality saturation** pass (`fm-layout/src/egraph_crossing.rs`). It explores rank-order rewrites in parallel under a node-budget and timeout, then extracts the lowest-crossing ordering. If the budget is exceeded, the engine falls back to Sugiyama's standard refinement automatically.
+For graphs where greedy barycenter ordering leaves room on the table, `fm-layout` includes an optional **e-graph equality saturation** pass (`fm-layout/src/egraph_crossing.rs`). It explores rank-order rewrites under a node-budget and timeout, then extracts the lowest-crossing ordering. If the budget is exceeded, the engine falls back to Sugiyama's standard refinement automatically.
 
 Hardening includes:
 
@@ -2390,7 +2394,7 @@ frankenmermaid borrows heavily from prior graph-drawing research and from the op
 - **Reingold-Tilford tidy tree** — Edward Reingold and John Tilford, *"Tidier Drawings of Trees"* (1981).
 - **Adapton self-adjusting computation** — Matthew Hammer et al., *"Adapton: Composable, Demand-Driven Incremental Computation"* (2014). Our implementation is a deliberately simplified, single-threaded, coarse-grained variant.
 - **Cache-oblivious layout (van Emde Boas)** — Michael Bender, Erik Demaine, and Martin Farach-Colton, *"Cache-Oblivious B-Trees"* (2000). The `build_veb()` BFS-index tree gives good locality at every level of the memory hierarchy without tuning.
-- **Equality saturation / e-graphs** — Max Willsey et al., *"egg: Fast and Extensible Equality Saturation"* (2021), via the [`egg`](https://crates.io/crates/egg) crate.
+- **Equality saturation / e-graphs** — Max Willsey et al., *"egg: Fast and Extensible Equality Saturation"* (2021), implemented as a zero-dependency in-crate e-graph (`crates/fm-layout/src/egraph_crossing.rs`).
 - **Conformal geometric algebra** — Hestenes/Doran/Lasenby's modern geometric algebra. Our rotor-based transform composition follows the textbook construction adapted to 2D screen space.
 - **Minimum feedback arc set heuristics** — Peter Eades, Xuemin Lin, and W.F. Smyth, *"A Fast and Effective Heuristic for the Feedback Arc Set Problem"* (1993).
 

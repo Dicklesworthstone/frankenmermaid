@@ -1,6 +1,6 @@
 # FrankenMermaid Apple app progress
 
-The repository Beads store is currently in unresolved sync-merge state. This file records implementation progress without mutating or bypassing that tracker conflict; migrate these items into the canonical tracker after the sync state is repaired.
+Tracked in the canonical Beads work graph under `bd-0fzf5` (Universal Native Apple App: iOS/iPadOS/Mac Catalyst studio, bundled WASM/Graph Deck engine bridge, and DSR quality gates).
 
 ## 2026-08-28 foundation
 

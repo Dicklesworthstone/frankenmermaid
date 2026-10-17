@@ -70,13 +70,16 @@ Whenever any changes are made to the showcase, web assets, or WASM build, you **
 
 ```bash
 # 1. Assemble static distribution bundle
-mkdir -p dist/site/pkg dist/site/web dist/site/web_react
+mkdir -p dist/site/pkg dist/site/web dist/site/web_react dist/site/evidence
 cp index.html dist/site/
 cp frankenmermaid_demo_showcase.html dist/site/
 cp web/_headers dist/site/
-cp web/index.html dist/site/web/
+cp web/index.html web/playground.html dist/site/web/
+cp web/fm-render.worker.js web/fm-source-editor.js web/fm-document.js web/fm-deck-editor.js web/fm-image-export.js web/fm-share.js dist/site/web/
+cp web/mermaid.mjs web/mermaid-compat.mjs web/mermaid-svg.mjs dist/site/web/
 cp web_react/index.html dist/site/web_react/
 cp pkg/* dist/site/pkg/
+cp evidence/capability_scenario_matrix.json dist/site/evidence/
 cp frankenmermaid_illustration.webp dist/site/
 # og:image / twitter:image named by index.html and the showcase. Omitting it makes the path
 # serve HTML and breaks every link preview (X, Slack, GitHub profile tiles).
