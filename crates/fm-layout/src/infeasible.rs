@@ -137,6 +137,30 @@ pub fn describe(report: &InfeasibilityReport, constraints: &[IrConstraint]) -> S
     out
 }
 
+/// Extract the source [`fm_core::Span`] attached to a layout constraint.
+#[must_use]
+pub const fn constraint_span(constraint: &IrConstraint) -> fm_core::Span {
+    match constraint {
+        IrConstraint::SameRank { span, .. }
+        | IrConstraint::MinLength { span, .. }
+        | IrConstraint::Pin { span, .. }
+        | IrConstraint::OrderInRank { span, .. }
+        | IrConstraint::NonOverlap { span, .. } => *span,
+    }
+}
+
+impl InfeasibilityReport {
+    /// Return the first known source span among the conflicting constraints, if any.
+    #[must_use]
+    pub fn first_conflicting_span(&self, constraints: &[IrConstraint]) -> Option<fm_core::Span> {
+        self.conflicting
+            .iter()
+            .filter_map(|&idx| constraints.get(idx))
+            .map(constraint_span)
+            .find(|span| !span.is_unknown())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{describe, diagnose};

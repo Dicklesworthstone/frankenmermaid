@@ -39,6 +39,27 @@ pub struct LayoutLensSnapshot {
     pub bounds: LayoutRect,
 }
 
+impl LayoutLensSnapshot {
+    /// Extract 2D node center positions for persistent homology analysis (`bd-t5hn8`).
+    #[must_use]
+    pub fn node_center_positions_f64(&self) -> Vec<(f64, f64)> {
+        self.nodes
+            .iter()
+            .map(|node| (f64::from(node.center.x), f64::from(node.center.y)))
+            .collect()
+    }
+
+    /// Compute the Vietoris-Rips persistence diagram for this snapshot (`bd-t5hn8`).
+    #[must_use]
+    pub fn persistence_diagram(
+        &self,
+        max_filtration: Option<f64>,
+    ) -> crate::persistence::PersistenceDiagram {
+        let positions = self.node_center_positions_f64();
+        crate::persistence::compute_persistence(&positions, max_filtration)
+    }
+}
+
 /// The ordering decisions the layout made but Mermaid source does not spell out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutComplement {
@@ -137,9 +158,22 @@ pub struct LayoutLens {
 }
 
 impl LayoutLens {
+    /// Returns true if `diagram_type` has rank/order layout support for `LayoutLens`.
+    #[must_use]
+    pub const fn supports_diagram_type(diagram_type: DiagramType) -> bool {
+        matches!(
+            diagram_type,
+            DiagramType::Flowchart
+                | DiagramType::Sequence
+                | DiagramType::Class
+                | DiagramType::State
+                | DiagramType::Er
+        )
+    }
+
     /// Lay out `ir` and retain the ordering choices needed for a safe in-rank drag putback.
     pub fn new(ir: &MermaidDiagramIr, config: LayoutConfig) -> Result<Self, LayoutLensError> {
-        if ir.diagram_type != DiagramType::Flowchart {
+        if !Self::supports_diagram_type(ir.diagram_type) {
             return Err(LayoutLensError::NotFlowchart);
         }
         let layout =
@@ -152,7 +186,7 @@ impl LayoutLens {
         ir: &MermaidDiagramIr,
         layout: &DiagramLayout,
     ) -> Result<Self, LayoutLensError> {
-        if ir.diagram_type != DiagramType::Flowchart {
+        if !Self::supports_diagram_type(ir.diagram_type) {
             return Err(LayoutLensError::NotFlowchart);
         }
 
@@ -254,6 +288,28 @@ impl LayoutLens {
     #[must_use]
     pub fn complement(&self) -> &LayoutComplement {
         &self.complement
+    }
+
+    /// Compute the Vietoris-Rips persistence diagram for the captured layout snapshot (`bd-t5hn8`).
+    #[must_use]
+    pub fn persistence_diagram(
+        &self,
+        max_filtration: Option<f64>,
+    ) -> crate::persistence::PersistenceDiagram {
+        self.snapshot.persistence_diagram(max_filtration)
+    }
+
+    /// Measure topological stability between the captured layout snapshot and an `edited`
+    /// snapshot (`bd-t5hn8`) using bottleneck and 1-Wasserstein distances.
+    #[must_use]
+    pub fn compare_edit_stability(
+        &self,
+        edited: &LayoutLensSnapshot,
+        config: &crate::persistence::StabilityConfig,
+    ) -> crate::persistence::LayoutStabilityResult {
+        let before = self.snapshot.node_center_positions_f64();
+        let after = edited.node_center_positions_f64();
+        crate::persistence::compare_layout_stability(&before, &after, config)
     }
 
     /// Convert a safe within-rank drag to an IR declaration-order update.
@@ -461,6 +517,24 @@ fn permute_flowchart_nodes(
     for subgraph in &mut reordered.graph.subgraphs {
         for member in &mut subgraph.members {
             remap_node(member)?;
+        }
+    }
+    if let Some(seq) = &mut reordered.sequence_meta {
+        for act in &mut seq.activations {
+            remap_node(&mut act.participant)?;
+        }
+        for note in &mut seq.notes {
+            for participant in &mut note.participants {
+                remap_node(participant)?;
+            }
+        }
+        for group in &mut seq.participant_groups {
+            for participant in &mut group.participants {
+                remap_node(participant)?;
+            }
+        }
+        for event in &mut seq.lifecycle_events {
+            remap_node(&mut event.participant)?;
         }
     }
     Ok(reordered)
@@ -837,5 +911,57 @@ mod tests {
             let restored = super::permute_flowchart_nodes(&updated, &inverse).unwrap();
             assert_eq!(restored, source);
         }
+    }
+
+    #[test]
+    fn layout_and_lens_persistence_measure_topological_stability() {
+        let source = flowchart();
+        let layout = crate::layout_diagram(&source);
+        let diagram = layout.persistence_diagram(None);
+        let (b0, _) = diagram.betti_numbers();
+        assert_eq!(
+            b0, 1,
+            "single connected layout should have essential H0 = 1"
+        );
+
+        let lens = LayoutLens::from_layout(&source, &layout).unwrap();
+        assert_eq!(lens.persistence_diagram(None), diagram);
+
+        let config = crate::persistence::StabilityConfig {
+            stable_threshold: 10.0,
+            disruption_threshold: 50.0,
+            max_filtration: None,
+        };
+        let mut gentle = lens.get().clone();
+        gentle.nodes[1].center.x += 2.0;
+        let gentle_stability = lens.compare_edit_stability(&gentle, &config);
+        assert!(
+            !gentle_stability.disruptive,
+            "small nudge should not be disruptive: {:?}",
+            gentle_stability
+        );
+
+        let mut disruptive = lens.get().clone();
+        disruptive.nodes[1].center.x += 500.0;
+        let disruptive_stability = lens.compare_edit_stability(&disruptive, &config);
+        assert!(
+            disruptive_stability.disruptive,
+            "large displacement should be marked disruptive: {:?}",
+            disruptive_stability
+        );
+
+        let mut engine = crate::IncrementalLayoutEngine::default();
+        assert!(engine.compare_cached_stability(&layout, &config).is_none());
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &source,
+            crate::LayoutAlgorithm::Auto,
+            crate::LayoutConfig::default(),
+            crate::LayoutGuardrails::default(),
+        );
+        let cached_cmp = engine
+            .compare_cached_stability(&layout, &config)
+            .expect("cached layout stability should be available");
+        assert!(!cached_cmp.disruptive);
+        assert!(cached_cmp.bottleneck_distance < 1e-6);
     }
 }

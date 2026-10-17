@@ -101,14 +101,48 @@ impl GridSpatialIndex {
         }
     }
 
-    /// Create a grid index pre-populated with nodes.
+    /// Create a grid index pre-populated with nodes in cache-oblivious Morton + vEB order.
     #[must_use]
     pub fn from_positions(positions: &[(usize, f64, f64)], cell_size: f64) -> Self {
         let mut index = Self::new(cell_size);
-        for &(id, x, y) in positions {
-            index.insert(id, (x, y));
+        if positions.len() >= 8 {
+            let coords: Vec<(f64, f64)> = positions.iter().map(|&(_, x, y)| (x, y)).collect();
+            let morton_perm = crate::cache_oblivious::morton_order(&coords);
+            let veb_perm = crate::cache_oblivious::veb_layout_order(morton_perm.len());
+            for &veb_idx in &veb_perm {
+                if let Some(&pos_idx) = morton_perm.get(veb_idx)
+                    && let Some(&(id, x, y)) = positions.get(pos_idx)
+                {
+                    index.insert(id, (x, y));
+                }
+            }
+        } else {
+            for &(id, x, y) in positions {
+                index.insert(id, (x, y));
+            }
         }
         index
+    }
+
+    /// Return all indexed node entries ordered by Morton Z-curve + Van Emde Boas tree layout.
+    #[must_use]
+    pub fn veb_ordered_entries(&self) -> Vec<(usize, f64, f64)> {
+        let all: Vec<NodeEntry> = self.cells.values().flatten().copied().collect();
+        if all.is_empty() {
+            return all;
+        }
+        let coords: Vec<(f64, f64)> = all.iter().map(|&(_, x, y)| (x, y)).collect();
+        let morton_perm = crate::cache_oblivious::morton_order(&coords);
+        let veb_perm = crate::cache_oblivious::veb_layout_order(morton_perm.len());
+        veb_perm
+            .into_iter()
+            .filter_map(|veb_idx| {
+                morton_perm
+                    .get(veb_idx)
+                    .and_then(|&idx| all.get(idx))
+                    .copied()
+            })
+            .collect()
     }
 
     /// Map a coordinate to its cell index.

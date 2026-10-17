@@ -202,6 +202,9 @@ pub struct SvgRenderConfig {
     /// A marker is drawn only when this parses as a real calendar date AND falls inside the charted
     /// span AND the diagram did not say `todayMarker off`.
     pub gantt_today: Option<String>,
+    /// Whether to emit a diagnostic debug overlay (`<g class="fm-debug-overlay">`) showing
+    /// bounding boxes, control points, and layout statistics (`bd-0l1x2`).
+    pub debug_overlay: bool,
 }
 
 impl SvgRenderConfig {
@@ -246,6 +249,7 @@ impl Default for SvgRenderConfig {
     fn default() -> Self {
         Self {
             gantt_today: None,
+            debug_overlay: false,
             backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
@@ -668,10 +672,82 @@ fn render_svg_with_layout_impl_reusing(
         }
     };
     if direct_minified_css {
+        if config.debug_overlay {
+            append_svg_debug_overlay(&mut svg, ir, layout, config.padding);
+        }
         return svg;
     }
     apply_output_post_passes(&mut svg, use_post_pass_cache, known_live_marker_mask);
+    if config.debug_overlay {
+        append_svg_debug_overlay(&mut svg, ir, layout, config.padding);
+    }
     svg
+}
+
+fn append_svg_debug_overlay(
+    svg: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    padding: f32,
+) {
+    use std::fmt::Write as _;
+    let Some(close_at) = svg.rfind("</svg>") else {
+        return;
+    };
+    let offset_x = padding - layout.bounds.x;
+    let offset_y = padding - layout.bounds.y;
+    let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+    let mut overlay = String::new();
+    let _ = write!(
+        overlay,
+        r##"<g class="fm-debug-overlay" data-node-count="{}" data-edge-count="{}" data-rank-count="{}" data-crossing-count="{}" data-cycle-count="{}">"##,
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    for cluster in &layout.clusters {
+        let x = cluster.bounds.x + offset_x;
+        let y = cluster.bounds.y + offset_y;
+        let _ = write!(
+            overlay,
+            r##"<rect class="fm-debug-cluster-bbox" x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="3 2" opacity="0.7"/>"##,
+            cluster.bounds.width, cluster.bounds.height,
+        );
+    }
+    for node in &layout.nodes {
+        let x = node.bounds.x + offset_x;
+        let y = node.bounds.y + offset_y;
+        let node_id = ir.nodes.get(node.node_index).map_or("", |n| n.id.as_str());
+        overlay.push_str(r#"<rect class="fm-debug-node-bbox" data-node-id=""#);
+        let _ = crate::attributes::write_escaped_attr(&mut overlay, node_id);
+        let _ = write!(
+            overlay,
+            r##"" data-rank="{}" x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="2 2" opacity="0.8"/>"##,
+            node.rank, node.bounds.width, node.bounds.height,
+        );
+    }
+    for edge in &layout.edges {
+        for pt in &edge.points {
+            let cx = pt.x + offset_x;
+            let cy = pt.y + offset_y;
+            let _ = write!(
+                overlay,
+                r##"<circle class="fm-debug-edge-point" cx="{cx:.1}" cy="{cy:.1}" r="2" fill="#f59e0b" opacity="0.85"/>"##,
+            );
+        }
+    }
+    let _ = write!(
+        overlay,
+        r##"<text class="fm-debug-hud" x="8" y="14" font-family="monospace" font-size="10" fill="#ef4444">debug: nodes={} edges={} ranks={} crossings={} cycles={}</text></g>"##,
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    svg.insert_str(close_at, &overlay);
 }
 
 /// Post-pass: drop the contiguous node-STATE rule region (inactive / block-beta / highlighted /
@@ -2486,10 +2562,11 @@ fn register_clip_path(
 }
 
 fn scene_transform_value(transform: RenderTransform) -> String {
-    // Use direct matrix formatting for bit-identical output.
-    // A fallible CGA rotor conversion is available via
-    // cga_transform::try_render_transform_to_cga() when rotation extraction or other
-    // similarity-transform-only features are needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(cga_stack) = cga_transform::try_render_transform_to_cga(transform) {
+        let _rotation_deg = cga_stack.rotation_degrees();
+        let _scale = cga_stack.scale_factor();
+    }
     cga_transform::render_transform_to_svg_matrix(transform)
 }
 
@@ -23131,5 +23208,22 @@ marker#arrow-open path {
             traced_b.trace.incremental.recomputed_nodes <= traced_b.layout.stats.node_count,
             "incremental should recompute at most all nodes"
         );
+    }
+
+    #[test]
+    fn debug_overlay_emits_bbox_and_hud_group_when_enabled() {
+        let parsed = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]");
+        let default_svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        assert!(!default_svg.contains("fm-debug-overlay"));
+
+        let debug_config = SvgRenderConfig {
+            debug_overlay: true,
+            ..SvgRenderConfig::default()
+        };
+        let debug_svg = render_svg_with_config(&parsed.ir, &debug_config);
+        assert!(debug_svg.contains(r#"class="fm-debug-overlay""#));
+        assert!(debug_svg.contains(r#"class="fm-debug-node-bbox""#));
+        assert!(debug_svg.contains(r#"class="fm-debug-edge-point""#));
+        assert!(debug_svg.contains("debug: nodes=2 edges=1"));
     }
 }

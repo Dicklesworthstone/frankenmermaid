@@ -5050,3 +5050,117 @@ fn release_regression_packet_distant_single_bits_preserve_visible_fields() {
     let svg = render_svg_with_layout(&result.ir, &traced.layout, &SvgRenderConfig::default());
     assert!(svg.contains("Near") && svg.contains("Far") && svg.contains("4294967295"));
 }
+
+#[test]
+fn capability_scenario_matrix_references_valid_families_scenarios_and_files() {
+    use std::path::Path;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let matrix_path = root.join("evidence/capability_scenario_matrix.json");
+    let raw = std::fs::read_to_string(&matrix_path).expect("read capability_scenario_matrix.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse capability_scenario_matrix.json");
+
+    let documented_families: std::collections::HashSet<&str> = fm_core::documented_diagram_types()
+        .iter()
+        .copied()
+        .map(fm_core::DiagramType::as_str)
+        .collect();
+
+    let scenarios = parsed["scenarios"]
+        .as_array()
+        .expect("scenarios array in capability_scenario_matrix.json");
+    let mut scenario_ids = std::collections::HashSet::new();
+    for scenario in scenarios {
+        let id = scenario["id"].as_str().expect("scenario id");
+        assert!(
+            scenario_ids.insert(id.to_string()),
+            "duplicate scenario id {id}"
+        );
+        let family = scenario["diagram_family"]
+            .as_str()
+            .expect("scenario diagram_family");
+        assert!(
+            documented_families.contains(family),
+            "scenario {id} references undocumented diagram_family '{family}'"
+        );
+        for src in scenario["source_refs"]
+            .as_array()
+            .expect("scenario source_refs")
+        {
+            let rel = src.as_str().expect("source_ref string");
+            assert!(
+                root.join(rel).exists(),
+                "scenario {id} references missing source_ref '{rel}'"
+            );
+        }
+    }
+
+    for family in parsed["feature_families"]
+        .as_array()
+        .expect("feature_families array")
+    {
+        let fid = family["id"].as_str().expect("feature_family id");
+        for sid in family["scenario_ids"]
+            .as_array()
+            .expect("feature_family scenario_ids")
+        {
+            let sid = sid.as_str().expect("scenario_id string");
+            assert!(
+                scenario_ids.contains(sid),
+                "feature_family {fid} references unknown scenario_id '{sid}'"
+            );
+        }
+        for eref in family["evidence_refs"]
+            .as_array()
+            .expect("feature_family evidence_refs")
+        {
+            let rel = eref.as_str().expect("evidence_ref string");
+            assert!(
+                root.join(rel).exists(),
+                "feature_family {fid} references missing evidence_ref '{rel}'"
+            );
+        }
+    }
+}
+
+#[test]
+fn readme_and_docs_capability_truth_matches_codebase_invariants() {
+    use std::path::Path;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let pkg_version = env!("CARGO_PKG_VERSION");
+
+    assert_eq!(fm_core::documented_diagram_types().len(), 27);
+    assert_eq!(fm_layout::concrete_layout_algorithms().len(), 18);
+
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+    assert!(
+        readme.contains(&format!("version `{pkg_version}`")),
+        "README.md should reference current version `{pkg_version}`"
+    );
+    assert!(
+        !readme.contains("frankenmermaid v0.2.0") && !readme.contains("fm-core = \"0.2\""),
+        "README.md should not contain stale 0.2 version snippets"
+    );
+
+    let publishing = std::fs::read_to_string(root.join("docs/CRATES_IO_PUBLISHING.md"))
+        .expect("read docs/CRATES_IO_PUBLISHING.md");
+    assert!(
+        publishing.contains(pkg_version) && !publishing.contains("0.2.0"),
+        "docs/CRATES_IO_PUBLISHING.md must match current workspace version {pkg_version}"
+    );
+
+    let parity = std::fs::read_to_string(root.join("docs/planning/FEATURE_PARITY.md"))
+        .expect("read docs/planning/FEATURE_PARITY.md");
+    assert!(
+        parity.contains("23 node shapes")
+            && parity.contains("18 algorithms + Auto")
+            && parity.contains("18 dedicated layout algorithms plus Auto"),
+        "docs/planning/FEATURE_PARITY.md must stay synchronized with 23 node shapes and 18 layout algorithms"
+    );
+}

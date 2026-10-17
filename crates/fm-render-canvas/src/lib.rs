@@ -49,7 +49,9 @@ pub use gpu_plan::{
     GpuNodeInstance, GpuNodeShape, GpuRenderPlan, GpuTextQuad, GpuTextRun, NODE_SDF_WGSL,
     TEXT_ATLAS_WGSL, parse_paint_rgba,
 };
-pub use interaction::{HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test};
+pub use interaction::{
+    CanvasSession, HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test,
+};
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use viewport::{Viewport, ViewportTransform};
 
@@ -331,7 +333,12 @@ mod tests {
         let expected = render_to_canvas_with_layout(&ir, &layout, &mut base, &config);
         let mut context = MockCanvas2dContext::new(300.0, 200.0);
         let actual = render_to_canvas_with_selection(
-            &ir, &layout, &mut context, &config, &mut selection, &style,
+            &ir,
+            &layout,
+            &mut context,
+            &config,
+            &mut selection,
+            &style,
         );
         assert_counts_match(&expected, &actual);
         assert_eq!(actual.draw_calls, expected.draw_calls + 2);

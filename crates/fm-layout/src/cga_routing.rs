@@ -416,6 +416,140 @@ fn horizontal_nudge_for_obstacle(
     }
 }
 
+/// Check if any segment of a polyline intersects any obstacle rectangle.
+#[must_use]
+pub fn polyline_intersects_obstacles(
+    points: &[LayoutPoint],
+    obstacles: &[LayoutRect],
+    margin: f32,
+) -> bool {
+    points
+        .windows(2)
+        .any(|seg| segment_intersects_obstacles(seg[0], seg[1], obstacles, margin))
+}
+
+/// Upgrade a blocked 4-point orthogonal route to a 6-point multi-bend orthogonal detour
+/// around the blocking obstacle's expanded bounding box when single-segment nudging
+/// remains blocked by an adjacent or staggered obstacle (`bd-e1gik`).
+#[must_use]
+pub fn detour_blocked_orthogonal_route(
+    points: &[LayoutPoint],
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    margin: f32,
+) -> Option<smallvec::SmallVec<[LayoutPoint; 6]>> {
+    if points.len() < 2
+        || obstacles.is_empty()
+        || !polyline_intersects_obstacles(points, obstacles, margin)
+    {
+        return None;
+    }
+    let source = *points.first()?;
+    let target = *points.last()?;
+
+    // Find the first segment that hits an obstacle and compute a 6-point staircase detour
+    // that clears the union of blocking obstacles along the orthogonal corridor.
+    let mut union_min_x = f32::INFINITY;
+    let mut union_max_x = f32::NEG_INFINITY;
+    let mut union_min_y = f32::INFINITY;
+    let mut union_max_y = f32::NEG_INFINITY;
+    let mut hit_any = false;
+
+    for seg in points.windows(2) {
+        for obs in obstacles {
+            if !obstacle_is_valid(obs) {
+                continue;
+            }
+            if segment_intersects_obstacles(seg[0], seg[1], std::slice::from_ref(obs), margin) {
+                union_min_x = union_min_x.min(obs.x - margin);
+                union_max_x = union_max_x.max(obs.x + obs.width + margin);
+                union_min_y = union_min_y.min(obs.y - margin);
+                union_max_y = union_max_y.max(obs.y + obs.height + margin);
+                hit_any = true;
+            }
+        }
+    }
+    if !hit_any {
+        return None;
+    }
+
+    let step = margin.max(4.0);
+    let lead_trail_xs = [source.x, target.x, union_min_x - step, union_max_x + step];
+    let bypass_xs = [union_min_x - step, union_max_x + step];
+    let lead_trail_ys = [source.y, target.y, union_min_y - step, union_max_y + step];
+    let bypass_ys = [union_min_y - step, union_max_y + step];
+
+    let polyline_len = |pts: &[LayoutPoint]| -> f32 {
+        pts.windows(2)
+            .map(|w| (w[1].x - w[0].x).abs() + (w[1].y - w[0].y).abs())
+            .sum()
+    };
+
+    let mut best: Option<(f32, [LayoutPoint; 6])> = None;
+    let clearance = margin * 0.5;
+
+    for horiz in [true, false] {
+        let penalty = if horiz == horizontal_ranks { 0.0 } else { 1.0 };
+        let lead_trails = if horiz {
+            &lead_trail_xs
+        } else {
+            &lead_trail_ys
+        };
+        let bypasses = if horiz { &bypass_ys } else { &bypass_xs };
+        for &lead in lead_trails {
+            for &trail in lead_trails {
+                for &bypass in bypasses {
+                    let candidate = if horiz {
+                        [
+                            source,
+                            LayoutPoint {
+                                x: lead,
+                                y: source.y,
+                            },
+                            LayoutPoint { x: lead, y: bypass },
+                            LayoutPoint {
+                                x: trail,
+                                y: bypass,
+                            },
+                            LayoutPoint {
+                                x: trail,
+                                y: target.y,
+                            },
+                            target,
+                        ]
+                    } else {
+                        [
+                            source,
+                            LayoutPoint {
+                                x: source.x,
+                                y: lead,
+                            },
+                            LayoutPoint { x: bypass, y: lead },
+                            LayoutPoint {
+                                x: bypass,
+                                y: trail,
+                            },
+                            LayoutPoint {
+                                x: target.x,
+                                y: trail,
+                            },
+                            target,
+                        ]
+                    };
+                    if !polyline_intersects_obstacles(&candidate, obstacles, clearance) {
+                        let cost = polyline_len(&candidate) + penalty;
+                        if best.as_ref().is_none_or(|(best_cost, _)| cost < *best_cost) {
+                            best = Some((cost, candidate));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, route)| smallvec::SmallVec::from_buf(route))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

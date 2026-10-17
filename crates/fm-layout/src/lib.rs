@@ -9,7 +9,7 @@ pub mod infeasible;
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_adapter;
-#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fnx_budget;
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 pub mod fnx_cache;
@@ -829,7 +829,7 @@ pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
         },
         LayoutAlgorithmRow {
             algorithm: LayoutAlgorithm::Sugiyama,
-            serves: "General graphs (flowchart, class, state, ER, requirement, DOT)",
+            serves: "General graphs (flowchart, class, state, ER, C4, requirement, DOT)",
             notes: "Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling",
         },
         LayoutAlgorithmRow {
@@ -904,7 +904,7 @@ pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
         },
         LayoutAlgorithmRow {
             algorithm: LayoutAlgorithm::Architecture,
-            serves: "Architecture-beta, C4 (conditional)",
+            serves: "Architecture-beta",
             notes: "Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs",
         },
         LayoutAlgorithmRow {
@@ -1322,6 +1322,8 @@ pub struct IncrementalLayoutEngine {
     // See `IncrementalCacheState::node_size_cache`: lookup-only, never iterated for output.
     node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
+    dcg: crate::adapton::LayoutDcg,
+    epoch: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2607,6 +2609,44 @@ pub struct DiagramLayout {
     /// layout (populated by incremental layout, empty for full recomputes).
     /// Renderers can use this to skip re-drawing unchanged portions.
     pub dirty_regions: Vec<LayoutRect>,
+}
+
+impl DiagramLayout {
+    /// Extract 2D node center positions for persistent homology analysis (`bd-t5hn8`).
+    #[must_use]
+    pub fn node_center_positions_f64(&self) -> Vec<(f64, f64)> {
+        self.nodes
+            .iter()
+            .map(|node| {
+                let center = node.bounds.center();
+                (f64::from(center.x), f64::from(center.y))
+            })
+            .collect()
+    }
+
+    /// Compute the Vietoris-Rips persistence diagram ($\beta_0$ components and $\beta_1$ loops)
+    /// over this layout's 2D node center positions (`bd-t5hn8`).
+    #[must_use]
+    pub fn persistence_diagram(
+        &self,
+        max_filtration: Option<f64>,
+    ) -> persistence::PersistenceDiagram {
+        let positions = self.node_center_positions_f64();
+        persistence::compute_persistence(&positions, max_filtration)
+    }
+
+    /// Compare topological stability between this layout (`before`) and `after` using
+    /// bottleneck and 1-Wasserstein distances on their persistence diagrams (`bd-t5hn8`).
+    #[must_use]
+    pub fn compare_stability(
+        &self,
+        after: &Self,
+        config: &persistence::StabilityConfig,
+    ) -> persistence::LayoutStabilityResult {
+        let before_positions = self.node_center_positions_f64();
+        let after_positions = after.node_center_positions_f64();
+        persistence::compare_layout_stability(&before_positions, &after_positions, config)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3939,6 +3979,7 @@ impl IncrementalLayoutEngine {
             && cached.key == key
             && memo_ir_equal(&cached.ir, ir)
         {
+            self.dcg.record_layout_hit();
             let mut traced = cached.traced.clone();
             let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
             traced.trace.incremental = IncrementalRecomputeTrace {
@@ -3959,6 +4000,7 @@ impl IncrementalLayoutEngine {
             return traced;
         }
 
+        self.epoch = self.epoch.wrapping_add(1);
         trace!(algorithm = algorithm.as_str(), "incremental.cache_miss");
         let mut incremental_state = IncrementalCacheState {
             graph_metrics_cache: self.graph_metrics_cache.take(),
@@ -4006,6 +4048,7 @@ impl IncrementalLayoutEngine {
                 recompute_duration_us,
                 "incremental.recompute"
             );
+            self.dcg.record_layout_recompute();
             self.cached = Some(CachedTracedLayout {
                 key,
                 ir: snapshot,
@@ -4053,6 +4096,7 @@ impl IncrementalLayoutEngine {
             recompute_duration_us,
             "incremental.recompute"
         );
+        self.dcg.record_layout_recompute();
         self.cached = Some(CachedTracedLayout {
             key,
             ir: snapshot,
@@ -4066,6 +4110,52 @@ impl IncrementalLayoutEngine {
         self.graph_metrics_cache = None;
         self.node_size_cache.clear();
         self.dependency_graph_cache = None;
+        self.dcg.invalidate_all();
+        self.dcg.reset_stats();
+        self.epoch = 0;
+    }
+
+    /// Return current Adapton DCG cache and invalidation statistics (`bd-yyt62`).
+    #[must_use]
+    pub fn dcg_stats(&self) -> crate::adapton::LayoutDcgStats {
+        self.dcg.stats()
+    }
+
+    /// Capture an epoch-tagged snapshot of the active IR (`bd-yyt62`).
+    #[must_use]
+    pub fn epoch_snapshot(&self, ir: &MermaidDiagramIr) -> fm_core::epoch::IrSnapshot {
+        fm_core::epoch::EpochIrHandle::with_epoch(self.epoch, ir.clone()).snapshot()
+    }
+
+    /// Return a counted [`fm_core::reuse_proof::ReuseProof`] classifying how many layout requests
+    /// on this engine were computed from scratch vs served from memoized reuse (`bd-bg59p`).
+    #[must_use]
+    pub fn reuse_proof(&self) -> fm_core::reuse_proof::ReuseProof {
+        let stats = self.dcg.stats();
+        let computed = stats.layout_recomputes;
+        let reused = stats.layout_hits;
+        fm_core::reuse_proof::ReuseProof {
+            requested: computed + reused,
+            computed,
+        }
+    }
+
+    /// Classify the engine's cumulative work history via [`fm_core::reuse_proof::WorkClass`] (`bd-bg59p`).
+    #[must_use]
+    pub fn work_class(&self) -> fm_core::reuse_proof::WorkClass {
+        self.reuse_proof().work_class()
+    }
+
+    /// Compare the engine's currently cached layout against `after` using topological persistence
+    /// (`bd-t5hn8`), returning `None` if no previous layout has been cached yet.
+    #[must_use]
+    pub fn compare_cached_stability(
+        &self,
+        after: &DiagramLayout,
+        config: &persistence::StabilityConfig,
+    ) -> Option<persistence::LayoutStabilityResult> {
+        let cached = self.cached.as_ref()?;
+        Some(cached.traced.layout.compare_stability(after, config))
     }
 
     fn try_incremental_subgraph_relayout(
@@ -8743,6 +8833,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let mut in_flow = vec![0.0_f32; node_count];
     let mut out_flow = vec![0.0_f32; node_count];
+    let mut sankey_links: Vec<(usize, usize, f32)> = Vec::with_capacity(ir.edges.len());
     for edge in &ir.edges {
         let Some(source) = endpoint_node_index(ir, edge.from) else {
             continue;
@@ -8758,10 +8849,12 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .label
             .and_then(|label_id| ir.labels.get(label_id.0))
             .and_then(|label| label.text.parse::<f32>().ok())
-            .unwrap_or(1.0);
+            .unwrap_or(1.0)
+            .max(0.001);
 
         out_flow[source] += flow_val;
         in_flow[target] += flow_val;
+        sankey_links.push((source, target, flow_val));
     }
 
     for (node_index, size) in node_sizes.iter_mut().enumerate() {
@@ -8777,6 +8870,112 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
     for nodes in nodes_by_rank.values_mut() {
         nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    }
+
+    if nodes_by_rank.len() > 1 && sankey_links.len() > 1 {
+        let mut order_in_rank = vec![0_usize; node_count];
+        for nodes in nodes_by_rank.values() {
+            for (pos, &node_idx) in nodes.iter().enumerate() {
+                order_in_rank[node_idx] = pos;
+            }
+        }
+        let weighted_crossings = |order: &[usize]| -> f32 {
+            let mut cost = 0.0_f32;
+            for (idx, &(u1, v1, w1)) in sankey_links.iter().enumerate() {
+                if ranks[u1] == ranks[v1] {
+                    continue;
+                }
+                let (l1, r1) = if ranks[u1] < ranks[v1] {
+                    (u1, v1)
+                } else {
+                    (v1, u1)
+                };
+                for &(u2, v2, w2) in &sankey_links[idx + 1..] {
+                    if ranks[u2] == ranks[v2] {
+                        continue;
+                    }
+                    let (l2, r2) = if ranks[u2] < ranks[v2] {
+                        (u2, v2)
+                    } else {
+                        (v2, u2)
+                    };
+                    if ranks[l1] == ranks[l2] && ranks[r1] == ranks[r2] {
+                        let inv_left = order[l1].cmp(&order[l2]);
+                        let inv_right = order[r1].cmp(&order[r2]);
+                        if (inv_left.is_lt() && inv_right.is_gt())
+                            || (inv_left.is_gt() && inv_right.is_lt())
+                        {
+                            cost += w1 * w2;
+                        }
+                    }
+                }
+            }
+            cost
+        };
+
+        let mut best_cost = weighted_crossings(&order_in_rank);
+        let mut best_nodes_by_rank = nodes_by_rank.clone();
+        let rank_keys: Vec<usize> = nodes_by_rank.keys().copied().collect();
+
+        for _sweep in 0..4 {
+            if best_cost <= 0.0 {
+                break;
+            }
+            for forward in [true, false] {
+                for idx in 1..rank_keys.len() {
+                    let rank = if forward {
+                        rank_keys[idx]
+                    } else {
+                        rank_keys[rank_keys.len() - 1 - idx]
+                    };
+                    if let Some(nodes) = nodes_by_rank.get_mut(&rank) {
+                        let mut barycenters: Vec<(usize, f32)> = nodes
+                            .iter()
+                            .map(|&node_idx| {
+                                let mut weighted_sum = 0.0_f32;
+                                let mut total_weight = 0.0_f32;
+                                for &(src, dst, weight) in &sankey_links {
+                                    let other = if dst == node_idx {
+                                        src
+                                    } else if src == node_idx {
+                                        dst
+                                    } else {
+                                        continue;
+                                    };
+                                    if (forward && ranks[other] < rank)
+                                        || (!forward && ranks[other] > rank)
+                                    {
+                                        weighted_sum += (order_in_rank[other] as f32) * weight;
+                                        total_weight += weight;
+                                    }
+                                }
+                                let bary = if total_weight > 0.0 {
+                                    weighted_sum / total_weight
+                                } else {
+                                    order_in_rank[node_idx] as f32
+                                };
+                                (node_idx, bary)
+                            })
+                            .collect();
+                        barycenters.sort_by(|(left_idx, left_bary), (right_idx, right_bary)| {
+                            left_bary
+                                .total_cmp(right_bary)
+                                .then_with(|| compare_node_indices(ir, *left_idx, *right_idx))
+                        });
+                        for (pos, (node_idx, _)) in barycenters.iter().enumerate() {
+                            nodes[pos] = *node_idx;
+                            order_in_rank[*node_idx] = pos;
+                        }
+                    }
+                }
+                let sweep_cost = weighted_crossings(&order_in_rank);
+                if sweep_cost < best_cost {
+                    best_cost = sweep_cost;
+                    best_nodes_by_rank = nodes_by_rank.clone();
+                }
+            }
+        }
+        nodes_by_rank = best_nodes_by_rank;
     }
 
     let spacing = LayoutSpacing::default();
@@ -10324,12 +10523,8 @@ fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     )
 }
 
-/// Place C4 elements from the `Rel_U`/`Rel_D`/`Rel_L`/`Rel_R` grammar.
-///
-/// The cell-placement engine is shared with architecture-beta because both grammars state the
-/// same discrete relation: where the target must sit relative to the source. The C4 relationship
-/// direction is stored separately in the IR so a plain `Rel` cannot accidentally acquire one.
-/// Lay out nodes on a deterministic grid whose selected edges specify one source-to-target step.
+/// Lay out nodes on a deterministic grid whose selected edges specify one source-to-target step
+/// (used by `architecture-beta` when edges declare explicit L/R/T/B sides).
 fn layout_diagram_directed_grid_traced(
     ir: &MermaidDiagramIr,
     edge_step: fn(&fm_core::IrEdge) -> Option<(i32, i32)>,
@@ -12575,7 +12770,7 @@ fn display_node_label_ref<'a>(ir: &'a MermaidDiagramIr, node: &'a IrNode) -> &'a
     ir.node_display_text(node)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct CycleRemovalResult {
     reversed_edge_indexes: BTreeSet<usize>,
     highlighted_edge_indexes: BTreeSet<usize>,
@@ -12622,6 +12817,138 @@ fn default_cycle_strategy() -> CycleStrategy {
         .unwrap_or_default()
 }
 
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+std::thread_local! {
+    static FNX_CYCLE_ANALYSIS_CACHE: RefCell<crate::fnx_cache::AnalysisCache> =
+        RefCell::new(crate::fnx_cache::AnalysisCache::default());
+}
+
+/// Evaluate directed Strongly Connected Components under an FNX canary rollout controller (`bd-qsjjb`).
+///
+/// Records request latency and error status into `rollout`, checks health criteria against
+/// `HealthCriteria::default()`, and automatically triggers deterministic rollback if violated.
+#[must_use]
+pub fn analyze_cycles_with_fnx_canary(
+    ir: &MermaidDiagramIr,
+    rollout: &mut fm_core::canary::RolloutState,
+    request_id: u64,
+) -> crate::fnx_directed::SccResult {
+    let enabled = rollout.should_enable_fnx(request_id);
+    let start = Instant::now();
+    let scc = crate::fnx_directed::compute_scc(ir);
+    if enabled {
+        let latency_us = saturating_elapsed_micros(start.elapsed());
+        rollout.record_request(latency_us, false);
+        if let Some(reason) = rollout.check_health(&fm_core::canary::HealthCriteria::default()) {
+            rollout.rollback(reason, request_id);
+        }
+    }
+    scc
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cycle_removal_fnx_cycle_aware(
+    ir: &MermaidDiagramIr,
+    node_count: usize,
+    edges: &[OrientedEdge],
+    node_priority: &[usize],
+    dfs_back_edges: &BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    if dfs_back_edges.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let scc = crate::fnx_directed::compute_scc(ir);
+    if scc.non_trivial_count == 0 {
+        return dfs_back_edges.clone();
+    }
+
+    #[cfg(feature = "fnx-integration")]
+    let criticality = FNX_CYCLE_ANALYSIS_CACHE.with(|cache| {
+        let proj = crate::fnx_adapter::ProjectionConfig::default();
+        let scoring = crate::fnx_cycle_scorer::CriticalityScoringConfig::default();
+        if let Some(hit) = cache.borrow_mut().get_criticality(ir, &proj, &scoring) {
+            return hit;
+        }
+        let computed = crate::fnx_cycle_scorer::compute_criticality_scores(ir, &scoring);
+        cache
+            .borrow_mut()
+            .put_criticality(ir, &proj, &scoring, computed.clone());
+        computed
+    });
+
+    let mut candidate_reversals = BTreeSet::new();
+    for component in scc.components.iter().filter(|c| !c.is_trivial) {
+        if component.nodes.len() == 1 {
+            let self_node = component.nodes[0];
+            for edge in edges {
+                if edge.source == self_node && edge.target == self_node {
+                    candidate_reversals.insert(edge.edge_index);
+                }
+            }
+            continue;
+        }
+
+        let mut net_weight = vec![0.0_f64; node_count];
+        for edge in edges {
+            if scc.node_to_component.get(&edge.source) == Some(&component.index)
+                && scc.node_to_component.get(&edge.target) == Some(&component.index)
+            {
+                #[cfg(feature = "fnx-integration")]
+                let w = 1.0 + criticality.get_score(edge.edge_index);
+                #[cfg(not(feature = "fnx-integration"))]
+                let w = 1.0_f64;
+                net_weight[edge.source] += w;
+                net_weight[edge.target] -= w;
+            }
+        }
+
+        let mut ordered = component.nodes.clone();
+        ordered.sort_by(|left, right| {
+            net_weight[*right]
+                .total_cmp(&net_weight[*left])
+                .then_with(|| compare_priority(*left, *right, node_priority))
+        });
+        let position: BTreeMap<usize, usize> = ordered
+            .into_iter()
+            .enumerate()
+            .map(|(idx, node)| (node, idx))
+            .collect();
+
+        for edge in edges {
+            if scc.node_to_component.get(&edge.source) == Some(&component.index)
+                && scc.node_to_component.get(&edge.target) == Some(&component.index)
+                && position.get(&edge.source).copied().unwrap_or(0)
+                    >= position.get(&edge.target).copied().unwrap_or(0)
+            {
+                candidate_reversals.insert(edge.edge_index);
+            }
+        }
+    }
+
+    if candidate_reversals.is_empty() {
+        return dfs_back_edges.clone();
+    }
+
+    let check_edges = oriented_edges(ir, &candidate_reversals);
+    if cycle_removal_dfs_back(node_count, &check_edges, node_priority).is_empty() {
+        candidate_reversals
+    } else {
+        dfs_back_edges.clone()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cycle_removal_fnx_cycle_aware(
+    _ir: &MermaidDiagramIr,
+    _node_count: usize,
+    _edges: &[OrientedEdge],
+    _node_priority: &[usize],
+    dfs_back_edges: &BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    dfs_back_edges.clone()
+}
+
 fn cycle_removal(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
@@ -12665,18 +12992,14 @@ fn cycle_removal(
             cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
         }
         CycleStrategy::CycleAware => {
-            // For CycleAware, we still want to break cycles for the ranking phase
-            // to ensure a high-quality topological baseline, but we keep the
-            // original orientation for other phases that handle cycles explicitly.
-            dfs_back_edges.clone()
+            // For CycleAware, break cycles for the ranking phase using FNX SCC + criticality
+            // scoring (with deterministic fallback to DFS back-edges) while keeping original
+            // orientation for downstream phases that handle cycles explicitly (`bd-qsjjb`).
+            cycle_removal_fnx_cycle_aware(ir, node_count, &edges, node_priority, &dfs_back_edges)
         }
     };
 
-    let highlighted_edge_indexes = if matches!(cycle_strategy, CycleStrategy::CycleAware) {
-        dfs_back_edges
-    } else {
-        reversed_edge_indexes.clone()
-    };
+    let highlighted_edge_indexes = reversed_edge_indexes.clone();
 
     let result = CycleRemovalResult {
         reversed_edge_indexes,
@@ -14049,6 +14372,168 @@ fn crossing_minimization_sweeps<
     (crossing_count, ordering_by_rank)
 }
 
+/// Build a cache-aware [`polyhedral::TiledSchedule`] for Sugiyama barycenter sweeps (`bd-t73cg`).
+///
+/// Uses [`polyhedral::auto_tile_config`] and [`polyhedral::estimate_miss_ratio`] against a 32 KiB
+/// L1 budget (16 bytes per node position/barycenter slot). When the entire rank working set fits in
+/// L1 (`miss_ratio >= 1.0`), returns a single-tile schedule covering all layers so small graphs pay
+/// zero tiling boundary overhead.
+#[must_use]
+pub fn build_sugiyama_tile_schedule(
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    sweeps: usize,
+) -> polyhedral::TiledSchedule {
+    const NODE_BYTES: usize = 16;
+    const L1_CACHE_BYTES: usize = 32_768;
+
+    let num_layers = ordering_by_rank.len();
+    if num_layers == 0 {
+        return polyhedral::TiledSchedule::new(0, sweeps, polyhedral::TileConfig::default());
+    }
+    let total_nodes: usize = ordering_by_rank.values().map(Vec::len).sum();
+    let avg_nodes = (total_nodes / num_layers).max(1);
+    let miss_ratio =
+        polyhedral::estimate_miss_ratio(num_layers, avg_nodes, NODE_BYTES, L1_CACHE_BYTES, sweeps);
+    let mut tile_config = polyhedral::auto_tile_config(avg_nodes, NODE_BYTES, L1_CACHE_BYTES);
+    if miss_ratio >= 1.0 {
+        tile_config.layer_tile_size = num_layers.max(1);
+    }
+    polyhedral::TiledSchedule::new(num_layers, sweeps, tile_config)
+}
+
+/// Execute Sugiyama barycenter crossing-minimization sweeps using a polyhedral
+/// [`polyhedral::TiledSchedule`] (`bd-t73cg`).
+///
+/// Returns `(crossing_count, ordering_by_rank, schedule)`.
+#[must_use]
+pub fn execute_tiled_barycenter_sweeps(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    mut ordering_by_rank: BTreeMap<usize, Vec<usize>>,
+    sweeps: usize,
+    config: &LayoutConfig,
+) -> (
+    usize,
+    BTreeMap<usize, Vec<usize>>,
+    polyhedral::TiledSchedule,
+) {
+    let schedule = build_sugiyama_tile_schedule(&ordering_by_rank, sweeps);
+    if ordering_by_rank.len() <= 1 || ordering_by_rank.values().all(|nodes| nodes.len() <= 1) {
+        return (0, ordering_by_rank, schedule);
+    }
+
+    let centrality = build_centrality_assist(ir, config);
+    let mut dense_node_rank = Vec::with_capacity(ir.nodes.len());
+    let mut dense_ok = true;
+    for node_index in 0..ir.nodes.len() {
+        let rank = ranks.get(&node_index).copied().unwrap_or(0);
+        if let Ok(rank_u32) = u32::try_from(rank) {
+            dense_node_rank.push(rank_u32);
+        } else {
+            dense_ok = false;
+            break;
+        }
+    }
+    let mut scratch = BarycenterScratch::new::<true, true>(ir);
+    let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    let avg_nodes = ir.nodes.len() / rank_keys.len().max(1);
+    let _interchange_recommended =
+        polyhedral::should_interchange(rank_keys.len(), avg_nodes, sweeps);
+    let _node_strips = polyhedral::strip_mine(avg_nodes, schedule.config.node_strip_size);
+
+    for (sweep, layer_index) in schedule.iterate() {
+        let Some(&rank) = rank_keys.get(layer_index) else {
+            continue;
+        };
+        if sweep % 2 == 0 {
+            if layer_index == 0 {
+                continue;
+            }
+            let upper_rank = rank_keys[layer_index - 1];
+            if dense_ok {
+                reorder_rank_by_barycenter::<true, true, true>(
+                    ir,
+                    (ranks, &dense_node_rank),
+                    &mut scratch,
+                    &mut ordering_by_rank,
+                    rank,
+                    upper_rank,
+                    true,
+                    &centrality,
+                );
+            } else {
+                reorder_rank_by_barycenter::<false, true, true>(
+                    ir,
+                    (ranks, &[]),
+                    &mut scratch,
+                    &mut ordering_by_rank,
+                    rank,
+                    upper_rank,
+                    true,
+                    &centrality,
+                );
+            }
+        } else if layer_index + 1 < rank_keys.len() {
+            let lower_rank = rank_keys[layer_index + 1];
+            if dense_ok {
+                reorder_rank_by_barycenter::<true, true, true>(
+                    ir,
+                    (ranks, &dense_node_rank),
+                    &mut scratch,
+                    &mut ordering_by_rank,
+                    rank,
+                    lower_rank,
+                    false,
+                    &centrality,
+                );
+            } else {
+                reorder_rank_by_barycenter::<false, true, true>(
+                    ir,
+                    (ranks, &[]),
+                    &mut scratch,
+                    &mut ordering_by_rank,
+                    rank,
+                    lower_rank,
+                    false,
+                    &centrality,
+                );
+            }
+        }
+    }
+
+    let crossing_count = total_crossings_packed(ir, ranks, &ordering_by_rank, &mut scratch)
+        .unwrap_or_else(|| total_crossings(ir, ranks, &ordering_by_rank));
+    (crossing_count, ordering_by_rank, schedule)
+}
+
+/// Combined spectral partition result and global-to-local node index mapping (`bd-t73cg`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct SpectralDecomposition {
+    pub result: spectral::SpectralPartitionResult,
+    pub mapping: spectral::PartitionMapping,
+}
+
+/// Partition a diagram IR using spectral graph bisection / k-way Laplacian eigendecomposition
+/// when it meets the [`spectral::SpectralConfig`] size threshold (`bd-t73cg`).
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn partition_diagram_spectrally(
+    ir: &MermaidDiagramIr,
+    config: &spectral::SpectralConfig,
+) -> Option<SpectralDecomposition> {
+    if !spectral::should_partition(ir, config) {
+        return None;
+    }
+    let result = if config.target_partitions <= 2 {
+        spectral::spectral_bisect_graph_with_config(ir, config)
+    } else {
+        spectral::spectral_partition_kway(ir, config)
+    };
+    let mapping = spectral::build_partition_mapping(&result, ir.nodes.len());
+    Some(SpectralDecomposition { result, mapping })
+}
+
 /// Apply transpose and sifting refinement heuristics to reduce crossings
 /// beyond what barycenter achieves alone.
 fn crossing_refinement(
@@ -14959,6 +15444,54 @@ fn separate_disjoint_subgraphs(
     }
 }
 
+/// Maximum constraint count for automatic Minimal Irreducible Infeasible Subset (IIS) diagnosis.
+///
+/// The deletion filter in [`crate::infeasible::diagnose`] makes `n + 1` oracle calls for `n`
+/// constraints, so capping automatic diagnosis at 32 constraints bounds the diagnosis cost.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CONSTRAINT_DIAGNOSIS_COUNT: usize = 32;
+
+/// Diagnose mutually conflicting layout constraints using [`crate::infeasible::diagnose`] (`bd-p5qgx`).
+///
+/// Returns `Some((report, description))` when `ir.constraints` is infeasible under the LP solver,
+/// or `None` when the constraint set is empty, feasible, exceeds the diagnosis size cap, or runs
+/// on `wasm32`.
+#[must_use]
+pub fn diagnose_constraint_infeasibility(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    spacing: LayoutSpacing,
+    wall_clock_valve_ms: u64,
+) -> Option<(crate::infeasible::InfeasibilityReport, String)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if ir.constraints.is_empty()
+            || ir.constraints.len() > MAX_CONSTRAINT_DIAGNOSIS_COUNT
+            || nodes.is_empty()
+            || wall_clock_valve_ms == 0
+        {
+            return None;
+        }
+        let report = crate::infeasible::diagnose(ir.constraints.len(), |active_indices| {
+            let mut subset_ir = ir.clone();
+            subset_ir.constraints = active_indices
+                .iter()
+                .filter_map(|&idx| ir.constraints.get(idx).cloned())
+                .collect();
+            let mut trial_nodes = nodes.to_vec();
+            solve_constraint_coordinates(&subset_ir, &mut trial_nodes, spacing, wall_clock_valve_ms)
+                .is_err()
+        })?;
+        let description = crate::infeasible::describe(&report, &ir.constraints);
+        Some((report, description))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (ir, nodes, spacing, wall_clock_valve_ms);
+        None
+    }
+}
+
 fn apply_constraint_solver(
     ir: &MermaidDiagramIr,
     nodes: &mut [LayoutNodeBox],
@@ -14987,6 +15520,22 @@ fn apply_constraint_solver(
         }
         Ok(_) => {}
         Err(error) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some((report, diagnosis)) = diagnose_constraint_infeasibility(
+                ir,
+                nodes,
+                spacing,
+                config.constraint_solver_wall_clock_valve_ms,
+            ) {
+                warn!(
+                    %error,
+                    conflicting_indices = ?report.conflicting,
+                    oracle_calls = report.oracle_calls,
+                    %diagnosis,
+                    "layout.constraint_solver.infeasible"
+                );
+                return;
+            }
             warn!(%error, "layout.constraint_solver.fallback");
         }
     }
@@ -15760,10 +16309,20 @@ fn layer_edges_by_rank_pair(
         .collect()
 }
 
+#[cfg(test)]
 fn egraph_optimized_order_for_rank(
     layer_edges: &FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     rank: usize,
+) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
+    egraph_optimized_order_for_rank_with_saturation(layer_edges, ordering_by_rank, rank, true)
+}
+
+fn egraph_optimized_order_for_rank_with_saturation(
+    layer_edges: &FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    rank: usize,
+    allow_egg_saturation: bool,
 ) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
     let current_order = ordering_by_rank.get(&rank)?.clone();
     let current = crate::egraph_ordering::LayerOrdering::new(current_order);
@@ -15805,11 +16364,44 @@ fn egraph_optimized_order_for_rank(
         upper_ordering.as_ref().zip(upper_edges),
         lower_ordering.as_ref().zip(lower_edges),
     );
-    let result = crate::egraph_ordering::optimize_layer_ordering(
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut result = crate::egraph_ordering::optimize_layer_ordering(
         &current,
         upper_ordering.as_ref().zip(upper_edges),
         lower_ordering.as_ref().zip(lower_edges),
     );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if allow_egg_saturation
+        && result.crossing_count >= 2
+        && result.rewrites_applied == 0
+        && (3..=5).contains(&current.len())
+    {
+        let ctx = crate::egraph_crossing::CrossingContext {
+            upper_ordering,
+            upper_edges: upper_edges.cloned(),
+            lower_ordering,
+            lower_edges: lower_edges.cloned(),
+        };
+        let sat = crate::egraph_crossing::saturate_layer(
+            &result.ordering,
+            &ctx,
+            &crate::egraph_crossing::SaturationConfig {
+                node_limit: 256,
+                iter_limit: 8,
+                wall_clock_valve_ms: crate::egraph_crossing::WALL_CLOCK_VALVE_MS,
+            },
+        );
+        if sat.crossing_count < result.crossing_count {
+            result = crate::egraph_ordering::LayerOptimizationResult {
+                ordering: sat.ordering,
+                crossing_count: sat.crossing_count,
+                rewrites_applied: result.rewrites_applied + sat.iterations,
+            };
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = allow_egg_saturation;
 
     (result.crossing_count < local_crossings_before).then_some((local_crossings_before, result))
 }
@@ -15822,6 +16414,7 @@ fn apply_egraph_ordering_pass<const PACKED_CROSSINGS: bool>(
     scratch: &mut BarycenterScratch,
 ) -> usize {
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    let allow_egg_saturation = false;
     // Ranks move within this pass, but an edge's endpoints keep their ranks -- `ranks` is fixed
     // here, only the within-rank ordering changes -- so the adjacent-pair edge buckets are built
     // once for the whole pass instead of rescanning `ir.edges` per rank.
@@ -15830,7 +16423,12 @@ fn apply_egraph_ordering_pass<const PACKED_CROSSINGS: bool>(
         let mut improved = false;
         for &rank in &rank_keys {
             let Some((local_crossings_before, result)) =
-                egraph_optimized_order_for_rank(&layer_edges, ordering_by_rank, rank)
+                egraph_optimized_order_for_rank_with_saturation(
+                    &layer_edges,
+                    ordering_by_rank,
+                    rank,
+                    allow_egg_saturation,
+                )
             else {
                 continue;
             };
@@ -17799,6 +18397,7 @@ fn route_edge_points_with_obstacle_index(
     obstacles: &[LayoutRect],
     mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> EdgePoints {
+    let has_spatial_index = obstacle_index.is_some();
     let epsilon = 0.001_f32;
 
     let points = if horizontal_ranks {
@@ -17943,6 +18542,18 @@ fn route_edge_points_with_obstacle_index(
                 target,
             ]
         }
+    };
+
+    let points = if !has_spatial_index
+        && !obstacles.is_empty()
+        && obstacles.len() <= 8
+        && points.len() == 4
+        && cga_routing::polyline_intersects_obstacles(&points, obstacles, 4.0)
+    {
+        cga_routing::detour_blocked_orthogonal_route(&points, horizontal_ranks, obstacles, 8.0)
+            .map_or(points, |detoured| SmallVec::from_slice(&detoured))
+    } else {
+        points
     };
 
     simplify_polyline(points)
@@ -19124,7 +19735,9 @@ fn build_layout_decision_record(
     }
 }
 
-const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 12] {
+/// Return all 18 concrete layout algorithms supported by the layout engine.
+#[must_use]
+pub const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 18] {
     [
         LayoutAlgorithm::Sugiyama,
         LayoutAlgorithm::Force,
@@ -19138,6 +19751,12 @@ const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 12] {
         LayoutAlgorithm::Grid,
         LayoutAlgorithm::Sequence,
         LayoutAlgorithm::Pie,
+        LayoutAlgorithm::Quadrant,
+        LayoutAlgorithm::GitGraph,
+        LayoutAlgorithm::Packet,
+        LayoutAlgorithm::Architecture,
+        LayoutAlgorithm::Treemap,
+        LayoutAlgorithm::Radar,
     ]
 }
 
@@ -19976,6 +20595,32 @@ mod tests {
             .zip(&plain_trace.layout.edges)
         {
             assert_eq!(directional_edge.points, plain_edge.points);
+        }
+    }
+
+    #[test]
+    fn family_parity_rows_layout_column_matches_layout_dispatch() {
+        for row in fm_core::family_parity_rows() {
+            let Some(alg) = super::layout_algorithm_rows()
+                .iter()
+                .find(|alg_row| alg_row.algorithm.as_str() == row.layout)
+                .map(|alg_row| alg_row.algorithm)
+            else {
+                panic!(
+                    "family_parity_rows entry {:?} declares unknown layout algorithm {:?}",
+                    row.family, row.layout
+                );
+            };
+            if let Some(diagram_type) = row.diagram_type {
+                assert!(
+                    super::algorithm_available_for_diagram(diagram_type, alg),
+                    "family_parity_rows entry {:?} ({:?}) declares layout {:?} ({:?}) which is not available for that DiagramType",
+                    row.family,
+                    diagram_type,
+                    row.layout,
+                    alg
+                );
+            }
         }
     }
 
@@ -22944,6 +23589,40 @@ mod tests {
         assert!(hub.bounds.center().x < left_sink.bounds.center().x);
         assert!(hub.bounds.center().x < right_sink.bounds.center().x);
         assert_eq!(layout.extensions.bands.len(), 3);
+    }
+
+    #[test]
+    fn sankey_flow_weighted_barycenter_untangles_crossed_bands() {
+        // Initial lexical/parse order in rank 1 is [B1, B2], while heavy flows connect
+        // A1 (top of rank 0) -> B2 (weight 50) and A2 (bottom of rank 0) -> B1 (weight 50).
+        // Without barycenter relaxation, B1 stays above B2 and the two heavy bands cross.
+        let parsed = parse("sankey-beta\nA1,B1,1\nA1,B2,50\nA2,B1,50\nA2,B2,1\n");
+        let layout = layout_diagram_sankey(&parsed.ir);
+        let nodes = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let a1 = nodes.get("A1").expect("A1");
+        let a2 = nodes.get("A2").expect("A2");
+        let b1 = nodes.get("B1").expect("B1");
+        let b2 = nodes.get("B2").expect("B2");
+
+        assert!(
+            a1.bounds.center().y < a2.bounds.center().y,
+            "A1 should remain above A2 in rank 0"
+        );
+        assert!(
+            b2.bounds.center().y < b1.bounds.center().y,
+            "Flow-weighted barycenter relaxation should place B2 above B1 to untangle heavy 50-unit flows"
+        );
+    }
+
+    #[test]
+    fn concrete_layout_algorithms_covers_all_18_engines() {
+        let algorithms = super::concrete_layout_algorithms();
+        assert_eq!(algorithms.len(), 18);
+        assert!(!algorithms.contains(&LayoutAlgorithm::Auto));
     }
 
     /// Build a `packet-beta` IR from `(id, start_bit, end_bit)` triples.
@@ -27723,6 +28402,110 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diagnose_constraint_infeasibility_identifies_minimal_conflicting_subset() {
+        let mut ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        // Benign constraint at index 0
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N0".to_string(),
+            x: 20.0,
+            y: 20.0,
+            span: Span::at_line(2, 1),
+        });
+        // Mutually conflicting pins on N1 at indices 1 and 2
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 10.0,
+            y: 40.0,
+            span: Span::at_line(3, 5),
+        });
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 900.0,
+            y: 700.0,
+            span: Span::at_line(4, 5),
+        });
+
+        let base_layout = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                constraint_solver: ConstraintSolverMode::Disabled,
+                ..LayoutConfig::default()
+            },
+        );
+        let (report, description) = super::diagnose_constraint_infeasibility(
+            &ir,
+            &base_layout.nodes,
+            LayoutSpacing::default(),
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+        )
+        .expect("contradictory pins on N1 must be diagnosed as infeasible");
+
+        assert_eq!(report.conflicting, vec![1, 2]);
+        assert_eq!(
+            report.first_conflicting_span(&ir.constraints),
+            Some(Span::at_line(3, 5))
+        );
+        assert!(description.contains("N1 pinned to (10, 40)"));
+        assert!(description.contains("N1 pinned to (900, 700)"));
+        assert!(!description.contains("N0"));
+    }
+
+    #[test]
+    fn polyhedral_tiled_sweeps_and_spectral_partitioning_orchestrate_end_to_end() {
+        let ir = labeled_graph_ir(
+            8,
+            &[
+                (0, 3),
+                (1, 2),
+                (2, 5),
+                (3, 4),
+                (4, 7),
+                (5, 6),
+                (0, 2),
+                (1, 3),
+            ],
+        );
+        let cycles = super::CycleRemovalResult::default();
+        let priorities = super::stable_node_priorities(&ir);
+        let ranks = super::rank_assignment(&ir, &cycles, &priorities);
+        let initial_order = super::nodes_by_rank(ir.nodes.len(), &ranks);
+        let initial_crossings = super::total_crossings(&ir, &ranks, &initial_order);
+
+        let (tiled_crossings, tiled_order, schedule) = super::execute_tiled_barycenter_sweeps(
+            &ir,
+            &ranks,
+            initial_order,
+            4,
+            &LayoutConfig::default(),
+        );
+        assert!(
+            tiled_crossings <= initial_crossings,
+            "tiled barycenter sweeps must not increase crossings ({tiled_crossings} vs {initial_crossings})"
+        );
+        assert_eq!(schedule.num_layers, tiled_order.len());
+        assert_eq!(schedule.total_iterations(), tiled_order.len() * 4);
+
+        let small_cfg = super::spectral::SpectralConfig {
+            min_nodes: 20,
+            ..super::spectral::SpectralConfig::default()
+        };
+        assert!(super::partition_diagram_spectrally(&ir, &small_cfg).is_none());
+
+        let active_cfg = super::spectral::SpectralConfig {
+            min_nodes: 4,
+            target_partitions: 2,
+            balance_threshold: 0.25,
+            max_depth: 2,
+        };
+        let decomp = super::partition_diagram_spectrally(&ir, &active_cfg)
+            .expect("8-node graph should partition when min_nodes = 4");
+        assert_eq!(decomp.result.partitions.len(), 2);
+        assert_eq!(decomp.mapping.global_to_partition.len(), 8);
+        let covered: usize = decomp.mapping.partitions.iter().map(Vec::len).sum();
+        assert_eq!(covered, 8);
+    }
+
     /// A constraint naming a node that does not exist must be skipped, not panic (bd-1s1g.3).
     #[test]
     fn constraints_on_unknown_nodes_are_skipped_without_panicking() {
@@ -31175,6 +31958,149 @@ mod tests {
 
         assert_eq!(sizes.len(), 2);
         assert!(sizes[1].1 > sizes[0].1);
+    }
+
+    #[test]
+    fn incremental_engine_tracks_adapton_dcg_epoch_and_veb_spatial_index() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let first = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            guardrails,
+        );
+        assert_eq!(engine.dcg_stats().layout_recomputes, 1);
+        assert_eq!(engine.dcg_stats().layout_hits, 0);
+        assert_eq!(engine.epoch_snapshot(&ir).epoch(), 1);
+
+        let _second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            guardrails,
+        );
+        assert_eq!(engine.dcg_stats().layout_hits, 1);
+        assert_eq!(engine.epoch_snapshot(&ir).epoch(), 1);
+
+        ir.nodes.push(IrNode {
+            id: "N4".to_string(),
+            ..IrNode::default()
+        });
+        let _third = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Sugiyama,
+            config,
+            guardrails,
+        );
+        assert_eq!(engine.dcg_stats().layout_recomputes, 2);
+        assert_eq!(engine.epoch_snapshot(&ir).epoch(), 2);
+
+        let positions: Vec<(usize, f64, f64)> = first
+            .layout
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, n)| (idx, f64::from(n.bounds.x), f64::from(n.bounds.y)))
+            .collect();
+        let grid = crate::spatial::GridSpatialIndex::from_positions(&positions, 64.0);
+        assert_eq!(grid.veb_ordered_entries().len(), first.layout.nodes.len());
+    }
+
+    #[test]
+    fn route_edge_points_detours_around_obstacle_blocking_outer_leg() {
+        let source = LayoutPoint { x: 100.0, y: 100.0 };
+        let target = LayoutPoint { x: 200.0, y: 100.0 };
+        // Obstacle1 blocks the direct segment (100,100)->(200,100), forcing a nudge in y.
+        // Obstacle2 and Obstacle3 sit directly above and below source.x=100, blocking both
+        // vertical outer legs from source.x=100 unless the router steps horizontally first
+        // into the gap x=112..128 before bypassing Obstacle1.
+        let obstacles = vec![
+            LayoutRect {
+                x: 135.0,
+                y: 90.0,
+                width: 40.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 90.0,
+                y: 105.0,
+                width: 14.0,
+                height: 30.0,
+            },
+            LayoutRect {
+                x: 90.0,
+                y: 65.0,
+                width: 14.0,
+                height: 30.0,
+            },
+        ];
+        let points =
+            super::route_edge_points_with_obstacle_index(source, target, true, &obstacles, None);
+        assert!(
+            points.len() >= 5,
+            "Obstacle detour should produce >=5-point staircase route, got {} points: {:?}",
+            points.len(),
+            points
+        );
+        assert!(
+            !crate::cga_routing::polyline_intersects_obstacles(&points, &obstacles, 4.0),
+            "Detoured route must not intersect any obstacle: {:?}",
+            points
+        );
+    }
+
+    #[test]
+    fn fnx_cycle_aware_and_canary_controller_integrate_cleanly() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 0), (2, 3)]);
+        let mut rollout = fm_core::canary::RolloutState::new();
+        rollout.transition_to(fm_core::canary::RolloutPhase::Full, 1000);
+        let scc = super::analyze_cycles_with_fnx_canary(&ir, &mut rollout, 1);
+        assert_eq!(scc.non_trivial_count, 1);
+        assert_eq!(scc.max_component_size, 3);
+        assert_eq!(rollout.requests_processed, 1);
+
+        let layout = layout_diagram_with_cycle_strategy(&ir, CycleStrategy::CycleAware);
+        assert_eq!(layout.stats.cycle_count, 1);
+        assert_eq!(layout.stats.max_cycle_size, 3);
+    }
+
+    #[test]
+    fn incremental_layout_reuse_proof_and_work_class_track_memoization() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let mut engine = IncrementalLayoutEngine::default();
+        assert_eq!(engine.reuse_proof().requested, 0);
+        assert_eq!(
+            engine.work_class(),
+            fm_core::reuse_proof::WorkClass::NothingComputed
+        );
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(engine.reuse_proof().computed, 1);
+        assert_eq!(engine.reuse_proof().requested, 1);
+        assert_eq!(
+            engine.work_class(),
+            fm_core::reuse_proof::WorkClass::FullComputation
+        );
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(engine.reuse_proof().computed, 1);
+        assert_eq!(engine.reuse_proof().requested, 2);
+        assert_eq!(
+            engine.work_class(),
+            fm_core::reuse_proof::WorkClass::Reuse { reused: 1 }
+        );
     }
 
     // ─── Property-based layout invariant tests (bd-30y.13) ──────────────

@@ -851,8 +851,11 @@ impl IrBuilder {
             .insert(key, value);
     }
 
-    pub(crate) const fn set_init_flowchart_direction(&mut self, direction: GraphDirection) {
+    pub(crate) fn set_init_flowchart_direction(&mut self, direction: GraphDirection) {
         self.ir.meta.init.config.flowchart_direction = Some(direction);
+        if self.ir.diagram_type == DiagramType::Flowchart {
+            self.set_direction(direction);
+        }
     }
 
     pub(crate) fn set_init_flowchart_curve(&mut self, curve: String) {
@@ -1395,7 +1398,6 @@ impl IrBuilder {
     }
 
     /// Add an info-level recovery diagnostic.
-    #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn add_recovery_info(&mut self, message: impl Into<String>, span: Option<Span>) {
         let mut diag = Diagnostic::info(message).with_category(DiagnosticCategory::Recovery);
         if let Some(s) = span {
@@ -1405,7 +1407,6 @@ impl IrBuilder {
     }
 
     /// Add a warning-level recovery diagnostic.
-    #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn add_recovery_warning(
         &mut self,
         message: impl Into<String>,
@@ -1648,13 +1649,11 @@ impl IrBuilder {
                     node_ids.join(", ")
                 )
             };
-            self.ir.add_diagnostic(
-                Diagnostic::info(message)
-                    .with_category(DiagnosticCategory::Recovery)
-                    .with_suggestion(
-                        "Define these nodes explicitly for better diagram quality".to_string(),
-                    ),
-            );
+            self.add_recovery_info(message, None);
+            if let Some(last) = self.ir.diagnostics.last_mut() {
+                last.suggestion =
+                    Some("Define these nodes explicitly for better diagram quality".to_string());
+            }
         }
 
         // Check for unresolved edges and report them
@@ -2318,7 +2317,6 @@ impl IrBuilder {
     }
 
     /// Intern a node as a placeholder (auto-created for dangling edge recovery).
-    #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
         let label = ParsedLabel::plain(id);
         self.intern_node_auto(
@@ -3298,5 +3296,38 @@ mod tests {
         assert!(meta.autonumber);
         assert_eq!(meta.autonumber_start, 10);
         assert_eq!(meta.autonumber_increment, 5);
+    }
+
+    #[test]
+    fn recovery_diagnostic_helpers_record_recovery_category_and_placeholder_nodes() {
+        let mut builder = IrBuilder::new(DiagramType::Flowchart);
+        let span = Span::at_line(2, 5);
+
+        let placeholder = builder
+            .intern_placeholder_node("OrphanNode", span)
+            .expect("placeholder node should be interned");
+        assert_eq!(placeholder.0, 0);
+
+        builder.add_recovery_warning(
+            "Recovered malformed arrow token",
+            Some(span),
+            Some("Use `-->` for a standard directed edge".to_string()),
+        );
+
+        let result = builder.finish(1.0, crate::DetectionMethod::ExactKeyword);
+        assert!(
+            result.ir.diagnostics.iter().any(|d| {
+                d.category == fm_core::DiagnosticCategory::Recovery
+                    && d.message.contains("Recovered malformed arrow token")
+            }),
+            "expected warning recovery diagnostic"
+        );
+        assert!(
+            result.ir.diagnostics.iter().any(|d| {
+                d.category == fm_core::DiagnosticCategory::Recovery
+                    && d.message.contains("OrphanNode")
+            }),
+            "expected info recovery diagnostic for auto-created placeholder node"
+        );
     }
 }

@@ -229,6 +229,50 @@ pub fn minimize(
     let mut lines: Vec<String> = input.split_inclusive('\n').map(str::to_owned).collect();
     let mut hit_iteration_cap = false;
 
+    // Pass 0: Logarithmic body-line bisection via `fm_layout::delta_debug::ddmin` (`bd-jabcj`).
+    // Keeps line 0 (the diagram header) anchored so diagram-type detection remains valid while
+    // rapidly bisecting multi-line bodies in O(log n) probes before fine-grained passes.
+    if lines.len() >= 10 && max_iterations >= 8 {
+        let header = lines[0].clone();
+        let body: Vec<String> = lines[1..].to_vec();
+        let iter_cell = std::cell::Cell::new(iterations);
+        let cap_cell = std::cell::Cell::new(false);
+        let dd_config = fm_layout::delta_debug::DeltaDebugConfig {
+            max_iterations: max_iterations.saturating_sub(iterations),
+            hierarchical: false,
+        };
+        let dd_result = fm_layout::delta_debug::ddmin(
+            &body,
+            &|subset: &[String]| {
+                let current_iters = iter_cell.get();
+                if current_iters >= max_iterations {
+                    cap_cell.set(true);
+                    return fm_layout::delta_debug::TestOutcome::Unresolved;
+                }
+                iter_cell.set(current_iters + 1);
+                let mut candidate_input = String::with_capacity(
+                    header.len() + subset.iter().map(String::len).sum::<usize>(),
+                );
+                candidate_input.push_str(&header);
+                for line in subset {
+                    candidate_input.push_str(line);
+                }
+                if test_failure(&candidate_input, signature, stage) {
+                    fm_layout::delta_debug::TestOutcome::Fail
+                } else {
+                    fm_layout::delta_debug::TestOutcome::Pass
+                }
+            },
+            &dd_config,
+        );
+        iterations = iter_cell.get();
+        hit_iteration_cap = cap_cell.get();
+        let mut rebuilt = Vec::with_capacity(1 + dd_result.minimized.len());
+        rebuilt.push(header);
+        rebuilt.extend(dd_result.minimized);
+        lines = rebuilt;
+    }
+
     // Pass 1: Line-level reduction.
     let mut changed = true;
     'line_pass: while changed {
@@ -605,5 +649,28 @@ mod tests {
         // Test profiles unwind, so the panic signature is usable here. The release profile sets
         // `panic = "abort"`, where the CLI must refuse rather than reduce against a blind probe.
         assert_eq!(panic_capture_available(), !cfg!(panic = "abort"));
+    }
+
+    #[test]
+    fn ddmin_bisects_large_multi_line_diagram_efficiently() {
+        let mut lines = vec!["flowchart LR".to_string()];
+        for idx in 0..24 {
+            if idx == 17 {
+                lines.push("  TARGET_NODE --> B17".to_string());
+            } else {
+                lines.push(format!("  N{idx} --> M{idx}"));
+            }
+        }
+        let input = lines.join("\n");
+        let signature = FailureSignature::OutputContains("TARGET_NODE".to_string());
+        let result = minimize(&input, &signature, parse_options());
+        assert!(result.reproduced);
+        assert!(result.minimized_input.contains("TARGET_NODE"));
+        assert!(
+            result.minimized_lines <= 2,
+            "expected header + single target line (or fewer), got {} lines: {:?}",
+            result.minimized_lines,
+            result.minimized_input
+        );
     }
 }

@@ -24,6 +24,7 @@ use fnx_algorithms::{
 };
 
 use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
+use crate::fnx_budget::{AnalysisBudget, BudgetExecutor, BudgetResult};
 
 // ============================================================================
 // Diagnostic Codes
@@ -349,31 +350,67 @@ pub struct FnxAnalysisResults {
 /// Returns analysis results with diagnostics that can be surfaced to users.
 #[must_use]
 pub fn analyze_structure(ir: &MermaidDiagramIr) -> FnxAnalysisResults {
-    if ir.nodes.is_empty() {
-        return FnxAnalysisResults::default();
-    }
+    analyze_structure_with_budget(ir, AnalysisBudget::default())
+        .into_value()
+        .unwrap_or_default()
+}
 
-    let (graph, table) = ir_to_graph(ir);
-    let mut results = FnxAnalysisResults::default();
+/// Run FNX structural analyses under an explicit [`AnalysisBudget`].
+///
+/// Tracks graph-projection and per-pass work units via [`BudgetExecutor`] and stops
+/// running further expensive passes (bridges, cycle basis) early if the work or time
+/// budget has been exceeded.
+#[must_use]
+pub fn analyze_structure_with_budget(
+    ir: &MermaidDiagramIr,
+    budget: AnalysisBudget,
+) -> BudgetResult<FnxAnalysisResults> {
+    let mut executor = BudgetExecutor::new(budget);
+    executor.execute_with_progress(|exec| {
+        if ir.nodes.is_empty() {
+            return FnxAnalysisResults::default();
+        }
 
-    // Run connected components analysis
-    let comp_result = connected_components(&graph);
-    analyze_components(ir, &table, &comp_result, &mut results);
+        let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
+        let (graph, table) = ir_to_graph(ir);
+        exec.record_work(base_work);
+        let mut results = FnxAnalysisResults::default();
+        if exec.is_exceeded() {
+            return results;
+        }
 
-    // Run articulation points analysis (only meaningful for connected graphs)
-    if results.is_connected {
-        let art_result = articulation_points(&graph);
-        analyze_articulation_points(ir, &table, &art_result, &mut results);
+        // Run connected components analysis
+        let comp_result = connected_components(&graph);
+        analyze_components(ir, &table, &comp_result, &mut results);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return results;
+        }
 
-        let bridge_result = bridges(&graph);
-        analyze_bridges(ir, &table, &bridge_result, &mut results);
-    }
+        // Run articulation points analysis (only meaningful for connected graphs)
+        if results.is_connected {
+            let art_result = articulation_points(&graph);
+            analyze_articulation_points(ir, &table, &art_result, &mut results);
+            exec.record_work(base_work);
+            if exec.is_exceeded() {
+                return results;
+            }
 
-    // Run cycle analysis
-    let cycle_result = cycle_basis(&graph, None);
-    analyze_cycles(ir, &table, &cycle_result, &mut results);
+            let bridge_result = bridges(&graph);
+            analyze_bridges(ir, &table, &bridge_result, &mut results);
+            exec.record_work(base_work);
+            if exec.is_exceeded() {
+                return results;
+            }
+        }
 
-    results
+        // Run cycle analysis
+        let cycle_result = cycle_basis(&graph, None);
+        analyze_cycles(ir, &table, &cycle_result, &mut results);
+        exec.record_work(base_work);
+
+        results
+    })
 }
 
 fn analyze_components(
@@ -1185,5 +1222,14 @@ mod tests {
         assert_eq!(FnxDiagnosticSeverity::Info.as_str(), "info");
         assert_eq!(FnxDiagnosticSeverity::Warning.as_str(), "warning");
         assert_eq!(FnxDiagnosticSeverity::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn analyze_structure_with_budget_enforces_work_limit() {
+        let ir = make_simple_chain();
+        let tight = AnalysisBudget::default().with_work_budget(1);
+        let result = analyze_structure_with_budget(&ir, tight);
+        assert!(result.is_cancelled());
+        assert!(result.into_value().is_some());
     }
 }

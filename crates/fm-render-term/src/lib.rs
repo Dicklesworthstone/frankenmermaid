@@ -56,7 +56,14 @@ pub mod renderer;
 pub mod transform;
 
 // Re-exports for convenient access.
-pub use config::{ResolvedConfig, TermRenderConfig};
+pub use ascii::{
+    CharClass, DiagramBlock, LineClass, align_right_border, classify_char, classify_line,
+    detect_diagram_blocks, normalize_box_drawing,
+};
+pub use config::{
+    ResolvedConfig, SelectionState, TermRenderConfig, build_adjacency, navigate_direction,
+    select_fidelity,
+};
 pub use diff::{
     DiagramDiff, DiffEdge, DiffNode, DiffStatus, diff_diagrams, render_diff_plain,
     render_diff_summary, render_diff_terminal, render_diff_terminal_with_config,

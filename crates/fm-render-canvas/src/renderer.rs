@@ -50,6 +50,9 @@ pub struct CanvasRenderConfig {
     /// times; a renderer that called `now()` would make every canvas op-stream test depend on the
     /// day it ran. The default is `None`, so nothing about an existing render changes.
     pub gantt_today: Option<String>,
+    /// Whether to draw diagnostic debug overlays (dashed node bounding boxes and HUD stats)
+    /// onto the Canvas2D context (`bd-0l1x2`).
+    pub debug_overlay: bool,
 }
 
 impl CanvasRenderConfig {
@@ -87,6 +90,7 @@ impl Default for CanvasRenderConfig {
             label_color: String::from("#0f172a"),
             auto_fit: true,
             gantt_today: None,
+            debug_overlay: false,
         }
     }
 }
@@ -255,6 +259,9 @@ impl Canvas2dRenderer {
         // at all for them. Both calls return immediately for every other diagram type.
         self.draw_treemap(ir, layout, ctx, offset_x, offset_y);
         self.draw_radar(ir, layout, ctx, offset_x, offset_y);
+        if ir.diagram_type == DiagramType::Info {
+            self.draw_info_version(ctx, offset_x, offset_y, &mut labels_drawn);
+        }
 
         // Draw the time/category axis (gantt dates, xychart categories).
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
@@ -300,11 +307,19 @@ impl Canvas2dRenderer {
         // Draw nodes
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
+        if self.config.debug_overlay {
+            self.draw_debug_overlay_world(layout, ctx, offset_x, offset_y);
+        }
+
         ctx.restore();
         if self.draw_generic_diagram_title(ctx, ir, canvas_width) {
             labels_drawn += 1;
         }
         labels_drawn += self.draw_c4_legend(ctx, ir, canvas_width, canvas_height);
+        if self.config.debug_overlay {
+            self.draw_debug_overlay_hud(layout, ctx, canvas_height);
+            labels_drawn += 1;
+        }
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -317,6 +332,55 @@ impl Canvas2dRenderer {
             // describe a different picture than the one on screen.
             hit_regions: crate::interaction::hit_regions(ir, layout),
         }
+    }
+
+    fn draw_debug_overlay_world<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        ctx.save();
+        ctx.set_stroke_style("#ef4444");
+        ctx.set_line_width(1.0);
+        ctx.set_line_dash(&[3.0, 2.0]);
+        for node in &layout.nodes {
+            ctx.stroke_rect(
+                f64::from(node.bounds.x) + offset_x,
+                f64::from(node.bounds.y) + offset_y,
+                f64::from(node.bounds.width),
+                f64::from(node.bounds.height),
+            );
+            self.draw_calls += 1;
+        }
+        ctx.set_line_dash(&[]);
+        ctx.restore();
+    }
+
+    fn draw_debug_overlay_hud<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        canvas_height: f64,
+    ) {
+        let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+        let hud = format!(
+            "debug: nodes={} edges={} ranks={} crossings={} cycles={}",
+            layout.nodes.len(),
+            layout.edges.len(),
+            rank_count,
+            layout.stats.crossing_count,
+            layout.stats.cycle_count,
+        );
+        ctx.save();
+        ctx.set_fill_style("#ef4444");
+        ctx.set_font("10px monospace");
+        ctx.set_text_align(TextAlign::Left);
+        ctx.set_text_baseline(TextBaseline::Bottom);
+        ctx.fill_text(&hud, 8.0, (canvas_height - 6.0).max(12.0));
+        self.draw_calls += 1;
+        ctx.restore();
     }
 
     fn draw_generic_diagram_title<C: Canvas2dContext>(
@@ -1259,6 +1323,28 @@ impl Canvas2dRenderer {
             self.draw_calls += 1;
         }
         ctx.set_line_width(1.0);
+    }
+
+    /// Draw an `info` diagram: a single centred version string matching `fm-render-svg` (bd-cfigc).
+    fn draw_info_version<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+    ) {
+        let font = format!("32px {}", self.config.font_family);
+        ctx.set_font(&font);
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_text_align(TextAlign::Center);
+        ctx.set_text_baseline(TextBaseline::Middle);
+        ctx.fill_text(
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            100.0 + offset_x,
+            40.0 + offset_y,
+        );
+        self.draw_calls += 1;
+        *labels_drawn += 1;
     }
 }
 
@@ -6457,6 +6543,32 @@ mod tests {
             vertical_segments(flowchart, Some("2026-01-03")),
             vertical_segments(flowchart, None),
             "supplying a today date altered a flowchart render"
+        );
+    }
+
+    #[test]
+    fn debug_overlay_draws_node_bboxes_and_hud_text_when_enabled() {
+        let parsed = fm_parser::parse("flowchart TD\n  a[Alpha] --> b[Beta]\n");
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        let mut base_ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut base_renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let base_res = base_renderer.render(&layout, &parsed.ir, &mut base_ctx);
+
+        let mut debug_ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut debug_renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+            debug_overlay: true,
+            ..CanvasRenderConfig::default()
+        });
+        let debug_res = debug_renderer.render(&layout, &parsed.ir, &mut debug_ctx);
+
+        assert!(debug_res.draw_calls > base_res.draw_calls);
+        assert_eq!(debug_res.labels_drawn, base_res.labels_drawn + 1);
+        assert!(
+            debug_ctx
+                .operations()
+                .iter()
+                .any(|op| matches!(op, DrawOperation::FillText(t, _, _) if t.starts_with("debug: nodes=2 edges=1")))
         );
     }
 }

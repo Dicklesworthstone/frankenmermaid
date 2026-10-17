@@ -54,6 +54,7 @@ use std::cell::RefCell;
 ///                 │                   │
 /// Config fingerprint ─────────────────┴─────────────────────────────┘
 /// ```
+#[derive(Debug, Clone)]
 pub struct LayoutDcg {
     /// Input: the diagram IR fingerprint.
     ir_fingerprint: RefCell<u64>,
@@ -73,8 +74,16 @@ pub struct LayoutDcg {
     stats: RefCell<LayoutDcgStats>,
 }
 
+impl PartialEq for LayoutDcg {
+    fn eq(&self, other: &Self) -> bool {
+        *self.ir_fingerprint.borrow() == *other.ir_fingerprint.borrow()
+            && *self.config_fingerprint.borrow() == *other.config_fingerprint.borrow()
+            && *self.dirty.borrow() == *other.dirty.borrow()
+    }
+}
+
 /// Dirty flags for each layout phase.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DirtyFlags {
     /// Graph metrics need recompute.
     graph_metrics: bool,
@@ -87,7 +96,7 @@ struct DirtyFlags {
 }
 
 /// Statistics for the layout DCG.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LayoutDcgStats {
     /// Number of input changes (IR or config).
     pub input_changes: usize,
@@ -286,6 +295,20 @@ impl LayoutDcg {
         }
         self.stats.borrow_mut().layout_hits += 1;
         self.layout.borrow().clone()
+    }
+
+    /// Record a layout cache hit without cloning a stored `DiagramLayout`.
+    pub fn record_layout_hit(&self) {
+        self.dirty.borrow_mut().layout = false;
+        self.stats.borrow_mut().layout_hits += 1;
+    }
+
+    /// Record an input change and layout recompute without cloning a `DiagramLayout`.
+    pub fn record_layout_recompute(&self) {
+        self.dirty.borrow_mut().layout = false;
+        let mut stats = self.stats.borrow_mut();
+        stats.input_changes += 1;
+        stats.layout_recomputes += 1;
     }
 
     // --- Utilities ---

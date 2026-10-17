@@ -832,11 +832,22 @@ enum LayoutAlgorithmArg {
     Force,
     Tree,
     Radial,
+    Sequence,
     Timeline,
     Gantt,
+    #[value(name = "xychart", alias = "xy-chart")]
+    XyChart,
     Sankey,
     Kanban,
     Grid,
+    Pie,
+    Quadrant,
+    #[value(name = "gitgraph", alias = "git-graph")]
+    GitGraph,
+    Packet,
+    Architecture,
+    Treemap,
+    Radar,
 }
 
 impl LayoutAlgorithmArg {
@@ -847,11 +858,20 @@ impl LayoutAlgorithmArg {
             Self::Force => LayoutAlgorithm::Force,
             Self::Tree => LayoutAlgorithm::Tree,
             Self::Radial => LayoutAlgorithm::Radial,
+            Self::Sequence => LayoutAlgorithm::Sequence,
             Self::Timeline => LayoutAlgorithm::Timeline,
             Self::Gantt => LayoutAlgorithm::Gantt,
+            Self::XyChart => LayoutAlgorithm::XyChart,
             Self::Sankey => LayoutAlgorithm::Sankey,
             Self::Kanban => LayoutAlgorithm::Kanban,
             Self::Grid => LayoutAlgorithm::Grid,
+            Self::Pie => LayoutAlgorithm::Pie,
+            Self::Quadrant => LayoutAlgorithm::Quadrant,
+            Self::GitGraph => LayoutAlgorithm::GitGraph,
+            Self::Packet => LayoutAlgorithm::Packet,
+            Self::Architecture => LayoutAlgorithm::Architecture,
+            Self::Treemap => LayoutAlgorithm::Treemap,
+            Self::Radar => LayoutAlgorithm::Radar,
         }
     }
 }
@@ -985,6 +1005,7 @@ struct FrankenmermaidRenderConfig {
     default_format: Option<String>,
     show_back_edges: Option<bool>,
     reduced_motion: Option<String>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -998,6 +1019,7 @@ struct FrankenmermaidSvgConfig {
     accessibility: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1006,6 +1028,7 @@ struct FrankenmermaidTermConfig {
     tier: Option<String>,
     unicode: Option<bool>,
     minimap: Option<bool>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3954,15 +3977,17 @@ fn parse_layout_algorithm_name(value: &str) -> Result<LayoutAlgorithm> {
         "sequence" => Ok(LayoutAlgorithm::Sequence),
         "timeline" => Ok(LayoutAlgorithm::Timeline),
         "gantt" => Ok(LayoutAlgorithm::Gantt),
-        "xychart" => Ok(LayoutAlgorithm::XyChart),
+        "xychart" | "xy-chart" => Ok(LayoutAlgorithm::XyChart),
         "sankey" => Ok(LayoutAlgorithm::Sankey),
         "kanban" => Ok(LayoutAlgorithm::Kanban),
         "grid" => Ok(LayoutAlgorithm::Grid),
         "pie" => Ok(LayoutAlgorithm::Pie),
         "quadrant" => Ok(LayoutAlgorithm::Quadrant),
-        "gitgraph" => Ok(LayoutAlgorithm::GitGraph),
+        "gitgraph" | "git-graph" => Ok(LayoutAlgorithm::GitGraph),
         "packet" => Ok(LayoutAlgorithm::Packet),
         "architecture" => Ok(LayoutAlgorithm::Architecture),
+        "treemap" => Ok(LayoutAlgorithm::Treemap),
+        "radar" => Ok(LayoutAlgorithm::Radar),
         other => anyhow::bail!("unknown layout.algorithm '{other}'"),
     }
 }
@@ -4199,6 +4224,13 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
         }
     }
     apply_reduced_motion_setting(&mut config, config_file.render.reduced_motion.as_deref())?;
+    if let Some(debug_overlay) = config_file
+        .svg
+        .debug_overlay
+        .or(config_file.render.debug_overlay)
+    {
+        config.debug_overlay = debug_overlay;
+    }
 
     Ok(config)
 }
@@ -4227,6 +4259,13 @@ fn build_base_term_render_config(
     }
     if let Some(show_minimap) = config_file.term.minimap {
         config.show_minimap = show_minimap;
+    }
+    if let Some(debug_overlay) = config_file
+        .term
+        .debug_overlay
+        .or(config_file.render.debug_overlay)
+    {
+        config.debug_overlay = debug_overlay;
     }
 
     Ok(config)
@@ -8814,7 +8853,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         layout_algorithm,
-        layout_config,
+        layout_config.clone(),
         layout_guardrails,
     );
     let layout_time = layout_start.elapsed();
@@ -8848,7 +8887,11 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
-    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
+    diagnostics.extend(collect_layout_diagnostics(
+        &parsed.ir,
+        &traced_layout,
+        layout_config,
+    ));
     diagnostics.extend(collect_render_diagnostics(&svg_output));
 
     // FNX structural analysis (when feature is enabled)
@@ -9157,7 +9200,11 @@ fn collect_fnx_diagnostics(results: &FnxAnalysisResults) -> Vec<ValidationDiagno
     diagnostics
 }
 
-fn collect_layout_diagnostics(traced: &TracedLayout) -> Vec<ValidationDiagnostic> {
+fn collect_layout_diagnostics(
+    ir: &fm_core::MermaidDiagramIr,
+    traced: &TracedLayout,
+    layout_config: LayoutConfig,
+) -> Vec<ValidationDiagnostic> {
     let mut diagnostics = Vec::new();
     let layout = &traced.layout;
     let dispatch = traced.trace.dispatch;
@@ -9232,6 +9279,38 @@ fn collect_layout_diagnostics(traced: &TracedLayout) -> Vec<ValidationDiagnostic
                 confidence: None,
                 remediation_hint: Some(
                     "Consider tuning cycle strategy when preserving edge direction is important"
+                        .to_string(),
+                ),
+            },
+        });
+    }
+
+    if layout_config.constraint_solver != fm_layout::ConstraintSolverMode::Disabled
+        && !ir.constraints.is_empty()
+        && let Some((report, message)) = fm_layout::diagnose_constraint_infeasibility(
+            ir,
+            &layout.nodes,
+            fm_layout::LayoutSpacing::default(),
+            layout_config.constraint_solver_wall_clock_valve_ms,
+        )
+    {
+        let span = report.first_conflicting_span(&ir.constraints);
+        let (source_line, source_column) = span
+            .map(|s| (Some(s.start.line as usize), Some(s.start.col as usize)))
+            .unwrap_or((None, None));
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/warn/layout-constraints-infeasible".to_string(),
+                severity: "warning".to_string(),
+                message,
+                span,
+                source_line,
+                source_column,
+                rule_id: Some("layout.constraints.infeasible".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Relax or remove one of the mutually conflicting layout constraints"
                         .to_string(),
                 ),
             },
@@ -9647,6 +9726,37 @@ mod validate_tests {
             diagnostics
                 .iter()
                 .any(|diag| diag.payload.severity == "warning")
+        );
+    }
+
+    #[test]
+    fn collect_layout_diagnostics_reports_infeasible_constraints() {
+        let source = "%%{init: {'constraints': {'pin': [{'node': 'A', 'x': 10, 'y': 20}, {'node': 'A', 'x': 300, 'y': 400}]}}}%%\nflowchart TD\nA --> B\n";
+        let parsed = parse(source);
+        assert_eq!(parsed.ir.constraints.len(), 2);
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let diagnostics = super::collect_layout_diagnostics(
+            &parsed.ir,
+            &traced,
+            fm_layout::LayoutConfig::default(),
+        );
+        let infeasible_diag = diagnostics
+            .iter()
+            .find(|d| d.payload.rule_id.as_deref() == Some("layout.constraints.infeasible"))
+            .expect("expected layout.constraints.infeasible diagnostic");
+        assert_eq!(infeasible_diag.stage, "layout");
+        assert_eq!(infeasible_diag.payload.severity, "warning");
+        assert!(
+            infeasible_diag
+                .payload
+                .message
+                .contains("A pinned to (10, 20)")
+        );
+        assert!(
+            infeasible_diag
+                .payload
+                .message
+                .contains("A pinned to (300, 400)")
         );
     }
 }
@@ -10143,6 +10253,46 @@ mod config_tests {
         )
         .expect("parse config");
         assert!(!resolve_show_back_edges(&config));
+    }
+
+    #[test]
+    fn all_layout_algorithms_roundtrip_cli_and_toml_config() {
+        use clap::ValueEnum;
+        let expected = [
+            ("auto", fm_layout::LayoutAlgorithm::Auto),
+            ("sugiyama", fm_layout::LayoutAlgorithm::Sugiyama),
+            ("force", fm_layout::LayoutAlgorithm::Force),
+            ("tree", fm_layout::LayoutAlgorithm::Tree),
+            ("radial", fm_layout::LayoutAlgorithm::Radial),
+            ("sequence", fm_layout::LayoutAlgorithm::Sequence),
+            ("timeline", fm_layout::LayoutAlgorithm::Timeline),
+            ("gantt", fm_layout::LayoutAlgorithm::Gantt),
+            ("xychart", fm_layout::LayoutAlgorithm::XyChart),
+            ("sankey", fm_layout::LayoutAlgorithm::Sankey),
+            ("kanban", fm_layout::LayoutAlgorithm::Kanban),
+            ("grid", fm_layout::LayoutAlgorithm::Grid),
+            ("pie", fm_layout::LayoutAlgorithm::Pie),
+            ("quadrant", fm_layout::LayoutAlgorithm::Quadrant),
+            ("gitgraph", fm_layout::LayoutAlgorithm::GitGraph),
+            ("packet", fm_layout::LayoutAlgorithm::Packet),
+            ("architecture", fm_layout::LayoutAlgorithm::Architecture),
+            ("treemap", fm_layout::LayoutAlgorithm::Treemap),
+            ("radar", fm_layout::LayoutAlgorithm::Radar),
+        ];
+
+        for (name, algo) in expected {
+            let cli_arg = LayoutAlgorithmArg::from_str(name, true)
+                .unwrap_or_else(|err| panic!("CLI ValueEnum rejected '{name}': {err}"));
+            assert_eq!(cli_arg.to_layout(), algo);
+
+            let toml_src = format!("[layout]\nalgorithm = \"{name}\"\n");
+            let config: FrankenmermaidConfigFile =
+                toml::from_str(&toml_src).expect("parse layout algorithm config");
+            assert_eq!(
+                resolve_layout_algorithm(None, &config).expect("resolve TOML algorithm"),
+                algo
+            );
+        }
     }
 }
 
@@ -10753,12 +10903,13 @@ fn interactive_help_line(hints: &InteractiveKeyHints) -> String {
     }
 }
 
-fn build_interactive_snapshot(
+fn build_interactive_snapshot_with_selection(
     source: &str,
     parse_mode: MermaidParseMode,
     parser_config: ParserConfig,
     preview_width: usize,
     preview_height: usize,
+    selected_node: Option<usize>,
 ) -> InteractiveSnapshot {
     let start = Instant::now();
     let parsed = parse_with_mode_and_config(source, parse_mode, &parser_config);
@@ -10770,13 +10921,25 @@ fn build_interactive_snapshot(
     );
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
-    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
+    diagnostics.extend(collect_layout_diagnostics(
+        &parsed.ir,
+        &traced_layout,
+        LayoutConfig::default(),
+    ));
     sort_diagnostics(&mut diagnostics);
+
+    let term_config = match selected_node.filter(|&idx| idx < parsed.ir.nodes.len()) {
+        Some(idx) => {
+            let selection = fm_render_term::SelectionState::from_selected(idx, &parsed.ir);
+            TermRenderConfig::rich().with_selection(&selection)
+        }
+        None => TermRenderConfig::rich(),
+    };
 
     let result = render_term_with_layout_and_config(
         &parsed.ir,
         &traced_layout.layout,
-        &TermRenderConfig::rich(),
+        &term_config,
         preview_width.max(16),
         preview_height.max(4),
     );
@@ -11032,18 +11195,20 @@ fn cmd_interactive(
     let mut buffer = InteractiveBuffer::from_source(&source);
     let save_path = (input != "-" && Path::new(input).exists()).then_some(input.to_string());
     let mut theme_index = resolve_interactive_theme_index(theme);
+    let mut selected_node: Option<usize> = None;
     let mut stdout = io::stdout();
     let _guard = InteractiveTerminalGuard::enter(&mut stdout)?;
 
     loop {
         let (cols, rows) = terminal::size().unwrap_or((120, 32));
         let layout = interactive_layout(cols, rows);
-        let snapshot = build_interactive_snapshot(
+        let snapshot = build_interactive_snapshot_with_selection(
             &buffer.to_source(),
             parse_mode,
             parser_config,
             layout.preview_width,
             layout.content_height,
+            selected_node,
         );
         draw_interactive_ui(
             &mut stdout,
@@ -11079,6 +11244,16 @@ fn cmd_interactive(
                 code: KeyCode::Tab, ..
             }) => {
                 theme_index = cycle_interactive_theme(theme_index);
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::BackTab,
+                ..
+            }) => {
+                selected_node = match selected_node {
+                    None if snapshot.node_count > 0 => Some(0),
+                    Some(idx) if idx + 1 < snapshot.node_count => Some(idx + 1),
+                    _ => None,
+                };
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,

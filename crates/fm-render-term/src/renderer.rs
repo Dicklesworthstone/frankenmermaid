@@ -275,6 +275,10 @@ impl TermRenderer {
         let (cell_width, cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
+        if matches!(self.config.fidelity, fm_core::MermaidFidelity::Outline) {
+            return self.render_outline_mode(ir, layout, cell_width, cell_height, scale_x, scale_y);
+        }
+
         // Use cell-based rendering for Compact tier or CellOnly mode.
         if matches!(self.config.tier, MermaidTier::Compact)
             || matches!(self.config.render_mode, MermaidRenderMode::CellOnly)
@@ -284,6 +288,80 @@ impl TermRenderer {
 
         // Use sub-cell canvas rendering for higher fidelity.
         self.render_subcell_mode(ir, layout, cell_width, cell_height, scale_x, scale_y)
+    }
+
+    /// Render skeleton outline (Outline fidelity mode) for tight viewports or dense graphs.
+    fn render_outline_mode(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        cell_width: usize,
+        cell_height: usize,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> TermRenderResult {
+        let mut buffer = CellBuffer::new(cell_width, cell_height);
+
+        for edge_path in &layout.edges {
+            self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
+        }
+
+        for node_box in &layout.nodes {
+            let ir_node = ir.nodes.get(node_box.node_index);
+            if ir_node.is_some_and(is_block_beta_space_node) {
+                continue;
+            }
+            let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let cy = y + h / 2;
+            let raw_id = self.truncate_label(&node_box.node_id);
+            let marker = if self.is_selected_node(node_box.node_index) {
+                if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    format!(">[{raw_id}]")
+                } else {
+                    format!("▶[{raw_id}]")
+                }
+            } else if w >= 3 {
+                format!("[{raw_id}]")
+            } else if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                String::from("*")
+            } else {
+                String::from("▪")
+            };
+            let marker_len = compact_label_width(&marker);
+            let start_x = x + w.saturating_sub(marker_len) / 2;
+            buffer.set_string(start_x, cy, &marker);
+        }
+
+        self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        let mut output = buffer.to_output_string();
+        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        let (debug_rows, debug_width) = if self.config.debug_overlay {
+            append_term_debug_overlay(&mut output, layout)
+        } else {
+            (0, 0)
+        };
+
+        TermRenderResult {
+            output,
+            width: cell_width
+                .max(legend_width)
+                .max(links_width)
+                .max(debug_width),
+            height: cell_height + legend_rows + links_rows + debug_rows,
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                cell_width,
+                cell_height,
+            ),
+        }
     }
 
     /// Render using character cells (Compact mode).
@@ -345,6 +423,98 @@ impl TermRenderer {
                 scale_x,
                 scale_y,
             );
+        } else if ir.diagram_type == fm_core::DiagramType::Treemap {
+            if let Some(meta) = ir.treemap_meta.as_ref() {
+                for tile in &layout.extensions.treemap_tiles {
+                    let (x, y, w, h) = self.bounds_to_cells(&tile.bounds, scale_x, scale_y);
+                    if w >= 3 && h >= 2 {
+                        self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Rect);
+                    }
+                    if let Some(item) = meta.nodes.get(tile.node) {
+                        let caption = self.truncate_label(&format!(
+                            "{} {}",
+                            item.label,
+                            format_terminal_treemap_value(tile.value)
+                        ));
+                        let width = caption.chars().count();
+                        if width + 2 <= w {
+                            let (row, col) = if tile.is_leaf {
+                                (y + h / 2, x + (w.saturating_sub(width)) / 2)
+                            } else {
+                                (y + 1, x + 1)
+                            };
+                            buffer.set_string(col, row, &caption);
+                        }
+                    }
+                }
+            }
+        } else if ir.diagram_type == fm_core::DiagramType::Radar {
+            if let Some((meta, radar)) =
+                ir.radar_meta.as_ref().zip(layout.extensions.radar.as_ref())
+            {
+                let (cx, cy) = self.point_to_cells(&radar.center, scale_x, scale_y);
+                for axis in &radar.axes {
+                    let (tx, ty) = self.point_to_cells(&axis.tip, scale_x, scale_y);
+                    self.draw_line_cell(
+                        &mut buffer,
+                        cx,
+                        cy,
+                        tx,
+                        ty,
+                        &self.edge_glyphs,
+                        false,
+                        ArrowType::Line,
+                    );
+                }
+                for curve in &radar.curves {
+                    let pts: Vec<(usize, usize)> = curve
+                        .points
+                        .iter()
+                        .map(|pt| self.point_to_cells(pt, scale_x, scale_y))
+                        .collect();
+                    for idx in 0..pts.len() {
+                        let (x0, y0) = pts[idx];
+                        let (x1, y1) = pts[(idx + 1) % pts.len()];
+                        self.draw_line_cell(
+                            &mut buffer,
+                            x0,
+                            y0,
+                            x1,
+                            y1,
+                            &self.edge_glyphs,
+                            false,
+                            ArrowType::Line,
+                        );
+                    }
+                }
+                for (index, axis) in radar.axes.iter().enumerate() {
+                    if let Some(declared) = meta.axes.get(index) {
+                        let (ax, ay) = self.point_to_cells(&axis.label_anchor, scale_x, scale_y);
+                        let caption = self.truncate_label(declared.display());
+                        let width = caption.chars().count();
+                        let col = ax
+                            .saturating_sub(width / 2)
+                            .min(cell_width.saturating_sub(width));
+                        let row = ay.min(cell_height.saturating_sub(1));
+                        buffer.set_string(col, row, &caption);
+                    }
+                }
+                if meta.show_legend {
+                    for (index, curve) in meta.curves.iter().enumerate() {
+                        let caption = self.truncate_label(curve.display());
+                        buffer.set_string(1, 1 + index, &caption);
+                    }
+                }
+            }
+        } else if ir.diagram_type == fm_core::DiagramType::Info {
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            let row = cell_height / 2;
+            let col = cell_width.saturating_sub(version.chars().count()) / 2;
+            for (idx, ch) in version.chars().enumerate() {
+                if col + idx < cell_width && row < cell_height {
+                    buffer.set(col + idx, row, ch);
+                }
+            }
         } else {
             // Render nodes (foreground).
             for node_box in &layout.nodes {
@@ -353,16 +523,76 @@ impl TermRenderer {
             for node_box in &layout.extensions.sequence_mirror_headers {
                 self.render_node_cell(&mut buffer, ir, node_box, scale_x, scale_y);
             }
+            for continuation in &layout.extensions.packet_field_continuations {
+                let (x, y, w, h) = self.bounds_to_cells(&continuation.bounds, scale_x, scale_y);
+                if w >= 3 && h >= 1 {
+                    self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Rect);
+                    if let Some(node) = ir.nodes.get(continuation.node_index)
+                        && let Some(label) = self.node_display_label(ir, Some(node), &node.id)
+                    {
+                        let label = self.truncate_label(&label);
+                        let label_len = label.chars().count();
+                        let label_x = x + (w.saturating_sub(label_len)) / 2;
+                        buffer.set_string(label_x, y + h / 2, &label);
+                    }
+                }
+            }
+            for note in &layout.extensions.state_notes {
+                let (x, y, w, h) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+                if w >= 3 && h >= 2 {
+                    self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Note);
+                    let budget = w.saturating_sub(2);
+                    for (row, line) in note.text.lines().enumerate() {
+                        if row >= h {
+                            break;
+                        }
+                        let clipped: String =
+                            self.truncate_label(line).chars().take(budget).collect();
+                        buffer.set_string(x + 1, y + row, &clipped);
+                    }
+                }
+            }
+            for fragment in &layout.extensions.sequence_fragments {
+                let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
+                if fw >= 3 && fh >= 3 {
+                    self.draw_shape_border(&mut buffer, fx, fy, fw, fh, NodeShape::Rect);
+                    let mut text = format!("{:?}", fragment.kind).to_lowercase();
+                    if !fragment.label.is_empty() {
+                        text.push(' ');
+                        text.push_str(&fragment.label);
+                    }
+                    let text = self.truncate_label(&text);
+                    buffer.set_string(fx + 1, fy + 1, &text);
+                }
+            }
+            for note in &layout.extensions.sequence_notes {
+                let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+                if nw >= 3 && nh >= 2 {
+                    self.draw_shape_border(&mut buffer, nx, ny, nw, nh, NodeShape::Note);
+                    let text = self.truncate_label(&note.text);
+                    buffer.set_string(nx + 1, ny + 1, &text);
+                }
+            }
         }
 
         self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
         let mut output = buffer.to_output_string();
         let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        let (debug_rows, debug_width) = if self.config.debug_overlay {
+            append_term_debug_overlay(&mut output, layout)
+        } else {
+            (0, 0)
+        };
 
         TermRenderResult {
             output,
-            width: cell_width.max(legend_width),
-            height: cell_height + legend_rows,
+            width: cell_width
+                .max(legend_width)
+                .max(links_width)
+                .max(debug_width),
+            height: cell_height + legend_rows + links_rows + debug_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -758,11 +988,21 @@ impl TermRenderer {
             scale_y,
         );
         let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        let (debug_rows, debug_width) = if self.config.debug_overlay {
+            append_term_debug_overlay(&mut output, layout)
+        } else {
+            (0, 0)
+        };
 
         TermRenderResult {
             output,
-            width: cell_width.max(legend_width),
-            height: cell_height + legend_rows,
+            width: cell_width
+                .max(legend_width)
+                .max(links_width)
+                .max(debug_width),
+            height: cell_height + legend_rows + links_rows + debug_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -1127,6 +1367,18 @@ impl TermRenderer {
 
         // Draw shape border.
         self.draw_shape_border(buffer, x, y, w, h, shape);
+        if self.is_selected_node(node_box.node_index) && w >= 2 && h >= 2 {
+            let (tl, tr, bl, br) =
+                if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    ('#', '#', '#', '#')
+                } else {
+                    ('╔', '╗', '╚', '╝')
+                };
+            buffer.set(x, y, tl);
+            buffer.set(x + w - 1, y, tr);
+            buffer.set(x, y + h - 1, bl);
+            buffer.set(x + w - 1, y + h - 1, br);
+        }
 
         // Get label.
         let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
@@ -2778,6 +3030,13 @@ impl TermRenderer {
             }
         }
 
+        if ir.diagram_type == fm_core::DiagramType::Info {
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            let row = cell_height / 2;
+            let col = cell_width.saturating_sub(version.chars().count()) / 2;
+            write_if_blank(&mut lines, row, col, version);
+        }
+
         if let Some(title) = generic_terminal_diagram_title(ir)
             && let Some(first_line) = lines.first_mut()
         {
@@ -2933,6 +3192,56 @@ impl TermRenderer {
         lines.join("\n")
     }
 
+    const fn is_selected_node(&self, node_index: usize) -> bool {
+        self.config.show_selection
+            && matches!(self.config.selected_node, Some(idx) if idx == node_index)
+    }
+
+    fn is_highlighted_node(&self, ir: &MermaidDiagramIr, node_index: usize) -> bool {
+        let Some(selected) = self
+            .config
+            .selected_node
+            .filter(|_| self.config.show_selection)
+        else {
+            return false;
+        };
+        if selected == node_index {
+            return false;
+        }
+        let resolve = |ep: &fm_core::IrEndpoint| -> Option<usize> {
+            match ep {
+                fm_core::IrEndpoint::Node(id) => Some(id.0),
+                fm_core::IrEndpoint::Port(port_id) => ir.ports.get(port_id.0).map(|p| p.node.0),
+                fm_core::IrEndpoint::Unresolved => None,
+            }
+        };
+        ir.edges.iter().any(|edge| {
+            matches!(
+                (resolve(&edge.from), resolve(&edge.to)),
+                (Some(u), Some(v))
+                    if (u == selected && v == node_index) || (v == selected && u == node_index)
+            )
+        })
+    }
+
+    fn node_link_url(node: &fm_core::IrNode) -> Option<&str> {
+        node.href()
+            .or_else(|| node.menu_links.first().map(|link| link.url.as_str()))
+    }
+
+    fn footnote_index(ir: &MermaidDiagramIr, target_node_id: &str) -> Option<usize> {
+        let mut idx = 0usize;
+        for node in &ir.nodes {
+            if Self::node_link_url(node).is_some() {
+                idx += 1;
+                if node.id == target_node_id {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
     fn node_display_label(
         &self,
         ir: &MermaidDiagramIr,
@@ -2944,12 +3253,42 @@ impl TermRenderer {
             return None;
         }
 
-        Some(
-            node.label
-                .and_then(|lid| ir.labels.get(lid.0))
-                .map(|label| self.truncate_label(&label.text))
-                .unwrap_or_else(|| self.truncate_label(fallback_id)),
-        )
+        let mut text = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|label| self.truncate_label(&label.text))
+            .unwrap_or_else(|| self.truncate_label(fallback_id));
+
+        if matches!(self.config.link_mode, fm_core::MermaidLinkMode::Footnote)
+            && let Some(idx) = Self::footnote_index(ir, &node.id)
+        {
+            text.push_str(&format!(" [{idx}]"));
+        }
+
+        if self.config.show_selection
+            && let Some(node_idx) = ir
+                .nodes
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, node))
+        {
+            if self.is_selected_node(node_idx) {
+                let prefix = if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    "> "
+                } else {
+                    "▶ "
+                };
+                text = format!("{prefix}{text}");
+            } else if self.is_highlighted_node(ir, node_idx) {
+                let prefix = if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    "* "
+                } else {
+                    "• "
+                };
+                text = format!("{prefix}{text}");
+            }
+        }
+
+        Some(text)
     }
 
     /// Render a UML-style three-compartment class box into the character grid.
@@ -3690,6 +4029,52 @@ fn append_c4_legend(output: &mut String, ir: &MermaidDiagramIr) -> (usize, usize
         output.push_str(entry);
     }
     (rows, width)
+}
+
+fn append_footnote_links(
+    output: &mut String,
+    ir: &MermaidDiagramIr,
+    link_mode: fm_core::MermaidLinkMode,
+) -> (usize, usize) {
+    if !matches!(link_mode, fm_core::MermaidLinkMode::Footnote) {
+        return (0, 0);
+    }
+
+    let mut entries = Vec::new();
+    for node in &ir.nodes {
+        if let Some(url) = TermRenderer::node_link_url(node) {
+            let idx = entries.len() + 1;
+            entries.push(format!("[{idx}] {}: {url}", node.id));
+        }
+    }
+    if entries.is_empty() {
+        return (0, 0);
+    }
+
+    let mut width = "Links:".chars().count();
+    output.push_str("\nLinks:");
+    for entry in &entries {
+        width = width.max(entry.chars().count());
+        output.push('\n');
+        output.push_str(entry);
+    }
+    (entries.len() + 1, width)
+}
+
+fn append_term_debug_overlay(output: &mut String, layout: &DiagramLayout) -> (usize, usize) {
+    let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+    let banner = format!(
+        "[debug: nodes={} edges={} ranks={} crossings={} cycles={}]",
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    let width = banner.chars().count();
+    output.push('\n');
+    output.push_str(&banner);
+    (1, width)
 }
 
 /// Place an edge label near its path midpoint without overwriting another edge label.
@@ -5292,6 +5677,163 @@ mod tests {
                 .output
                 .chars()
                 .all(|ch| ch.is_whitespace() || ch == '⠀')
+        );
+    }
+
+    #[test]
+    fn debug_overlay_appends_stats_banner_when_enabled() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+
+        let default_res = render_diagram_with_config(&ir, &TermRenderConfig::default(), 60, 20);
+        assert!(!default_res.output.contains("[debug: nodes="));
+
+        let debug_cfg = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let debug_res = render_diagram_with_config(&ir, &debug_cfg, 60, 20);
+        assert!(debug_res.output.contains("[debug: nodes=2 edges=0"));
+        assert_eq!(debug_res.height, default_res.height + 1);
+    }
+
+    #[test]
+    fn cell_mode_renders_treemap_radar_and_notes() {
+        let compact = TermRenderConfig::compact();
+
+        // 1. Treemap in Compact / CellOnly mode
+        let mut treemap_ir = MermaidDiagramIr::empty(DiagramType::Treemap);
+        treemap_ir.treemap_meta = Some(fm_core::IrTreemapMeta {
+            nodes: vec![
+                fm_core::IrTreemapItem {
+                    label: "Root".to_string(),
+                    value: None,
+                    parent: None,
+                    children: vec![1],
+                    depth: 0,
+                    ..Default::default()
+                },
+                fm_core::IrTreemapItem {
+                    label: "LeafA".to_string(),
+                    value: Some(40.0),
+                    parent: Some(0),
+                    children: Vec::new(),
+                    depth: 1,
+                    ..Default::default()
+                },
+            ],
+            roots: vec![0],
+        });
+        let treemap_res = render_diagram_with_config(&treemap_ir, &compact, 80, 24);
+        assert!(
+            treemap_res.output.contains("LeafA"),
+            "Compact cell mode must render treemap leaf labels: {}",
+            treemap_res.output
+        );
+
+        // 2. Radar in Compact / CellOnly mode
+        let mut radar_ir = MermaidDiagramIr::empty(DiagramType::Radar);
+        radar_ir.radar_meta = Some(fm_core::IrRadarMeta {
+            axes: vec![
+                fm_core::IrRadarAxis {
+                    id: "A".to_string(),
+                    label: Some("Speed".to_string()),
+                    span: Default::default(),
+                },
+                fm_core::IrRadarAxis {
+                    id: "B".to_string(),
+                    label: Some("Power".to_string()),
+                    span: Default::default(),
+                },
+                fm_core::IrRadarAxis {
+                    id: "C".to_string(),
+                    label: Some("Range".to_string()),
+                    span: Default::default(),
+                },
+            ],
+            curves: vec![fm_core::IrRadarCurve {
+                id: "c1".to_string(),
+                label: Some("Bot".to_string()),
+                values: vec![80.0, 60.0, 90.0],
+                span: Default::default(),
+            }],
+            show_legend: true,
+            ..Default::default()
+        });
+        let radar_res = render_diagram_with_config(&radar_ir, &compact, 80, 24);
+        assert!(
+            radar_res.output.contains("Speed") && radar_res.output.contains("Bot"),
+            "Compact cell mode must render radar axis labels and legend: {}",
+            radar_res.output
+        );
+    }
+
+    #[test]
+    fn outline_fidelity_and_selection_and_footnote_links_render_end_to_end() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut node_a = IrNode {
+            id: "Alpha".to_string(),
+            ..IrNode::default()
+        };
+        node_a.interaction_mut().href = Some("https://example.com/alpha".to_string());
+        let node_b = IrNode {
+            id: "Beta".to_string(),
+            ..IrNode::default()
+        };
+        ir.nodes.push(node_a);
+        ir.nodes.push(node_b);
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            crate::select_fidelity(0.2, 0.2, 0.1, 2, 14, 5, fm_core::MermaidTier::Auto),
+            fm_core::MermaidFidelity::Outline
+        );
+
+        let selection = crate::SelectionState::from_selected(0, &ir);
+        assert_eq!(selection.selected_node, Some(0));
+        assert_eq!(selection.highlighted_nodes, vec![1]);
+
+        let adj = crate::build_adjacency(&ir);
+        assert_eq!(adj[0], vec![1]);
+        let layout = layout_diagram(&ir);
+        let next = crate::navigate_direction(&layout, 0, 1.0, 0.0)
+            .or_else(|| crate::navigate_direction(&layout, 0, 0.0, 1.0));
+        assert_eq!(next, Some(1));
+
+        let mut cfg = TermRenderConfig::compact().with_selection(&selection);
+        cfg.link_mode = fm_core::MermaidLinkMode::Footnote;
+        let res = render_diagram_with_config(&ir, &cfg, 80, 24);
+        assert!(res.output.contains("▶ Alpha [1]"), "{}", res.output);
+        assert!(res.output.contains("• Beta"), "{}", res.output);
+        assert!(
+            res.output.contains("[1] Alpha: https://example.com/alpha"),
+            "{}",
+            res.output
+        );
+
+        let outline_cfg = TermRenderConfig::outline().with_selection(&selection);
+        let outline_res = render_diagram_with_config(&ir, &outline_cfg, 80, 24);
+        assert!(
+            outline_res.output.contains("▶[Alpha]"),
+            "{}",
+            outline_res.output
+        );
+        assert!(
+            outline_res.output.contains("[Beta]"),
+            "{}",
+            outline_res.output
         );
     }
 }

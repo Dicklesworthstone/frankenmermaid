@@ -20,6 +20,7 @@ use fnx_algorithms::{
 };
 
 use crate::fnx_adapter::{ProjectionTable, ir_to_graph};
+use crate::fnx_budget::{AnalysisBudget, BudgetExecutor, BudgetResult};
 
 // ============================================================================
 // Scoring Configuration
@@ -125,81 +126,118 @@ pub fn compute_criticality_scores(
     ir: &MermaidDiagramIr,
     config: &CriticalityScoringConfig,
 ) -> CriticalityScoringResults {
-    if ir.nodes.is_empty() || ir.edges.is_empty() {
-        return CriticalityScoringResults::default();
-    }
+    compute_criticality_scores_with_budget(ir, config, AnalysisBudget::default())
+        .into_value()
+        .unwrap_or_default()
+}
 
-    let (graph, table) = ir_to_graph(ir);
-
-    // Run FNX analyses
-    let bridges_result = bridges(&graph);
-    let articulation_result = articulation_points(&graph);
-    let centrality_result = degree_centrality(&graph);
-
-    let mut results = CriticalityScoringResults {
-        fnx_available: true,
-        bridge_count: 0,
-        articulation_count: articulation_result.nodes.len(),
-        ..Default::default()
-    };
-
-    // Build lookup sets for fast checking
-    let bridge_set = build_bridge_set(&bridges_result, &table);
-    let articulation_set = build_articulation_set(&articulation_result, &table);
-    let centrality_map = build_centrality_map(&centrality_result, &table);
-    let pair_counts = build_edge_pair_counts(ir);
-
-    // Score each edge
-    for (edge_idx, edge) in ir.edges.iter().enumerate() {
-        let source_idx = endpoint_node_index(edge.from, &ir.ports);
-        let target_idx = endpoint_node_index(edge.to, &ir.ports);
-
-        let (source_idx, target_idx) = match (source_idx, target_idx) {
-            (Some(s), Some(t)) => (s, t),
-            _ => continue, // Skip unresolved edges
-        };
-
-        let pair = (source_idx.min(target_idx), source_idx.max(target_idx));
-        let multiplicity = pair_counts.get(&pair).copied().unwrap_or(1);
-        let is_bridge = source_idx != target_idx && multiplicity == 1 && bridge_set.contains(&pair);
-        let source_is_articulation = articulation_set.contains(&source_idx);
-        let target_is_articulation = articulation_set.contains(&target_idx);
-        let source_centrality = centrality_map.get(&source_idx).copied().unwrap_or(0.0);
-        let target_centrality = centrality_map.get(&target_idx).copied().unwrap_or(0.0);
-
-        // Compute composite score
-        let bridge_penalty = if is_bridge { 1.0 } else { 0.0 };
-        let articulation_penalty = match (source_is_articulation, target_is_articulation) {
-            (true, true) => 1.0,
-            (true, false) | (false, true) => 0.5,
-            (false, false) => 0.0,
-        };
-        let centrality_penalty = (source_centrality + target_centrality) / 2.0;
-
-        let score = config.base_penalty
-            + config.bridge_weight * bridge_penalty
-            + config.articulation_weight * articulation_penalty
-            + config.centrality_weight * centrality_penalty;
-
-        if is_bridge {
-            results.bridge_count += 1;
+/// Compute edge criticality scores under an explicit [`AnalysisBudget`].
+#[must_use]
+pub fn compute_criticality_scores_with_budget(
+    ir: &MermaidDiagramIr,
+    config: &CriticalityScoringConfig,
+    budget: AnalysisBudget,
+) -> BudgetResult<CriticalityScoringResults> {
+    let mut executor = BudgetExecutor::new(budget);
+    executor.execute_with_progress(|exec| {
+        if ir.nodes.is_empty() || ir.edges.is_empty() {
+            return CriticalityScoringResults::default();
         }
 
-        results.scores.insert(
-            edge_idx,
-            EdgeCriticalityScore {
-                edge_index: edge_idx,
-                is_bridge,
-                source_is_articulation,
-                target_is_articulation,
-                source_centrality,
-                target_centrality,
-                score,
-            },
-        );
-    }
+        let base_work = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
+        let (graph, table) = ir_to_graph(ir);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return CriticalityScoringResults::default();
+        }
 
-    results
+        // Run FNX analyses
+        let bridges_result = bridges(&graph);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return CriticalityScoringResults::default();
+        }
+
+        let articulation_result = articulation_points(&graph);
+        exec.record_work(base_work);
+        if exec.is_exceeded() {
+            return CriticalityScoringResults::default();
+        }
+
+        let centrality_result = degree_centrality(&graph);
+        exec.record_work(base_work);
+
+        let mut results = CriticalityScoringResults {
+            fnx_available: true,
+            bridge_count: 0,
+            articulation_count: articulation_result.nodes.len(),
+            ..Default::default()
+        };
+
+        // Build lookup sets for fast checking
+        let bridge_set = build_bridge_set(&bridges_result, &table);
+        let articulation_set = build_articulation_set(&articulation_result, &table);
+        let centrality_map = build_centrality_map(&centrality_result, &table);
+        let pair_counts = build_edge_pair_counts(ir);
+
+        // Score each edge
+        for (edge_idx, edge) in ir.edges.iter().enumerate() {
+            if exec.is_exceeded() {
+                break;
+            }
+            exec.record_work(1);
+
+            let source_idx = endpoint_node_index(edge.from, &ir.ports);
+            let target_idx = endpoint_node_index(edge.to, &ir.ports);
+
+            let (source_idx, target_idx) = match (source_idx, target_idx) {
+                (Some(s), Some(t)) => (s, t),
+                _ => continue, // Skip unresolved edges
+            };
+
+            let pair = (source_idx.min(target_idx), source_idx.max(target_idx));
+            let multiplicity = pair_counts.get(&pair).copied().unwrap_or(1);
+            let is_bridge =
+                source_idx != target_idx && multiplicity == 1 && bridge_set.contains(&pair);
+            let source_is_articulation = articulation_set.contains(&source_idx);
+            let target_is_articulation = articulation_set.contains(&target_idx);
+            let source_centrality = centrality_map.get(&source_idx).copied().unwrap_or(0.0);
+            let target_centrality = centrality_map.get(&target_idx).copied().unwrap_or(0.0);
+
+            // Compute composite score
+            let bridge_penalty = if is_bridge { 1.0 } else { 0.0 };
+            let articulation_penalty = match (source_is_articulation, target_is_articulation) {
+                (true, true) => 1.0,
+                (true, false) | (false, true) => 0.5,
+                (false, false) => 0.0,
+            };
+            let centrality_penalty = (source_centrality + target_centrality) / 2.0;
+
+            let score = config.base_penalty
+                + config.bridge_weight * bridge_penalty
+                + config.articulation_weight * articulation_penalty
+                + config.centrality_weight * centrality_penalty;
+
+            if is_bridge {
+                results.bridge_count += 1;
+            }
+
+            results.scores.insert(
+                edge_idx,
+                EdgeCriticalityScore {
+                    edge_index: edge_idx,
+                    is_bridge,
+                    source_is_articulation,
+                    target_is_articulation,
+                    source_centrality,
+                    target_centrality,
+                    score,
+                },
+            );
+        }
+
+        results
+    })
 }
 
 fn endpoint_node_index(endpoint: IrEndpoint, ports: &[IrPort]) -> Option<usize> {
@@ -595,5 +633,14 @@ mod tests {
                 "high bridge weight should produce higher scores"
             );
         }
+    }
+
+    #[test]
+    fn compute_criticality_scores_with_budget_enforces_work_limit() {
+        let ir = make_chain_ir();
+        let config = CriticalityScoringConfig::default();
+        let tight = AnalysisBudget::default().with_work_budget(1);
+        let result = compute_criticality_scores_with_budget(&ir, &config, tight);
+        assert!(result.is_cancelled());
     }
 }

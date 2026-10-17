@@ -517,6 +517,224 @@ impl ParseLensSnapshot {
     ) -> Result<MermaidLensEditResult, MermaidLensError> {
         apply_lens_edit(&self.source, &self.source_map, edit)
     }
+
+    /// Re-emits `edited` across any supported `ParseLens` family (`Flowchart`, `Sequence`,
+    /// `Class`, `State`, or `Er`) while preserving all formatting trivia.
+    pub fn put_ir(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
+        let find_range: fn(&str, MermaidTextRange, &str, &str) -> Option<MermaidTextRange> =
+            match self.parsed.ir.diagram_type {
+                DiagramType::Flowchart | DiagramType::Class | DiagramType::Er => {
+                    find_flowchart_label_text_range
+                }
+                DiagramType::Sequence => find_sequence_participant_label_text_range,
+                DiagramType::State => find_state_label_text_range,
+                _ => return Err(FlowchartParseLensError::NotFlowchart),
+            };
+        self.put_with_label_finder(self.parsed.ir.diagram_type, edited, find_range)
+    }
+
+    fn put_with_label_finder(
+        &self,
+        expected_type: DiagramType,
+        edited: &MermaidDiagramIr,
+        find_range: fn(&str, MermaidTextRange, &str, &str) -> Option<MermaidTextRange>,
+    ) -> Result<String, FlowchartParseLensError> {
+        if edited.diagram_type != expected_type {
+            return Err(FlowchartParseLensError::NotFlowchart);
+        }
+
+        let original = &self.parsed.ir;
+        if original.labels.len() != edited.labels.len() {
+            return Err(FlowchartParseLensError::UnsupportedIrChange);
+        }
+
+        // First prove that every IR field except label text stayed unchanged. If not, check
+        // whether `edited` is a pure standalone-node-declaration permutation (bd-mlio9).
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return self
+                .try_put_node_declaration_permutation(edited)
+                .ok_or(FlowchartParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range =
+                find_range(self.original_source(), line_range, &node.id, old_label)
+                    .ok_or_else(|| FlowchartParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(FlowchartParseLensError::UnsupportedIrChange);
+        }
+
+        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
+        let mut updated = self.original_source().to_string();
+        for (range, replacement) in replacements {
+            updated.replace_range(range.start_byte..range.end_byte, replacement);
+        }
+        Ok(updated)
+    }
+
+    fn try_put_node_declaration_permutation(&self, edited: &MermaidDiagramIr) -> Option<String> {
+        let original = &self.parsed.ir;
+        let count = original.nodes.len();
+        if edited.nodes.len() != count || original.labels != edited.labels {
+            return None;
+        }
+
+        let mut new_to_old = Vec::with_capacity(count);
+        let mut old_to_new = vec![usize::MAX; count];
+        for (new_idx, edited_node) in edited.nodes.iter().enumerate() {
+            let old_idx = original
+                .nodes
+                .iter()
+                .position(|orig_node| orig_node.id == edited_node.id)?;
+            if old_to_new[old_idx] != usize::MAX {
+                return None;
+            }
+            old_to_new[old_idx] = new_idx;
+            new_to_old.push(old_idx);
+        }
+
+        let moved_slots: Vec<usize> = (0..count)
+            .filter(|&slot| new_to_old[slot] != slot)
+            .collect();
+        if moved_slots.is_empty() {
+            return None;
+        }
+
+        let edge_ranges: Vec<_> = original
+            .edges
+            .iter()
+            .filter_map(|edge| resolve_span_text_range(self.original_source(), edge.span))
+            .collect();
+
+        let mut slot_ranges = std::collections::BTreeMap::new();
+        for &slot in &moved_slots {
+            let span = self
+                .source_map
+                .entries
+                .iter()
+                .find(|entry| entry.kind == MermaidSourceMapKind::Node && entry.index == slot)
+                .map(|entry| entry.span)
+                .unwrap_or(original.nodes[slot].span_primary);
+            let range = resolve_span_text_range(self.original_source(), span)?;
+            let slice = self
+                .original_source()
+                .get(range.start_byte..range.end_byte)?;
+
+            // Reject inline edge declarations (`A --> B`): moving an edge statement would alter edge
+            // order or reconnect another endpoint.
+            if edge_ranges.iter().any(|edge_range| {
+                !(edge_range.end_byte <= range.start_byte
+                    || edge_range.start_byte >= range.end_byte)
+            }) || slice.contains("-->")
+                || slice.contains("---")
+                || slice.contains("-.->")
+                || slice.contains("==>")
+                || slice.contains("~~~")
+            {
+                return None;
+            }
+            slot_ranges.insert(slot, range);
+        }
+
+        // Moved statement spans must be mutually disjoint and appear in source order matching slot order.
+        let ordered_ranges: Vec<_> = slot_ranges
+            .iter()
+            .map(|(&slot, &range)| (slot, range))
+            .collect();
+        for pair in ordered_ranges.windows(2) {
+            if pair[0].1.end_byte > pair[1].1.start_byte {
+                return None;
+            }
+        }
+
+        let mut replacements: Vec<(_, String)> = moved_slots
+            .iter()
+            .map(|&slot| {
+                let target_range = slot_ranges[&slot];
+                let source_range = slot_ranges[&new_to_old[slot]];
+                let replacement = self.original_source()
+                    [source_range.start_byte..source_range.end_byte]
+                    .to_string();
+                (target_range, replacement)
+            })
+            .collect();
+        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
+
+        let mut updated = self.original_source().to_string();
+        for (range, replacement) in replacements {
+            updated.replace_range(range.start_byte..range.end_byte, &replacement);
+        }
+
+        // Verify PutGet: reparsing `updated` must yield the requested node declaration order,
+        // node labels, and edge topology.
+        let reparsed = crate::parse(&updated).ir;
+        fn label_text<'a>(ir: &'a MermaidDiagramIr, node: &fm_core::IrNode) -> Option<&'a str> {
+            node.label
+                .and_then(|id| ir.labels.get(id.0))
+                .map(|l| l.text.as_str())
+        }
+        if reparsed.diagram_type != edited.diagram_type
+            || reparsed.nodes.len() != edited.nodes.len()
+            || reparsed.edges.len() != edited.edges.len()
+            || reparsed.clusters != edited.clusters
+            || !reparsed.nodes.iter().zip(&edited.nodes).all(|(a, b)| {
+                a.id == b.id
+                    && a.shape == b.shape
+                    && label_text(&reparsed, a) == label_text(edited, b)
+            })
+            || !reparsed
+                .edges
+                .iter()
+                .zip(&edited.edges)
+                .all(|(a, b)| a.from == b.from && a.to == b.to && a.arrow == b.arrow)
+        {
+            return None;
+        }
+
+        Some(updated)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -591,85 +809,11 @@ impl FlowchartParseLens {
 
     /// Re-emits `edited` by replacing only changed flowchart node-label text.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
-        if edited.diagram_type != DiagramType::Flowchart {
-            return Err(FlowchartParseLensError::NotFlowchart);
-        }
-
-        let original = self.ir();
-        if original.labels.len() != edited.labels.len() {
-            return Err(FlowchartParseLensError::UnsupportedIrChange);
-        }
-
-        // First prove that every IR field except label text stayed unchanged. This keeps the
-        // initial lens honest: a node/edge/style mutation cannot be rendered as though it had
-        // round-tripped when only label source spans are available.
-        let mut labels_only = original.clone();
-        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
-            expected.text.clone_from(&actual.text);
-        }
-        if &labels_only != edited {
-            return Err(FlowchartParseLensError::UnsupportedIrChange);
-        }
-
-        let changed_labels: Vec<usize> = original
-            .labels
-            .iter()
-            .zip(&edited.labels)
-            .enumerate()
-            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
-            .collect();
-        if changed_labels.is_empty() {
-            return Ok(self.original_source().to_string());
-        }
-
-        let mut replacements = Vec::new();
-        for (node_index, node) in original.nodes.iter().enumerate() {
-            let Some(label_id) = node.label else {
-                continue;
-            };
-            if !changed_labels.contains(&label_id.0) {
-                continue;
-            }
-
-            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
-                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
-            });
-            let Some(source_entry) = source_entry else {
-                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let Some(line_range) =
-                resolve_span_text_range(self.original_source(), source_entry.span)
-            else {
-                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let old_label = &original.labels[label_id.0].text;
-            let label_range = find_flowchart_label_text_range(
-                self.original_source(),
-                line_range,
-                &node.id,
-                old_label,
-            )
-            .ok_or_else(|| FlowchartParseLensError::MissingSourceLabel(node.id.clone()))?;
-            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
-        }
-
-        if replacements.len() != changed_labels.len()
-            && changed_labels.iter().any(|label_id| {
-                !original
-                    .nodes
-                    .iter()
-                    .any(|node| node.label.is_some_and(|id| id.0 == *label_id))
-            })
-        {
-            return Err(FlowchartParseLensError::UnsupportedIrChange);
-        }
-
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
-        Ok(updated)
+        self.snapshot.put_with_label_finder(
+            DiagramType::Flowchart,
+            edited,
+            find_flowchart_label_text_range,
+        )
     }
 }
 
@@ -727,77 +871,21 @@ impl SequenceParseLens {
 
     /// Re-emits `edited` by replacing only explicit participant alias text.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, SequenceParseLensError> {
-        if edited.diagram_type != DiagramType::Sequence {
-            return Err(SequenceParseLensError::NotSequence);
-        }
-
-        let original = self.ir();
-        if original.labels.len() != edited.labels.len() {
-            return Err(SequenceParseLensError::UnsupportedIrChange);
-        }
-        let mut labels_only = original.clone();
-        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
-            expected.text.clone_from(&actual.text);
-        }
-        if &labels_only != edited {
-            return Err(SequenceParseLensError::UnsupportedIrChange);
-        }
-
-        let changed_labels: Vec<usize> = original
-            .labels
-            .iter()
-            .zip(&edited.labels)
-            .enumerate()
-            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
-            .collect();
-        if changed_labels.is_empty() {
-            return Ok(self.original_source().to_string());
-        }
-
-        let mut replacements = Vec::new();
-        let mut covered_labels = vec![false; original.labels.len()];
-        for (node_index, node) in original.nodes.iter().enumerate() {
-            let Some(label_id) = node.label else {
-                continue;
-            };
-            if !changed_labels.contains(&label_id.0) {
-                continue;
-            }
-            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
-                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
-            });
-            let Some(source_entry) = source_entry else {
-                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let Some(line_range) =
-                resolve_span_text_range(self.original_source(), source_entry.span)
-            else {
-                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let old_label = &original.labels[label_id.0].text;
-            let label_range = find_sequence_participant_label_text_range(
-                self.original_source(),
-                line_range,
-                &node.id,
-                old_label,
+        self.snapshot
+            .put_with_label_finder(
+                DiagramType::Sequence,
+                edited,
+                find_sequence_participant_label_text_range,
             )
-            .ok_or_else(|| SequenceParseLensError::MissingSourceLabel(node.id.clone()))?;
-            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
-            covered_labels[label_id.0] = true;
-        }
-        if changed_labels
-            .iter()
-            .any(|label_id| !covered_labels[*label_id])
-        {
-            return Err(SequenceParseLensError::UnsupportedIrChange);
-        }
-
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
-        Ok(updated)
+            .map_err(|err| match err {
+                FlowchartParseLensError::NotFlowchart => SequenceParseLensError::NotSequence,
+                FlowchartParseLensError::UnsupportedIrChange => {
+                    SequenceParseLensError::UnsupportedIrChange
+                }
+                FlowchartParseLensError::MissingSourceLabel(id) => {
+                    SequenceParseLensError::MissingSourceLabel(id)
+                }
+            })
     }
 }
 
@@ -854,77 +942,17 @@ impl ClassParseLens {
 
     /// Re-emits `edited` by replacing only explicit class-node label text.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ClassParseLensError> {
-        if edited.diagram_type != DiagramType::Class {
-            return Err(ClassParseLensError::NotClass);
-        }
-
-        let original = self.ir();
-        if original.labels.len() != edited.labels.len() {
-            return Err(ClassParseLensError::UnsupportedIrChange);
-        }
-        let mut labels_only = original.clone();
-        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
-            expected.text.clone_from(&actual.text);
-        }
-        if &labels_only != edited {
-            return Err(ClassParseLensError::UnsupportedIrChange);
-        }
-
-        let changed_labels: Vec<usize> = original
-            .labels
-            .iter()
-            .zip(&edited.labels)
-            .enumerate()
-            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
-            .collect();
-        if changed_labels.is_empty() {
-            return Ok(self.original_source().to_string());
-        }
-
-        let mut replacements = Vec::new();
-        let mut covered_labels = vec![false; original.labels.len()];
-        for (node_index, node) in original.nodes.iter().enumerate() {
-            let Some(label_id) = node.label else {
-                continue;
-            };
-            if !changed_labels.contains(&label_id.0) {
-                continue;
-            }
-            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
-                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
-            });
-            let Some(source_entry) = source_entry else {
-                return Err(ClassParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let Some(line_range) =
-                resolve_span_text_range(self.original_source(), source_entry.span)
-            else {
-                return Err(ClassParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let old_label = &original.labels[label_id.0].text;
-            let label_range = find_flowchart_label_text_range(
-                self.original_source(),
-                line_range,
-                &node.id,
-                old_label,
-            )
-            .ok_or_else(|| ClassParseLensError::MissingSourceLabel(node.id.clone()))?;
-            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
-            covered_labels[label_id.0] = true;
-        }
-        if changed_labels
-            .iter()
-            .any(|label_id| !covered_labels[*label_id])
-        {
-            return Err(ClassParseLensError::UnsupportedIrChange);
-        }
-
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
-        Ok(updated)
+        self.snapshot
+            .put_with_label_finder(DiagramType::Class, edited, find_flowchart_label_text_range)
+            .map_err(|err| match err {
+                FlowchartParseLensError::NotFlowchart => ClassParseLensError::NotClass,
+                FlowchartParseLensError::UnsupportedIrChange => {
+                    ClassParseLensError::UnsupportedIrChange
+                }
+                FlowchartParseLensError::MissingSourceLabel(id) => {
+                    ClassParseLensError::MissingSourceLabel(id)
+                }
+            })
     }
 }
 
@@ -981,77 +1009,17 @@ impl StateParseLens {
 
     /// Re-emits `edited` by replacing only explicit `state Label as Id` label text.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, StateParseLensError> {
-        if edited.diagram_type != DiagramType::State {
-            return Err(StateParseLensError::NotState);
-        }
-
-        let original = self.ir();
-        if original.labels.len() != edited.labels.len() {
-            return Err(StateParseLensError::UnsupportedIrChange);
-        }
-        let mut labels_only = original.clone();
-        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
-            expected.text.clone_from(&actual.text);
-        }
-        if &labels_only != edited {
-            return Err(StateParseLensError::UnsupportedIrChange);
-        }
-
-        let changed_labels: Vec<usize> = original
-            .labels
-            .iter()
-            .zip(&edited.labels)
-            .enumerate()
-            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
-            .collect();
-        if changed_labels.is_empty() {
-            return Ok(self.original_source().to_string());
-        }
-
-        let mut replacements = Vec::new();
-        let mut covered_labels = vec![false; original.labels.len()];
-        for (node_index, node) in original.nodes.iter().enumerate() {
-            let Some(label_id) = node.label else {
-                continue;
-            };
-            if !changed_labels.contains(&label_id.0) {
-                continue;
-            }
-            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
-                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
-            });
-            let Some(source_entry) = source_entry else {
-                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let Some(line_range) =
-                resolve_span_text_range(self.original_source(), source_entry.span)
-            else {
-                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let old_label = &original.labels[label_id.0].text;
-            let label_range = find_state_label_text_range(
-                self.original_source(),
-                line_range,
-                &node.id,
-                old_label,
-            )
-            .ok_or_else(|| StateParseLensError::MissingSourceLabel(node.id.clone()))?;
-            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
-            covered_labels[label_id.0] = true;
-        }
-        if changed_labels
-            .iter()
-            .any(|label_id| !covered_labels[*label_id])
-        {
-            return Err(StateParseLensError::UnsupportedIrChange);
-        }
-
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
-        Ok(updated)
+        self.snapshot
+            .put_with_label_finder(DiagramType::State, edited, find_state_label_text_range)
+            .map_err(|err| match err {
+                FlowchartParseLensError::NotFlowchart => StateParseLensError::NotState,
+                FlowchartParseLensError::UnsupportedIrChange => {
+                    StateParseLensError::UnsupportedIrChange
+                }
+                FlowchartParseLensError::MissingSourceLabel(id) => {
+                    StateParseLensError::MissingSourceLabel(id)
+                }
+            })
     }
 }
 
@@ -1108,77 +1076,68 @@ impl ErParseLens {
 
     /// Re-emits `edited` by replacing only explicit ER entity-label text.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ErParseLensError> {
-        if edited.diagram_type != DiagramType::Er {
-            return Err(ErParseLensError::NotEr);
-        }
+        self.snapshot
+            .put_with_label_finder(DiagramType::Er, edited, find_flowchart_label_text_range)
+            .map_err(|err| match err {
+                FlowchartParseLensError::NotFlowchart => ErParseLensError::NotEr,
+                FlowchartParseLensError::UnsupportedIrChange => {
+                    ErParseLensError::UnsupportedIrChange
+                }
+                FlowchartParseLensError::MissingSourceLabel(id) => {
+                    ErParseLensError::MissingSourceLabel(id)
+                }
+            })
+    }
+}
 
-        let original = self.ir();
-        if original.labels.len() != edited.labels.len() {
-            return Err(ErParseLensError::UnsupportedIrChange);
-        }
-        let mut labels_only = original.clone();
-        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
-            expected.text.clone_from(&actual.text);
-        }
-        if &labels_only != edited {
-            return Err(ErParseLensError::UnsupportedIrChange);
-        }
+/// A multi-family text/IR lens that dispatches across all five trivia-preserving families
+/// (`Flowchart`, `Sequence`, `Class`, `State`, and `Er`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramParseLens {
+    snapshot: ParseLensSnapshot,
+}
 
-        let changed_labels: Vec<usize> = original
-            .labels
-            .iter()
-            .zip(&edited.labels)
-            .enumerate()
-            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
-            .collect();
-        if changed_labels.is_empty() {
-            return Ok(self.original_source().to_string());
-        }
+impl DiagramParseLens {
+    /// Returns true if `diagram_type` is supported by `DiagramParseLens`.
+    #[must_use]
+    pub const fn supports_diagram_type(diagram_type: DiagramType) -> bool {
+        matches!(
+            diagram_type,
+            DiagramType::Flowchart
+                | DiagramType::Sequence
+                | DiagramType::Class
+                | DiagramType::State
+                | DiagramType::Er
+        )
+    }
 
-        let mut replacements = Vec::new();
-        let mut covered_labels = vec![false; original.labels.len()];
-        for (node_index, node) in original.nodes.iter().enumerate() {
-            let Some(label_id) = node.label else {
-                continue;
-            };
-            if !changed_labels.contains(&label_id.0) {
-                continue;
-            }
-            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
-                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
-            });
-            let Some(source_entry) = source_entry else {
-                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let Some(line_range) =
-                resolve_span_text_range(self.original_source(), source_entry.span)
-            else {
-                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
-            };
-            let old_label = &original.labels[label_id.0].text;
-            let label_range = find_flowchart_label_text_range(
-                self.original_source(),
-                line_range,
-                &node.id,
-                old_label,
-            )
-            .ok_or_else(|| ErParseLensError::MissingSourceLabel(node.id.clone()))?;
-            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
-            covered_labels[label_id.0] = true;
+    /// Parses `input` and retains its exact text as the formatting complement across any
+    /// supported `ParseLens` family.
+    pub fn parse(input: &str) -> Result<Self, FlowchartParseLensError> {
+        let snapshot = build_parse_lens(input);
+        if !Self::supports_diagram_type(snapshot.parsed.ir.diagram_type) {
+            return Err(FlowchartParseLensError::NotFlowchart);
         }
-        if changed_labels
-            .iter()
-            .any(|label_id| !covered_labels[*label_id])
-        {
-            return Err(ErParseLensError::UnsupportedIrChange);
-        }
+        Ok(Self { snapshot })
+    }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
-        Ok(updated)
+    /// Returns the immutable IR view obtained from the original text.
+    #[must_use]
+    pub fn ir(&self) -> &MermaidDiagramIr {
+        &self.snapshot.parsed.ir
+    }
+
+    /// Returns the source whose whitespace, comments, directives, quotes, and line endings are
+    /// retained by this lens.
+    #[must_use]
+    pub fn original_source(&self) -> &str {
+        self.snapshot.original_source()
+    }
+
+    /// Re-emits `edited` by delegating to the diagram family's trivia-preserving `ParseLens`.
+    pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
+        self.snapshot.put_ir(edited)
     }
 }
 

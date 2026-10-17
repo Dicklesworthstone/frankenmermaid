@@ -646,6 +646,7 @@ pub fn parse_mermaid_with_detection_and_config(
     // Semantic deck validation (bd-m2qzi): resolve every selector against the finished
     // diagram, purely for diagnostics — resolution results are never stored.
     validate_deck_semantics(&mut builder);
+    validate_constraint_semantics(&mut builder);
 
     // A treemap holds its whole diagram in `treemap_meta` and declares no nodes or edges, so the
     // generic emptiness check would report every valid treemap as unparseable. Keyed on the meta
@@ -705,14 +706,10 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
             parse_flowchart(content, builder);
         }
         MermaidParseMode::Recover => {
-            builder.add_diagnostic(
-                Diagnostic::warning(
-                    "Unable to detect diagram family; falling back to flowchart-style recovery",
-                )
-                .with_category(DiagnosticCategory::Recovery)
-                .with_suggestion(
-                    "Add an explicit Mermaid header to reduce recovery guesswork".to_string(),
-                ),
+            builder.add_recovery_warning(
+                "Unable to detect diagram family; falling back to flowchart-style recovery",
+                None,
+                Some("Add an explicit Mermaid header to reduce recovery guesswork".to_string()),
             );
             builder.add_warning(
                 "Unable to detect diagram type; using recovery-mode flowchart salvage",
@@ -15330,11 +15327,44 @@ fn parse_layout_constraint_config(
     };
 
     for key in constraints.keys() {
-        if key != "nonOverlap" {
+        if !matches!(
+            key.as_str(),
+            "nonOverlap" | "sameRank" | "orderInRank" | "pin" | "minLength"
+        ) {
             builder.add_warning(format!(
                 "{context}: unsupported layout constraint '{key}' ignored"
             ));
         }
+    }
+
+    if let Some(same_rank) = constraints.get("sameRank") {
+        parse_string_group_constraints(
+            same_rank,
+            context,
+            "sameRank",
+            span,
+            builder,
+            |node_ids, span| IrConstraint::SameRank { node_ids, span },
+        );
+    }
+
+    if let Some(order_in_rank) = constraints.get("orderInRank") {
+        parse_string_group_constraints(
+            order_in_rank,
+            context,
+            "orderInRank",
+            span,
+            builder,
+            |node_ids, span| IrConstraint::OrderInRank { node_ids, span },
+        );
+    }
+
+    if let Some(pin) = constraints.get("pin") {
+        parse_pin_constraints(pin, context, span, builder);
+    }
+
+    if let Some(min_length) = constraints.get("minLength") {
+        parse_min_length_constraints(min_length, context, span, builder);
     }
 
     let Some(non_overlap) = constraints.get("nonOverlap") else {
@@ -15406,6 +15436,170 @@ fn parse_layout_constraint_config(
         span,
     });
 }
+
+fn parse_string_group_constraints(
+    value: &Value,
+    context: &str,
+    field: &str,
+    span: Span,
+    builder: &mut IrBuilder,
+    make_constraint: fn(Vec<String>, Span) -> IrConstraint,
+) {
+    let Some(items) = value.as_array() else {
+        builder.add_warning(format!(
+            "{context}: constraints.{field} must be an array of node IDs or groups"
+        ));
+        return;
+    };
+    if items.iter().all(Value::is_string) {
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if ids.len() < 2 {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} needs at least two node IDs"
+            ));
+            return;
+        }
+        builder.add_constraint(make_constraint(ids, span));
+        return;
+    }
+    for group in items {
+        let Some(arr) = group.as_array() else {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} entries must be arrays of node IDs"
+            ));
+            continue;
+        };
+        let ids: Option<Vec<String>> = arr
+            .iter()
+            .map(Value::as_str)
+            .map(|id| id.map(str::to_string))
+            .collect();
+        let Some(ids) = ids else {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} groups must contain only strings"
+            ));
+            continue;
+        };
+        if ids.len() < 2 {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} needs at least two node IDs"
+            ));
+            continue;
+        }
+        builder.add_constraint(make_constraint(ids, span));
+    }
+}
+
+fn parse_pin_constraints(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    let entries: &[Value] = match value {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => {
+            builder.add_warning(format!(
+                "{context}: constraints.pin must be an object or array of objects"
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            builder.add_warning(format!(
+                "{context}: constraints.pin entry must be an object"
+            ));
+            continue;
+        };
+        let node_id = obj
+            .get("node")
+            .or_else(|| obj.get("nodeId"))
+            .and_then(Value::as_str);
+        let x = obj
+            .get("x")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite());
+        let y = obj
+            .get("y")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite());
+        let (Some(node_id), Some(x), Some(y)) = (node_id, x, y) else {
+            builder.add_warning(format!(
+                "{context}: constraints.pin requires finite 'x', 'y', and string 'node'"
+            ));
+            continue;
+        };
+        builder.add_constraint(IrConstraint::Pin {
+            node_id: node_id.to_string(),
+            x,
+            y,
+            span,
+        });
+    }
+}
+
+fn parse_min_length_constraints(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    let entries: &[Value] = match value {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength must be an object or array of objects"
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength entry must be an object"
+            ));
+            continue;
+        };
+        let from = obj.get("from").and_then(Value::as_str);
+        let to = obj.get("to").and_then(Value::as_str);
+        let min_len = obj
+            .get("minLen")
+            .or_else(|| obj.get("minLength"))
+            .or_else(|| obj.get("min_length"))
+            .and_then(Value::as_u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|v| *v >= 1);
+        let (Some(from_id), Some(to_id), Some(min_len)) = (from, to, min_len) else {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength requires string 'from', 'to', and integer 'minLen' >= 1"
+            ));
+            continue;
+        };
+        builder.add_constraint(IrConstraint::MinLength {
+            from_id: from_id.to_string(),
+            to_id: to_id.to_string(),
+            min_len,
+            span,
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_constraint_semantics(builder: &mut IrBuilder) {
+    if builder.ir_mut().constraints.is_empty() {
+        return;
+    }
+    let conflicts: Vec<String> = builder
+        .ir_mut()
+        .constraint_set()
+        .conflicts()
+        .iter()
+        .map(|conflict| conflict.description.clone())
+        .collect();
+    for description in conflicts {
+        builder.add_warning(format!("layout constraint conflict: {description}"));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn validate_constraint_semantics(_builder: &mut IrBuilder) {}
 
 fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
     let mut segments = input.split_inclusive('\n');
@@ -25616,6 +25810,36 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn classdef_default_populates_all_nodes_and_cascades() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[Base] --> B[Classed] --> C[Styled]\n  classDef default fill:#eee,stroke:#333,stroke-width:2px\n  classDef accent fill:#ff0,stroke:#f00\n  class B,C accent\n  style C fill:#0f0",
+        );
+        let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
+        let style_a = node_a.inline_style.as_ref().expect("A gets default style");
+        assert_eq!(style_a.properties.get("fill").unwrap(), "#eee");
+        assert_eq!(style_a.properties.get("stroke").unwrap(), "#333");
+        assert_eq!(style_a.properties.get("stroke-width").unwrap(), "2px");
+
+        let node_b = parsed.ir.nodes.iter().find(|n| n.id == "B").unwrap();
+        let style_b = node_b
+            .inline_style
+            .as_ref()
+            .expect("B gets accent + default");
+        assert_eq!(style_b.properties.get("fill").unwrap(), "#ff0");
+        assert_eq!(style_b.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_b.properties.get("stroke-width").unwrap(), "2px");
+
+        let node_c = parsed.ir.nodes.iter().find(|n| n.id == "C").unwrap();
+        let style_c = node_c
+            .inline_style
+            .as_ref()
+            .expect("C gets style + accent + default");
+        assert_eq!(style_c.properties.get("fill").unwrap(), "#0f0");
+        assert_eq!(style_c.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_c.properties.get("stroke-width").unwrap(), "2px");
+    }
+
+    #[test]
     fn classdef_with_no_nodes_still_populates_style_defs() {
         let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef unused fill:#999");
         assert_eq!(parsed.ir.style_defs.len(), 1);
@@ -27118,6 +27342,46 @@ Rel_Back(db, app, "Responds")"#,
                 .map(|f| (f.start_bit, f.end_bit))
                 .collect::<Vec<_>>(),
             [(0, 7), (8, 15), (16, 23)]
+        );
+    }
+
+    #[test]
+    fn init_flowchart_direction_applies_unless_overridden_by_header_or_body() {
+        let bare =
+            parse_mermaid("%%{init: {'flowchart': {'rankDir': 'LR'}}}%%\nflowchart\nA --> B");
+        assert_eq!(bare.ir.direction, GraphDirection::LR);
+        assert_eq!(
+            bare.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::LR)
+        );
+
+        let header_override =
+            parse_mermaid("%%{init: {'flowchart': {'rankDir': 'LR'}}}%%\nflowchart BT\nA --> B");
+        assert_eq!(header_override.ir.direction, GraphDirection::BT);
+
+        let frontmatter =
+            parse_mermaid("---\nconfig:\n  flowchart:\n    direction: RL\n---\nflowchart\nA --> B");
+        assert_eq!(frontmatter.ir.direction, GraphDirection::RL);
+    }
+
+    #[test]
+    fn layout_constraints_directive_parses_all_variants_and_detects_conflicts() {
+        let parsed = parse_mermaid(
+            "%%{constraints: {sameRank: ['A', 'B'], orderInRank: ['A', 'B'], pin: {node: 'A', x: 10, y: 20}, minLength: {from: 'A', to: 'C', minLen: 2}, nonOverlap: true}}%%\nflowchart TD\nA --> C\nB --> C",
+        );
+        assert_eq!(parsed.ir.constraints.len(), 5);
+        assert!(parsed.ir.constraint_set().conflicts().is_empty());
+
+        let conflicting = parse_mermaid(
+            "%%{constraints: {orderInRank: [['A', 'B'], ['B', 'A']]}}%%\nflowchart TD\nA --> C\nB --> C",
+        );
+        assert!(
+            conflicting
+                .warnings
+                .iter()
+                .any(|w| w.contains("layout constraint conflict")),
+            "expected conflict warning, got {:?}",
+            conflicting.warnings
         );
     }
 }

@@ -35,7 +35,7 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
-    FlowchartParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
+    DiagramParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
     apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
 };
 #[cfg(target_arch = "wasm32")]
@@ -179,7 +179,7 @@ struct RuntimeConfig {
 /// the next parse.
 #[derive(Debug, Clone)]
 pub struct DiagramLens {
-    parse: FlowchartParseLens,
+    parse: DiagramParseLens,
     layout: LayoutLens,
     config: LayoutConfig,
 }
@@ -219,9 +219,10 @@ impl From<LayoutLensError> for DiagramLensError {
 }
 
 impl DiagramLens {
-    /// Parse and lay out a flowchart, retaining both complements for later safe putback.
+    /// Parse and lay out a diagram (`Flowchart`, `Sequence`, `Class`, `State`, or `Er`),
+    /// retaining both complements for later safe putback.
     pub fn from_source(input: &str, config: LayoutConfig) -> Result<Self, DiagramLensError> {
-        let parse = FlowchartParseLens::parse(input)?;
+        let parse = DiagramParseLens::parse(input)?;
         let layout = LayoutLens::new(parse.ir(), config.clone())?;
         Ok(Self {
             parse,
@@ -418,6 +419,7 @@ struct RuntimeInitConfig {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    debug_overlay: Option<bool>,
 }
 
 impl RuntimeInitConfig {
@@ -435,6 +437,7 @@ impl RuntimeInitConfig {
             link_mode: self.link_mode.clone(),
             node_gradients: self.node_gradients,
             cluster_fill_opacity: self.cluster_fill_opacity,
+            debug_overlay: self.debug_overlay,
         };
         if self.svg.responsive.is_some() {
             merged.responsive = self.svg.responsive;
@@ -472,6 +475,9 @@ impl RuntimeInitConfig {
         if self.svg.cluster_fill_opacity.is_some() {
             merged.cluster_fill_opacity = self.svg.cluster_fill_opacity;
         }
+        if self.svg.debug_overlay.is_some() {
+            merged.debug_overlay = self.svg.debug_overlay;
+        }
         merged
     }
 }
@@ -491,6 +497,7 @@ struct SvgConfigOverrides {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -499,6 +506,7 @@ struct CanvasConfigOverrides {
     font_size: Option<f64>,
     padding: Option<f64>,
     auto_fit: Option<bool>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1185,6 +1193,9 @@ fn merge_svg_config(
     if let Some(value) = overrides.cluster_fill_opacity {
         merged.cluster_fill_opacity = value;
     }
+    if let Some(value) = overrides.debug_overlay {
+        merged.debug_overlay = value;
+    }
 
     Ok(merged)
 }
@@ -1209,6 +1220,9 @@ fn merge_canvas_config(
     }
     if let Some(value) = overrides.auto_fit {
         merged.auto_fit = value;
+    }
+    if let Some(value) = overrides.debug_overlay {
+        merged.debug_overlay = value;
     }
 
     merged
@@ -1240,6 +1254,9 @@ fn align_canvas_typography_with_svg(
     // did -- would be a divergence between two views of the same diagram (bd-t1jj). Neither renderer
     // ever reads the clock; the date is supplied, and `None` here means no marker in either.
     canvas.gantt_today.clone_from(&svg.gantt_today);
+    if svg.debug_overlay {
+        canvas.debug_overlay = true;
+    }
     canvas
 }
 
@@ -2365,6 +2382,21 @@ fn browser_supports_webgpu() -> bool {
     !(gpu.is_null() || gpu.is_undefined())
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn parse_navigation_direction(
+    direction: &str,
+) -> Result<fm_render_canvas::NavigationDirection, String> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "up" | "arrowup" => Ok(fm_render_canvas::NavigationDirection::Up),
+        "down" | "arrowdown" => Ok(fm_render_canvas::NavigationDirection::Down),
+        "left" | "arrowleft" => Ok(fm_render_canvas::NavigationDirection::Left),
+        "right" | "arrowright" => Ok(fm_render_canvas::NavigationDirection::Right),
+        other => Err(format!(
+            "unsupported navigation direction '{other}'; expected 'up', 'down', 'left', or 'right'"
+        )),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct Diagram {
@@ -2377,6 +2409,7 @@ pub struct Diagram {
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
     layout_engine: fm_layout::IncrementalLayoutEngine,
+    session: fm_render_canvas::CanvasSession,
     last_layout: Option<Arc<fm_layout::DiagramLayout>>,
     destroyed: bool,
 }
@@ -2427,6 +2460,7 @@ impl Diagram {
             canvas_config,
             pressure_config,
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
+            session: fm_render_canvas::CanvasSession::default(),
             last_layout: None,
             destroyed: false,
         })
@@ -2556,12 +2590,22 @@ impl Diagram {
                     self.canvas_height,
                     self.context.clone(),
                 );
-                render_to_canvas_with_layout(
-                    &parsed.ir,
-                    &traced_layout.layout,
-                    &mut web_canvas,
-                    &next_canvas,
-                )
+                self.session.set_diagram(
+                    parsed.ir.clone(),
+                    Arc::clone(&traced_layout.layout),
+                    next_canvas.clone(),
+                );
+                self.session
+                    .redraw(&mut web_canvas)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        render_to_canvas_with_layout(
+                            &parsed.ir,
+                            &traced_layout.layout,
+                            &mut web_canvas,
+                            &next_canvas,
+                        )
+                    })
             }
             WebRendererKind::WebGpu => {
                 return Err(js_error(
@@ -2627,6 +2671,51 @@ impl Diagram {
             .and_then(|layout| hit_test_layout_edge(layout, x, y, max_distance)))
     }
 
+    /// Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = selectedNodeId)]
+    pub fn selected_node_id(&self) -> Result<Option<String>, JsValue> {
+        self.ensure_alive()?;
+        Ok(self.session.selected_node_id().map(str::to_owned))
+    }
+
+    /// Select a node by author ID without reparsing or relayout (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = selectNode)]
+    pub fn select_node(&mut self, node_id: &str) -> Result<bool, JsValue> {
+        self.ensure_alive()?;
+        Ok(self.session.select_node(node_id))
+    }
+
+    /// Select a node at canvas-space coordinates `(x, y)` (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = selectAt)]
+    pub fn select_at(&mut self, x: f64, y: f64) -> Result<bool, JsValue> {
+        self.ensure_alive()?;
+        let size = [f64::from(self.canvas_width), f64::from(self.canvas_height)];
+        Ok(self.session.select_at(x, y, size))
+    }
+
+    /// Navigate node selection spatially (`"up"`, `"down"`, `"left"`, `"right"`) (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = navigateSelection)]
+    pub fn navigate_selection(&mut self, direction: &str) -> Result<bool, JsValue> {
+        self.ensure_alive()?;
+        let dir = parse_navigation_direction(direction).map_err(js_error)?;
+        Ok(self.session.navigate_selection(dir))
+    }
+
+    /// Clear the current node selection (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = clearSelection)]
+    pub fn clear_selection(&mut self) -> Result<bool, JsValue> {
+        self.ensure_alive()?;
+        Ok(self.session.clear_selection())
+    }
+
+    /// Redraw the retained diagram and selection ring without reparsing or relayout (`bd-g7sx9`).
+    pub fn redraw(&mut self) -> Result<bool, JsValue> {
+        self.ensure_alive()?;
+        let mut web_canvas =
+            WebCanvas2dContext::new(self.canvas_width, self.canvas_height, self.context.clone());
+        Ok(self.session.redraw(&mut web_canvas).is_some())
+    }
+
     #[wasm_bindgen(js_name = setTheme)]
     pub fn set_theme(&mut self, theme: &str) -> Result<(), JsValue> {
         self.ensure_alive()?;
@@ -2659,6 +2748,7 @@ impl Diagram {
             f64::from(self.canvas_width),
             f64::from(self.canvas_height),
         );
+        self.session.clear();
         self.last_layout = None;
         self.destroyed = true;
     }
@@ -2688,6 +2778,30 @@ impl Diagram {
         _y: f64,
         _max_distance: f64,
     ) -> Result<Option<usize>, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn selected_node_id(&self) -> Result<Option<String>, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn select_node(&mut self, _node_id: &str) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn select_at(&mut self, _x: f64, _y: f64) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn navigate_selection(&mut self, _direction: &str) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn clear_selection(&mut self) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn redraw(&mut self) -> Result<bool, JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 
@@ -4514,6 +4628,186 @@ mod tests {
     }
 
     #[test]
+    fn diagram_lens_reemits_standalone_in_rank_drag_and_refreshes_layout() {
+        let lens = DiagramLens::from_source(
+            "flowchart TB\n  A[Alpha]\n  B[Bravo]\n  C[Charlie]\n  A --> B\n  A --> C\n",
+            LayoutConfig::default(),
+        )
+        .expect("flowchart lens");
+        let mut dragged = lens.positioned_graph().clone();
+        let sibling_rank = dragged
+            .nodes
+            .iter()
+            .map(|node| node.rank)
+            .find(|rank| {
+                dragged
+                    .nodes
+                    .iter()
+                    .filter(|node| node.rank == *rank)
+                    .count()
+                    >= 2
+            })
+            .expect("fixture has a sibling rank");
+        let mut sibling_ids: Vec<String> = dragged
+            .nodes
+            .iter()
+            .filter(|node| node.rank == sibling_rank)
+            .map(|node| node.node_id.clone())
+            .collect();
+        sibling_ids.reverse();
+        for (index, node_id) in sibling_ids.iter().enumerate() {
+            dragged
+                .nodes
+                .iter_mut()
+                .find(|node| &node.node_id == node_id)
+                .expect("sibling exists")
+                .center
+                .x = (index as f32) * 100.0;
+        }
+
+        let updated = lens
+            .put_layout(&dragged)
+            .expect("standalone node declarations should re-emit in-rank reorder");
+        assert_eq!(
+            updated
+                .ir()
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "C", "B"]
+        );
+        assert!(
+            updated.source().find("C[Charlie]").expect("C present")
+                < updated.source().find("B[Bravo]").expect("B present"),
+            "updated source must place C[Charlie] before B[Bravo]: {}",
+            updated.source()
+        );
+    }
+
+    #[test]
+    fn diagram_lens_supports_sequence_class_state_and_er_label_and_layout_edits() {
+        // 1. Sequence diagram: label edit + horizontal participant reorder
+        let seq_lens = DiagramLens::from_source(
+            "sequenceDiagram\n  participant A as Alpha\n  participant B as Bravo\n  A->>B: ping\n",
+            LayoutConfig::default(),
+        )
+        .expect("sequence lens");
+        let mut seq_ir = seq_lens.ir().clone();
+        let b_label = seq_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "B")
+            .and_then(|n| n.label)
+            .expect("B label");
+        seq_ir.labels[b_label.0].text = "Bravo V2".to_string();
+        let seq_renamed = seq_lens.put_ir(&seq_ir).expect("sequence label put_ir");
+        assert!(seq_renamed.source().contains("participant B as Bravo V2"));
+
+        let mut seq_dragged = seq_renamed.positioned_graph().clone();
+        // Swap x coordinates of A and B within rank 0
+        let a_x = seq_dragged
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "A")
+            .unwrap()
+            .center
+            .x;
+        let b_x = seq_dragged
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "B")
+            .unwrap()
+            .center
+            .x;
+        seq_dragged
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == "A")
+            .unwrap()
+            .center
+            .x = b_x;
+        seq_dragged
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == "B")
+            .unwrap()
+            .center
+            .x = a_x;
+        let seq_reordered = seq_renamed
+            .put_layout(&seq_dragged)
+            .expect("sequence participant reorder put_layout");
+        assert_eq!(
+            seq_reordered
+                .ir()
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+
+        // 2. Class diagram: label edit
+        let class_lens = DiagramLens::from_source(
+            "classDiagram\n  Animal[\"Living creature\"]\n  Dog[\"Canine\"]\n  Animal <|-- Dog\n",
+            LayoutConfig::default(),
+        )
+        .expect("class lens");
+        let mut class_ir = class_lens.ir().clone();
+        let dog_label = class_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "Dog")
+            .and_then(|n| n.label)
+            .expect("Dog label");
+        class_ir.labels[dog_label.0].text = "Domestic dog".to_string();
+        let class_renamed = class_lens.put_ir(&class_ir).expect("class label put_ir");
+        assert!(class_renamed.source().contains("Dog[\"Domestic dog\"]"));
+
+        // 3. State diagram: label edit
+        let state_lens = DiagramLens::from_source(
+            "stateDiagram-v2\n  state \"Idle State\" as Idle\n  state \"Active State\" as Active\n  Idle --> Active\n",
+            LayoutConfig::default(),
+        )
+        .expect("state lens");
+        let mut state_ir = state_lens.ir().clone();
+        let idle_label = state_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "Idle")
+            .and_then(|n| n.label)
+            .expect("Idle label");
+        state_ir.labels[idle_label.0].text = "Waiting State".to_string();
+        let state_renamed = state_lens.put_ir(&state_ir).expect("state label put_ir");
+        assert!(
+            state_renamed
+                .source()
+                .contains("state \"Waiting State\" as Idle")
+        );
+
+        // 4. ER diagram: label edit
+        let er_lens = DiagramLens::from_source(
+            "erDiagram\n  CUSTOMER[\"Customer Account\"]\n  ORDER[\"Purchase Order\"]\n  CUSTOMER ||--o{ ORDER : places\n",
+            LayoutConfig::default(),
+        )
+        .expect("er lens");
+        let mut er_ir = er_lens.ir().clone();
+        let cust_label = er_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "CUSTOMER")
+            .and_then(|n| n.label)
+            .expect("CUSTOMER label");
+        er_ir.labels[cust_label.0].text = "Verified Customer".to_string();
+        let er_renamed = er_lens.put_ir(&er_ir).expect("er label put_ir");
+        assert!(
+            er_renamed
+                .source()
+                .contains("CUSTOMER[\"Verified Customer\"]")
+        );
+    }
+
+    #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
         struct RuntimeConfigGuard(RuntimeConfig);
@@ -4538,7 +4832,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xa134_c5e7_929c_fc29;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 5_997_013_219_095_552_821;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4603,5 +4897,35 @@ mod tests {
                  (stale pkg/? config default? or a real cross-target divergence)"
             );
         }
+    }
+
+    #[test]
+    fn canvas_session_and_navigation_direction_work_for_diagram_surface() {
+        assert_eq!(
+            super::parse_navigation_direction("ArrowDown"),
+            Ok(fm_render_canvas::NavigationDirection::Down)
+        );
+        assert_eq!(
+            super::parse_navigation_direction("left"),
+            Ok(fm_render_canvas::NavigationDirection::Left)
+        );
+        assert!(super::parse_navigation_direction("diagonal").is_err());
+
+        let parsed = fm_parser::parse("flowchart LR\nA --> B");
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let mut session = fm_render_canvas::CanvasSession::default();
+        session.set_diagram(
+            parsed.ir,
+            std::sync::Arc::clone(&traced.layout),
+            fm_render_canvas::CanvasRenderConfig::default(),
+        );
+        let mut ctx = fm_render_canvas::MockCanvas2dContext::new(800.0, 600.0);
+        assert!(session.redraw(&mut ctx).is_some());
+        assert!(session.select_node("A"));
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert!(session.navigate_selection(fm_render_canvas::NavigationDirection::Right));
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(session.clear_selection());
+        assert_eq!(session.selected_node_id(), None);
     }
 }

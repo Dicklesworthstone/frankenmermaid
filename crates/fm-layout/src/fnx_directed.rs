@@ -191,12 +191,30 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::fnx_budget::record_budget_work((n + ir.edges.len()).max(1) as u64);
+
     SccResult {
         components,
         non_trivial_count,
         max_component_size,
         node_to_component,
     }
+}
+
+/// Compute Strongly Connected Components under an explicit [`crate::fnx_budget::AnalysisBudget`].
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn compute_scc_with_budget(
+    ir: &MermaidDiagramIr,
+    budget: crate::fnx_budget::AnalysisBudget,
+) -> crate::fnx_budget::BudgetResult<SccResult> {
+    let mut executor = crate::fnx_budget::BudgetExecutor::new(budget);
+    executor.execute_with_progress(|exec| {
+        let work_units = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
+        exec.record_work(work_units);
+        compute_scc(ir)
+    })
 }
 
 // ============================================================================
@@ -883,5 +901,15 @@ mod tests {
         let result1 = detect_directed_cycles(&ir);
         let result2 = detect_directed_cycles(&ir);
         assert_eq!(result1, result2, "Cycle detection must be deterministic");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn compute_scc_with_budget_enforces_work_limit() {
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
+        let tight = crate::fnx_budget::AnalysisBudget::default().with_work_budget(1);
+        let result = compute_scc_with_budget(&ir, tight);
+        assert!(result.is_cancelled());
+        assert_eq!(result.into_value().unwrap().non_trivial_count, 1);
     }
 }

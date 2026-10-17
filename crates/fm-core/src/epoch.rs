@@ -123,9 +123,15 @@ impl EpochIrHandle {
     /// Create a new handle with the given initial IR at epoch 0.
     #[must_use]
     pub fn new(ir: MermaidDiagramIr) -> Self {
+        Self::with_epoch(0, ir)
+    }
+
+    /// Create a new handle with the given IR and explicit epoch number.
+    #[must_use]
+    pub fn with_epoch(epoch: u64, ir: MermaidDiagramIr) -> Self {
         Self {
             inner: RwLock::new(EpochInner {
-                epoch: 0,
+                epoch,
                 current: Arc::new(ir),
             }),
         }

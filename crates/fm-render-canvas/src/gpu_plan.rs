@@ -5502,6 +5502,18 @@ mod tests {
                 "draw_c4_legend",
                 "bd-adabx (source added by the bd-5k51.1 C4-legend cell): legend text",
             ),
+            (
+                "draw_debug_overlay_world",
+                "bd-0l1x2: opt-in diagnostic debug overlay bounding boxes",
+            ),
+            (
+                "draw_debug_overlay_hud",
+                "bd-0l1x2: opt-in diagnostic debug overlay stats HUD",
+            ),
+            (
+                "draw_info_version",
+                "bd-cfigc: DiagramType::Info static version banner",
+            ),
         ];
 
         let mut found = Vec::new();

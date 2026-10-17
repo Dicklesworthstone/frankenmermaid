@@ -441,8 +441,8 @@ impl DiagramType {
             | Self::Kanban
             | Self::Treemap
             | Self::Radar
-            | Self::Info => MermaidSupportLevel::Supported,
-            Self::Sequence => MermaidSupportLevel::Partial,
+            | Self::Info
+            | Self::Sequence => MermaidSupportLevel::Supported,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
@@ -475,8 +475,8 @@ impl DiagramType {
             | Self::Kanban
             | Self::Treemap
             | Self::Radar
-            | Self::Info => "full",
-            Self::Sequence => "partial",
+            | Self::Info
+            | Self::Sequence => "full",
             Self::Unknown => "unknown",
         }
     }
@@ -892,7 +892,7 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             dedicated_parser: true,
             layout: "sequence",
             svg_render: true,
-            runtime: MermaidSupportLevel::Partial,
+            runtime: MermaidSupportLevel::Supported,
             parity: MermaidParityLevel::Partial,
             notes: "Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups",
         },
@@ -1077,11 +1077,11 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             diagram_type: Some(DiagramType::C4Context),
             detection: true,
             dedicated_parser: true,
-            layout: "architecture",
+            layout: "auto",
             svg_render: true,
             runtime: MermaidSupportLevel::Supported,
             parity: MermaidParityLevel::Partial,
-            notes: "Boundary detection, C4 node metadata; one notation at five zoom levels; direction-aware algorithm engages on a declared relationship side",
+            notes: "Boundary detection, C4 node metadata; one notation at five zoom levels; routes through the general graph selector",
         },
         FamilyParityRow {
             family: "kanban",
@@ -3112,11 +3112,11 @@ pub enum ArchitectureSide {
     Bottom,
 }
 
-/// A placement direction declared by a C4 relationship macro.
+/// A relationship direction declared by a C4 relationship macro (`Rel_U`, `Rel_D`, `Rel_L`, `Rel_R`).
 ///
-/// `Rel_Up` and its short alias `Rel_U` are layout constraints, not names for distinct edge
-/// kinds. Keeping the closed four-value grammar in the IR lets the layout engine honour it without
-/// reparsing the macro name or treating author-provided text as a direction.
+/// Preserved in the IR as typed parser metadata (`IrEdge::c4_direction`) so callers can inspect
+/// which directional macro was written without reparsing the macro name, while C4 layout routes
+/// through the general graph selector to match Mermaid 11.15.0 geometry.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum C4RelationshipDirection {
     Up,
@@ -8235,10 +8235,17 @@ impl MermaidDiagramIr {
         }
         self.style_defs = defs.into_values().collect();
 
-        // 2. Apply per-node styles (cascade: classDef → style directive).
+        // 2. Apply per-node styles (cascade: classDef default → classDef → style directive).
+        let default_node_style = self
+            .style_defs
+            .iter()
+            .find(|d| d.name == "default")
+            .map(|d| d.properties.clone())
+            .unwrap_or_default();
+
         for (node_idx, node) in self.nodes.iter_mut().enumerate() {
             let node_id = IrNodeId(node_idx);
-            let mut merged = BTreeMap::new();
+            let mut merged = default_node_style.clone();
 
             // Layer 1: classDef properties via node.classes.
             for class_name in &node.classes {
@@ -8287,6 +8294,213 @@ impl MermaidDiagramIr {
                 edge.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
+    }
+
+    /// Lower the diagram's [`IrConstraint`] entries into a validated
+    /// [`crate::constraints::ConstraintSet`] with automatic conflict detection.
+    #[must_use]
+    pub fn constraint_set(&self) -> crate::constraints::ConstraintSet {
+        use crate::constraints::{
+            AlignAxis, AlignConstraint, ConstraintStrength, LayoutConstraint, OrderConstraint,
+            OrderRelation, PinConstraint, SpacingConstraint, SpacingDimension,
+        };
+
+        let mut set = crate::constraints::ConstraintSet::new();
+        let horizontal_rank = matches!(self.direction, GraphDirection::TB | GraphDirection::BT);
+        for constraint in &self.constraints {
+            match constraint {
+                IrConstraint::SameRank { node_ids, .. } => {
+                    set.add(LayoutConstraint::Align(AlignConstraint {
+                        nodes: node_ids.clone(),
+                        axis: if horizontal_rank {
+                            AlignAxis::Horizontal
+                        } else {
+                            AlignAxis::Vertical
+                        },
+                        strength: ConstraintStrength::Hard,
+                    }));
+                }
+                IrConstraint::MinLength { min_len, .. } => {
+                    set.add(LayoutConstraint::Spacing(SpacingConstraint {
+                        dimension: SpacingDimension::Rank,
+                        min_value: *min_len as f32,
+                    }));
+                }
+                IrConstraint::Pin { node_id, x, y, .. } => {
+                    set.add(LayoutConstraint::Pin(PinConstraint {
+                        node: node_id.clone(),
+                        x: *x as f32,
+                        y: *y as f32,
+                    }));
+                }
+                IrConstraint::OrderInRank { node_ids, .. } => {
+                    let relation = if horizontal_rank {
+                        OrderRelation::LeftOf
+                    } else {
+                        OrderRelation::Above
+                    };
+                    for pair in node_ids.windows(2) {
+                        set.add(LayoutConstraint::Order(OrderConstraint {
+                            subject: pair[0].clone(),
+                            relation,
+                            reference: pair[1].clone(),
+                            min_gap: 1.0,
+                            strength: ConstraintStrength::Hard,
+                        }));
+                    }
+                }
+                IrConstraint::NonOverlap { gap, .. } => {
+                    set.add(LayoutConstraint::Spacing(SpacingConstraint {
+                        dimension: SpacingDimension::Node,
+                        min_value: *gap as f32,
+                    }));
+                }
+            }
+        }
+        set
+    }
+
+    /// Build a compact Compressed Sparse Row ([`crate::succinct::CsrGraph`]) adjacency structure
+    /// from the diagram's resolved node edges.
+    #[must_use]
+    pub fn csr_graph(&self, directed: bool) -> crate::succinct::CsrGraph {
+        let edges: Vec<(usize, usize)> = self
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let from = self.resolve_endpoint_node(edge.from)?.0;
+                let to = self.resolve_endpoint_node(edge.to)?.0;
+                Some((from, to))
+            })
+            .collect();
+        crate::succinct::CsrGraph::from_edges(self.nodes.len(), &edges, directed)
+    }
+
+    /// Compute forward reachability from `start` as a compact [`crate::succinct::BitVector`]
+    /// with $O(1)$ `rank`/`select` support.
+    #[must_use]
+    pub fn reachability_bitvector(&self, start: IrNodeId) -> crate::succinct::BitVector {
+        let csr = self.csr_graph(true);
+        let mut bv = crate::succinct::BitVector::new(self.nodes.len());
+        if start.0 >= self.nodes.len() {
+            bv.build_rank();
+            return bv;
+        }
+        let mut stack = vec![start.0];
+        bv.set(start.0);
+        while let Some(curr) = stack.pop() {
+            for &next in csr.neighbors(curr) {
+                let next_idx = next as usize;
+                if next_idx < self.nodes.len() && !bv.get(next_idx) {
+                    bv.set(next_idx);
+                    stack.push(next_idx);
+                }
+            }
+        }
+        bv.build_rank();
+        bv
+    }
+
+    /// Count duplicate parallel edges `(from, to, arrow)` using a [`crate::quotient_filter::QuotientFilter`]
+    /// fast path backed by exact verification on probable hits.
+    #[must_use]
+    pub fn duplicate_edge_count(&self) -> usize {
+        if self.edges.len() < 2 {
+            return 0;
+        }
+        let mut filter = crate::quotient_filter::QuotientFilter::with_capacity(self.edges.len());
+        let mut exact_seen = FxHashSet::default();
+        let mut duplicates = 0;
+        for edge in &self.edges {
+            let Some(from) = self.resolve_endpoint_node(edge.from) else {
+                continue;
+            };
+            let Some(to) = self.resolve_endpoint_node(edge.to) else {
+                continue;
+            };
+            let key = (from.0, to.0, edge.arrow);
+            if filter.may_contain(&key) && !exact_seen.insert(key) {
+                duplicates += 1;
+            } else {
+                filter.insert(&key);
+                exact_seen.insert(key);
+            }
+        }
+        duplicates
+    }
+
+    /// Build a string-keyed Adaptive Radix Tree ([`crate::art::StringArt`]) indexing all node IDs.
+    #[must_use]
+    pub fn node_prefix_index(&self) -> crate::art::StringArt<IrNodeId> {
+        let mut index = crate::art::StringArt::new();
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if !node.id.is_empty() {
+                index.insert(&node.id, IrNodeId(idx));
+            }
+        }
+        index
+    }
+
+    /// Return all [`IrNodeId`]s whose identifier starts with `prefix`, ordered by node index,
+    /// using [`Self::node_prefix_index`].
+    #[must_use]
+    pub fn nodes_with_prefix(&self, prefix: &str) -> Vec<IrNodeId> {
+        let index = self.node_prefix_index();
+        let mut matches: Vec<IrNodeId> = index
+            .prefix_search(prefix)
+            .into_iter()
+            .map(|(_, &node_id)| node_id)
+            .collect();
+        matches.sort_unstable_by_key(|id| id.0);
+        matches.dedup();
+        matches
+    }
+
+    /// Find nodes that belong to *all* specified `cluster_indices` using worst-case-optimal
+    /// [`crate::leapfrog::leapfrog_join`].
+    #[must_use]
+    pub fn shared_cluster_members(&self, cluster_indices: &[usize]) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_join};
+
+        if cluster_indices.is_empty() {
+            return Vec::new();
+        }
+        let mut relations = Vec::with_capacity(cluster_indices.len());
+        for &cluster_idx in cluster_indices {
+            let Some(cluster) = self.clusters.get(cluster_idx) else {
+                return Vec::new();
+            };
+            let members: Vec<u64> = cluster.members.iter().map(|id| id.0 as u64).collect();
+            relations.push(SortedRelation::from_unsorted(&members));
+        }
+        let refs: Vec<&SortedRelation> = relations.iter().collect();
+        leapfrog_join(&refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
+    }
+
+    /// Find top-level nodes that do not belong to any cluster using [`crate::leapfrog::leapfrog_anti_join`].
+    #[must_use]
+    pub fn unclustered_nodes(&self) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_anti_join};
+
+        let all_ids: Vec<u64> = (0..self.nodes.len() as u64).collect();
+        let base = SortedRelation::new(all_ids);
+        let exclusions: Vec<SortedRelation> = self
+            .clusters
+            .iter()
+            .filter(|c| !c.members.is_empty())
+            .map(|c| {
+                let members: Vec<u64> = c.members.iter().map(|id| id.0 as u64).collect();
+                SortedRelation::from_unsorted(&members)
+            })
+            .collect();
+        let refs: Vec<&SortedRelation> = exclusions.iter().collect();
+        leapfrog_anti_join(&base, &refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
     }
 
     #[must_use]
@@ -13744,6 +13958,12 @@ mod tests {
         assert_eq!(DiagramType::ArchitectureBeta.support_label(), "full");
 
         assert_eq!(
+            DiagramType::Sequence.support_level(),
+            MermaidSupportLevel::Supported
+        );
+        assert_eq!(DiagramType::Sequence.support_label(), "full");
+
+        assert_eq!(
             DiagramType::Unknown.support_level(),
             MermaidSupportLevel::Unsupported
         );
@@ -15275,6 +15495,60 @@ mod tests {
     }
 
     #[test]
+    fn populate_structured_styles_classdef_default_and_overrides() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            classes: vec!["highlight".to_string()],
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "C".to_string(),
+            classes: vec!["highlight".to_string()],
+            ..Default::default()
+        });
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Class("default".to_string()),
+            style: "fill:#eee,stroke:#333,stroke-width:2px".to_string(),
+            span: Span::default(),
+        });
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Class("highlight".to_string()),
+            style: "fill:#ff0,stroke:#f00".to_string(),
+            span: Span::default(),
+        });
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Node(IrNodeId(2)),
+            style: "fill:#0f0".to_string(),
+            span: Span::default(),
+        });
+
+        ir.populate_structured_styles();
+
+        // Node A gets classDef default
+        let style_a = ir.nodes[0].inline_style.as_ref().unwrap();
+        assert_eq!(style_a.properties.get("fill").unwrap(), "#eee");
+        assert_eq!(style_a.properties.get("stroke").unwrap(), "#333");
+        assert_eq!(style_a.properties.get("stroke-width").unwrap(), "2px");
+
+        // Node B gets classDef default overridden by classDef highlight
+        let style_b = ir.nodes[1].inline_style.as_ref().unwrap();
+        assert_eq!(style_b.properties.get("fill").unwrap(), "#ff0");
+        assert_eq!(style_b.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_b.properties.get("stroke-width").unwrap(), "2px");
+
+        // Node C gets classDef default + classDef highlight + style C override
+        let style_c = ir.nodes[2].inline_style.as_ref().unwrap();
+        assert_eq!(style_c.properties.get("fill").unwrap(), "#0f0");
+        assert_eq!(style_c.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_c.properties.get("stroke-width").unwrap(), "2px");
+    }
+
+    #[test]
     fn populate_structured_styles_link_default_and_specific() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
@@ -15481,5 +15755,84 @@ mod tests {
         map.insert(42, 2.7);
         assert_eq!(map.get(&0), Some(&1.5));
         assert_eq!(map.get(&42), Some(&2.7));
+    }
+
+    #[test]
+    fn ir_constraint_set_and_alien_data_structures_work_end_to_end() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for id in ["api_gateway", "api_auth", "db_primary", "worker_cron"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..Default::default()
+            });
+        }
+        // Edges: 0 -> 1, 1 -> 2, duplicate 0 -> 1
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        // Clusters: c0=[0, 1], c1=[1, 2]
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            ..Default::default()
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(1),
+            members: vec![IrNodeId(1), IrNodeId(2)],
+            ..Default::default()
+        });
+
+        // 1. StringArt prefix search
+        assert_eq!(ir.nodes_with_prefix("api_"), vec![IrNodeId(0), IrNodeId(1)]);
+
+        // 2. CsrGraph + BitVector reachability
+        let csr = ir.csr_graph(true);
+        assert!(csr.has_edge(0, 1));
+        assert!(csr.has_edge(1, 2));
+        assert!(!csr.has_edge(0, 3));
+        let reach = ir.reachability_bitvector(IrNodeId(0));
+        assert!(reach.get(0) && reach.get(1) && reach.get(2));
+        assert!(!reach.get(3));
+        assert_eq!(reach.count_ones(), 3);
+
+        // 3. QuotientFilter duplicate edge count
+        assert_eq!(ir.duplicate_edge_count(), 1);
+
+        // 4. Leapfrog join & anti-join on clusters
+        assert_eq!(ir.shared_cluster_members(&[0, 1]), vec![IrNodeId(1)]);
+        assert_eq!(ir.unclustered_nodes(), vec![IrNodeId(3)]);
+
+        // 5. ConstraintSet conflict detection
+        ir.constraints.push(super::IrConstraint::Pin {
+            node_id: "api_gateway".to_string(),
+            x: 10.0,
+            y: 20.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(super::IrConstraint::Pin {
+            node_id: "api_gateway".to_string(),
+            x: 50.0,
+            y: 60.0,
+            span: Span::default(),
+        });
+        let cset = ir.constraint_set();
+        assert_eq!(cset.len(), 2);
+        assert!(cset.has_conflicts());
     }
 }

@@ -251,6 +251,91 @@ pub fn hierarchical_ddmin<T: Clone>(
     }
 }
 
+/// Minimize the edge set of a [`fm_core::MermaidDiagramIr`] using [`hierarchical_ddmin`] (`bd-jabcj`).
+///
+/// Groups edges by their source node's primary cluster membership (or coarse source-node bucket
+/// when unclustered) for Phase 1 coarse reduction, then reduces individual edges in Phase 2.
+/// Returns the reduced [`fm_core::MermaidDiagramIr`] (with unreferenced isolated nodes pruned)
+/// alongside the [`DeltaDebugResult`] of kept edge indices.
+pub fn minimize_diagram_ir<F>(
+    ir: &fm_core::MermaidDiagramIr,
+    config: &DeltaDebugConfig,
+    test_ir: F,
+) -> (fm_core::MermaidDiagramIr, DeltaDebugResult<usize>)
+where
+    F: Fn(&fm_core::MermaidDiagramIr) -> TestOutcome,
+{
+    let edge_indices: Vec<usize> = (0..ir.edges.len()).collect();
+    if edge_indices.is_empty() {
+        return (
+            ir.clone(),
+            DeltaDebugResult {
+                minimized: Vec::new(),
+                test_calls: 0,
+                elements_removed: 0,
+                original_size: 0,
+            },
+        );
+    }
+
+    let mut node_cluster_group = vec![0_usize; ir.nodes.len()];
+    for (cluster_idx, cluster) in ir.clusters.iter().enumerate() {
+        for &member in &cluster.members {
+            if let Some(slot) = node_cluster_group.get_mut(member.0)
+                && *slot == 0
+            {
+                *slot = cluster_idx + 1;
+            }
+        }
+    }
+
+    let endpoint_node_idx = |endpoint: fm_core::IrEndpoint| -> Option<usize> {
+        match endpoint {
+            fm_core::IrEndpoint::Node(id) => Some(id.0),
+            fm_core::IrEndpoint::Port(port_id) => ir.ports.get(port_id.0).map(|p| p.node.0),
+            fm_core::IrEndpoint::Unresolved => None,
+        }
+    };
+
+    let build_sub_ir = |subset: &[usize]| -> fm_core::MermaidDiagramIr {
+        let mut sub = ir.clone();
+        sub.edges = subset
+            .iter()
+            .filter_map(|&idx| ir.edges.get(idx).cloned())
+            .collect();
+        sub
+    };
+
+    let dd_result = hierarchical_ddmin(
+        &edge_indices,
+        &|subset: &[usize]| {
+            if subset.is_empty() {
+                return TestOutcome::Unresolved;
+            }
+            let sub_ir = build_sub_ir(subset);
+            test_ir(&sub_ir)
+        },
+        &|&edge_idx: &usize| {
+            ir.edges
+                .get(edge_idx)
+                .and_then(|edge| endpoint_node_idx(edge.from))
+                .map(|node_idx| {
+                    let cluster_group = node_cluster_group.get(node_idx).copied().unwrap_or(0);
+                    if cluster_group > 0 {
+                        cluster_group
+                    } else {
+                        1_000 + (node_idx / 4)
+                    }
+                })
+                .unwrap_or(0)
+        },
+        config,
+    );
+
+    let reduced_ir = build_sub_ir(&dd_result.minimized);
+    (reduced_ir, dd_result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +543,46 @@ mod tests {
 
         assert_eq!(r1.minimized, r2.minimized);
         assert_eq!(r1.test_calls, r2.test_calls);
+    }
+
+    #[test]
+    fn minimize_diagram_ir_isolates_failing_edge_subset() {
+        use fm_core::{
+            ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr, Span,
+        };
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for i in 0..8 {
+            ir.nodes.push(IrNode {
+                id: format!("N{i}"),
+                ..IrNode::default()
+            });
+        }
+        for i in 0..7 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(i)),
+                to: IrEndpoint::Node(IrNodeId(i + 1)),
+                arrow: ArrowType::Arrow,
+                span: Span::default(),
+                ..IrEdge::default()
+            });
+        }
+
+        let (reduced, stats) =
+            minimize_diagram_ir(&ir, &DeltaDebugConfig::default(), |candidate| {
+                let has_target_edge = candidate.edges.iter().any(|e| {
+                    e.from == IrEndpoint::Node(IrNodeId(5)) && e.to == IrEndpoint::Node(IrNodeId(6))
+                });
+                if has_target_edge {
+                    TestOutcome::Fail
+                } else {
+                    TestOutcome::Pass
+                }
+            });
+
+        assert_eq!(stats.minimized, vec![5]);
+        assert_eq!(reduced.edges.len(), 1);
+        assert_eq!(reduced.edges[0].from, IrEndpoint::Node(IrNodeId(5)));
+        assert_eq!(reduced.edges[0].to, IrEndpoint::Node(IrNodeId(6)));
     }
 }
