@@ -72,6 +72,10 @@ export function validateInitDirectives(source: string): string;
 export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Clear the current node selection (`bd-g7sx9`).
+     */
+    clearSelection(): boolean;
     destroy(): void;
     /**
      * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
@@ -98,9 +102,29 @@ export class Diagram {
      * return `None`.
      */
     hitTestNode(x: number, y: number): string | undefined;
+    /**
+     * Navigate node selection spatially (`"up"`, `"down"`, `"left"`, `"right"`) (`bd-g7sx9`).
+     */
+    navigateSelection(direction: string): boolean;
     constructor(canvas: HTMLCanvasElement, config?: any | null);
     on(event: string, callback: Function): void;
+    /**
+     * Redraw the retained diagram and selection ring without reparsing or relayout (`bd-g7sx9`).
+     */
+    redraw(): boolean;
     render(input: string, config?: any | null): any;
+    /**
+     * Select a node at canvas-space coordinates `(x, y)` (`bd-g7sx9`).
+     */
+    selectAt(x: number, y: number): boolean;
+    /**
+     * Select a node by author ID without reparsing or relayout (`bd-g7sx9`).
+     */
+    selectNode(node_id: string): boolean;
+    /**
+     * Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
+     */
+    selectedNodeId(): string | undefined;
     setTheme(theme: string): void;
 }
 
@@ -245,13 +269,19 @@ export interface InitOutput {
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
+    readonly diagram_clearSelection: (a: number, b: number) => void;
     readonly diagram_destroy: (a: number) => void;
     readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
     readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
+    readonly diagram_navigateSelection: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_new: (a: number, b: number, c: number) => void;
     readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_redraw: (a: number, b: number) => void;
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_selectAt: (a: number, b: number, c: number, d: number) => void;
+    readonly diagram_selectNode: (a: number, b: number, c: number, d: number) => void;
+    readonly diagram_selectedNodeId: (a: number, b: number) => void;
     readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
     readonly hitRegions: (a: number, b: number, c: number, d: number) => void;
     readonly init: (a: number, b: number) => void;
