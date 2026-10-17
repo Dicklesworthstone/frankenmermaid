@@ -118,6 +118,27 @@ function linkUrl(value, ids, document) {
   return trimmed;
 }
 
+// Menu metadata becomes real hyperlinks when bindFunctions runs. Give it the SAME
+// admission policy as <a href>, including namespacing references into this diagram.
+function checkedMenuLinks(text, ids, document) {
+  if (text.length > 128 * 1024) throw new Error("SVG actor menu exceeds its 128 KiB limit.");
+  const links = JSON.parse(text);
+  if (!Array.isArray(links) || links.length > 128) throw new Error("SVG actor menu requires at most 128 links.");
+  return links.map(link => {
+    if (!link || Array.isArray(link) || typeof link !== "object"
+      || Object.keys(link).some(key => !["label", "url"].includes(key))
+      || typeof link.label !== "string" || !link.label.trim() || link.label.length > 2048
+      || typeof link.url !== "string" || !link.url.trim() || link.url.length > 8192) {
+      throw new Error("SVG actor menu requires bounded label/url pairs.");
+    }
+    for (const text of [link.label, link.url]) for (const character of text) {
+      const code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) throw new Error("SVG actor menu contains invalid Unicode.");
+    }
+    return { label: link.label, url: linkUrl(link.url, ids, document) };
+  });
+}
+
 // CSSOM, not a second CSS parser, handles selector lists, strings and nested media/supports
 // rules. Scope both the SVG root and descendants. Keyframe names need the same isolation as
 // element IDs: otherwise two independently themed diagrams share a document-global animation.
@@ -219,6 +240,7 @@ function prepareSvgDocument(svg, id, document, deck = false) {
       ids.set(original, element === root ? id : namespaced);
     }
   }
+  let menuLinkCount = 0;
   for (const element of elements) {
     for (const attr of [...element.attributes]) {
       const name = attr.localName.toLowerCase();
@@ -227,12 +249,18 @@ function prepareSvgDocument(svg, id, document, deck = false) {
       }
       // XML is case-sensitive; HTML insertion folds these names. Do not publish a second,
       // unvalidated interpretation of an ID, URL, or inline stylesheet in result.svg.
-      if (["id", "href", "style"].includes(name) && attr.localName !== name) {
+      if (["id", "href", "style", "data-menu-links"].includes(name) && attr.localName !== name) {
         throw new Error("Engine SVG contains a non-canonical attribute name.");
       }
       let value = attr.value;
       if (name === "id") value = ids.get(value);
       else if (name === "href") value = element.localName === "a" ? linkUrl(value, ids, document) : localUrl(value, ids);
+      else if (name === "data-menu-links") {
+        const links = checkedMenuLinks(value, ids, document);
+        menuLinkCount += links.length;
+        if (menuLinkCount > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
+        value = JSON.stringify(links);
+      }
       else if (ARIA_REFERENCES.has(name)) {
         value = value.trim();
         value = value ? value.split(/\s+/u).map((token) => {
@@ -443,6 +471,226 @@ export function checkCallbackName(name) {
   return name;
 }
 
+let nextMenuId = 0;
+
+// One lazily created HTML menu per bound SVG; no foreignObject, external resources,
+// graph reparse, or node-geometry mutation. The host's bindFunctions cleanup owns it.
+function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
+  const document = root.ownerDocument, window = document.defaultView, tree = root.getRootNode();
+  const ids = new Map([...root.querySelectorAll("[id]")].map(node => [node.id, node.id]));
+  ids.set(root.id, root.id);
+  const plans = new Map();
+  let count = 0;
+  for (const node of root.querySelectorAll("[data-menu-links]")) {
+    const raw = node.getAttribute("data-menu-links"), sourceId = node.getAttribute("data-id");
+    const links = checkedMenuLinks(raw, ids, document);
+    if (!links.length) continue;
+    if (!sourceId || node.localName !== "g" || node.closest("svg") !== root
+      || node.closest("defs, symbol, clipPath, mask")) throw new Error("Actor menu has no addressable source node.");
+    count += links.length;
+    if (count > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
+    // Capture absolute destinations now. A later <base> edit must not redirect an
+    // already admitted link, and links must never become executable URL schemes.
+    const destinations = links.map(link => {
+      const href = new URL(link.url, document.baseURI);
+      if (!["http:", "https:", "mailto:", "tel:"].includes(href.protocol)) throw new Error("Unsafe actor menu hyperlink.");
+      return { label: link.label, href: href.href, local: link.url.startsWith("#") };
+    });
+    plans.set(node, { node, raw, sourceId, links: destinations });
+  }
+  if (!plans.size) return () => {};
+  const removals = [], attributes = new Map();
+  let disposed = false, active = null;
+  function attribute(node, name, value) {
+    if (!attributes.has(node)) attributes.set(node, new Map());
+    const entries = attributes.get(node);
+    if (!entries.has(name)) entries.set(name, { original: node.getAttribute(name), written: null });
+    entries.get(name).written = value;
+    if (value === null) node.removeAttribute(name); else node.setAttribute(name, value);
+  }
+  function usable(plan) {
+    const node = plan.node;
+    if (disposed || !isLive() || !root.isConnected || !node.isConnected || root.ownerDocument !== document
+      || root.getRootNode() !== tree || !root.contains(node) || node.closest("svg") !== root
+      || node.getAttribute("data-id") !== plan.sourceId || node.getAttribute("data-menu-links") !== plan.raw) return false;
+    for (let parent = node; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
+      if (parent.matches('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return false;
+      const style = window.getComputedStyle(parent);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+    }
+    const box = node.getBoundingClientRect();
+    return [box.x, box.y, box.width, box.height].every(Number.isFinite) && box.width > 0 && box.height > 0;
+  }
+  function target(event) {
+    if (event.defaultPrevented || disposed) return null;
+    let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+    if (node?.closest("svg") !== root) return null;
+    for (; node && node !== root; node = node.parentElement) {
+      const plan = plans.get(node);
+      if (plan) return usable(plan) ? plan : null;
+    }
+    return null;
+  }
+  const hasPrimary = plan => callbackPlans.has(plan.node)
+    || plan.node.closest("a[href], a[*|href]") !== null;
+  function close(restoreFocus = false) {
+    const job = active;
+    if (!job) return;
+    active = null;
+    job.observer.disconnect();
+    for (const remove of job.removals) remove();
+    if (job.node.getAttribute("aria-expanded") === "true") attribute(job.node, "aria-expanded", "false");
+    if (job.node.getAttribute("aria-controls") === job.menu.id) attribute(job.node, "aria-controls", null);
+    if (job.menu.matches(":popover-open")) job.menu.hidePopover();
+    job.menu.remove();
+    if (restoreFocus && usable(job.plan)) job.node.focus({ preventScroll: true });
+  }
+  function position() {
+    const job = active;
+    if (!job) return;
+    if (!usable(job.plan)) { close(); return; }
+    const box = job.node.getBoundingClientRect(), menu = job.menu;
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+    const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+    menu.style.maxWidth = `${Math.max(1, width - 16)}px`;
+    menu.style.maxHeight = `${Math.max(1, height - 16)}px`;
+    const rect = menu.getBoundingClientRect();
+    const x = Math.max(left + 8, Math.min(box.left, left + width - rect.width - 8));
+    const below = box.bottom + 4, above = box.top - rect.height - 4;
+    const y = below + rect.height <= top + height - 8 ? below : Math.max(top + 8, above);
+    menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+  }
+  function listen(target, type, fn, options, list = removals) {
+    const guarded = event => {
+      try { fn(event); } catch (error) { close(); report(error); }
+    };
+    target.addEventListener(type, guarded, options);
+    list.push(() => target.removeEventListener(type, guarded, options));
+  }
+  function open(plan, last = false) {
+    if (!usable(plan)) return;
+    close();
+    const menu = document.createElement("div");
+    do { menu.id = `${root.id}--actor-menu-${++nextMenuId}`; } while (tree.querySelector(`[id="${menu.id}"]`));
+    menu.className = "fm-actor-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `Links for ${plan.sourceId}`);
+    menu.style.cssText = "position:fixed;inset:auto;margin:0;padding:6px;box-sizing:border-box;overflow:auto;z-index:2147483647;border:1px solid GrayText;border-radius:6px;background:var(--fm-menu-background,Canvas);color:var(--fm-menu-color,CanvasText);font:14px/1.5 system-ui,sans-serif;min-width:0;width:max-content;max-width:calc(100vw - 16px);box-shadow:0 4px 16px #0003;";
+    const items = plan.links.map(link => {
+      const item = document.createElement("a");
+      item.textContent = link.label;
+      item.setAttribute("href", link.href);
+      item.setAttribute("target", link.local ? "_self" : "_blank");
+      item.setAttribute("rel", "noopener noreferrer");
+      item.setAttribute("role", "menuitem");
+      item.tabIndex = -1;
+      item.style.cssText = "display:block;padding:5px 10px;border-radius:3px;color:inherit;text-decoration:none;overflow-wrap:anywhere;outline-offset:-2px;";
+      menu.append(item); return item;
+    });
+    // A top-layer popover escapes clipped/translated diagram containers. Keep the
+    // menu in the same tree as its trigger so ARIA ID references also work in Shadow DOM.
+    if (typeof menu.showPopover === "function") menu.setAttribute("popover", "manual");
+    (tree.nodeType === 9 ? document.body || document.documentElement : tree).append(menu);
+    const observer = new window.MutationObserver(() => { try { position(); } catch (error) { close(); report(error); } });
+    active = { plan, node: plan.node, menu, items, observer, removals: [] };
+    const job = active;
+    function focus(index) {
+      if (active !== job) return;
+      for (const item of items) item.tabIndex = -1;
+      const item = items[(index + items.length) % items.length];
+      item.tabIndex = 0; item.focus({ preventScroll: true }); item.scrollIntoView({ block: "nearest" });
+    }
+    try {
+      if (menu.hasAttribute("popover")) menu.showPopover();
+      attribute(plan.node, "aria-expanded", "true"); attribute(plan.node, "aria-controls", menu.id);
+      position();
+      if (active !== job) return;
+      focus(last ? items.length - 1 : 0);
+      listen(menu, "keydown", event => {
+        if (event.defaultPrevented || event.isComposing) return;
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); return; }
+        if (event.key === "Tab") { close(true); return; } // Native Tab advances from the trigger.
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const index = items.indexOf(tree.activeElement);
+        const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 }[event.key];
+        if (next !== undefined) { event.preventDefault(); focus(next); }
+        else if (event.key === " ") { event.preventDefault(); if (!event.repeat && index >= 0) items[index].click(); }
+        else if (event.key.length === 1) {
+          const key = event.key.toLocaleLowerCase();
+          for (let offset = 1; offset <= items.length; offset++) {
+            const next = (index + offset + items.length) % items.length;
+            if (items[next].textContent.trim().toLocaleLowerCase().startsWith(key)) { event.preventDefault(); focus(next); break; }
+          }
+        }
+      }, undefined, job.removals);
+      const guardLink = event => {
+        const item = event.target?.closest?.("a"), index = items.indexOf(item);
+        if (active !== job || !usable(plan) || index < 0
+          || item.getAttribute("href") !== plan.links[index].href
+          || item.getAttribute("target") !== (plan.links[index].local ? "_self" : "_blank")
+          || item.getAttribute("rel") !== "noopener noreferrer") {
+          event.preventDefault(); event.stopImmediatePropagation(); close();
+        }
+      };
+      listen(menu, "click", guardLink, true, job.removals);
+      listen(menu, "auxclick", guardLink, true, job.removals);
+      observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+      // Observe detachment, including removal of a ShadowRoot's host, only while open.
+      observer.observe(document, { childList: true, subtree: true });
+    } catch (error) { close(); throw error; }
+  }
+  function cleanup() {
+    if (disposed) return;
+    disposed = true; close();
+    for (const remove of removals) remove();
+    for (const [node, entries] of attributes) for (const [name, entry] of entries) {
+      if (node.getAttribute(name) !== entry.written) continue;
+      if (entry.original === null) node.removeAttribute(name); else node.setAttribute(name, entry.original);
+    }
+    plans.clear(); attributes.clear();
+  }
+  try {
+    if (!root.hasAttribute("tabindex")) attribute(root, "tabindex", "-1");
+    if (root.getAttribute("role") === "img") attribute(root, "role", "group");
+    for (const plan of plans.values()) {
+      attribute(plan.node, "role", "button"); attribute(plan.node, "tabindex", "0");
+      attribute(plan.node, "aria-haspopup", "menu"); attribute(plan.node, "aria-expanded", "false");
+      attribute(plan.node, "aria-keyshortcuts", "Enter Space ArrowDown ArrowUp");
+      if (!plan.node.hasAttribute("aria-label") && !plan.node.hasAttribute("aria-labelledby")) {
+        attribute(plan.node, "aria-label", plan.node.querySelector("title")?.textContent || plan.sourceId);
+      }
+    }
+    listen(root, "click", event => {
+      const plan = target(event);
+      if (!plan || hasPrimary(plan) || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      event.preventDefault(); open(plan);
+    });
+    listen(root, "keydown", event => {
+      if (event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      const plan = target(event);
+      if (!plan) return;
+      const menuKey = ["ArrowDown", "ArrowUp", "ContextMenu"].includes(event.key) || (event.key === "F10" && event.shiftKey);
+      if (!menuKey && (hasPrimary(plan) || event.shiftKey || !["Enter", " "].includes(event.key))) return;
+      event.preventDefault(); open(plan, event.key === "ArrowUp");
+    });
+    listen(root, "contextmenu", event => { const plan = target(event); if (plan) { event.preventDefault(); open(plan); } });
+    listen(document, "pointerdown", event => {
+      if (active && !event.composedPath().includes(active.menu) && !event.composedPath().includes(active.node)) close();
+    }, true);
+    listen(document, "focusin", event => {
+      if (active && !event.composedPath().includes(active.menu) && !event.composedPath().includes(active.node)) close();
+    }, true);
+    listen(window, "resize", position); listen(window, "scroll", position, true);
+    if (window.visualViewport) {
+      listen(window.visualViewport, "resize", position); listen(window.visualViewport, "scroll", position);
+    }
+    listen(window, "blur", () => close());
+    listen(document, "visibilitychange", () => { if (document.hidden) close(); });
+  } catch (error) { cleanup(); throw error; }
+  return cleanup;
+}
+
 /** Capture an admitted SVG, then bind only an unchanged copy inside the caller's container.
  * No global function lookup, evaluation, source parsing, or callback argument interpretation.
  * The returned cleanup is idempotent; binding the same live root twice returns that cleanup.
@@ -488,7 +736,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
     }
     if (!isLive()) throw new Error("The interaction owner was disposed while preparing bindings.");
     const restorations = [];
-    let disposed = false, pressed = null;
+    let disposed = false, pressed = null, cleanupMenus = () => {};
     function attribute(node, name, value) {
       const previous = node.getAttribute(name);
       if (previous === value) return;
@@ -546,6 +794,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
       if (disposed) return;
       disposed = true;
       pressed = null;
+      cleanupMenus();
       root.removeEventListener("click", click);
       root.removeEventListener("keydown", keydown);
       root.removeEventListener("keyup", keyup);
@@ -574,6 +823,7 @@ export function createSvgBinder(element, { resolveCallback = () => undefined,
         root.addEventListener("keyup", keyup);
         root.addEventListener("blur", blur, true);
       }
+      cleanupMenus = bindSvgLinkMenus(root, plans, () => !disposed && isLive(), report);
       bindings.set(root, cleanup);
       onBind(root, cleanup);
       if (!isLive()) throw new Error("The interaction owner was disposed while installing bindings.");
