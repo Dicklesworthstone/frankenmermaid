@@ -1,0 +1,36 @@
+{
+  "result": "PASS",
+  "version": "0.3.0",
+  "sourceSHA256": "6294db736aaa2d969b69f1edb6fa0fdb6b47ecb4a1ded945548a10af0d09d822",
+  "fixtures": [
+    {
+      "name": "flowchart",
+      "source": "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
+      "bytes": 9265,
+      "fnv64": "0xacae5e206c6f15e9"
+    },
+    {
+      "name": "sequence",
+      "source": "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
+      "bytes": 8398,
+      "fnv64": "0xc209f15c30b57f38"
+    },
+    {
+      "name": "class",
+      "source": "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
+      "bytes": 6588,
+      "fnv64": "0x7ae5446bc48fe3d0"
+    },
+    {
+      "name": "state",
+      "source": "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
+      "bytes": 8868,
+      "fnv64": "0x29600634d767b5c7"
+    }
+  ],
+  "packetTests": [
+    "maximum",
+    "full",
+    "distant"
+  ]
+}
