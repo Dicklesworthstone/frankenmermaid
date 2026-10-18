@@ -15153,9 +15153,8 @@ fn bk_horizontal_compaction(
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     root: &[usize],
     align: &[usize],
-    // `pred_in_rank` (each node's left neighbour in its rank) depends only on `ordering_by_rank`, which
-    // is identical across all four BK alignment passes — so it's built ONCE by the caller and shared
-    // here instead of being rebuilt per pass.
+    // The preceding node in the sweep direction: left neighbours for left-to-right compaction,
+    // right neighbours for right-to-left. Both tables are built once by the caller.
     pred_in_rank: &[Option<usize>],
     node_spacing: f32,
     horizontal_ranks: bool,
@@ -15364,14 +15363,16 @@ fn brandes_kopf_secondary_coords(
         }
     }
 
-    // Each node's left neighbour in its rank — a pure function of `ordering_by_rank`, identical across all
-    // four alignment passes. Build it ONCE here instead of rebuilding it inside each `bk_horizontal_
-    // compaction` call (3 of 4 builds were pure waste). Byte-identical (same values, same order).
+    // Compaction must follow the alignment's horizontal sweep. Using left predecessors for a
+    // right-to-left alignment biases branching diagrams toward the left and gives a different
+    // layout when the same rank order is mirrored. Build both neighbour tables once.
     let mut pred_in_rank: Vec<Option<usize>> = vec![None; n];
+    let mut succ_in_rank: Vec<Option<usize>> = vec![None; n];
     for nodes in ordering_by_rank.values() {
         for i in 1..nodes.len() {
             if nodes[i] < n && nodes[i - 1] < n {
                 pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
+                succ_in_rank[nodes[i - 1]] = Some(nodes[i]);
             }
         }
     }
@@ -15399,30 +15400,73 @@ fn brandes_kopf_secondary_coords(
             left_to_right,
         );
 
-        let coords = bk_horizontal_compaction(
+        let mut coords = bk_horizontal_compaction(
             n,
             node_sizes,
             ordering_by_rank,
             &root,
             &align,
-            &pred_in_rank,
+            if left_to_right {
+                &pred_in_rank
+            } else {
+                &succ_in_rank
+            },
             spacing.node_spacing,
             horizontal_ranks,
         );
 
+        // Compaction increases coordinates along its sweep. Reflect the right-to-left passes
+        // back into the diagram's coordinate system before combining the four layouts.
+        if !left_to_right {
+            for coordinate in &mut coords {
+                *coordinate = -*coordinate;
+            }
+        }
+
         all_coords.push(coords);
     }
 
-    // Normalize each pass so that the minimum coordinate is 0.
-    for coords in &mut all_coords {
-        let min_val = coords
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite())
-            .fold(f32::INFINITY, f32::min);
-        if min_val.is_finite() {
-            for c in coords.iter_mut() {
-                *c -= min_val;
+    // Balance against the narrowest layout: left sweeps share its leading edge and right sweeps
+    // share its trailing edge. Independently left-normalizing every pass loses this balance and
+    // pulls asymmetric branches sideways. Compare the actual box extents, so wide labels count
+    // when choosing the envelope rather than only the distance between node centres.
+    let pass_bounds: Vec<(f32, f32)> = all_coords
+        .iter()
+        .map(|coords| {
+            coords.iter().enumerate().fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(min, max), (node, &coordinate)| {
+                    if !coordinate.is_finite() {
+                        return (min, max);
+                    }
+                    let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
+                    let half_extent = if horizontal_ranks { height } else { width } / 2.0;
+                    (
+                        min.min(coordinate - half_extent),
+                        max.max(coordinate + half_extent),
+                    )
+                },
+            )
+        })
+        .collect();
+    let reference = pass_bounds
+        .iter()
+        .copied()
+        .filter(|(min, max)| min.is_finite() && max.is_finite())
+        .min_by(|left, right| (left.1 - left.0).total_cmp(&(right.1 - right.0)));
+    if let Some((reference_min, reference_max)) = reference {
+        for ((coords, &(min, max)), &(_, left_to_right)) in
+            all_coords.iter_mut().zip(&pass_bounds).zip(&directions)
+        {
+            let shift = if left_to_right {
+                reference_min - min
+            } else {
+                reference_max - max
+            };
+            if shift.is_finite() {
+                for coordinate in coords {
+                    *coordinate += shift;
+                }
             }
         }
     }
@@ -28474,6 +28518,157 @@ mod tests {
     }
 
     // --- Brandes-Köpf coordinate assignment tests ---
+
+    #[test]
+    fn bk_asymmetric_branches_are_mirror_symmetric_with_variable_node_sizes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..7 {
+            ir.nodes.push(IrNode {
+                id: format!("node{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (0, 3), (1, 2), (2, 6), (4, 5)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                ..IrEdge::default()
+            });
+        }
+        let ordering = BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3, 4]), (2, vec![5, 6])]);
+        let ranks = ordering
+            .iter()
+            .flat_map(|(&rank, nodes)| nodes.iter().map(move |&node| (node, rank)))
+            .collect();
+        let mirrored_ordering = ordering
+            .iter()
+            .map(|(&rank, nodes)| (rank, nodes.iter().rev().copied().collect()))
+            .collect();
+        let sizes = [
+            (80.0, 46.0),
+            (180.0, 92.0),
+            (120.0, 66.0),
+            (70.0, 54.0),
+            (240.0, 108.0),
+            (90.0, 60.0),
+            (140.0, 78.0),
+        ];
+
+        for horizontal_ranks in [false, true] {
+            for node_spacing in [0.0, 32.0, 80.0] {
+                let spacing = LayoutSpacing {
+                    node_spacing,
+                    ..LayoutSpacing::default()
+                };
+                let coordinates = super::brandes_kopf_secondary_coords(
+                    &ir,
+                    &sizes,
+                    &ranks,
+                    &ordering,
+                    spacing,
+                    horizontal_ranks,
+                );
+                let mirrored = super::brandes_kopf_secondary_coords(
+                    &ir,
+                    &sizes,
+                    &ranks,
+                    &mirrored_ordering,
+                    spacing,
+                    horizontal_ranks,
+                );
+                // Mirroring the ordering must reflect the geometry up to a shared translation.
+                // Left-only compaction used to move individual branches by different amounts.
+                let reflection_axis = coordinates[0] + mirrored[0];
+                for (node, (&coordinate, &reflected)) in
+                    coordinates.iter().zip(&mirrored).enumerate()
+                {
+                    assert!(
+                        (coordinate + reflected - reflection_axis).abs() < 0.001,
+                        "node {node} is biased by the sweep direction: horizontal={horizontal_ranks}, \
+                         spacing={node_spacing}, coordinates={coordinates:?}, mirrored={mirrored:?}"
+                    );
+                }
+                // Balancing must retain the requested clear space, including between unequal
+                // boxes and isolated components that happen to share a rank.
+                for nodes in ordering.values() {
+                    for pair in nodes.windows(2) {
+                        let extent = |node: usize| {
+                            if horizontal_ranks {
+                                sizes[node].1
+                            } else {
+                                sizes[node].0
+                            }
+                        };
+                        let gap = coordinates[pair[1]]
+                            - coordinates[pair[0]]
+                            - (extent(pair[0]) + extent(pair[1])) / 2.0;
+                        assert!(
+                            gap + 0.001 >= node_spacing,
+                            "rank neighbours {pair:?} have {gap} clear space, need {node_spacing}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bk_branch_merge_keeps_its_central_trunk_straight_in_every_direction() {
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.direction = direction;
+            // A forks into B/C/D, rejoins at E and continues to F. Equal labels keep box
+            // dimensions equal, so C is the central branch in the stable rank ordering.
+            for id in ["A", "B", "C", "D", "E", "F"] {
+                ir.nodes.push(IrNode {
+                    id: id.to_string(),
+                    ..IrNode::default()
+                });
+            }
+            for (from, to) in [(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4), (4, 5)] {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(from)),
+                    to: IrEndpoint::Node(IrNodeId(to)),
+                    ..IrEdge::default()
+                });
+            }
+            // Exercise the actual Sugiyama pipeline explicitly; Auto may select Tree for this
+            // small graph, which would leave a coordinate-assignment regression untested.
+            let first = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sugiyama);
+            let second = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sugiyama);
+            let across = |node: usize| {
+                let centre = first.layout.nodes[node].bounds.center();
+                if matches!(direction, GraphDirection::LR | GraphDirection::RL) {
+                    centre.y
+                } else {
+                    centre.x
+                }
+            };
+            for node in [2, 4, 5] {
+                assert!(
+                    (across(node) - across(0)).abs() < 0.001,
+                    "central trunk bends at node {node} in {direction:?}"
+                );
+            }
+            for (left, right) in first.layout.nodes.iter().zip(&second.layout.nodes) {
+                assert_eq!(left.bounds, right.bounds);
+            }
+            assert_eq!(first.layout.edges.len(), ir.edges.len());
+            assert!(
+                first
+                    .layout
+                    .edges
+                    .iter()
+                    .flat_map(|edge| &edge.points)
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+        }
+    }
 
     #[test]
     fn bk_linear_chain_aligns_connected_nodes() {
