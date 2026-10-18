@@ -3002,27 +3002,23 @@ mod tests {
         assert_package_source_matches_current_inputs();
     }
 
-    #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct WasmDiagramLens {
         bindings: Vec<MermaidLensBinding>,
     }
 
-    #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct WasmLensEditResponse {
         result: MermaidLensEditResult,
         bindings: Vec<MermaidLensBinding>,
     }
 
-    #[allow(dead_code)]
     fn build_diagram_lens(input: &str) -> WasmDiagramLens {
         WasmDiagramLens {
             bindings: build_parse_lens(input).bindings,
         }
     }
 
-    #[allow(dead_code)]
     fn build_lens_edit_response(
         input: &str,
         element_id: &str,
@@ -3041,11 +3037,25 @@ mod tests {
         })
     }
 
-    #[allow(dead_code)]
     fn describe_diagram_js(input: &str) -> String {
         let parsed = parse(input);
         let traced = layout_diagram_traced(&parsed.ir);
         describe_diagram_with_layout(&parsed.ir, Some(&traced.layout))
+    }
+
+    #[test]
+    fn wasm_diagram_lens_and_describe_diagram_helpers_roundtrip() {
+        let source = "flowchart LR\nA[Start] --> B[End]";
+        let lens = build_diagram_lens(source);
+        assert!(!lens.bindings.is_empty());
+        let first_id = lens.bindings[0].element_id.clone();
+        let edited = build_lens_edit_response(source, &first_id, "Begin")
+            .expect("lens edit on first node binding should succeed");
+        assert!(edited.result.updated_source.contains("Begin"));
+        assert!(!edited.bindings.is_empty());
+
+        let description = describe_diagram_js(source);
+        assert!(description.contains("Flowchart"));
     }
 
     #[test]
@@ -4832,7 +4842,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 5_997_013_219_095_552_821;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 1_547_807_444_074_752_938;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
