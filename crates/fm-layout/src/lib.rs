@@ -5960,7 +5960,9 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let depth_level_sizes = tree_depth_level_sizes(&tree, &node_sizes);
     let depth_centers = depth_level_centers(
+        ir,
         &depth_level_sizes,
+        &tree.depth,
         spacing.rank_spacing,
         tree.reverse_depth_axis,
     );
@@ -6079,8 +6081,13 @@ fn layout_directed_path_tree_traced(
         }
     }
 
-    let depth_centers =
-        depth_level_centers(&depth_level_sizes, spacing.rank_spacing, reverse_depth_axis);
+    let depth_centers = depth_level_centers(
+        ir,
+        &depth_level_sizes,
+        &depth,
+        spacing.rank_spacing,
+        reverse_depth_axis,
+    );
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let logical_depth = depth[node_index];
@@ -6273,7 +6280,10 @@ pub fn try_relayout_directed_path_suffix(
     for (suffix_offset, edge) in ir.edges[prefix.edge_count..].iter().enumerate() {
         let target = prefix.node_count + suffix_offset;
         let source = target.saturating_sub(1);
-        if endpoint_node_index(ir, edge.from) != Some(source)
+        // This reuse path advances by a fixed rank gap. A new edge label may enlarge the
+        // preceding gap, so let the full tree layout reserve space before changing the cache.
+        if edge.label.is_some()
+            || endpoint_node_index(ir, edge.from) != Some(source)
             || endpoint_node_index(ir, edge.to) != Some(target)
         {
             return false;
@@ -11630,13 +11640,34 @@ fn tree_depth_level_sizes(tree: &TreeLayoutStructure, node_sizes: &[(f32, f32)])
     level_sizes
 }
 
-fn depth_level_centers(level_sizes: &[f32], gap: f32, reverse: bool) -> Vec<f32> {
+fn depth_level_centers(
+    ir: &MermaidDiagramIr,
+    level_sizes: &[f32],
+    node_depths: &[usize],
+    gap: f32,
+    reverse: bool,
+) -> Vec<f32> {
+    // Tree ranks need the same label clearance as Sugiyama. Avoid additional allocations for
+    // unlabelled trees, and enlarge only the logical gap containing a label.
+    let label_gaps = if ir.edges.iter().any(|edge| edge.label.is_some()) {
+        let ranks: BTreeMap<usize, usize> = node_depths.iter().copied().enumerate().collect();
+        let rank_to_index: BTreeMap<usize, usize> =
+            (0..level_sizes.len()).map(|rank| (rank, rank)).collect();
+        edge_label_rank_gaps(
+            ir,
+            &ranks,
+            &rank_to_index,
+            matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
+        )
+    } else {
+        BTreeMap::new()
+    };
     let mut centers = vec![0.0_f32; level_sizes.len()];
     let mut cursor = 0.0_f32;
     for (index, level_size) in level_sizes.iter().copied().enumerate() {
         let bounded_size = level_size.max(1.0);
         centers[index] = cursor + (bounded_size / 2.0);
-        cursor += bounded_size + gap;
+        cursor += bounded_size + gap.max(label_gaps.get(&index).copied().unwrap_or(gap));
     }
     // Reflect the physical axis while retaining each logical rank's own dimensions. Reversing
     // the rank indexes instead assigned a large node the centre allocated to a smaller band,
@@ -25970,6 +26001,113 @@ mod tests {
     }
 
     #[test]
+    fn tree_rank_gaps_fit_edge_labels_without_expanding_plain_ranks() {
+        let spacing = LayoutSpacing::default();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for direction in [
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::TB,
+            GraphDirection::BT,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let reverse = matches!(direction, GraphDirection::RL | GraphDirection::BT);
+            let text = if horizontal {
+                "Confirm available inventory and reserve every requested item before continuing"
+            } else {
+                "Validate request\nAuthorize changes\nCheck ownership\nCheck version\nApply update\nConfirm result"
+            };
+            let (text_width, text_height) = metrics.estimate_dimensions(text);
+            let needed_gap = if horizontal {
+                text_width.mul_add(1.4, 40.0)
+            } else {
+                text_height + 40.0
+            };
+            assert!(needed_gap > spacing.rank_spacing + 10.0);
+            for branching in [false, true] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                ir.direction = direction;
+                let node_count = if branching { 4 } else { 3 };
+                for index in 0..node_count {
+                    ir.nodes.push(IrNode {
+                        id: format!("N{index}"),
+                        ..IrNode::default()
+                    });
+                }
+                ir.labels.push(IrLabel {
+                    text: text.to_string(),
+                    ..IrLabel::default()
+                });
+                let mut connections = vec![(0, 1), (1, 2)];
+                if branching {
+                    connections.push((0, 3));
+                }
+                for (index, &(from, to)) in connections.iter().enumerate() {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(from)),
+                        to: IrEndpoint::Node(IrNodeId(to)),
+                        label: (index == 0).then_some(IrLabelId(0)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+                // Three nodes use the directed-path fast path; the branch uses the generic tree.
+                let labelled = layout_diagram_tree(&ir);
+                ir.edges[0].label = None;
+                let plain = layout_diagram_tree(&ir);
+                let primary = |bounds: LayoutRect| {
+                    if horizontal {
+                        (bounds.x, bounds.width)
+                    } else {
+                        (bounds.y, bounds.height)
+                    }
+                };
+                let clearance = |layout: &DiagramLayout, from: usize, to: usize| {
+                    let (a, a_size) = primary(layout.nodes[from].bounds);
+                    let (b, b_size) = primary(layout.nodes[to].bounds);
+                    if reverse {
+                        a - (b + b_size)
+                    } else {
+                        b - (a + a_size)
+                    }
+                };
+                assert!(
+                    clearance(&labelled, 0, 1) + 0.01 >= needed_gap,
+                    "label needs {needed_gap} units in {direction:?}, branching={branching}"
+                );
+                assert!(
+                    (clearance(&labelled, 1, 2) - spacing.rank_spacing).abs() < 0.01,
+                    "the following unlabelled rank must retain the default gap"
+                );
+                for &(from, to) in &connections {
+                    assert!(
+                        (clearance(&plain, from, to) - spacing.rank_spacing).abs() < 0.01,
+                        "unlabelled tree geometry keeps the default gap"
+                    );
+                }
+                for (with_label, without_label) in labelled.nodes.iter().zip(&plain.nodes) {
+                    assert_eq!(
+                        (with_label.rank, with_label.order),
+                        (without_label.rank, without_label.order)
+                    );
+                    assert_eq!(
+                        (with_label.bounds.width, with_label.bounds.height),
+                        (without_label.bounds.width, without_label.bounds.height)
+                    );
+                    let cross = |bounds: LayoutRect| {
+                        if horizontal {
+                            bounds.y + bounds.height / 2.0
+                        } else {
+                            bounds.x + bounds.width / 2.0
+                        }
+                    };
+                    assert!((cross(with_label.bounds) - cross(without_label.bounds)).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tree_layout_top_down_places_children_below_parents() {
         let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
         let mut centers = BTreeMap::new();
@@ -30947,6 +31085,46 @@ mod tests {
             &prefix
         ));
         assert_eq!(cached, before_fallback, "failed reuse must not mutate");
+    }
+
+    #[test]
+    fn directed_path_suffix_with_edge_labels_falls_back_without_mutation() {
+        let mut base = graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]);
+        base.direction = GraphDirection::LR;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 2, 1)
+            .expect("unlabelled sequential LR path should certify");
+        let text = "Confirm available inventory and reserve every requested item before continuing";
+        let (text_width, _) = fm_core::FontMetrics::default_metrics().estimate_dimensions(text);
+        let needed_gap = text_width.mul_add(1.4, 40.0);
+
+        // A label on the boundary edge or a later appended edge requires the full layout.
+        for edge_index in [1, 2] {
+            let mut next = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+            next.direction = GraphDirection::LR;
+            let label_index = next.labels.len();
+            next.labels.push(IrLabel {
+                text: text.to_string(),
+                ..IrLabel::default()
+            });
+            next.edges[edge_index].label = Some(IrLabelId(label_index));
+            let mut cached = before.clone();
+            assert!(!try_relayout_directed_path_suffix(
+                &next,
+                &mut cached,
+                &prefix
+            ));
+            assert_eq!(cached, before, "failed reuse must not mutate the cache");
+
+            let full = layout_diagram_tree(&next);
+            let source = full.nodes[edge_index].bounds;
+            let target = full.nodes[edge_index + 1].bounds;
+            let gap = target.x - (source.x + source.width);
+            assert!(
+                gap + 0.01 >= needed_gap,
+                "the full fallback must reserve space for the appended label"
+            );
+        }
     }
 
     #[test]
