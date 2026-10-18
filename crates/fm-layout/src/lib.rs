@@ -1260,9 +1260,9 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 80.0,
-            rank_spacing: 120.0,
-            cluster_padding: 52.0,
+            node_spacing: 56.0,
+            rank_spacing: 80.0,
+            cluster_padding: 36.0,
             sequence_participant_gap_extra: 80.0,
             sequence_min_message_gap: 56.0,
             sequence_self_loop_width: 40.0,
@@ -5959,17 +5959,16 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
 
     let depth_level_sizes = tree_depth_level_sizes(&tree, &node_sizes);
-    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+    let depth_centers = depth_level_centers(
+        &depth_level_sizes,
+        spacing.rank_spacing,
+        tree.reverse_depth_axis,
+    );
 
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let logical_depth = tree.depth[node_index];
-        let mapped_depth = if tree.reverse_depth_axis {
-            tree.max_depth.saturating_sub(logical_depth)
-        } else {
-            logical_depth
-        };
-        let depth_center = depth_centers[mapped_depth];
+        let depth_center = depth_centers[logical_depth];
         let span_center = span_centers[node_index];
         centers[node_index] = if tree.horizontal_depth_axis {
             (depth_center, span_center)
@@ -6043,7 +6042,6 @@ fn layout_directed_path_tree_traced(
     let node_count = ir.nodes.len();
     let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let reverse_depth_axis = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
-    let max_depth = node_count.saturating_sub(1);
 
     push_snapshot(
         &mut trace,
@@ -6081,16 +6079,12 @@ fn layout_directed_path_tree_traced(
         }
     }
 
-    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+    let depth_centers =
+        depth_level_centers(&depth_level_sizes, spacing.rank_spacing, reverse_depth_axis);
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let logical_depth = depth[node_index];
-        let mapped_depth = if reverse_depth_axis {
-            max_depth.saturating_sub(logical_depth)
-        } else {
-            logical_depth
-        };
-        let depth_center = depth_centers[mapped_depth];
+        let depth_center = depth_centers[logical_depth];
         let span_center = span_centers[node_index];
         centers[node_index] = if horizontal_depth_axis {
             (depth_center, span_center)
@@ -7487,38 +7481,56 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .unwrap_or_default();
 
-    let cluster_bounds =
-        participant_group_clusters
-            .iter()
-            .fold(None::<(f32, f32, f32, f32)>, |acc, cluster| {
-                let cluster_max_x = cluster.bounds.x + cluster.bounds.width;
-                let cluster_max_y = cluster.bounds.y + cluster.bounds.height;
-                Some(match acc {
-                    Some((min_x, min_y, max_x, max_y)) => (
-                        min_x.min(cluster.bounds.x),
-                        min_y.min(cluster.bounds.y),
-                        max_x.max(cluster_max_x),
-                        max_y.max(cluster_max_y),
-                    ),
-                    None => (
-                        cluster.bounds.x,
-                        cluster.bounds.y,
-                        cluster_max_x,
-                        cluster_max_y,
-                    ),
-                })
-            });
+    let sequence_notes = build_sequence_note_geometry(
+        ir,
+        &participant_x_centers,
+        &node_sizes,
+        &message_y_positions,
+        first_message_y,
+        message_gap,
+        timeline_rows.as_ref().map(|rows| rows.note_top.as_slice()),
+    );
+    let sequence_fragments = build_sequence_fragment_geometry(
+        ir,
+        &participant_x_centers,
+        &node_sizes,
+        &message_y_positions,
+        first_message_y,
+        diagram_bottom,
+        message_gap,
+        timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
+    );
 
-    let bounds = if let Some((cluster_min_x, cluster_min_y, cluster_max_x, cluster_max_y)) =
-        cluster_bounds
-    {
-        let min_x = cluster_min_x.min(0.0);
-        let min_y = cluster_min_y.min(0.0);
+    // Notes beside the outermost actors and fragment borders can extend beyond the
+    // participant columns. Include the geometry actually rendered so every surface
+    // can fit the complete diagram without clipping annotations or losing padding.
+    let outer_bounds = participant_group_clusters
+        .iter()
+        .map(|cluster| cluster.bounds)
+        .chain(sequence_notes.iter().map(|note| note.bounds))
+        .chain(sequence_fragments.iter().map(|fragment| fragment.bounds))
+        .fold(None::<(f32, f32, f32, f32)>, |acc, rect| {
+            let right = rect.x + rect.width;
+            let bottom = rect.y + rect.height;
+            Some(match acc {
+                Some((min_x, min_y, max_x, max_y)) => (
+                    min_x.min(rect.x),
+                    min_y.min(rect.y),
+                    max_x.max(right),
+                    max_y.max(bottom),
+                ),
+                None => (rect.x, rect.y, right, bottom),
+            })
+        });
+
+    let bounds = if let Some((outer_min_x, outer_min_y, outer_max_x, outer_max_y)) = outer_bounds {
+        let min_x = outer_min_x.min(0.0);
+        let min_y = outer_min_y.min(0.0);
         LayoutRect {
             x: min_x,
             y: min_y,
-            width: total_width.max(cluster_max_x) - min_x,
-            height: diagram_bottom.max(cluster_max_y) - min_y,
+            width: total_width.max(outer_max_x) - min_x,
+            height: diagram_bottom.max(outer_max_y) - min_y,
         }
     } else {
         LayoutRect {
@@ -7570,25 +7582,8 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 gantt_axis_rows: Vec::new(),
                 cluster_dividers: Vec::new(),
                 activation_bars,
-                sequence_notes: build_sequence_note_geometry(
-                    ir,
-                    &participant_x_centers,
-                    &node_sizes,
-                    &message_y_positions,
-                    first_message_y,
-                    message_gap,
-                    timeline_rows.as_ref().map(|rows| rows.note_top.as_slice()),
-                ),
-                sequence_fragments: build_sequence_fragment_geometry(
-                    ir,
-                    &participant_x_centers,
-                    &node_sizes,
-                    &message_y_positions,
-                    first_message_y,
-                    diagram_bottom,
-                    message_gap,
-                    timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
-                ),
+                sequence_notes,
+                sequence_fragments,
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
                 node_centrality: Vec::new(),
@@ -11635,13 +11630,22 @@ fn tree_depth_level_sizes(tree: &TreeLayoutStructure, node_sizes: &[(f32, f32)])
     level_sizes
 }
 
-fn depth_level_centers(level_sizes: &[f32], gap: f32) -> Vec<f32> {
+fn depth_level_centers(level_sizes: &[f32], gap: f32, reverse: bool) -> Vec<f32> {
     let mut centers = vec![0.0_f32; level_sizes.len()];
     let mut cursor = 0.0_f32;
     for (index, level_size) in level_sizes.iter().copied().enumerate() {
         let bounded_size = level_size.max(1.0);
         centers[index] = cursor + (bounded_size / 2.0);
         cursor += bounded_size + gap;
+    }
+    // Reflect the physical axis while retaining each logical rank's own dimensions. Reversing
+    // the rank indexes instead assigned a large node the centre allocated to a smaller band,
+    // which could put its child inside it in RL or BT diagrams.
+    if reverse {
+        let extent = cursor - gap;
+        for center in &mut centers {
+            *center = extent - *center;
+        }
     }
     centers
 }
@@ -25863,6 +25867,109 @@ mod tests {
     }
 
     #[test]
+    fn tree_reverse_directions_preserve_variable_rank_sizes_and_clearance() {
+        let spacing = LayoutSpacing::default();
+        for (forward_direction, reverse_direction) in [
+            (GraphDirection::LR, GraphDirection::RL),
+            (GraphDirection::TB, GraphDirection::BT),
+        ] {
+            let horizontal = matches!(forward_direction, GraphDirection::LR);
+            let oversized_label = if horizontal {
+                "Review account details and confirm available inventory. ".repeat(4)
+            } else {
+                "A multiline root label\n".repeat(16)
+            };
+            for branching in [false, true] {
+                let node_count = if branching { 4 } else { 3 };
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                ir.direction = forward_direction;
+                for index in 0..node_count {
+                    ir.labels.push(IrLabel {
+                        text: if index == 0 {
+                            oversized_label.clone()
+                        } else {
+                            format!("Step {index}")
+                        },
+                        ..IrLabel::default()
+                    });
+                    ir.nodes.push(IrNode {
+                        id: format!("N{index}"),
+                        label: Some(IrLabelId(index)),
+                        ..IrNode::default()
+                    });
+                }
+                let connections = if branching {
+                    vec![(0, 1), (1, 2), (0, 3)]
+                } else {
+                    vec![(0, 1), (1, 2)]
+                };
+                for &(from, to) in &connections {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(from)),
+                        to: IrEndpoint::Node(IrNodeId(to)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+                // Three nodes exercise the directed-path specialization; the extra branch
+                // exercises the general tidy-tree placement with unequal rank dimensions.
+                let forward = layout_diagram_tree(&ir);
+                ir.direction = reverse_direction;
+                let reversed = layout_diagram_tree(&ir);
+                let primary = |bounds: LayoutRect| {
+                    if horizontal {
+                        (bounds.x, bounds.width)
+                    } else {
+                        (bounds.y, bounds.height)
+                    }
+                };
+                let center = |bounds: LayoutRect| {
+                    let (start, extent) = primary(bounds);
+                    start + extent / 2.0
+                };
+                assert!(
+                    primary(forward.nodes[0].bounds).1
+                        > primary(forward.nodes[1].bounds).1 + 2.0 * spacing.rank_spacing,
+                    "fixture needs unequal ranks large enough to expose swapped dimensions"
+                );
+                let reflection = center(forward.nodes[0].bounds) + center(reversed.nodes[0].bounds);
+                for (first, second) in forward.nodes.iter().zip(&reversed.nodes) {
+                    assert_eq!((first.rank, first.order), (second.rank, second.order));
+                    assert_eq!(
+                        (first.bounds.width, first.bounds.height),
+                        (second.bounds.width, second.bounds.height)
+                    );
+                    assert!(
+                        (center(first.bounds) + center(second.bounds) - reflection).abs() < 0.01,
+                        "{} does not reflect its own rank in {reverse_direction:?}",
+                        first.node_id
+                    );
+                }
+                for (placed, reverse) in [(&forward, false), (&reversed, true)] {
+                    for &(from, to) in &connections {
+                        let (from_start, from_extent) = primary(placed.nodes[from].bounds);
+                        let (to_start, to_extent) = primary(placed.nodes[to].bounds);
+                        let gap = if reverse {
+                            from_start - (to_start + to_extent)
+                        } else {
+                            to_start - (from_start + from_extent)
+                        };
+                        assert!(
+                            gap + 0.01 >= spacing.rank_spacing,
+                            "edge {from}->{to} has {gap} clear space, need {}; \
+                             direction={reverse_direction:?}, reversed={reverse}, branching={branching}",
+                            spacing.rank_spacing
+                        );
+                    }
+                    assert_eq!(placed.edges.len(), connections.len());
+                }
+                assert!((forward.bounds.width - reversed.bounds.width).abs() < 0.01);
+                assert!((forward.bounds.height - reversed.bounds.height).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
     fn tree_layout_top_down_places_children_below_parents() {
         let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
         let mut centers = BTreeMap::new();
@@ -27374,6 +27481,96 @@ mod tests {
 
     fn sequence_layout_of(source: &str) -> DiagramLayout {
         layout_diagram_sequence(&fm_parser::parse(source).ir)
+    }
+
+    fn assert_sequence_content_within_bounds(layout: &DiagramLayout) {
+        let bounds = layout.bounds;
+        for content in layout
+            .nodes
+            .iter()
+            .map(|node| node.bounds)
+            .chain(layout.clusters.iter().map(|cluster| cluster.bounds))
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| note.bounds),
+            )
+            .chain(
+                layout
+                    .extensions
+                    .sequence_fragments
+                    .iter()
+                    .map(|fragment| fragment.bounds),
+            )
+        {
+            assert!(
+                content.x >= bounds.x - 0.01
+                    && content.y >= bounds.y - 0.01
+                    && content.x + content.width <= bounds.x + bounds.width + 0.01
+                    && content.y + content.height <= bounds.y + bounds.height + 0.01,
+                "sequence content {content:?} exceeds diagram bounds {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_side_notes_expand_diagram_bounds() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  participant A\n  participant B\n  Note left of A: Keep the complete left annotation visible\n  A->>B: Request\n  Note right of B: Keep the complete right annotation visible\n",
+        );
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        let left = layout.extensions.sequence_notes[0].bounds;
+        let right = layout.extensions.sequence_notes[1].bounds;
+        let first_actor = layout.nodes.first().expect("first participant").bounds;
+        let last_actor = layout.nodes.last().expect("last participant").bounds;
+        assert!(
+            left.x < first_actor.x,
+            "left note lies outside the actor columns"
+        );
+        assert!(
+            right.x + right.width > last_actor.x + last_actor.width,
+            "right note lies outside the actor columns"
+        );
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_spanning_notes_remain_visible_in_both_participant_orders() {
+        for participants in ["A,B", "B,A"] {
+            let source = format!(
+                "sequenceDiagram\n  participant A\n  participant B\n  A->>B: Request\n  Note over {participants}: Keep all of this annotation visible\n"
+            );
+            let layout = sequence_layout_of(&source);
+            assert_eq!(layout.extensions.sequence_notes.len(), 1);
+            assert_eq!(layout.nodes.len(), 2);
+            let note = layout.extensions.sequence_notes[0].bounds;
+            assert!(
+                note.x < layout.nodes[0].bounds.x,
+                "the long spanning note extends beyond the first actor"
+            );
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    #[test]
+    fn sequence_fragment_borders_remain_within_diagram_bounds() {
+        for (source, expected_notes) in [
+            (
+                "sequenceDiagram\n  participant A\n  participant B\n  loop Retry until confirmed\n    A->>B: Request\n  end\n",
+                0,
+            ),
+            (
+                "sequenceDiagram\n  box rgb(240,245,250) Workers\n    participant A\n    participant B\n  end\n  rect rgb(220,230,240)\n    Note over A,B: Preserve this note-only region\n  end\n",
+                1,
+            ),
+        ] {
+            let layout = sequence_layout_of(source);
+            assert_eq!(layout.extensions.sequence_fragments.len(), 1);
+            assert_eq!(layout.extensions.sequence_notes.len(), expected_notes);
+            assert_sequence_content_within_bounds(&layout);
+        }
     }
 
     /// A note gets its OWN row: it never overlaps the message before or after it, which it did
