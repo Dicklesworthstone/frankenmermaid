@@ -71,13 +71,15 @@ pub use diff::{
 pub use glyphs::{BoxGlyphs, ClusterGlyphs, EdgeGlyphs, ShapeGlyphs};
 pub use minimap::{
     MinimapConfig, MinimapCorner, MinimapDensity, MinimapDetailLevel, MinimapRect, MinimapResult,
-    Viewport, minimap_cell_to_layout_point, render_minimap, render_minimap_ascii,
-    render_minimap_colored, viewport_to_minimap_rect,
+    Viewport, minimap_cell_to_layout_point, overlay_minimap, render_minimap, render_minimap_ascii,
+    render_minimap_colored, render_minimap_from_layout, render_minimap_with_viewport,
+    viewport_to_minimap_rect,
 };
 pub use renderer::{
     TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config,
     render_diagram_with_layout_and_config,
 };
+pub use transform::TermTransform;
 
 use fm_core::MermaidDiagramIr;
 use fm_layout::DiagramLayout;
@@ -199,6 +201,39 @@ pub fn render_minimap_simple(ir: &MermaidDiagramIr, max_width: usize, max_height
     result.output
 }
 
+/// Render a terminal diagram and overlay a minimap with viewport indicator (`bd-z8971`).
+#[must_use]
+pub fn render_term_with_minimap(
+    ir: &MermaidDiagramIr,
+    config: &TermRenderConfig,
+    minimap_config: &MinimapConfig,
+    visible_rect: Option<&fm_layout::LayoutRect>,
+    cols: usize,
+    rows: usize,
+) -> TermRenderResult {
+    let layout = fm_layout::layout_diagram(ir);
+    let mut main_result = render_term_with_layout_and_config(ir, &layout, config, cols, rows);
+    let viewport = visible_rect
+        .map(|rect| Viewport::from_layout_rect(&layout.bounds, rect))
+        .unwrap_or_default()
+        .normalized();
+    let minimap = render_minimap_from_layout(&layout, minimap_config, Some(&viewport));
+    if minimap.width > 0
+        && minimap.height > 0
+        && main_result.width >= minimap.width + 2
+        && main_result.height >= minimap.height + 2
+    {
+        main_result.output = overlay_minimap(
+            &main_result.output,
+            &minimap,
+            main_result.width,
+            main_result.height,
+            minimap_config.corner,
+        );
+    }
+    main_result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +352,39 @@ mod tests {
 
         // Rich should generally produce more detailed output.
         assert!(rich.width >= compact.width || rich.height >= compact.height);
+    }
+
+    #[test]
+    fn term_transform_and_minimap_overlay_integrate_cleanly() {
+        let ir = sample_ir();
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = TermRenderConfig::rich();
+        let resolved = ResolvedConfig::resolve(&config, 120, 40);
+        let renderer = TermRenderer::new(resolved);
+        let transform = renderer
+            .layout_transform(&layout, ir.direction)
+            .expect("valid layout transform");
+        assert!(transform.uniform_scale() > 0.0);
+        assert!(transform.aspect() > 0.0);
+
+        let first_center = layout.nodes[0].bounds.center();
+        let (col, row) = renderer.map_layout_point_to_cells(&layout, ir.direction, first_center);
+        assert!(col > 0 || row > 0);
+
+        let minimap_config = MinimapConfig {
+            max_width: 12,
+            max_height: 6,
+            ..Default::default()
+        };
+        let with_minimap = render_term_with_minimap(
+            &ir,
+            &config,
+            &minimap_config,
+            Some(&layout.nodes[0].bounds),
+            120,
+            40,
+        );
+        assert!(!with_minimap.output.is_empty());
     }
 
     proptest! {

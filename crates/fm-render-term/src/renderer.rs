@@ -290,6 +290,32 @@ impl TermRenderer {
         self.render_subcell_mode(ir, layout, cell_width, cell_height, scale_x, scale_y)
     }
 
+    /// Return the CGA-backed [`TermTransform`] that maps layout coordinates to terminal cells
+    /// for `layout` (`bd-z8971`).
+    #[must_use]
+    pub fn layout_transform(
+        &self,
+        layout: &DiagramLayout,
+        direction: GraphDirection,
+    ) -> Option<TermTransform> {
+        let (_cell_width, _cell_height, scale_x, scale_y) =
+            self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
+        TermTransform::new(scale_x, scale_y)
+    }
+
+    /// Map a layout-space point into padded terminal cell coordinates `(col, row)` (`bd-z8971`).
+    #[must_use]
+    pub fn map_layout_point_to_cells(
+        &self,
+        layout: &DiagramLayout,
+        direction: GraphDirection,
+        point: fm_layout::LayoutPoint,
+    ) -> (usize, usize) {
+        let (_cell_width, _cell_height, scale_x, scale_y) =
+            self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
+        self.point_to_cells(&point, scale_x, scale_y)
+    }
+
     /// Render skeleton outline (Outline fidelity mode) for tight viewports or dense graphs.
     fn render_outline_mode(
         &self,
