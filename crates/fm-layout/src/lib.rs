@@ -2647,6 +2647,223 @@ impl DiagramLayout {
         let after_positions = after.node_center_positions_f64();
         persistence::compare_layout_stability(&before_positions, &after_positions, config)
     }
+
+    /// Return all geometry invariant violations (`NonFinite`, `NegativeExtent`) in this layout (`bd-5veml`).
+    #[inline]
+    #[must_use]
+    pub fn geometry_violations(&self) -> Vec<invariants::InvariantViolation> {
+        invariants::layout_geometry_violations(self)
+    }
+
+    /// Return the first geometry invariant violation in this layout, if any (`bd-5veml`).
+    #[inline]
+    #[must_use]
+    pub fn first_geometry_violation(&self) -> Option<invariants::InvariantViolation> {
+        invariants::first_layout_geometry_violation(self)
+    }
+
+    /// Check whether all node boxes, cluster boxes, cycle-cluster boxes, edge points, and
+    /// overall bounds satisfy layout geometry invariants (`bd-5veml`).
+    #[inline]
+    #[must_use]
+    pub fn is_geometry_valid(&self) -> bool {
+        self.first_geometry_violation().is_none()
+    }
+
+    /// Assert that this layout satisfies all geometry invariants, panicking with a located
+    /// message if any violation is present (`bd-5veml`).
+    #[inline]
+    pub fn assert_geometry(&self) {
+        invariants::assert_layout_geometry(self);
+    }
+
+    /// Extract `(node_index, center_x, center_y)` positions for spatial indexing (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn node_indexed_center_positions_f64(&self) -> Vec<(usize, f64, f64)> {
+        self.nodes
+            .iter()
+            .map(|node| {
+                let center = node.bounds.center();
+                (node.node_index, f64::from(center.x), f64::from(center.y))
+            })
+            .collect()
+    }
+
+    /// Build an auto-selected spatial index (`GridSpatialIndex` for `< 5000` nodes,
+    /// `LshSpatialIndex` for `>= 5000` nodes) over this layout's node centers (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn build_spatial_index(&self, cell_size: f64) -> Box<dyn spatial::SpatialIndex> {
+        let positions = self.node_indexed_center_positions_f64();
+        spatial::create_spatial_index(&positions, cell_size)
+    }
+
+    /// Build a cache-oblivious Morton + vEB pre-ordered `GridSpatialIndex` over this layout's
+    /// node centers (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn build_grid_spatial_index(&self, cell_size: f64) -> spatial::GridSpatialIndex {
+        let positions = self.node_indexed_center_positions_f64();
+        spatial::GridSpatialIndex::from_positions(&positions, cell_size)
+    }
+
+    /// Find the nearest node index within `radius` of `(x, y)` using spatial indexing (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn nearest_node_at(&self, x: f64, y: f64, radius: f64) -> Option<usize> {
+        let index = self.build_spatial_index(radius.max(50.0));
+        index.nearest((x, y), radius)
+    }
+
+    /// Find all node indices within `radius` of `(x, y)` using spatial indexing (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn nodes_within_radius(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
+        let index = self.build_spatial_index(radius.max(50.0));
+        index.within_radius((x, y), radius)
+    }
+
+    /// Return all node center entries `(node_index, x, y)` ordered by cache-oblivious
+    /// Morton Z-curve + Van Emde Boas tree layout (`bd-bsphn`).
+    #[inline]
+    #[must_use]
+    pub fn veb_ordered_nodes(&self, cell_size: f64) -> Vec<(usize, f64, f64)> {
+        self.build_grid_spatial_index(cell_size)
+            .veb_ordered_entries()
+    }
+
+    /// Extract bounding rectangles for all laid-out nodes for CGA obstacle queries (`bd-cuuar`).
+    #[inline]
+    #[must_use]
+    pub fn node_obstacle_bounds(&self) -> Vec<LayoutRect> {
+        self.nodes.iter().map(|node| node.bounds).collect()
+    }
+
+    /// Check whether the line segment `start -> end` intersects any laid-out node box expanded
+    /// by `margin` using Conformal Geometric Algebra (`bd-cuuar`).
+    #[inline]
+    #[must_use]
+    pub fn segment_intersects_nodes(
+        &self,
+        start: LayoutPoint,
+        end: LayoutPoint,
+        margin: f32,
+    ) -> bool {
+        let obstacles = self.node_obstacle_bounds();
+        cga_routing::segment_intersects_obstacles(start, end, &obstacles, margin)
+    }
+
+    /// Find the first laid-out node box (returning `(node_index, intersection_points)`) that the
+    /// line segment `start -> end` intersects when expanded by `margin` (`bd-cuuar`).
+    #[inline]
+    #[must_use]
+    pub fn first_node_intersection(
+        &self,
+        start: LayoutPoint,
+        end: LayoutPoint,
+        margin: f32,
+    ) -> Option<(usize, Vec<LayoutPoint>)> {
+        let obstacles = self.node_obstacle_bounds();
+        cga_routing::find_first_obstacle_intersection(start, end, &obstacles, margin).map(
+            |(slice_idx, points)| {
+                let node_index = self
+                    .nodes
+                    .get(slice_idx)
+                    .map_or(slice_idx, |node| node.node_index);
+                (node_index, points)
+            },
+        )
+    }
+
+    /// Group edges by their source node's rank into cache-oblivious [`cache_oblivious::BlockedEdgeGroups`] (`bd-v4ziz`).
+    #[inline]
+    #[must_use]
+    pub fn blocked_edge_groups(&self, ir: &MermaidDiagramIr) -> cache_oblivious::BlockedEdgeGroups {
+        let mut node_ranks = FxHashMap::default();
+        let mut max_rank = 0_usize;
+        for node in &self.nodes {
+            node_ranks.insert(node.node_index, node.rank);
+            max_rank = max_rank.max(node.rank);
+        }
+        let num_ranks = if self.nodes.is_empty() {
+            0
+        } else {
+            max_rank.saturating_add(1)
+        };
+        let edge_source_ranks: Vec<usize> = self
+            .edges
+            .iter()
+            .map(|edge| {
+                ir.edges
+                    .get(edge.edge_index)
+                    .and_then(|ir_edge| endpoint_node_index(ir, ir_edge.from))
+                    .and_then(|node_idx| node_ranks.get(&node_idx).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
+        cache_oblivious::BlockedEdgeGroups::from_ranks(&edge_source_ranks, num_ranks)
+    }
+
+    /// Route a spline-friendly chamfered polyline between `source` and `target` around laid-out
+    /// node obstacles (`bd-v4ziz`).
+    #[inline]
+    #[must_use]
+    pub fn route_spline_between(
+        &self,
+        source: LayoutPoint,
+        target: LayoutPoint,
+        horizontal_ranks: bool,
+    ) -> Vec<LayoutPoint> {
+        let obstacles = self.node_obstacle_bounds();
+        route_edge_points_spline_with_obstacles(source, target, horizontal_ranks, &obstacles)
+            .into_vec()
+    }
+
+    /// Run anytime e-graph equality saturation with greedy fallback on a single rank's node
+    /// ordering (`bd-foylr`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    #[must_use]
+    pub fn saturate_rank_with_fallback(
+        &self,
+        ir: &MermaidDiagramIr,
+        rank: usize,
+        config: &egraph_crossing::SaturationConfig,
+    ) -> egraph_crossing::FallbackResult {
+        let mut by_rank: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+        let mut node_ranks = BTreeMap::new();
+        for node in &self.nodes {
+            node_ranks.insert(node.node_index, node.rank);
+            by_rank
+                .entry(node.rank)
+                .or_default()
+                .push((node.order, node.node_index));
+        }
+        let ordering_for = |target_rank: usize| -> Option<egraph_ordering::LayerOrdering> {
+            let mut entries = by_rank.get(&target_rank)?.clone();
+            entries.sort_unstable_by_key(|(order, node_idx)| (*order, *node_idx));
+            Some(egraph_ordering::LayerOrdering::new(
+                entries.into_iter().map(|(_, node_idx)| node_idx).collect(),
+            ))
+        };
+        let initial =
+            ordering_for(rank).unwrap_or_else(|| egraph_ordering::LayerOrdering::new(Vec::new()));
+        let pair_edges = build_pair_node_edges(ir, &node_ranks);
+        let upper_ordering = rank.checked_sub(1).and_then(ordering_for);
+        let upper_edges = rank
+            .checked_sub(1)
+            .and_then(|upper_rank| pair_edges.get(&(upper_rank, rank)).cloned());
+        let lower_ordering = ordering_for(rank.saturating_add(1));
+        let lower_edges = pair_edges.get(&(rank, rank.saturating_add(1))).cloned();
+        let ctx = egraph_crossing::CrossingContext {
+            upper_ordering,
+            upper_edges,
+            lower_ordering,
+            lower_edges,
+        };
+        egraph_crossing::saturate_with_fallback(&initial, &ctx, config)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3225,6 +3442,7 @@ pub mod spatial;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod spectral;
 
+pub use cache_oblivious::BlockedEdgeGroups;
 use shapes::{node_path, rounded_rect_path};
 
 fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
@@ -4122,9 +4340,52 @@ impl IncrementalLayoutEngine {
     }
 
     /// Capture an epoch-tagged snapshot of the active IR (`bd-yyt62`).
+    #[inline]
     #[must_use]
     pub fn epoch_snapshot(&self, ir: &MermaidDiagramIr) -> fm_core::epoch::IrSnapshot {
         fm_core::epoch::EpochIrHandle::with_epoch(self.epoch, ir.clone()).snapshot()
+    }
+
+    /// Construct an [`fm_core::epoch::EpochIrHandle`] backed by the engine's current epoch and
+    /// cached `Arc<MermaidDiagramIr>` snapshot (`bd-chfh9`).
+    #[inline]
+    #[must_use]
+    pub fn epoch_handle(&self) -> fm_core::epoch::EpochIrHandle {
+        match &self.cached {
+            Some(cached) => {
+                fm_core::epoch::EpochIrHandle::with_shared_ir(self.epoch, Arc::clone(&cached.ir))
+            }
+            None => {
+                fm_core::epoch::EpochIrHandle::with_epoch(self.epoch, MermaidDiagramIr::default())
+            }
+        }
+    }
+
+    /// Return diagnostic [`fm_core::epoch::ReclamationStatus`] for the engine's current epoch (`bd-chfh9`).
+    #[inline]
+    #[must_use]
+    pub fn reclamation_status(&self) -> fm_core::epoch::ReclamationStatus {
+        self.epoch_handle().reclamation_status()
+    }
+
+    /// Synchronize an external [`fm_core::epoch::EpochIrHandle`] with `ir` when the engine has
+    /// advanced past `handle.current_epoch()`, returning its updated [`fm_core::epoch::ReclamationStatus`] (`bd-chfh9`).
+    #[inline]
+    pub fn sync_epoch_handle(
+        &self,
+        handle: &fm_core::epoch::EpochIrHandle,
+        ir: &MermaidDiagramIr,
+    ) -> fm_core::epoch::ReclamationStatus {
+        while handle.current_epoch() < self.epoch {
+            if let Some(cached) = &self.cached
+                && handle.current_epoch() + 1 == self.epoch
+            {
+                handle.update_shared(Arc::clone(&cached.ir));
+            } else {
+                handle.update(ir.clone());
+            }
+        }
+        handle.reclamation_status()
     }
 
     /// Return a counted [`fm_core::reuse_proof::ReuseProof`] classifying how many layout requests
@@ -16383,7 +16644,7 @@ fn egraph_optimized_order_for_rank_with_saturation(
             lower_ordering,
             lower_edges: lower_edges.cloned(),
         };
-        let sat = crate::egraph_crossing::saturate_layer(
+        let sat = crate::egraph_crossing::saturate_with_fallback(
             &result.ordering,
             &ctx,
             &crate::egraph_crossing::SaturationConfig {
@@ -16393,10 +16654,11 @@ fn egraph_optimized_order_for_rank_with_saturation(
             },
         );
         if sat.crossing_count < result.crossing_count {
+            let iterations = sat.egraph_result.as_ref().map_or(0, |r| r.iterations);
             result = crate::egraph_ordering::LayerOptimizationResult {
                 ordering: sat.ordering,
                 crossing_count: sat.crossing_count,
-                rewrites_applied: result.rewrites_applied + sat.iterations,
+                rewrites_applied: result.rewrites_applied + iterations,
             };
         }
     }
@@ -18564,7 +18826,7 @@ fn route_edge_points_with_obstacle_index(
 /// The SVG backend already smooths edge waypoints with Catmull-Rom interpolation,
 /// so this router emits a smaller set of bend and midpoint anchors instead of the
 /// hard orthogonal staircase used by the default path router.
-#[allow(dead_code)]
+#[inline]
 fn route_edge_points_spline_with_obstacles(
     source: LayoutPoint,
     target: LayoutPoint,
@@ -32101,6 +32363,94 @@ mod tests {
             engine.work_class(),
             fm_core::reuse_proof::WorkClass::Reuse { reused: 1 }
         );
+    }
+
+    #[test]
+    fn diagram_layout_geometry_invariants_spatial_and_cga_queries() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let mut layout = layout_diagram(&ir);
+        assert!(layout.is_geometry_valid());
+        assert!(layout.geometry_violations().is_empty());
+        layout.assert_geometry();
+
+        // Spatial index & vEB ordering
+        let first_center = layout.nodes[0].bounds.center();
+        let nearest =
+            layout.nearest_node_at(f64::from(first_center.x), f64::from(first_center.y), 30.0);
+        assert_eq!(nearest, Some(layout.nodes[0].node_index));
+        let within = layout.nodes_within_radius(
+            f64::from(first_center.x),
+            f64::from(first_center.y),
+            10_000.0,
+        );
+        assert_eq!(within.len(), 4);
+        assert_eq!(layout.veb_ordered_nodes(64.0).len(), 4);
+
+        // CGA obstacle intersection queries
+        let n0 = &layout.nodes[0].bounds;
+        let seg_start = LayoutPoint {
+            x: n0.x - 10.0,
+            y: n0.center().y,
+        };
+        let seg_end = LayoutPoint {
+            x: n0.x + n0.width + 10.0,
+            y: n0.center().y,
+        };
+        assert!(layout.segment_intersects_nodes(seg_start, seg_end, 0.0));
+        let (hit_idx, hit_points) = layout
+            .first_node_intersection(seg_start, seg_end, 0.0)
+            .expect("segment through node[0] should intersect");
+        assert_eq!(hit_idx, layout.nodes[0].node_index);
+        assert!(!hit_points.is_empty());
+
+        // Broken invariant detection
+        layout.nodes[0].bounds.width = -1.0;
+        assert!(!layout.is_geometry_valid());
+        assert_eq!(layout.geometry_violations().len(), 1);
+    }
+
+    #[test]
+    fn wave6_egraph_fallback_blocked_edge_groups_spline_and_epoch_reclamation() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            6,
+            &[(0, 3), (1, 4), (2, 5), (0, 5), (2, 3)],
+        );
+        let mut engine = IncrementalLayoutEngine::default();
+        let initial_handle = engine.epoch_handle();
+        assert_eq!(initial_handle.current_epoch(), 0);
+        assert_eq!(engine.reclamation_status().current_epoch, 0);
+
+        let traced = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let status = engine.reclamation_status();
+        assert_eq!(status.current_epoch, 1);
+        assert!(status.current_ref_count >= 1);
+
+        let synced = engine.sync_epoch_handle(&initial_handle, &ir);
+        assert_eq!(synced.current_epoch, 1);
+        assert!(initial_handle.current_ref_count() >= 1);
+
+        let groups = traced.layout.blocked_edge_groups(&ir);
+        assert_eq!(groups.total_edges(), ir.edges.len());
+        assert!(!groups.edges_for_rank(0).is_empty());
+
+        let start = traced.layout.nodes[0].bounds.center();
+        let end = traced.layout.nodes[5].bounds.center();
+        let spline = traced.layout.route_spline_between(start, end, false);
+        assert!(spline.len() >= 2);
+
+        let fallback = traced.layout.saturate_rank_with_fallback(
+            &ir,
+            1,
+            &egraph_crossing::SaturationConfig::default(),
+        );
+        assert_eq!(fallback.ordering.len(), 3);
+        assert!(fallback.crossing_count <= fallback.greedy_result.crossing_count);
     }
 
     // ─── Property-based layout invariant tests (bd-30y.13) ──────────────

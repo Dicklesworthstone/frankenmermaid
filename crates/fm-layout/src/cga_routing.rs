@@ -37,7 +37,6 @@ fn obstacle_is_valid(obstacle: &LayoutRect) -> bool {
 ///
 /// Returns true if the segment crosses the obstacle boundary OR is inside it.
 #[must_use]
-#[allow(dead_code)]
 pub fn segment_intersects_obstacles(
     start: LayoutPoint,
     end: LayoutPoint,
@@ -76,7 +75,6 @@ pub fn segment_intersects_obstacles(
 ///
 /// Returns the obstacle index and intersection points, or None if no intersection.
 #[must_use]
-#[allow(dead_code)]
 pub fn find_first_obstacle_intersection(
     start: LayoutPoint,
     end: LayoutPoint,
