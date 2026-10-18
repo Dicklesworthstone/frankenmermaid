@@ -69,9 +69,38 @@ export function validateInitDirectives(source: string): string;
 
 
 
+/** selectionState(): IDs are author IDs, not layout indices. Absent optionals are nullish. */
+export interface DiagramSelectionState {
+    selectedNodeIds: string[];
+    primaryNodeId?: string | null;
+    activeGesture?: string | null;
+    frameAvailable: boolean;
+}
+export type DiagramSelectionMode = "replace" | "add" | "remove" | "toggle";
+export type DiagramSelectionContainment = "intersects" | "contains";
+
+
+
 export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Begin a transactional box/lasso preview. Returns a decimal token or undefined if no
+     * usable draw is available, another gesture owns the session, or tokens are exhausted.
+     */
+    beginSelectionGesture(mode?: string | null, policy?: string | null): string | undefined;
+    /**
+     * Roll back the matching preview. True means selection changed and should be redrawn.
+     */
+    cancelSelectionGesture(token: string): boolean;
+    /**
+     * Clear selection and revoke the current drag. A delayed cancellation cannot restore it.
+     */
+    clearSelection(): boolean;
+    /**
+     * Commit the latest accepted preview. True means committed, not selection-changed.
+     */
+    commitSelectionGesture(token: string): boolean;
     destroy(): void;
     /**
      * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
@@ -84,23 +113,61 @@ export class Diagram {
      */
     static fromOffscreenCanvas(canvas: OffscreenCanvas, config?: any | null): Diagram;
     /**
-     * Return the nearest rendered edge index within a canvas-space tolerance.
-     *
-     * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
-     * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+     * Return the nearest rendered edge within a backing-store-pixel tolerance.
+     * Shares the draw viewport with node picking and excludes bundled-away paths.
      */
     hitTestEdge(x: number, y: number, max_distance: number): number | undefined;
     /**
-     * Return the laid-out node below a canvas-space pointer, if any.
-     *
-     * The query uses CGA rectangle containment against the latest render's layout, so it never
-     * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
-     * return `None`.
+     * Inspect the topmost node's interaction metadata without following a URL or calling JS.
+     */
+    hitTestInteraction(x: number, y: number): any;
+    /**
+     * Return the topmost node below a backing-store-pixel pointer, if any.
+     * Uses the actual draw viewport, including fit, padding and origin normalization.
+     * Resizing invalidates picking until redraw; this query never parses or lays out source.
      */
     hitTestNode(x: number, y: number): string | undefined;
+    /**
+     * Revoke picking and roll back an in-progress drag after an external canvas clear/reset.
+     * Call even when assigning the SAME width/height: that clears pixels without a size change.
+     * Geometry and committed selection remain available to redraw().
+     */
+    invalidateFrame(): void;
+    /**
+     * Move the primary keyboard selection, optionally extending the existing selected set.
+     */
+    navigateSelection(direction: string, extend?: boolean | null): boolean;
     constructor(canvas: HTMLCanvasElement, config?: any | null);
     on(event: string, callback: Function): void;
+    /**
+     * Preview a marquee from its pointer-down selection, not the previous preview.
+     * Captured pointers may be outside the canvas. Wrong/retired tokens have no side effects.
+     */
+    previewSelectionBox(token: string, start_x: number, start_y: number, end_x: number, end_y: number): boolean;
+    /**
+     * Preview an even-odd lasso from interleaved backing-store x/y coordinates.
+     * Length is bounded BEFORE copying out of JS memory. Invalid input throws without changing
+     * selection; polygon degeneracy is handled by the native selector as an unchanged preview.
+     */
+    previewSelectionLasso(token: string, values: Float64Array): boolean;
+    /**
+     * Redraw retained geometry and current selection. No parse or layout is performed.
+     * Returns false before the first render or while the backing store has zero size.
+     */
+    redraw(): boolean;
     render(input: string, config?: any | null): any;
+    /**
+     * Modifier click in backing-store pixels. Convert CSS coordinates once in the host.
+     */
+    selectAt(x: number, y: number, mode?: string | null): boolean;
+    /**
+     * Select a placed author ID. An unknown ID leaves selection and active gestures unchanged.
+     */
+    selectNode(id: string, mode?: string | null): boolean;
+    /**
+     * Stable author IDs, primary keyboard anchor, active token and usable-frame availability.
+     */
+    selectionState(): any;
     setTheme(theme: string): void;
 }
 
@@ -245,13 +312,26 @@ export interface InitOutput {
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
+    readonly diagram_beginSelectionGesture: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly diagram_cancelSelectionGesture: (a: number, b: number, c: number, d: number) => void;
+    readonly diagram_clearSelection: (a: number, b: number) => void;
+    readonly diagram_commitSelectionGesture: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_destroy: (a: number) => void;
     readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
     readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_hitTestInteraction: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
+    readonly diagram_invalidateFrame: (a: number, b: number) => void;
+    readonly diagram_navigateSelection: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_new: (a: number, b: number, c: number) => void;
     readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_previewSelectionBox: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+    readonly diagram_previewSelectionLasso: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_redraw: (a: number, b: number) => void;
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_selectAt: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly diagram_selectNode: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly diagram_selectionState: (a: number, b: number) => void;
     readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
     readonly hitRegions: (a: number, b: number, c: number, d: number) => void;
     readonly init: (a: number, b: number) => void;

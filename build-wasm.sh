@@ -212,7 +212,19 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # `turning_route` inlined, `clear_line` 0.5K and its closures 0.4K: routing net +0.9K; the
 # membership pass inlined into `parse_flowchart_with_line_offset` ~1.0K plus its iterator chain
 # 0.3K; shared component ranks ~0.4K. Headroom: 812 bytes.
-MAX_GZIP_BYTES=$((753 * 1024))
+# Raised 753K -> 776K on 2026-10-18 for the fresh package and GH#14 browser label preservation.
+# MEASURED with this script's gzip command; see evidence/issue14_browser_regression.md:
+#   771021 gzip  last committed pkg/ (01666a65, source fingerprint verified)
+#   790765 gzip  unchanged source at 4e6dea85, rebuilt with the same pinned toolchain (+19744)
+#   790696 gzip  that baseline with --strip-producers in the existing optimizer pass (-69)
+#   794451 gzip  GH#14 full text and node/label-plate clearance with the same flags (+3755)
+#   794414 gzip  plus scoped geometricPrecision to retain glyph metrics through zoom (-37)
+# The first delta is accumulated Canvas selection/session bindings since pkg/ was last built;
+# the complete issue fix adds 3718 bytes over the stripped baseline. Shrink preceded this raise:
+# every noncustom section stayed byte-identical; a separate strip-only pass grew gzip by 3012.
+# Existing -Oz --converge, LTO, one codegen unit and immediate-abort std remain in force.
+# This is the smallest whole-KiB ceiling that fits the measured artifact: headroom 210 bytes.
+MAX_GZIP_BYTES=$((776 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
@@ -308,6 +320,9 @@ echo "==> Optimizing wasm with wasm-opt"
 # (custom-descriptors proposal), producing a module Node and current browsers refuse to
 # instantiate ("invalid heap type 'exact'"). The explicit list keeps the output inside the
 # widely-shipped wasm feature set.
+# Strip producer metadata inside this same pass. A paired build at 4e6dea85 removed 74 raw
+# bytes / 69 gzip bytes with every noncustom section byte-identical. A separate strip-only
+# round trip grew gzip by 3012 bytes, so do not add a second optimizer invocation.
 wasm-opt -Oz \
   --enable-bulk-memory \
   --enable-mutable-globals \
@@ -315,6 +330,7 @@ wasm-opt -Oz \
   --enable-sign-ext \
   --enable-reference-types \
   --enable-multivalue \
+  --strip-producers \
   --converge "$WASM_PATH" -o "$WASM_PATH"
 
 SOURCE_SHA256_AFTER="$(compute_source_sha256)"

@@ -1,0 +1,76 @@
+flowchart TB
+    %% Pracovní koncept z mentoringu na Rakathonu Brno.
+    %% Nejde o popis existující nebo schválené služby VZP.
+    %% Rozsah: komunikace, edukace, rezervace a připomenutí.
+    %% Výběr klientek je vstup od VZP, nikoli další část tohoto návrhu.
+
+    K["Klientky vybrané v rámci výzvy VZP"]
+    T["Dostupné termíny zapojených mamocenter"]
+    O["Společná nabídka konkrétních termínů<br/>a navazující komunikace napříč kanály"]
+    K --> O
+    T --> O
+
+    subgraph CHANNELS["OMNICHANNEL — paralelní cesty, nikoli povinné pořadí"]
+        direction LR
+        S["SMS: avízo hovoru a konkrétní termíny<br/>1 / 2 / 3 = zvolený termín<br/>4 = zavolejte mi"]
+        E["E-mail: konkrétní termíny, avízo hovoru<br/>videa a možnost potvrdit termín"]
+        P["Push + Moje VZP u uživatelek aplikace<br/>termíny, videa a přímé potvrzení<br/>Návrh možné integrace"]
+        H["Robotický hovor po předchozím avízu<br/>nebo na žádost klientky<br/>Pouze pokud ještě nemá potvrzenou rezervaci"]
+    end
+
+    O --> S
+    O --> E
+    O -.->|U uživatelek aplikace| P
+    O --> H
+    S -->|Odpověď 4| H
+
+    subgraph EDUCATION["EDUKACE — informace k rozhodnutí a přípravě, ne podmínka rezervace"]
+        direction LR
+        EDU["EduAIttractive<br/>Tvorba upravitelných videí pomocí kódu"]
+        V1["Video: význam screeningu<br/>a proč vyšetření neodkládat"]
+        V2["Video: jak vyšetření probíhá<br/>a co při návštěvě očekávat"]
+        EDU --> V1
+        EDU --> V2
+        V1 -.->|Další informace| V2
+    end
+
+    E -.->|Zhlédnout podle potřeby| V1
+    E -.->|Zhlédnout podle potřeby| V2
+    P -.->|Zhlédnout podle potřeby| V1
+    P -.->|Zhlédnout podle potřeby| V2
+
+    N["Notifikace o právě probíhajícím hovoru<br/>a možnost jeho ověření v Moje VZP<br/>Návrh pro uživatelky aplikace"]
+    H -.->|Souběžně, nikoli jako podmínka hovoru| N
+    H --> D{"Podařilo se dovolat?"}
+    D -->|Ano| R["Robot rovnou nabídne konkrétní dostupné termíny"]
+    R --> Q{"Vyhovuje některý termín?"}
+    Q -->|Ano| HC["Klientka zvolí a potvrdí termín během hovoru<br/>Bez aplikace a bez dalšího potvrzovacího kroku"]
+    Q -->|Potřebuje jiný| OTHER["Další konkrétní dostupné termíny"]
+    OTHER --> R
+    D -->|Ne| F["Navazující zpráva s nabídkou termínů<br/>Možnost odpovědět nebo požádat o zavolání"]
+    F --> S
+    F --> E
+    F -.->|U uživatelek aplikace| P
+
+    B["Potvrzená rezervace v systému centra<br/>Jeden společný stav napříč kanály"]
+    S -->|Odpověď 1 / 2 / 3| B
+    E -->|Potvrdit zvolený termín| B
+    P -->|Potvrdit zvolený termín| B
+    V1 -.->|Termín lze potvrdit přímo u videa| B
+    V2 -.->|Termín lze potvrdit přímo u videa| B
+    HC --> B
+
+    B --> STOP["Ukončit další zvací zprávy a plánované zvací hovory"]
+    B --> CONF["Potvrzení a informace o sjednaném termínu<br/>SMS / e-mail / Moje VZP"]
+    CONF --> REM["Připomenutí návštěvy a praktické informace<br/>Navazující komunikace napříč kanály"]
+    REM -.->|Informace k průběhu návštěvy| V2
+    REM --> VISIT["Skutečně absolvované vyšetření<br/>Cílový výsledek, nikoli pouze rezervace"]
+
+    A["Kód + agenti + datová analytika<br/>Doručení, zhlédnutí, reakce, rezervace a skutečná účast"]
+    O -.->|Komunikační události| A
+    V1 -.->|Práce s obsahem| A
+    V2 -.->|Práce s obsahem| A
+    B -.->|Rezervace| A
+    VISIT -.->|Účast| A
+    A --> LEARN["Vyhodnocování a ověřování dopadu<br/>Úpravy obsahu, nabídky a návaznosti komunikace"]
+    LEARN -.-> O

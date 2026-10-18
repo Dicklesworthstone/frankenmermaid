@@ -17,6 +17,101 @@ export class Diagram {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_diagram_free(ptr, 0);
     }
+    /**
+     * Begin a transactional box/lasso preview. Returns a decimal token or undefined if no
+     * usable draw is available, another gesture owns the session, or tokens are exhausted.
+     * @param {string | null} [mode]
+     * @param {string | null} [policy]
+     * @returns {string | undefined}
+     */
+    beginSelectionGesture(mode, policy) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            var ptr0 = isLikeNone(mode) ? 0 : passStringToWasm0(mode, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            var len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(policy) ? 0 : passStringToWasm0(policy, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            var len1 = WASM_VECTOR_LEN;
+            wasm.diagram_beginSelectionGesture(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            let v3;
+            if (r0 !== 0) {
+                v3 = getStringFromWasm0(r0, r1);
+                wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            }
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Roll back the matching preview. True means selection changed and should be redrawn.
+     * @param {string} token
+     * @returns {boolean}
+     */
+    cancelSelectionGesture(token) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(token, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.diagram_cancelSelectionGesture(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Clear selection and revoke the current drag. A delayed cancellation cannot restore it.
+     * @returns {boolean}
+     */
+    clearSelection() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_clearSelection(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Commit the latest accepted preview. True means committed, not selection-changed.
+     * @param {string} token
+     * @returns {boolean}
+     */
+    commitSelectionGesture(token) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(token, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.diagram_commitSelectionGesture(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
     destroy() {
         wasm.diagram_destroy(this.__wbg_ptr);
     }
@@ -48,10 +143,8 @@ export class Diagram {
         }
     }
     /**
-     * Return the nearest rendered edge index within a canvas-space tolerance.
-     *
-     * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
-     * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+     * Return the nearest rendered edge within a backing-store-pixel tolerance.
+     * Shares the draw viewport with node picking and excludes bundled-away paths.
      * @param {number} x
      * @param {number} y
      * @param {number} max_distance
@@ -73,11 +166,30 @@ export class Diagram {
         }
     }
     /**
-     * Return the laid-out node below a canvas-space pointer, if any.
-     *
-     * The query uses CGA rectangle containment against the latest render's layout, so it never
-     * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
-     * return `None`.
+     * Inspect the topmost node's interaction metadata without following a URL or calling JS.
+     * @param {number} x
+     * @param {number} y
+     * @returns {any}
+     */
+    hitTestInteraction(x, y) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_hitTestInteraction(retptr, this.__wbg_ptr, x, y);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Return the topmost node below a backing-store-pixel pointer, if any.
+     * Uses the actual draw viewport, including fit, padding and origin normalization.
+     * Resizing invalidates picking until redraw; this query never parses or lays out source.
      * @param {number} x
      * @param {number} y
      * @returns {string | undefined}
@@ -99,6 +211,47 @@ export class Diagram {
                 wasm.__wbindgen_export4(r0, r1 * 1, 1);
             }
             return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Revoke picking and roll back an in-progress drag after an external canvas clear/reset.
+     * Call even when assigning the SAME width/height: that clears pixels without a size change.
+     * Geometry and committed selection remain available to redraw().
+     */
+    invalidateFrame() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_invalidateFrame(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Move the primary keyboard selection, optionally extending the existing selected set.
+     * @param {string} direction
+     * @param {boolean | null} [extend]
+     * @returns {boolean}
+     */
+    navigateSelection(direction, extend) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(direction, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.diagram_navigateSelection(retptr, this.__wbg_ptr, ptr0, len0, isLikeNone(extend) ? 0xFFFFFF : extend ? 1 : 0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
@@ -145,6 +298,79 @@ export class Diagram {
         }
     }
     /**
+     * Preview a marquee from its pointer-down selection, not the previous preview.
+     * Captured pointers may be outside the canvas. Wrong/retired tokens have no side effects.
+     * @param {string} token
+     * @param {number} start_x
+     * @param {number} start_y
+     * @param {number} end_x
+     * @param {number} end_y
+     * @returns {boolean}
+     */
+    previewSelectionBox(token, start_x, start_y, end_x, end_y) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(token, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.diagram_previewSelectionBox(retptr, this.__wbg_ptr, ptr0, len0, start_x, start_y, end_x, end_y);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Preview an even-odd lasso from interleaved backing-store x/y coordinates.
+     * Length is bounded BEFORE copying out of JS memory. Invalid input throws without changing
+     * selection; polygon degeneracy is handled by the native selector as an unchanged preview.
+     * @param {string} token
+     * @param {Float64Array} values
+     * @returns {boolean}
+     */
+    previewSelectionLasso(token, values) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(token, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.diagram_previewSelectionLasso(retptr, this.__wbg_ptr, ptr0, len0, addBorrowedObject(values));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            heap[stack_pointer++] = undefined;
+        }
+    }
+    /**
+     * Redraw retained geometry and current selection. No parse or layout is performed.
+     * Returns false before the first render or while the backing store has zero size.
+     * @returns {boolean}
+     */
+    redraw() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_redraw(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * @param {string} input
      * @param {any | null} [config]
      * @returns {any}
@@ -155,6 +381,74 @@ export class Diagram {
             const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.diagram_render(retptr, this.__wbg_ptr, ptr0, len0, isLikeNone(config) ? 0 : addHeapObject(config));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Modifier click in backing-store pixels. Convert CSS coordinates once in the host.
+     * @param {number} x
+     * @param {number} y
+     * @param {string | null} [mode]
+     * @returns {boolean}
+     */
+    selectAt(x, y, mode) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            var ptr0 = isLikeNone(mode) ? 0 : passStringToWasm0(mode, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            var len0 = WASM_VECTOR_LEN;
+            wasm.diagram_selectAt(retptr, this.__wbg_ptr, x, y, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Select a placed author ID. An unknown ID leaves selection and active gestures unchanged.
+     * @param {string} id
+     * @param {string | null} [mode]
+     * @returns {boolean}
+     */
+    selectNode(id, mode) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(mode) ? 0 : passStringToWasm0(mode, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            var len1 = WASM_VECTOR_LEN;
+            wasm.diagram_selectNode(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return r0 !== 0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Stable author IDs, primary keyboard anchor, active token and usable-frame availability.
+     * @returns {any}
+     */
+    selectionState() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_selectionState(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -872,6 +1166,10 @@ function __wbg_get_imports() {
             const ret = getObject(arg0)[arg1 >>> 0];
             return addHeapObject(ret);
         },
+        __wbg_get_index_f4750150bb3083b3: function(arg0, arg1) {
+            const ret = getObject(arg0)[arg1 >>> 0];
+            return ret;
+        },
         __wbg_get_with_ref_key_6412cf3094599694: function(arg0, arg1) {
             const ret = getObject(arg0)[getObject(arg1)];
             return addHeapObject(ret);
@@ -904,6 +1202,16 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_instanceof_Float64Array_8a59377f9eec1b8b: function(arg0) {
+            let result;
+            try {
+                result = getObject(arg0) instanceof Float64Array;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
         __wbg_instanceof_Uint8Array_828cef2aaacafc31: function(arg0) {
             let result;
             try {
@@ -919,6 +1227,10 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbg_length_7f3c00c40364105e: function(arg0) {
+            const ret = getObject(arg0).length;
+            return ret;
+        },
+        __wbg_length_b5f0008bbf60cf59: function(arg0) {
             const ret = getObject(arg0).length;
             return ret;
         },
@@ -973,6 +1285,9 @@ function __wbg_get_imports() {
         __wbg_rect_c6f60004ffec8f09: function(arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).rect(arg1, arg2, arg3, arg4);
         },
+        __wbg_resetTransform_32fd5da93353bad2: function() { return handleError(function (arg0) {
+            getObject(arg0).resetTransform();
+        }, arguments); },
         __wbg_restore_c93ba7571816b182: function(arg0) {
             getObject(arg0).restore();
         },
@@ -1007,8 +1322,23 @@ function __wbg_get_imports() {
         __wbg_set_globalAlpha_ae4b85201dda64c5: function(arg0, arg1) {
             getObject(arg0).globalAlpha = arg1;
         },
+        __wbg_set_lineJoin_c1780f2096e6f970: function(arg0, arg1, arg2) {
+            getObject(arg0).lineJoin = getStringFromWasm0(arg1, arg2);
+        },
         __wbg_set_lineWidth_cc15473552c60c9c: function(arg0, arg1) {
             getObject(arg0).lineWidth = arg1;
+        },
+        __wbg_set_shadowBlur_216915d92b179fbe: function(arg0, arg1) {
+            getObject(arg0).shadowBlur = arg1;
+        },
+        __wbg_set_shadowColor_0e2bd5d3400b0d3b: function(arg0, arg1, arg2) {
+            getObject(arg0).shadowColor = getStringFromWasm0(arg1, arg2);
+        },
+        __wbg_set_shadowOffsetX_0dbcf4ca8295e0c3: function(arg0, arg1) {
+            getObject(arg0).shadowOffsetX = arg1;
+        },
+        __wbg_set_shadowOffsetY_de495fcc5a5ae809: function(arg0, arg1) {
+            getObject(arg0).shadowOffsetY = arg1;
         },
         __wbg_set_strokeStyle_d51608fa918b53d4: function(arg0, arg1, arg2) {
             getObject(arg0).strokeStyle = getStringFromWasm0(arg1, arg2);

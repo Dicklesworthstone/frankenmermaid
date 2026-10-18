@@ -555,6 +555,32 @@ diagram.on('rendered', () => console.log('done'));
 diagram.destroy();
 ```
 
+### SVG labels and detail levels
+
+Browser SVG rendering preserves complete node labels, edge labels, and subgraph titles by
+default, including explicit line breaks. Zoom enlarges the same complete text. These options
+apply to `init`, `renderSvg`, `renderDeck`, and worker render configuration:
+
+| Option | Browser default | Behavior |
+|---|---|---|
+| `preserveLabels` | `true` | Keeps authored text through detail changes, wrapping, and resource-pressure reductions. |
+| `detailTier` | `"auto"` | Requests `"auto"`, `"compact"`, `"normal"`, or `"rich"` typography and decoration. Resource guards can reduce the selected tier. |
+
+Options can be top-level or nested under `svg`; nested values take precedence. Compact
+typography still includes every label when `preserveLabels` is enabled. To deliberately
+produce an abbreviated overview with shortened node labels and hidden edge/subgraph labels:
+
+```ts
+const overview = renderSvg(source, {
+  detailTier: 'compact',
+  preserveLabels: false,
+});
+```
+
+`data-detail-tier` reports the selected presentation tier; `data-label-detail="full"`
+identifies SVGs with label preservation enabled. Layout budgets and decoration reductions
+remain active independently of this text policy.
+
 The wasm-bindgen surface intentionally stays narrow: ten free functions (`init`, `renderSvg`, `renderDeck`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
 
 The WASM build integrates the same `IncrementalLayoutEngine` used by the CLI, so successive renders of near-identical input skip stages whose dependency-graph inputs have not changed.

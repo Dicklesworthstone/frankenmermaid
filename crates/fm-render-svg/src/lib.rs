@@ -180,6 +180,12 @@ pub struct SvgRenderConfig {
     pub custom_icons: BTreeMap<String, CustomSvgIcon>,
     /// Detail tier selection (`auto`, `compact`, `normal`, `rich`).
     pub detail_tier: MermaidTier,
+    /// Preserve complete authored labels independently of the selected detail tier.
+    ///
+    /// Interactive SVG hosts enable this so zoom can reveal every label without rerendering.
+    /// Typography and decoration still follow the detail tier and resource degradation plan.
+    /// The generic renderer defaults to adaptive labels for explicitly budgeted overviews.
+    pub preserve_labels: bool,
     /// Minimum readable font size in pixels.
     pub min_font_size: f32,
     /// Whether to embed print-optimized CSS rules.
@@ -283,6 +289,7 @@ impl Default for SvgRenderConfig {
             node_icon_position: NodeIconPosition::Above,
             custom_icons: BTreeMap::new(),
             detail_tier: MermaidTier::Auto,
+            preserve_labels: false,
             min_font_size: 8.0,
             print_optimized: true,
             a11y: A11yConfig::full(),
@@ -319,6 +326,7 @@ const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
 struct SvgBatchFragments {
     edge_svg: String,
     edge_ends: Vec<usize>,
+    edge_label_positions: Vec<Option<fm_layout::LayoutPoint>>,
     node_svg: String,
     node_ends: Vec<usize>,
     reused_edges: usize,
@@ -1952,6 +1960,9 @@ fn render_scene_document_with_ir(
         .data("groups", &group_count.to_string())
         .data("paths", &path_count.to_string())
         .data("texts", &text_count.to_string());
+    if config.preserve_labels {
+        doc = doc.data("label-detail", "full");
+    }
 
     let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
@@ -1967,6 +1978,9 @@ fn render_scene_document_with_ir(
         );
         strip_unused_theme_css(&mut theme_css, ir);
         css.push_str(&theme_css);
+        if config.preserve_labels {
+            css.push_str(r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#);
+        }
     }
     push_state_css(&mut css, config, effects_enabled, true);
     if config.animations_enabled {
@@ -3302,7 +3316,7 @@ fn resolve_detail_profile(
         }
     };
 
-    match tier {
+    let mut profile = match tier {
         RenderDetailTier::Rich => RenderDetailProfile {
             tier,
             show_node_labels: true,
@@ -3342,7 +3356,18 @@ fn resolve_detail_profile(
                 enable_shadows: false,
             }
         }
+    };
+    if config.preserve_labels {
+        // A detail downgrade is a presentation decision, not permission to remove information
+        // from an interactive document. In particular, a later CSS zoom cannot reconstruct text
+        // omitted during SVG generation (GH#14).
+        profile.show_node_labels = true;
+        profile.show_edge_labels = true;
+        profile.show_cluster_labels = true;
+        profile.node_label_max_chars = None;
+        profile.edge_label_max_chars = None;
     }
+    profile
 }
 
 fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient> {
@@ -3927,7 +3952,7 @@ fn render_edges_with_batch_reuse(
     layout: &DiagramLayout,
     reuse: &mut SvgBatchFragmentReuse<'_>,
 ) {
-    let common = reusable_edge_prefix_len(
+    let mut common = reusable_edge_prefix_len(
         reuse,
         context.ir,
         layout,
@@ -3940,6 +3965,28 @@ fn render_edges_with_batch_reuse(
             .previous
             .map_or(0, |previous| previous.edge_ends.len()),
     );
+    if let Some(positions) = context.preserved_label_positions {
+        // Node/frame changes and earlier labels can move a label with an unchanged route.
+        // Retain the actual placement, not a reference to geometry that suffix transplantation
+        // can mutate before reuse. The existing prefix proof certifies text/style/route identity.
+        if let Some(previous) = reuse.previous {
+            let position_bits = |positions: &[Option<fm_layout::LayoutPoint>], index: usize| {
+                positions
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|point| (point.x.to_bits(), point.y.to_bits()))
+            };
+            for (index, edge) in edges[..common].iter().enumerate() {
+                if position_bits(&previous.edge_label_positions, edge.edge_index)
+                    != position_bits(positions, edge.edge_index)
+                {
+                    common = index;
+                    break;
+                }
+            }
+        }
+        reuse.next.edge_label_positions.extend_from_slice(positions);
+    }
     let prefix_end = common
         .checked_sub(1)
         .and_then(|index| reuse.previous?.edge_ends.get(index).copied())
@@ -4146,6 +4193,9 @@ fn render_layout_to_svg(
         .data("edges", &ir.edges.len().to_string())
         .data("type", ir.diagram_type.as_str())
         .data("detail-tier", detail_tier_name(detail.tier));
+    if config.preserve_labels {
+        doc = doc.data("label-detail", "full");
+    }
 
     let theme = resolve_theme(Some(ir), config);
     let classdef_css = collect_classdef_css(ir);
@@ -4272,6 +4322,11 @@ fn render_layout_to_svg(
             ir.edges.iter().any(|edge| edge.label.is_some()),
         );
         strip_unused_theme_css(&mut css, Some(ir));
+        if config.preserve_labels {
+            // Keep glyph metrics in SVG units while zooming. optimizeLegibility can quantize
+            // tiny text to device pixels and retain those distorted bounds after zoom changes.
+            css.push_str(r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#);
+        }
         push_state_css(
             &mut css,
             config,
@@ -5218,6 +5273,8 @@ fn render_layout_to_svg(
         .map(|nc| (nc.node_index, nc.tier))
         .collect();
 
+    let preserved_label_positions =
+        resolve_preserved_edge_label_positions(ir, layout, config, detail);
     let edge_context = EdgeRenderContext {
         ir,
         offset_x,
@@ -5226,6 +5283,7 @@ fn render_layout_to_svg(
         detail,
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
+        preserved_label_positions: preserved_label_positions.as_deref(),
         // Computed ONCE here; the per-edge helper used to recompute it, re-parsing every flow
         // value on every edge.
         sankey_widest_flow: sankey_widest_flow(ir),
@@ -14072,8 +14130,8 @@ struct FittedNodeLabel<'a> {
 ///
 /// Ordinary labels return a borrowed string and preserve the existing fast path. Overflowing labels
 /// first use word-boundary wrapping, then reduce their size no lower than 10px (or a stricter
-/// configured minimum), and finally ellipsize the final visible line. This keeps SVG labels readable
-/// without allowing a long identifier to draw outside its node.
+/// configured minimum), and finally ellipsize the final visible line unless content preservation is
+/// enabled. Interactive hosts keep all authored text even when supplied geometry underestimates it.
 fn fit_node_label_text<'a>(
     label: &'a str,
     max_width: f32,
@@ -14132,7 +14190,7 @@ fn fit_node_label_text<'a>(
         || lines
             .iter()
             .any(|line| calibrated_width(line, fitted_size) > max_width);
-    if was_truncated {
+    if was_truncated && !config.preserve_labels {
         lines.truncate(visible_lines);
         if let Some(last) = lines.last_mut() {
             *last = ellipsize_label_line(last, max_width, fitted_size, &calibrated_width);
@@ -14611,6 +14669,7 @@ fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: 
 }
 
 /// Render a single edge to an SVG element.
+#[derive(Clone, Copy)]
 struct EdgeRenderContext<'a> {
     ir: &'a MermaidDiagramIr,
     offset_x: f32,
@@ -14619,6 +14678,9 @@ struct EdgeRenderContext<'a> {
     detail: RenderDetailProfile,
     colors: &'a ThemeColors,
     accessible_node_labels: Option<&'a [&'a str]>,
+    /// Positions indexed by IR edge index, resolved once in paint order for preserved flowcharts.
+    /// Other diagrams and adaptive overviews retain their existing label placement.
+    preserved_label_positions: Option<&'a [Option<fm_layout::LayoutPoint>]>,
     /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
     ///
     /// Every ribbon's width is its value normalised against this ONE number, so it is invariant
@@ -14999,13 +15061,18 @@ fn write_common_edge_full_fragment_into<const A11Y: bool, F>(
 /// midpoint, exactly as the labeled-edge fragments need them. Shared by `render_edge` (slow/`Element`
 /// path) and `render_edge_into` (streaming path) so both derive byte-identical label text + position.
 fn compute_edge_label<'a>(
-    ir: &'a MermaidDiagramIr,
     edge_path: &LayoutEdgePath,
-    edge_index: usize,
-    detail: RenderDetailProfile,
-    offset_x: f32,
-    offset_y: f32,
+    context: &EdgeRenderContext<'a>,
 ) -> Option<(Cow<'a, str>, f32, f32)> {
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        detail,
+        preserved_label_positions,
+        ..
+    } = *context;
+    let edge_index = edge_path.edge_index;
     // ⚠️ A SANKEY LINK CARRIES NO LABEL AT ALL, and this is parity, not a simplification. mermaid
     // 11.15.0 draws text only on the NODES: for `A,B,10` its drawn text is exactly
     // `["A\n10", "B\n10"]`, with no standalone `10` anywhere — measured in Chromium 151 against the
@@ -15063,11 +15130,186 @@ fn compute_edge_label<'a>(
             label_text
         };
         // The anchor rule is fm-layout's, shared with the canvas and the render scene.
-        let anchor = fm_layout::edge_label_position(edge_path);
-        Some((label_text, anchor.x + offset_x, anchor.y + offset_y - 8.0))
+        let anchor = preserved_label_positions
+            .and_then(|positions| positions.get(edge_index).copied().flatten())
+            .unwrap_or_else(|| fm_layout::edge_label_position(edge_path));
+        let y = if preserved_label_positions.is_some() {
+            anchor.y + offset_y
+        } else {
+            // Retain the legacy operation order as well as its offset.
+            anchor.y + offset_y - 8.0
+        };
+        Some((label_text, anchor.x + offset_x, y))
     } else {
         None
     }
+}
+
+fn edge_label_dimensions(
+    label: &str,
+    font_size: f32,
+    avg_char_width: f32,
+    line_height: f32,
+) -> (f32, f32, f32) {
+    let line_count = label.lines().count().max(1) as f32;
+    let max_chars = label
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let text_height = (line_count - 1.0) * font_size * line_height;
+    (
+        (max_chars as f32 * avg_char_width) + 8.0 + 20.0,
+        text_height + font_size + 14.0,
+        text_height,
+    )
+}
+
+/// Resolve once in the same order in which ordinary edge groups are painted. Keeping earlier
+/// plates as obstacles prevents a later opaque backing box from hiding an already placed label.
+fn resolve_preserved_edge_label_positions(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+) -> Option<Vec<Option<fm_layout::LayoutPoint>>> {
+    if !config.preserve_labels || ir.diagram_type != DiagramType::Flowchart {
+        return None;
+    }
+    let mut positions = vec![None; ir.edges.len()];
+    let mut plates = Vec::new();
+    for path in &layout.edges {
+        if path.bundled || path.points.len() < 2 || !detail.show_edge_labels {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        if edge.arrow == fm_core::ArrowType::Invisible {
+            continue;
+        }
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let (width, height, _) = edge_label_dimensions(
+            &label.text,
+            detail.edge_font_size,
+            config.avg_char_width,
+            config.line_height,
+        );
+        let position = clear_edge_label_position(
+            fm_layout::edge_label_position(path),
+            width,
+            height,
+            layout,
+            config.padding,
+            &plates,
+        );
+        positions[path.edge_index] = Some(position);
+        plates.push(fm_layout::LayoutRect {
+            x: position.x - width / 2.0,
+            y: position.y - height / 2.0,
+            width,
+            height,
+        });
+    }
+    Some(positions)
+}
+
+/// The endpoints of the connected forbidden interval containing `position`. Merging projections
+/// handles chains of obstacles without an iterative nudge that can oscillate between nodes.
+fn edge_label_exclusion_interval(mut intervals: Vec<(f32, f32)>, position: f32) -> (f32, f32) {
+    intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut merged: Option<(f32, f32)> = None;
+    for (start, end) in intervals {
+        if let Some((left, right)) = merged {
+            if start < right {
+                merged = Some((left, right.max(end)));
+                continue;
+            }
+            if left < position && position < right {
+                return (left, right);
+            }
+        }
+        merged = Some((start, end));
+    }
+    merged
+        .filter(|(left, right)| *left < position && position < *right)
+        .unwrap_or((position, position))
+}
+
+/// Keep the padded label box clear of nodes and earlier plates, starting at the routed midpoint.
+/// Only a colliding label allocates interval lists. There are exactly four candidate moves (nearest free +/- X/Y),
+/// with a deterministic tie order; candidates outside the existing padded SVG frame are rejected.
+fn clear_edge_label_position(
+    anchor: fm_layout::LayoutPoint,
+    width: f32,
+    height: f32,
+    layout: &DiagramLayout,
+    padding: f32,
+    placed_labels: &[fm_layout::LayoutRect],
+) -> fm_layout::LayoutPoint {
+    let half_width = width / 2.0;
+    let half_height = height / 2.0;
+    // Includes the backing-plate stroke and a visible gap to the node's stroke.
+    let clearance_x = half_width + 2.0;
+    let clearance_y = half_height + 2.0;
+    let obstacles = || {
+        layout
+            .nodes
+            .iter()
+            .map(|node| &node.bounds)
+            .chain(placed_labels)
+    };
+    let overlaps_x = |bounds: &fm_layout::LayoutRect| {
+        anchor.x > bounds.x - clearance_x && anchor.x < bounds.x + bounds.width + clearance_x
+    };
+    let overlaps_y = |bounds: &fm_layout::LayoutRect| {
+        anchor.y > bounds.y - clearance_y && anchor.y < bounds.y + bounds.height + clearance_y
+    };
+    if !obstacles().any(|bounds| overlaps_x(bounds) && overlaps_y(bounds)) {
+        return anchor;
+    }
+    let mut x_intervals = Vec::new();
+    let mut y_intervals = Vec::new();
+    for bounds in obstacles() {
+        if overlaps_y(bounds) {
+            x_intervals.push((
+                bounds.x - clearance_x,
+                bounds.x + bounds.width + clearance_x,
+            ));
+        }
+        if overlaps_x(bounds) {
+            y_intervals.push((
+                bounds.y - clearance_y,
+                bounds.y + bounds.height + clearance_y,
+            ));
+        }
+    }
+    let (left, right) = edge_label_exclusion_interval(x_intervals, anchor.x);
+    let (top, bottom) = edge_label_exclusion_interval(y_intervals, anchor.y);
+    let mut closest = anchor;
+    let mut distance = f32::INFINITY;
+    for (x, y) in [
+        (anchor.x, bottom),
+        (anchor.x, top),
+        (right, anchor.y),
+        (left, anchor.y),
+    ] {
+        if x - half_width < layout.bounds.x - padding
+            || x + half_width > layout.bounds.x + layout.bounds.width + padding
+            || y - half_height < layout.bounds.y - padding
+            || y + half_height > layout.bounds.y + layout.bounds.height + padding
+        {
+            continue;
+        }
+        let candidate_distance = (x - anchor.x).abs() + (y - anchor.y).abs();
+        if candidate_distance < distance {
+            closest = fm_layout::LayoutPoint { x, y };
+            distance = candidate_distance;
+        }
+    }
+    closest
 }
 
 /// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
@@ -15099,6 +15341,7 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     ly: f32,
     label_font_size: f32,
     avg_char_width: f32,
+    centered: bool,
     from_label: Option<&str>,
     to_label: Option<&str>,
     colors: &ThemeColors,
@@ -15106,9 +15349,13 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     use crate::attributes::{
         AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
     };
-    let label_width = (label_str.chars().count() as f32 * avg_char_width) + 8.0 + 20.0;
-    let label_height = label_font_size + 14.0;
-    let start_y = ly + (label_font_size / 4.0);
+    let (label_width, label_height, _) =
+        edge_label_dimensions(label_str, label_font_size, avg_char_width, 1.0);
+    let start_y = if centered {
+        ly
+    } else {
+        ly + label_font_size / 4.0
+    };
     out.push_str("<g id=\"fm-edge-");
     let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
     out.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
@@ -15129,7 +15376,10 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     out.push_str("<rect x=\"");
     let _ = write_number_into(out, lx - label_width / 2.0);
     out.push_str("\" y=\"");
-    let _ = write_number_into(out, ly - label_height / 2.0 - 1.0);
+    let _ = write_number_into(
+        out,
+        ly - label_height / 2.0 - if centered { 0.0 } else { 1.0 },
+    );
     out.push_str("\" width=\"");
     let _ = write_number_into(out, label_width);
     out.push_str("\" height=\"");
@@ -15142,11 +15392,21 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     let _ = write_number_into(out, lx);
     out.push_str("\" y=\"");
     let _ = write_number_into(out, start_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    out.push_str("\" text-anchor=\"middle\"");
+    if centered {
+        out.push_str(" dominant-baseline=\"central\"");
+    }
+    out.push_str(" font-size=\"");
     let _ = write_number_into(out, label_font_size);
     out.push_str("\" fill=\"");
     let _ = write_escaped_attr(out, &colors.text);
-    out.push_str("\" class=\"edge-label\">");
+    out.push_str("\" class=\"edge-label\"");
+    if centered {
+        out.push_str(" style=\"font-size:");
+        let _ = write_number_into(out, label_font_size);
+        out.push_str("px\"");
+    }
+    out.push('>');
     let _ = write_escaped_text(out, label_str);
     if A11Y {
         out.push_str("</text><title>");
@@ -15202,6 +15462,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         colors,
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
+        preserved_label_positions,
     } = *context;
 
     let edge_index = edge_path.edge_index;
@@ -15542,7 +15803,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
     // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
     // `compute_edge_label` so the streaming path derives byte-identical text + position.
-    let edge_label = compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y);
+    let edge_label = compute_edge_label(edge_path, context);
 
     // Whole labeled-edge fast fragment, hoisted above `elem`: for the common single-line solid-`Arrow`
     // label under embedded CSS + default a11y, stream `<g><path/><rect/><text/><title/></g>` and RETURN
@@ -15591,6 +15852,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 *ly,
                 label_font_size,
                 config.avg_char_width,
+                preserved_label_positions.is_some(),
                 from_label,
                 to_label,
                 colors,
@@ -15707,26 +15969,21 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
-        let lines_count = label_text.lines().count().max(1) as f32;
-        let max_line_len = label_text
-            .lines()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(0);
-        let label_text_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
-        let label_padding_x = 10.0;
-        let label_width = label_text_width + (label_padding_x * 2.0);
-
         let label_font_size = detail.edge_font_size;
-        let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
-        let label_height = total_text_height + label_font_size + 14.0;
-
-        let start_y = ly - (total_text_height / 2.0) + (label_font_size / 4.0);
+        let (label_width, label_height, total_text_height) = edge_label_dimensions(
+            label_text,
+            label_font_size,
+            config.avg_char_width,
+            config.line_height,
+        );
+        let centered = preserved_label_positions.is_some();
+        let start_y =
+            ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
 
         group = group.child(
             Element::rect()
                 .x(lx - label_width / 2.0)
-                .y(ly - label_height / 2.0 - 1.0)
+                .y(ly - label_height / 2.0 - if centered { 0.0 } else { 1.0 })
                 .width(label_width)
                 .height(label_height)
                 .fill(&colors.background)
@@ -15737,18 +15994,30 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         );
 
         // Add label text
-        group = group.child(
-            TextBuilder::new(label_text)
-                .x(lx)
-                .y(start_y)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(label_font_size)
-                .line_height(config.line_height)
-                .anchor(TextAnchor::Middle)
-                .fill(&colors.text)
-                .class("edge-label")
-                .build(),
-        );
+        let mut text = TextBuilder::new(label_text)
+            .x(lx)
+            .y(start_y)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(label_font_size)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .baseline(if centered {
+                text::DominantBaseline::Central
+            } else {
+                text::DominantBaseline::Auto
+            })
+            .fill(&colors.text)
+            .class("edge-label")
+            .build();
+        if centered {
+            // The theme's relative .edge-label font-size otherwise overrides the SVG attribute,
+            // so the drawn glyphs would disagree with the dimensions used for collision checks.
+            let mut style = String::from("font-size:");
+            let _ = attributes::write_number_into(&mut style, label_font_size);
+            style.push_str("px");
+            text = text.attr("style", &style);
+        }
+        group = group.child(text);
 
         // A C4 relationship's TECHNOLOGY, drawn as its own italic row beneath the label.
         //
@@ -15947,6 +16216,7 @@ fn render_edge_body_into(
         colors,
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
+        preserved_label_positions,
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
@@ -16004,7 +16274,7 @@ fn render_edge_body_into(
         && !config.include_source_spans
         && let Some(edge) = ir_edge
         && let Some((label_text, lx, ly)) =
-            compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y)
+            compute_edge_label(edge_path, context)
     {
         let label_str = label_text.as_ref();
         // A sankey flow's WIDTH is its value (bd-e69x). This labeled-edge fast path is the one
@@ -16029,6 +16299,7 @@ fn render_edge_body_into(
                     ly,
                     detail.edge_font_size,
                     config.avg_char_width,
+                    preserved_label_positions.is_some(),
                     from_label,
                     to_label,
                     colors,
@@ -16048,6 +16319,7 @@ fn render_edge_body_into(
                     ly,
                     detail.edge_font_size,
                     config.avg_char_width,
+                    preserved_label_positions.is_some(),
                     None,
                     None,
                     colors,
@@ -16985,6 +17257,413 @@ mod tests {
         }
     }
 
+    fn edge_label_test_node(
+        index: usize,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> LayoutNodeBox {
+        LayoutNodeBox {
+            node_index: index,
+            node_id: ((b'A' + index as u8) as char).to_string(),
+            rank: index,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+        }
+    }
+
+    fn edge_label_test_scene() -> (MermaidDiagramIr, DiagramLayout) {
+        let ir = fm_parser::parse(
+            "flowchart LR\nA[Alpha]-->B[Beta]\nB-->|U uživatelek aplikace|C[Gamma]\nD[Obstacle]",
+        )
+        .ir;
+        let mut layout = frame_test_layout(0.0, 0.0, 700.0, 360.0);
+        layout.nodes = vec![
+            edge_label_test_node(0, 0.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(1, 160.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(2, 520.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(3, 300.0, 220.0, 180.0, 40.0),
+        ];
+        for (edge_index, (start, end)) in [(80.0, 160.0), (240.0, 520.0)].into_iter().enumerate() {
+            layout.edges.push(LayoutEdgePath {
+                edge_index,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: start, y: 100.0 },
+                    fm_layout::LayoutPoint { x: end, y: 100.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            });
+        }
+        (ir, layout)
+    }
+
+    #[test]
+    fn label_clearance_merges_obstacle_chains_and_respects_the_existing_frame() {
+        assert_eq!(
+            edge_label_exclusion_interval(vec![(40.0, 60.0), (10.0, 30.0), (20.0, 50.0)], 25.0),
+            (10.0, 60.0)
+        );
+        let mut layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        layout
+            .nodes
+            .push(edge_label_test_node(0, 0.0, 0.0, 100.0, 70.0));
+        let anchor = fm_layout::LayoutPoint { x: 50.0, y: 65.0 };
+        let clear = clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]);
+        assert_eq!(clear, fm_layout::LayoutPoint { x: 50.0, y: 82.0 });
+        assert_eq!(
+            clear.y - 10.0 - 70.0,
+            2.0,
+            "the whole plate has a gap to the node"
+        );
+        assert!(clear.y + 10.0 <= layout.bounds.height);
+
+        // No free axis candidate fits a completely occupied frame. Retain the routed anchor
+        // instead of hiding the label outside the exported viewBox or iterating without a bound.
+        layout.nodes[0].bounds.height = 100.0;
+        assert_eq!(
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
+            anchor
+        );
+        layout.nodes.clear();
+        assert_eq!(
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
+            anchor
+        );
+    }
+
+    #[test]
+    fn preserved_edge_labels_share_font_baseline_and_clearance_in_both_svg_paths() {
+        let colors = ThemeColors::default();
+        for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+            for a11y in [A11yConfig::full(), A11yConfig::none()] {
+                for arrow in [ArrowType::Arrow, ArrowType::DottedArrow] {
+                    for label in [
+                        "U uživatelek aplikace",
+                        "U uživatelek aplikace\nDalší informace",
+                    ] {
+                        let (mut ir, mut layout) = edge_label_test_scene();
+                        let id = ir.edges[1].label.expect("labeled edge");
+                        ir.labels[id.0].text = label.to_string();
+                        ir.edges[1].arrow = arrow;
+                        layout.nodes[3] = edge_label_test_node(3, 400.0, 72.0, 180.0, 20.0);
+                        let config = SvgRenderConfig {
+                            detail_tier: tier,
+                            preserve_labels: true,
+                            a11y: a11y.clone(),
+                            ..Default::default()
+                        };
+                        let detail = resolve_detail_profile(700.0, 360.0, &config);
+                        let positions =
+                            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail)
+                                .expect("preserved positions");
+                        let context = EdgeRenderContext {
+                            ir: &ir,
+                            offset_x: 5.0,
+                            offset_y: 7.0,
+                            config: &config,
+                            detail,
+                            colors: &colors,
+                            accessible_node_labels: None,
+                            preserved_label_positions: Some(&positions),
+                            sankey_widest_flow: None,
+                        };
+                        let edge = &layout.edges[1];
+                        let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
+                        let (_, height, _) = edge_label_dimensions(
+                            label,
+                            detail.edge_font_size,
+                            config.avg_char_width,
+                            config.line_height,
+                        );
+                        assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
+                        assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
+                        let mut streamed = String::new();
+                        render_edge_into(&mut streamed, edge, &context);
+                        let element = render_edge(edge, &context).render();
+                        assert_eq!(streamed, element, "{tier:?}/{arrow:?}/{label}");
+                        assert!(streamed.contains("dominant-baseline=\"central\""));
+                        let mut font = String::new();
+                        let _ = attributes::write_number_into(&mut font, detail.edge_font_size);
+                        assert!(streamed.contains(&format!("style=\"font-size:{font}px\"")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserved_labels_clear_earlier_plates_in_actual_paint_order() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        layout.nodes.clear();
+        ir.edges[0].label = Some(IrLabelId(ir.labels.len()));
+        ir.labels.push(IrLabel {
+            text: "Ano".to_string(),
+            span: Span::default(),
+        });
+        for edge in &mut layout.edges {
+            edge.points = [
+                fm_layout::LayoutPoint { x: 100.0, y: 100.0 },
+                fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+            ]
+            .into_iter()
+            .collect();
+        }
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let detail = resolve_detail_profile(700.0, 360.0, &config);
+        let colors = ThemeColors::default();
+        let anchor = fm_layout::LayoutPoint { x: 200.0, y: 100.0 };
+        for reversed in [false, true] {
+            if reversed {
+                layout.edges.reverse();
+            }
+            let positions = resolve_preserved_edge_label_positions(&ir, &layout, &config, detail)
+                .expect("preserved positions");
+            let first_index = layout.edges[0].edge_index;
+            let last_index = layout.edges[1].edge_index;
+            assert_eq!(positions[first_index], Some(anchor));
+            let last = positions[last_index].expect("second position");
+            assert_eq!(last.x, anchor.x);
+            assert!(
+                (last.y - anchor.y - (detail.edge_font_size + 16.0)).abs() < 0.001,
+                "both whole plates have a two-pixel gap"
+            );
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+                preserved_label_positions: Some(&positions),
+                sankey_widest_flow: None,
+            };
+            for edge in &layout.edges {
+                let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
+                assert_eq!(
+                    positions[edge.edge_index],
+                    Some(fm_layout::LayoutPoint { x, y })
+                );
+                let mut streamed = String::new();
+                render_edge_into(&mut streamed, edge, &context);
+                assert_eq!(streamed, render_edge(edge, &context).render());
+            }
+        }
+
+        // A non-painted edge must not reserve space and displace a visible label.
+        let hidden = layout.edges[0].edge_index;
+        let visible = layout.edges[1].edge_index;
+        ir.edges[hidden].arrow = ArrowType::Invisible;
+        let positions =
+            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        assert_eq!(positions[hidden], None);
+        assert_eq!(positions[visible], Some(anchor));
+        ir.edges[hidden].arrow = ArrowType::Arrow;
+        layout.edges[0].bundled = true;
+        let positions =
+            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        assert_eq!(positions[hidden], None);
+        assert_eq!(positions[visible], Some(anchor));
+    }
+
+    #[test]
+    fn preserved_placement_does_not_change_sequence_or_adaptive_edge_geometry() {
+        for (diagram_type, preserve_labels) in [
+            (DiagramType::Flowchart, false),
+            (DiagramType::Sequence, false),
+            (DiagramType::Sequence, true),
+        ] {
+            let (mut ir, layout) = edge_label_test_scene();
+            ir.diagram_type = diagram_type;
+            let config = SvgRenderConfig {
+                detail_tier: MermaidTier::Rich,
+                preserve_labels,
+                ..Default::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let fragment = svg
+                .split_once("id=\"fm-edge-1\"")
+                .expect("edge group")
+                .1
+                .split_once("</g>")
+                .expect("edge end")
+                .0;
+            assert!(!fragment.contains("dominant-baseline=\"central\""));
+            assert!(!fragment.contains("style=\"font-size:"));
+            let detail = resolve_detail_profile(700.0, 360.0, &config);
+            let frame = svg_frame(&ir, &layout, &config);
+            let mut expected_y = String::new();
+            let _ = attributes::write_number_into(
+                &mut expected_y,
+                100.0 + frame.offset_y - 8.0 + detail.edge_font_size / 4.0,
+            );
+            let text = fragment.split_once("<text ").expect("edge text").1;
+            assert!(
+                text.contains(&format!("y=\"{expected_y}\"")),
+                "{diagram_type:?}/{preserve_labels}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_label_reuse_tracks_unrelated_obstacles_and_frame_changes() {
+        let (ir, base) = edge_label_test_scene();
+        let ir = Arc::new(ir);
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            font_size: 16.0,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let prefix = CertifiedSvgBatchPrefix::new(Arc::from("unchanged-label-prefix"), 3, 2);
+        for certified in [false, true] {
+            let mut renderer = SvgBatchRenderer::default();
+            let render = |renderer: &mut SvgBatchRenderer, layout: DiagramLayout| {
+                let expected = render_svg_with_layout(&ir, &layout, &config);
+                let layout = Arc::new(layout);
+                let actual = if certified {
+                    renderer.render_borrowed(&ir, layout, &config, Some(prefix.clone()))
+                } else {
+                    renderer.render(Arc::clone(&ir), layout, &config)
+                };
+                assert_eq!(actual, expected, "certified={certified}");
+            };
+            render(&mut renderer, base.clone());
+            let mut far = base.clone();
+            far.nodes[3].bounds.y += 20.0;
+            render(&mut renderer, far);
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                2
+            );
+
+            let mut blocked = base.clone();
+            blocked.nodes[3] = edge_label_test_node(3, 400.0, 72.0, 180.0, 20.0);
+            assert_eq!(blocked.edges, base.edges, "no edge route changed");
+            render(&mut renderer, blocked.clone());
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                1,
+                "only the prefix before the affected label can be reused"
+            );
+            render(&mut renderer, blocked.clone());
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                2
+            );
+
+            // Same nodes, routes, offsets, and explicit detail tier; only the available frame
+            // changes. Its lower edge now rules out the formerly closest downward adjustment.
+            blocked.bounds.height = 120.0;
+            render(&mut renderer, blocked);
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn transplanted_path_labels_revalidate_the_previous_placement() {
+        let make_input = |tail: &str| {
+            let mut input = concat!(
+                "flowchart LR\n",
+                "subgraph Shared[\"Shared prefix\"]\n",
+                "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
+                "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
+                "C[Short]\nA-->B\n",
+                "B-->|A preserved prefix label that is long enough to reach the next variable suffix node|C\n",
+                "end\nC-->D",
+            ).to_string();
+            input.push_str(tail);
+            input.push_str("\nD-->E0");
+            // A long path selects the same tree specialization as the optimized batch workload.
+            for index in 0..48 {
+                input.push_str(&format!("\nE{index}-->E{}", index + 1));
+            }
+            input
+        };
+        let owned_inputs = [
+            make_input("[\"Short\"]"),
+            make_input("[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5\"]"),
+        ];
+        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut renderer = SvgBatchRenderer::default();
+        let mut previous_label = None;
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed.reusable_prefix.expect("certified prefix");
+                assert_eq!((prefix.node_count, prefix.edge_count), (3, 2));
+                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
+                let label = expected
+                    .split_once("id=\"fm-edge-1\"")
+                    .expect("edge group")
+                    .1
+                    .split_once("</g>")
+                    .expect("edge end")
+                    .0
+                    .to_string();
+                if let Some(previous_label) = previous_label.as_ref() {
+                    assert_ne!(
+                        previous_label, &label,
+                        "the growing suffix moves the prefix label"
+                    );
+                }
+                previous_label = Some(label);
+                let actual = renderer.layout_and_render_borrowed(
+                    parsed.ir,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+                let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+                assert!(
+                    snapshot.layout_prefix.is_some(),
+                    "tree transplant remains eligible"
+                );
+                if index > 0 {
+                    assert_eq!(snapshot.fragments.reused_nodes, 3);
+                    assert_eq!(snapshot.fragments.reused_edges, 1);
+                }
+            });
+        }
+    }
+
     fn render_common_rect_through_both_paths(config: &SvgRenderConfig) -> (String, String) {
         let ir = create_ir_with_single_node("N0", NodeShape::Rect);
         let colors = ThemeColors::default();
@@ -17727,6 +18406,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -17803,6 +18483,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -17905,6 +18586,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -18078,6 +18760,7 @@ mod tests {
             detail,
             colors: &colors,
             accessible_node_labels: None,
+            preserved_label_positions: None,
             sankey_widest_flow: sankey_widest_flow(&ir),
         };
 
@@ -18204,6 +18887,27 @@ mod tests {
             fitted.text.as_ref(),
             "extraordinarily-long-unbreakable-identifier"
         );
+    }
+
+    #[test]
+    fn content_preservation_keeps_text_when_supplied_geometry_is_too_small() {
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        for label in [
+            "extraordinarily-long-unbreakable-identifier",
+            "Připomenutí návštěvy a praktické informace\nNavazující komunikace napříč kanály",
+        ] {
+            let fitted = fit_node_label_text(label, 48.0, 16.0, 15.0, &config);
+            assert!(fitted.changed);
+            assert_eq!(fitted.font_size, 10.0);
+            assert!(!fitted.text.contains('…'));
+            assert_eq!(
+                fitted.text.split_whitespace().collect::<Vec<_>>(),
+                label.split_whitespace().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -19773,6 +20477,155 @@ mod tests {
         };
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("data-detail-tier=\"normal\""));
+    }
+
+    #[test]
+    fn preserving_labels_keeps_compact_typography_and_resource_simplification() {
+        let mut config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Compact,
+            reduce_decoration: true,
+            ..Default::default()
+        });
+        let detail = resolve_detail_profile(80.0, 60.0, &config);
+        assert_eq!(detail.tier, RenderDetailTier::Compact);
+        assert_eq!(detail.node_font_size, config.font_size * 0.78);
+        assert!(!detail.enable_shadows);
+        assert!(!config.shadows && !config.node_gradients && !config.glow_enabled);
+        assert!(detail.show_node_labels && detail.show_edge_labels && detail.show_cluster_labels);
+        assert!(detail.node_label_max_chars.is_none() && detail.edge_label_max_chars.is_none());
+
+        let ir = create_ir_with_single_node("zoomable-label", NodeShape::Rect);
+        let precision_css = r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            config.backend = backend;
+            for preserve_labels in [false, true] {
+                config.preserve_labels = preserve_labels;
+                let svg = render_svg_with_config(&ir, &config);
+                assert_eq!(svg.contains(precision_css), preserve_labels);
+                let (_, root) = svg.split_once("<svg ").unwrap();
+                let (root, _) = root.split_once('>').unwrap();
+                assert_eq!(root.contains("data-label-detail=\"full\""), preserve_labels);
+                if preserve_labels {
+                    assert!(
+                        svg.find(precision_css).unwrap()
+                            > svg.rfind("text-rendering:optimizeLegibility").unwrap(),
+                        "the exported preservation rule must override the theme's text hinting"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Read only drawn `<text>` content. The issue's broken SVG already preserved the complete
+    /// strings in `<title>`, `<desc>`, and `aria-label`, so whole-document substring assertions
+    /// would pass on exactly the artifact that prompted GH#14.
+    fn issue14_drawn_text(svg: &str) -> BTreeMap<String, usize> {
+        let mut labels = BTreeMap::new();
+        for element in svg.split("<text ").skip(1) {
+            let body = element
+                .split_once('>')
+                .expect("text opening tag")
+                .1
+                .split_once("</text>")
+                .expect("text closing tag")
+                .0;
+            let label = if body.contains("<tspan ") {
+                body.split("<tspan ")
+                    .skip(1)
+                    .map(|span| {
+                        span.split_once('>')
+                            .expect("tspan opening tag")
+                            .1
+                            .split_once("</tspan>")
+                            .expect("tspan closing tag")
+                            .0
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                body.to_string()
+            };
+            let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            *labels.entry(normalized).or_default() += 1;
+        }
+        labels
+    }
+
+    #[test]
+    fn issue14_preserves_every_drawn_label_at_all_detail_tiers() {
+        let parsed = fm_parser::parse(include_str!("../tests/fixtures/issue14_omnichannel.mmd"));
+        let ir = &parsed.ir;
+        assert_eq!(ir.nodes.len(), 24);
+        assert_eq!(ir.edges.len(), 43);
+        assert_eq!(ir.clusters.len(), 2);
+        assert_eq!(
+            ir.edges.iter().filter(|edge| edge.label.is_some()).count(),
+            24
+        );
+
+        let mut expected = BTreeMap::<String, usize>::new();
+        for label in ir
+            .nodes
+            .iter()
+            .map(|node| ir.node_display_text(node))
+            .chain(
+                ir.edges
+                    .iter()
+                    .filter_map(|edge| edge.label)
+                    .map(|id| ir.labels[id.0].text.as_str()),
+            )
+            .chain(
+                ir.clusters
+                    .iter()
+                    .filter_map(|cluster| cluster.title)
+                    .map(|id| ir.labels[id.0].text.as_str()),
+            )
+        {
+            let label = escape_xml_text(label);
+            let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            *expected.entry(normalized).or_default() += 1;
+        }
+        assert_eq!(expected.values().sum::<usize>(), 50);
+        let sms = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "S")
+            .expect("SMS node");
+        assert_eq!(
+            ir.node_display_text(sms),
+            "SMS: avízo hovoru a konkrétní termíny\n1 / 2 / 3 = zvolený termín\n4 = zavolejte mi"
+        );
+
+        for tier in [
+            MermaidTier::Auto,
+            MermaidTier::Compact,
+            MermaidTier::Normal,
+            MermaidTier::Rich,
+        ] {
+            let config = SvgRenderConfig {
+                detail_tier: tier,
+                preserve_labels: true,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(ir, &config);
+            assert!(svg.contains("data-label-detail=\"full\""));
+            assert_eq!(
+                issue14_drawn_text(&svg),
+                expected,
+                "drawn labels at {tier:?}"
+            );
+            let sms_group = svg.split_once("data-id=\"S\"").expect("SMS group").1;
+            let sms_group = sms_group.split_once("</g>").expect("SMS group end").0;
+            assert_eq!(
+                sms_group.matches("<tspan ").count(),
+                3,
+                "explicit line breaks at {tier:?}"
+            );
+        }
     }
 
     #[test]

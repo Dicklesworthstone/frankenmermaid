@@ -383,7 +383,10 @@ fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebG
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let svg = SvgRenderConfig::default();
+        let svg = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
         let canvas = align_canvas_typography_with_svg(CanvasRenderConfig::default(), &svg);
         Self {
             renderer: WebRendererKind::Canvas2d,
@@ -417,6 +420,8 @@ struct RuntimeInitConfig {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    detail_tier: Option<String>,
+    preserve_labels: Option<bool>,
 }
 
 impl RuntimeInitConfig {
@@ -434,6 +439,8 @@ impl RuntimeInitConfig {
             link_mode: self.link_mode.clone(),
             node_gradients: self.node_gradients,
             cluster_fill_opacity: self.cluster_fill_opacity,
+            detail_tier: self.detail_tier.clone(),
+            preserve_labels: self.preserve_labels,
         };
         if self.svg.responsive.is_some() {
             merged.responsive = self.svg.responsive;
@@ -471,6 +478,12 @@ impl RuntimeInitConfig {
         if self.svg.cluster_fill_opacity.is_some() {
             merged.cluster_fill_opacity = self.svg.cluster_fill_opacity;
         }
+        if self.svg.detail_tier.is_some() {
+            merged.detail_tier = self.svg.detail_tier.clone();
+        }
+        if self.svg.preserve_labels.is_some() {
+            merged.preserve_labels = self.svg.preserve_labels;
+        }
         merged
     }
 }
@@ -490,6 +503,8 @@ struct SvgConfigOverrides {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    detail_tier: Option<String>,
+    preserve_labels: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1131,6 +1146,22 @@ fn merge_svg_config(
     }
     if let Some(value) = overrides.accessible {
         merged.accessible = value;
+    }
+    if let Some(value) = overrides.preserve_labels {
+        merged.preserve_labels = value;
+    }
+    if let Some(value) = overrides.detail_tier.as_deref() {
+        merged.detail_tier = match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => fm_core::MermaidTier::Auto,
+            "compact" => fm_core::MermaidTier::Compact,
+            "normal" => fm_core::MermaidTier::Normal,
+            "rich" => fm_core::MermaidTier::Rich,
+            other => {
+                return Err(format!(
+                    "invalid detail tier '{other}': expected auto, compact, normal, or rich"
+                ));
+            }
+        };
     }
     if let Some(value) = overrides.font_size
         && value.is_finite()
@@ -3244,6 +3275,42 @@ mod tests {
     }
 
     #[test]
+    fn browser_detail_overrides_preserve_labels_unless_explicitly_disabled() {
+        let base = RuntimeConfig::default().svg;
+        assert!(base.preserve_labels);
+        for (name, expected) in [
+            ("auto", fm_core::MermaidTier::Auto),
+            ("compact", fm_core::MermaidTier::Compact),
+            ("normal", fm_core::MermaidTier::Normal),
+            ("RICH", fm_core::MermaidTier::Rich),
+        ] {
+            let overrides = SvgConfigOverrides {
+                detail_tier: Some(name.to_string()),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid detail tier");
+            assert_eq!(merged.detail_tier, expected);
+            assert!(merged.preserve_labels);
+        }
+        let abbreviated = SvgConfigOverrides {
+            detail_tier: Some("compact".to_string()),
+            preserve_labels: Some(false),
+            ..Default::default()
+        };
+        let merged = merge_svg_config(&base, &abbreviated, None).expect("explicit overview");
+        assert_eq!(merged.detail_tier, fm_core::MermaidTier::Compact);
+        assert!(!merged.preserve_labels);
+        let invalid = SvgConfigOverrides {
+            detail_tier: Some("missing".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_svg_config(&base, &invalid, None).expect_err("invalid tier must fail"),
+            "invalid detail tier 'missing': expected auto, compact, normal, or rich"
+        );
+    }
+
+    #[test]
     fn apply_canvas_theme_preset_updates_canvas_colors() {
         let base = CanvasRenderConfig::default();
         let themed = apply_canvas_theme_preset(base, ThemePreset::Dark);
@@ -3287,10 +3354,14 @@ mod tests {
                 "responsive": false,
                 "fontSize": 18.0,
                 "shadows": true,
+                "detailTier": "rich",
+                "preserveLabels": false,
                 "svg": {
                     "theme": "forest",
                     "fontSize": 21.0,
-                    "shadows": false
+                    "shadows": false,
+                    "detailTier": "compact",
+                    "preserveLabels": true
                 }
             }"#,
         )
@@ -3301,6 +3372,8 @@ mod tests {
         assert_eq!(effective.responsive, Some(false));
         assert_eq!(effective.font_size, Some(21.0));
         assert_eq!(effective.shadows, Some(false));
+        assert_eq!(effective.detail_tier.as_deref(), Some("compact"));
+        assert_eq!(effective.preserve_labels, Some(true));
     }
 
     #[test]
@@ -3772,6 +3845,140 @@ mod tests {
         let budget_broker = fm_core::MermaidBudgetLedger::new(&pressure.into_report());
         apply_budget_svg_simplifications(&mut config, &budget_broker);
         assert!(!config.shadows);
+    }
+
+    const ISSUE14_SOURCE: &str =
+        include_str!("../../fm-render-svg/tests/fixtures/issue14_omnichannel.mmd");
+
+    fn assert_issue14_visible_labels(svg: &str) {
+        use std::collections::BTreeMap;
+
+        let parsed = parse(ISSUE14_SOURCE);
+        assert_eq!(parsed.ir.nodes.len(), 24);
+        assert_eq!(parsed.ir.edges.len(), 43);
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        let mut expected = BTreeMap::<String, usize>::new();
+        for id in parsed
+            .ir
+            .nodes
+            .iter()
+            .filter_map(|node| node.label)
+            .chain(parsed.ir.edges.iter().filter_map(|edge| edge.label))
+            .chain(
+                parsed
+                    .ir
+                    .clusters
+                    .iter()
+                    .filter_map(|cluster| cluster.title),
+            )
+        {
+            let text = fm_render_svg::escape_xml_text(&parsed.ir.labels[id.0].text);
+            let label = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            *expected.entry(label).or_default() += 1;
+        }
+        assert_eq!(expected.values().sum::<usize>(), 50);
+
+        let mut drawn = BTreeMap::<String, usize>::new();
+        // Only visible text counts: the reported broken artifact already contains complete
+        // labels in accessibility metadata, which must not satisfy a rendering regression test.
+        for element in svg.split("<text ").skip(1) {
+            let body = element.split_once('>').expect("text opening tag").1;
+            let body = body.split_once("</text>").expect("text closing tag").0;
+            let text = if body.contains("<tspan ") {
+                body.split("<tspan ")
+                    .skip(1)
+                    .map(|span| {
+                        span.split_once('>')
+                            .expect("tspan opening tag")
+                            .1
+                            .split_once("</tspan>")
+                            .expect("tspan closing tag")
+                            .0
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                body.to_string()
+            };
+            let label = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            *drawn.entry(label).or_default() += 1;
+        }
+        assert_eq!(drawn, expected);
+        assert!(svg.contains("data-label-detail=\"full\""));
+        assert_eq!(svg.matches("class=\"edge-label\"").count(), 24);
+        assert_eq!(svg.matches("class=\"fm-cluster-label\"").count(), 2);
+    }
+
+    #[test]
+    fn issue14_browser_render_paths_keep_all_text_under_resource_pressure() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        for pressured in [false, true] {
+            let mut runtime = RuntimeConfig::default();
+            if pressured {
+                runtime.svg.detail_tier = fm_core::MermaidTier::Compact;
+                runtime.pressure = MermaidWasmPressureSignals {
+                    frame_budget_ms: Some(16),
+                    frame_time_ms: Some(64),
+                    worker_saturation_permille: Some(1000),
+                    ..Default::default()
+                };
+            }
+            write_runtime_config(runtime);
+
+            let direct = render_svg_js(ISSUE14_SOURCE, None).expect("browser renderSvg");
+            assert_issue14_visible_labels(&direct);
+            let output = render(ISSUE14_SOURCE);
+            assert_issue14_visible_labels(&output.svg);
+            let deck = render_deck(ISSUE14_SOURCE, None).expect("browser renderDeck");
+            assert_issue14_visible_labels(&deck.svg);
+            match render_worker_request(&WorkerRenderRequest {
+                request_id: 14,
+                input: ISSUE14_SOURCE.to_string(),
+                config_json: None,
+            }) {
+                WorkerRenderResponse::Completed {
+                    svg,
+                    node_count,
+                    edge_count,
+                    ..
+                } => {
+                    assert_eq!(node_count, 24);
+                    assert_eq!(edge_count, 43);
+                    assert_issue14_visible_labels(&svg);
+                }
+                response => panic!("worker failed: {response:?}"),
+            }
+            if pressured {
+                assert!(direct.contains("data-detail-tier=\"compact\""));
+                assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Critical);
+                assert!(!direct.contains("<filter id=\"drop-shadow\""));
+            }
+        }
+    }
+
+    #[test]
+    fn issue14_abbreviated_browser_overview_requires_explicit_opt_out() {
+        let _serial = config_guard();
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 14,
+            input: ISSUE14_SOURCE.to_string(),
+            config_json: Some(r#"{"detailTier":"compact","preserveLabels":false}"#.to_string()),
+        });
+        let WorkerRenderResponse::Completed { svg, .. } = response else {
+            panic!("explicit overview failed: {response:?}");
+        };
+        assert!(svg.contains("data-detail-tier=\"compact\""));
+        assert!(!svg.contains("data-label-detail=\"full\""));
+        assert_eq!(svg.matches("<text ").count(), 24);
+        assert_eq!(svg.matches("class=\"edge-label\"").count(), 0);
+        assert_eq!(svg.matches("class=\"fm-cluster-label\"").count(), 0);
     }
 
     /// Serialises every test that reads or writes `RUNTIME_CONFIG` (bd-vca5l).
@@ -4539,7 +4746,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xa935_66ac_3415_4ef1;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x044c_7024_58aa_f4e4;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4567,22 +4774,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x21e1_3931_372a_2b0f,
+                0x4628_cd9c_352e_b4d7,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x36cb_027c_81b7_66f4,
+                0xd3bc_ce11_232c_5c5e,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x16d9_c046_8b59_85f0,
+                0xae81_b7ad_5f77_5612,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x9dcf_6d14_b453_9097,
+                0x753b_6364_3e69_e453,
             ),
         ];
 

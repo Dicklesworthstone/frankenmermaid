@@ -1,0 +1,1284 @@
+{
+  "issue": "https://github.com/Dicklesworthstone/frankenmermaid/issues/14",
+  "baseline_commit": "4e6dea858bf441156beab63f0edd301645856e76",
+  "viewport_commit": "2b1033f200aa7006349865dbf8dfd42ba39f3aaa",
+  "fixture_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+  "wasm_sha256": "c2ba665b60abdd57d9c357fc6e28891b4bed7b62bcfc75d714fb059c87af3ea1",
+  "source_sha256": "b41ce83803d928375eb5950f8a01116f42d7c4b4a000f34bcd8c78ef668b5ae7",
+  "html_sha256": "e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26",
+  "browser": {
+    "engine": "Chromium 141.0.7390.37 / Playwright 1.56.0",
+    "checks": 62,
+    "failed": 0,
+    "tailwind_sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+    "resource_cache": {
+      "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap": {
+        "content_type": "text/css; charset=utf-8",
+        "sha256": "450d41b4d43c418e22a76f7b2f17d7ec84b835681d7e90d61496958a633d1027"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuBWYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "5b717029a2c4cfca2167e97be1157edb24151591e5ec96eb484745c392817a7a"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuDyYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "eec66af7f2337bd34fe6e801cf92ededcb57a20c0d7bc40a61d4eefcbe3dd40c"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuFuYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "b37284b5701b6b168dfc770aa1a4ac492106422fd3ba76bc7641e37434e8019c"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "e7a1aaf7eda9f2fad4131725fa556265ec75ca7b2d756260173a040363e8d4f7"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuI6fMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "8c883f63b2c4157d997319f2c8bc6995ed4357ef371940d31ca159004a4aae63"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "1b08e7fc267a5c7e1d614100f604b83e7e8a0be241f0f288faa2b3ac93a683ba"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuOKfMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "d0f4bc7faca468376e3db9b5e57afcdc2192134c9ac82a9511f32767b56853a4"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8L6tjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "a1d92abc6b02a87faed23d98067ab1027e8e95242fd7c9978a072ea383b89d1a"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8SKtjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "bc31e0b0583e8530795907883e768597bf7bdb4e47a65861dc393b4411439e22"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDba2o-flEEny0FZhsfKu5WU4xD-IQ-PuZJJXxfpAO-LflOQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "f3ad0f703a734b38b49b3ee2d8121ef2718fba185198c3482e81a618272cb4af"
+      }
+    },
+    "results": [
+      {
+        "scenario_id": "index.html/production-fonts",
+        "passed": true,
+        "errors": [],
+        "fonts": [
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "300",
+            "status": "unloaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "500",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "900",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "italic",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "500",
+            "status": "unloaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          }
+        ]
+      },
+      {
+        "scenario_id": "index.html/fit-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-31-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-31-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-95-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-95-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/svg-export-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/restore",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/uncaught-errors",
+        "passed": true,
+        "errors": [],
+        "fonts": [
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "300",
+            "status": "unloaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "500",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "900",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "italic",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "500",
+            "status": "unloaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          }
+        ]
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/production-fonts",
+        "passed": true,
+        "errors": [],
+        "fonts": [
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "300",
+            "status": "unloaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "500",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "900",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "italic",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "500",
+            "status": "unloaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          }
+        ]
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/svg-export-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/restore",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/uncaught-errors",
+        "passed": true,
+        "errors": [],
+        "fonts": [
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "300",
+            "status": "unloaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "500",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          },
+          {
+            "family": "Inter",
+            "style": "normal",
+            "weight": "900",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "italic",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "400",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "500",
+            "status": "unloaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "600",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "700",
+            "status": "loaded"
+          },
+          {
+            "family": "JetBrains Mono",
+            "style": "normal",
+            "weight": "800",
+            "status": "loaded"
+          }
+        ]
+      }
+    ]
+  },
+  "wasm_api": {
+    "source_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+    "wasm_sha256": "c2ba665b60abdd57d9c357fc6e28891b4bed7b62bcfc75d714fb059c87af3ea1",
+    "checks": 38,
+    "results": [
+      {
+        "name": "renderSvg/default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/auto",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/normal",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/rich",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/critical",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/critical-rich-request",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderSvg/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "75f1442d4c00e7bea0ed6636aa52203165e2d737426594a8bedce2a871baf00d"
+      },
+      {
+        "name": "renderSvg/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "renderSvg/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "ac2a371a3ab66282cc20d793af3874e85a3e1d7ed2a5d7e32a3ccb6ec947a349"
+      },
+      {
+        "name": "renderSvg/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "14b8615a3570479d8df49048d2621ad7f77e7cd3b6b4a8fa6112e59caa79ccf8"
+      },
+      {
+        "name": "renderDeck/default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/auto",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/normal",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/rich",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/critical",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/critical-rich-request",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "acac5d2eb22bd72d490dba1447be9c0eeecf38df3e170281fe7d5a0002fd97dc"
+      },
+      {
+        "name": "renderDeck/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "75f1442d4c00e7bea0ed6636aa52203165e2d737426594a8bedce2a871baf00d"
+      },
+      {
+        "name": "renderDeck/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "renderDeck/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "ac2a371a3ab66282cc20d793af3874e85a3e1d7ed2a5d7e32a3ccb6ec947a349"
+      },
+      {
+        "name": "renderDeck/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "14b8615a3570479d8df49048d2621ad7f77e7cd3b6b4a8fa6112e59caa79ccf8"
+      },
+      {
+        "name": "worker/default",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "090a9a6ff123b03c721f836c61692492c5f9a90e01fc159d3453d86c17d4d425"
+      },
+      {
+        "name": "worker/auto",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "090a9a6ff123b03c721f836c61692492c5f9a90e01fc159d3453d86c17d4d425"
+      },
+      {
+        "name": "worker/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "worker/normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "51db94ab78167c1ac2144e0725285ba4f0bf68829c31133aebeab68e1525b77b"
+      },
+      {
+        "name": "worker/rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "090a9a6ff123b03c721f836c61692492c5f9a90e01fc159d3453d86c17d4d425"
+      },
+      {
+        "name": "worker/critical",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "090a9a6ff123b03c721f836c61692492c5f9a90e01fc159d3453d86c17d4d425"
+      },
+      {
+        "name": "worker/critical-rich-request",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "090a9a6ff123b03c721f836c61692492c5f9a90e01fc159d3453d86c17d4d425"
+      },
+      {
+        "name": "worker/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "worker/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "a629e82507246aea5704a1255a9c5a373a98227407d4761e6f9f913ee49b331f"
+      },
+      {
+        "name": "worker/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "worker/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "ac2a371a3ab66282cc20d793af3874e85a3e1d7ed2a5d7e32a3ccb6ec947a349"
+      },
+      {
+        "name": "worker/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "14b8615a3570479d8df49048d2621ad7f77e7cd3b6b4a8fa6112e59caa79ccf8"
+      },
+      {
+        "name": "init/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "sha256": "1defd3cdfc49413bf72080447a5fe54cafdc4c39c85827c1a337b3fcae66bf6f"
+      },
+      {
+        "name": "init/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "a629e82507246aea5704a1255a9c5a373a98227407d4761e6f9f913ee49b331f"
+      }
+    ]
+  },
+  "gzip_budget": {
+    "last_committed_package_bytes": 771021,
+    "fresh_unchanged_baseline_bytes": 790765,
+    "same_baseline_with_inline_strip_bytes": 790696,
+    "final_bytes": 794414,
+    "limit_bytes": 794624,
+    "headroom_bytes": 210,
+    "issue_delta_over_same_flags_baseline_bytes": 3718
+  },
+  "cross_target_byte_audit": [
+    {
+      "name": "flowchart",
+      "old_bytes": 9182,
+      "new_bytes": 9273,
+      "sha256": "41d7765383e4b3a42c719411466dd5da9893b72068de309222bdae9d86e06bf8",
+      "differences": [
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "\" data-label-detail=\"full"
+        },
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "}[data-label-detail=\"full\"] text{text-rendering:geometricPrecision"
+        }
+      ]
+    },
+    {
+      "name": "sequence",
+      "old_bytes": 8139,
+      "new_bytes": 8230,
+      "sha256": "d82b25fa8e6976d1544da40150289bdccca70d822d8de008170c981a108a61fc",
+      "differences": [
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "\" data-label-detail=\"full"
+        },
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "}[data-label-detail=\"full\"] text{text-rendering:geometricPrecision"
+        }
+      ]
+    },
+    {
+      "name": "class",
+      "old_bytes": 6591,
+      "new_bytes": 6682,
+      "sha256": "535c91f465143f72f186ff37f907044dde9f4f24861a834ddeccfa30508684e2",
+      "differences": [
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "l\" data-label-detail=\"ful"
+        },
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "}[data-label-detail=\"full\"] text{text-rendering:geometricPrecision"
+        }
+      ]
+    },
+    {
+      "name": "state",
+      "old_bytes": 8561,
+      "new_bytes": 8652,
+      "sha256": "901f04360798f64b9359c75666dacc3202cfcb79a19f89e503d5dc8d250aca52",
+      "differences": [
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "l\" data-label-detail=\"ful"
+        },
+        {
+          "operation": "insert",
+          "old": "",
+          "new": "}[data-label-detail=\"full\"] text{text-rendering:geometricPrecision"
+        }
+      ]
+    }
+  ],
+  "cloudflare_bundle": {
+    "copied_files": 27,
+    "hosting_plan_checks": [
+      {
+        "name": "shared pkg cache rule",
+        "ok": true,
+        "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+      },
+      {
+        "name": "shared evidence cache rule",
+        "ok": true,
+        "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+      },
+      {
+        "name": "static route rules",
+        "ok": true,
+        "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+      },
+      {
+        "name": "react route rules",
+        "ok": true,
+        "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+      },
+      {
+        "name": "static contract route matrix",
+        "ok": true,
+        "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+      },
+      {
+        "name": "react contract alignment",
+        "ok": true,
+        "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+      },
+      {
+        "name": "strategy trace",
+        "ok": true,
+        "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+      }
+    ],
+    "route_integrity": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "root entry",
+          "ok": true,
+          "detail": "staged bundle contains the root landing page served at /"
+        },
+        {
+          "name": "share image",
+          "ok": true,
+          "detail": "staged bundle contains the og:image/twitter:image PNG that the root page and showcase name"
+        },
+        {
+          "name": "static entry",
+          "ok": true,
+          "detail": "staged bundle contains the /web entry document"
+        },
+        {
+          "name": "react entry",
+          "ok": true,
+          "detail": "staged bundle contains the /web_react entry document"
+        },
+        {
+          "name": "shared showcase",
+          "ok": true,
+          "detail": "staged bundle contains the shared standalone showcase snapshot"
+        },
+        {
+          "name": "runtime assets",
+          "ok": true,
+          "detail": "staged bundle contains JS/WASM plus every playground, editor, browser-adapter and deck runtime dependency"
+        },
+        {
+          "name": "capability artifact",
+          "ok": true,
+          "detail": "staged bundle contains the capability matrix artifact required by the hosted showcase"
+        },
+        {
+          "name": "merged headers",
+          "ok": true,
+          "detail": "staged bundle emits a root-level _headers manifest for the hosted routes"
+        },
+        {
+          "name": "redirect rules",
+          "ok": true,
+          "detail": "redirect rules preserve the query string for /web/ and /web_react/ canonicalization"
+        },
+        {
+          "name": "hosting plan precondition",
+          "ok": true,
+          "detail": "staging still requires the checked-in hosting-plan validator to pass first"
+        }
+      ]
+    }
+  },
+  "native_validation": {
+    "status": "blocked_before_renderer_compilation_or_test_execution",
+    "command": "cargo test -p fm-render-svg --lib --locked -j1 -- --test-threads=1",
+    "default_features_unchanged": true,
+    "final_result": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "fm-render-svg",
+        "--lib",
+        "--locked",
+        "-j1",
+        "--",
+        "--test-threads=1"
+      ],
+      "cwd": "/dev/shm/frankenmermaid-issue14-final",
+      "svg_source_sha256": "65fc4c967f6166f0a512074f5c119dd0da8832148d3f2c4700b9b1638f8b0047",
+      "shm_reserve_bytes": 67108864,
+      "cgroup_headroom_bytes": 220000000,
+      "cgroup_limit_bytes": 8589934592,
+      "rustflags_override": null,
+      "profile": {
+        "dev_debug": 0,
+        "test_debug": 0,
+        "incremental": false,
+        "cargo_jobs": 1,
+        "cmake_jobs": 1
+      },
+      "status": "resource_reserve_reached",
+      "minimum_shm_available_bytes": 186732544,
+      "maximum_cgroup_memory_bytes": 8377737216,
+      "memory_events_before": "low 0\nhigh 0\nmax 7596846\noom 69\noom_kill 19\noom_group_kill 0\n",
+      "initial_shm_available_bytes": 279818240,
+      "initial_cgroup_memory_bytes": 7677984768,
+      "stop_reason": "cgroup_memory",
+      "stop_shm_available_bytes": 186732544,
+      "stop_cgroup_memory_bytes": 8377737216,
+      "exit_code": -15,
+      "elapsed_seconds": 116.55,
+      "memory_events_after": "low 0\nhigh 0\nmax 7596846\noom 69\noom_kill 19\noom_group_kill 0\n",
+      "svg_source_sha256_after": "65fc4c967f6166f0a512074f5c119dd0da8832148d3f2c4700b9b1638f8b0047"
+    },
+    "svg_unit_tests": "unrun",
+    "wasm_unit_tests": "unrun",
+    "native_cross_target_comparison": "unrun",
+    "workspace_format": "failed with the same 83 hunks in 8 baseline files; normalized complete diff is byte-identical",
+    "standalone_final_svg_rustfmt": "passed",
+    "earlier_workspace_check": "passed before final placement/precision changes; not final-source proof",
+    "strict_clippy": "preexisting too_many_arguments and chunks_exact_to_as_chunks; final all-workspace Clippy not completed"
+  },
+  "deployment": "Not performed: no authorized Cloudflare credentials are available in this session."
+}
