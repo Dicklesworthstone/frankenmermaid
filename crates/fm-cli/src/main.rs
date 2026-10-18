@@ -9317,6 +9317,27 @@ fn collect_layout_diagnostics(
         });
     }
 
+    for violation in layout.geometry_violations() {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/layout-geometry-invariant".to_string(),
+                severity: "error".to_string(),
+                message: violation.to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("layout.geometry.invariant".to_string()),
+                confidence: None,
+                remediation_hint: Some(format!(
+                    "Inspect {} ({}) for non-finite or negative layout extents",
+                    violation.site,
+                    violation.kind.as_str()
+                )),
+            },
+        });
+    }
+
     diagnostics
 }
 
@@ -9758,6 +9779,27 @@ mod validate_tests {
                 .message
                 .contains("A pinned to (300, 400)")
         );
+    }
+
+    #[test]
+    fn collect_layout_diagnostics_reports_geometry_invariant_violations() {
+        let parsed = parse("flowchart LR\nA --> B\n");
+        let mut traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        std::sync::Arc::make_mut(&mut traced.layout).nodes[0]
+            .bounds
+            .width = -5.0;
+        let diagnostics = super::collect_layout_diagnostics(
+            &parsed.ir,
+            &traced,
+            fm_layout::LayoutConfig::default(),
+        );
+        let invariant_diag = diagnostics
+            .iter()
+            .find(|d| d.payload.rule_id.as_deref() == Some("layout.geometry.invariant"))
+            .expect("expected layout.geometry.invariant diagnostic");
+        assert_eq!(invariant_diag.stage, "layout");
+        assert_eq!(invariant_diag.payload.severity, "error");
+        assert!(invariant_diag.payload.message.contains("negative-extent"));
     }
 }
 

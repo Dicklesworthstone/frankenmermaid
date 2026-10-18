@@ -186,7 +186,7 @@ fn test_failure(input: &str, signature: &FailureSignature, stage: Stage) -> bool
 fn layout_geometry_violations_for(input: &str) -> Vec<fm_layout::invariants::InvariantViolation> {
     let parsed = fm_parser::parse(input);
     let layout = fm_layout::layout_diagram(&parsed.ir);
-    fm_layout::invariants::layout_geometry_violations(&layout)
+    layout.geometry_violations()
 }
 
 /// Minimize a failing input using delta debugging (ddmin).
