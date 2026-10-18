@@ -129,6 +129,20 @@ impl Default for CanvasSelectionStyle {
     }
 }
 
+impl CanvasSelectionStyle {
+    /// Parse the foreground ring stroke CSS color into a structured [`Color`] (`bd-24t2w`).
+    #[must_use]
+    pub fn parsed_stroke_color(&self) -> Option<Color> {
+        Color::from_css(&self.stroke)
+    }
+
+    /// Parse the background halo CSS color into a structured [`Color`] (`bd-24t2w`).
+    #[must_use]
+    pub fn parsed_halo_color(&self) -> Option<Color> {
+        Color::from_css(&self.halo)
+    }
+}
+
 /// Render a diagram and its current node selection from ONE pre-computed layout.
 ///
 /// This is the interactive counterpart of [`render_to_canvas_with_layout`]. It clears selection
@@ -267,6 +281,20 @@ mod tests {
         assert!(result.draw_calls >= 1);
         assert_eq!(result.nodes_drawn, 0);
         assert_eq!(result.edges_drawn, 0);
+    }
+
+    #[test]
+    fn point_and_selection_style_color_parsing_roundtrip() {
+        let pt = Point::from_layout(fm_layout::LayoutPoint { x: 12.5, y: -4.0 });
+        assert_eq!(pt, Point::new(12.5, -4.0));
+
+        let style = CanvasSelectionStyle::default();
+        assert_eq!(style.parsed_stroke_color(), Some(Color::rgb(37, 99, 235)));
+        assert_eq!(style.parsed_halo_color(), Some(Color::rgb(255, 255, 255)));
+
+        let rgba = Color::from_css("rgba(226, 232, 240, 0.5)").expect("parse rgba");
+        assert_eq!(rgba, Color::rgba(226, 232, 240, 0.5));
+        assert_eq!(rgba.to_css_string(), "rgba(226,232,240,0.5)");
     }
 
     fn selection_fixture() -> (MermaidDiagramIr, DiagramLayout) {
