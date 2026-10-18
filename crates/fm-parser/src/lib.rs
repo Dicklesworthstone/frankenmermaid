@@ -16,7 +16,10 @@ use serde_json::json;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub use dot_parser::{looks_like_dot, parse_dot};
-pub use mermaid_parser::first_significant_line;
+pub use mermaid_parser::{
+    first_significant_line, parse_mermaid, parse_mermaid_with_detection,
+    parse_mermaid_with_detection_and_config, parse_with_support_contract,
+};
 
 /// Strictly validate every one-line Mermaid initialization/configuration directive in source.
 ///
@@ -4789,5 +4792,54 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             "the bare spelling was offered back to the author: {:?}",
             detected.warnings
         );
+    }
+
+    #[test]
+    fn reexported_mermaid_parser_entrypoints_and_support_contract_work() {
+        let parsed = super::parse_mermaid("flowchart LR\nA --> B");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+
+        let detection = super::detect_type_with_confidence("flowchart LR\nA --> B");
+        let with_det = super::parse_mermaid_with_detection(
+            "flowchart LR\nA --> B",
+            detection,
+            fm_core::MermaidParseMode::Strict,
+        );
+        assert_eq!(with_det.ir.nodes.len(), 2);
+
+        let supported = super::parse_with_support_contract(
+            "flowchart LR\nA --> B",
+            fm_core::DiagramType::Flowchart,
+            fm_core::MermaidParseMode::Compat,
+        );
+        assert_eq!(supported.ir.nodes.len(), 2);
+
+        let unsupported_strict = super::parse_with_support_contract(
+            "A --> B",
+            fm_core::DiagramType::Unknown,
+            fm_core::MermaidParseMode::Strict,
+        );
+        assert!(
+            unsupported_strict
+                .ir
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unsupported in strict mode"))
+        );
+
+        let unsupported_compat = super::parse_with_support_contract(
+            "A --> B",
+            fm_core::DiagramType::Unknown,
+            fm_core::MermaidParseMode::Compat,
+        );
+        assert_eq!(unsupported_compat.ir.nodes.len(), 2);
+
+        let unsupported_recover = super::parse_with_support_contract(
+            "A --> B",
+            fm_core::DiagramType::Unknown,
+            fm_core::MermaidParseMode::Recover,
+        );
+        assert_eq!(unsupported_recover.ir.nodes.len(), 2);
     }
 }

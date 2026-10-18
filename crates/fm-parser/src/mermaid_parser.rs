@@ -494,8 +494,8 @@ enum ClassStatement {
 
 /// Parse mermaid input with auto-detection. Convenience entry point for external callers
 /// and reproduction scripts.
+#[inline]
 #[must_use]
-#[allow(dead_code)]
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let detection = crate::detect_type_with_confidence(input);
     parse_mermaid_with_detection_and_config(
@@ -507,8 +507,8 @@ pub fn parse_mermaid(input: &str) -> ParseResult {
 }
 
 /// Parse mermaid input with pre-computed detection results.
+#[inline]
 #[must_use]
-#[allow(dead_code)] // Used by crate-level tests through the private module path.
 pub fn parse_mermaid_with_detection(
     input: &str,
     detection: DetectedType,
@@ -517,7 +517,7 @@ pub fn parse_mermaid_with_detection(
     parse_mermaid_with_detection_and_config(input, detection, parse_mode, &ParserConfig::default())
 }
 
-/// Parse mermaid input with pre-computed detection results and explicit parser behavior config./// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
+/// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
 #[must_use]
 pub fn parse_mermaid_with_detection_and_config(
     input: &str,
@@ -719,7 +719,20 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
     }
 }
 
-#[allow(dead_code)] // Reserved for future detectible diagram families that still need fallback handling.
+/// Parse Mermaid content against the declared support-level contract for `diagram_type` (`bd-hcg6p`).
+#[inline]
+#[must_use]
+pub fn parse_with_support_contract(
+    content: &str,
+    diagram_type: DiagramType,
+    parse_mode: MermaidParseMode,
+) -> ParseResult {
+    let mut builder = IrBuilder::new(diagram_type);
+    builder.set_parse_mode(parse_mode);
+    apply_support_contract(content, &mut builder, diagram_type, parse_mode);
+    builder.finish(1.0, crate::DetectionMethod::ExactKeyword)
+}
+
 fn apply_support_contract(
     content: &str,
     builder: &mut IrBuilder,
@@ -800,7 +813,6 @@ fn apply_support_contract(
 /// Intermediate AST node produced by the chumsky flowchart parser.
 /// Lowered to IR via [`lower_flowchart`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Subgraph variant used in future expansion
 enum FlowAst {
     Direction(GraphDirection),
     Node(FlowAstNode),
@@ -10635,7 +10647,6 @@ enum StateStatement {
     RegionSeparator,
     Note {
         target: String,
-        #[allow(dead_code)]
         position: String,
         text: String,
     },
