@@ -1258,13 +1258,12 @@ fn flow_statement_parser<'a>()
 
     // -- style/linkStyle/classDef (skip) ------------------------------------
     let skip_directive = choice((
-        just("style ").to(()),
-        just("linkStyle ").to(()),
-        just("classDef ").to(()),
+        just("style ").to(FlowAst::StyleOrLinkStyle),
+        just("linkStyle ").to(FlowAst::StyleOrLinkStyle),
+        just("classDef ").to(FlowAst::ClassDef),
     ))
-    .then(any().repeated())
-    .then_ignore(end())
-    .to(FlowAst::StyleOrLinkStyle);
+    .then_ignore(any().repeated())
+    .then_ignore(end());
 
     // -- Statement: try edge first (more specific), then directives, then node
     choice((

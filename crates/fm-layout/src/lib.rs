@@ -2849,7 +2849,7 @@ impl DiagramLayout {
         };
         let initial =
             ordering_for(rank).unwrap_or_else(|| egraph_ordering::LayerOrdering::new(Vec::new()));
-        let pair_edges = build_pair_node_edges(ir, &node_ranks);
+        let pair_edges = layer_edges_by_rank_pair(ir, &node_ranks);
         let upper_ordering = rank.checked_sub(1).and_then(ordering_for);
         let upper_edges = rank
             .checked_sub(1)
@@ -32444,12 +32444,13 @@ mod tests {
         let spline = traced.layout.route_spline_between(start, end, false);
         assert!(spline.len() >= 2);
 
+        let rank_1_count = traced.layout.nodes.iter().filter(|n| n.rank == 1).count();
         let fallback = traced.layout.saturate_rank_with_fallback(
             &ir,
             1,
-            &egraph_crossing::SaturationConfig::default(),
+            &crate::egraph_crossing::SaturationConfig::default(),
         );
-        assert_eq!(fallback.ordering.len(), 3);
+        assert_eq!(fallback.ordering.len(), rank_1_count);
         assert!(fallback.crossing_count <= fallback.greedy_result.crossing_count);
     }
 

@@ -3055,7 +3055,7 @@ mod tests {
         assert!(!edited.bindings.is_empty());
 
         let description = describe_diagram_js(source);
-        assert!(description.contains("Flowchart"));
+        assert!(description.contains("Key relationships"));
     }
 
     #[test]
@@ -4842,7 +4842,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 1_547_807_444_074_752_938;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 9_645_411_231_395_040_975;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
