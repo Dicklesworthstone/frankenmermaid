@@ -129,11 +129,14 @@ impl EpochIrHandle {
     /// Create a new handle with the given IR and explicit epoch number.
     #[must_use]
     pub fn with_epoch(epoch: u64, ir: MermaidDiagramIr) -> Self {
+        Self::with_shared_ir(epoch, Arc::new(ir))
+    }
+
+    /// Create a new handle backed by an existing shared `Arc<MermaidDiagramIr>` (`bd-chfh9`).
+    #[must_use]
+    pub fn with_shared_ir(epoch: u64, current: Arc<MermaidDiagramIr>) -> Self {
         Self {
-            inner: RwLock::new(EpochInner {
-                epoch,
-                current: Arc::new(ir),
-            }),
+            inner: RwLock::new(EpochInner { epoch, current }),
         }
     }
 
@@ -155,9 +158,14 @@ impl EpochIrHandle {
     /// Previous snapshots remain valid. The old IR data is reclaimed when all
     /// outstanding snapshots from that epoch are dropped.
     pub fn update(&self, ir: MermaidDiagramIr) {
+        self.update_shared(Arc::new(ir));
+    }
+
+    /// Publish a new shared `Arc<MermaidDiagramIr>` version, incrementing the epoch (`bd-chfh9`).
+    pub fn update_shared(&self, ir: Arc<MermaidDiagramIr>) {
         let mut inner = self.write_inner();
         inner.epoch = inner.epoch.wrapping_add(1);
-        inner.current = Arc::new(ir);
+        inner.current = ir;
     }
 
     /// Current epoch number.
