@@ -255,9 +255,7 @@ impl Default for SvgRenderConfig {
             backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
-            font_family: String::from(
-                "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-            ),
+            font_family: String::from(theme::DEFAULT_FONT_FAMILY),
             font_size: 15.0,
             avg_char_width: 7.5,
             line_height: 1.5,
@@ -274,7 +272,7 @@ impl Default for SvgRenderConfig {
             glow_blur: 5.0,
             glow_opacity: 0.30,
             glow_color: String::from("#4f46e5"),
-            cluster_fill_opacity: 0.06,
+            cluster_fill_opacity: 1.0,
             inactive_opacity: 0.40,
             rounded_corners: 8.0,
             root_classes: Vec::new(),
@@ -1790,6 +1788,10 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
         .and_then(|t| t.parse::<ThemePreset>().ok())
         .unwrap_or(config.theme);
     let mut theme = Theme::from_preset(preset);
+    // Layout and text fitting use these same settings. A theme's independent font defaults
+    // must not override them when its stylesheet is embedded in the finished SVG.
+    theme.font.family.clone_from(&config.font_family);
+    theme.font.size = config.font_size;
     if let Some(i) = ir {
         theme
             .colors
@@ -1990,7 +1992,7 @@ fn render_scene_document_with_ir(
         css.push_str(accessibility_css());
     }
     if config.print_optimized {
-        css.push_str(&print_css(config.min_font_size, config.node_gradients));
+        css.push_str(&print_css(config.node_gradients));
     }
     if !classdef_css.is_empty() {
         css.push_str(&classdef_css);
@@ -3305,15 +3307,10 @@ fn resolve_detail_profile(
         MermaidTier::Compact => RenderDetailTier::Compact,
         MermaidTier::Normal => RenderDetailTier::Normal,
         MermaidTier::Rich => RenderDetailTier::Rich,
-        MermaidTier::Auto => {
-            if area < 12_000.0 {
-                RenderDetailTier::Compact
-            } else if area < 220_000.0 {
-                RenderDetailTier::Normal
-            } else {
-                RenderDetailTier::Rich
-            }
-        }
+        // An SVG's intrinsic area is not a display budget: it can be zoomed, printed, or
+        // embedded at any size. Keep authored labels and consistent typography by default.
+        // Explicit tiers and resource degradation still provide bounded overview rendering.
+        MermaidTier::Auto => RenderDetailTier::Rich,
     };
 
     let mut profile = match tier {
@@ -3393,8 +3390,8 @@ fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient
 
 /// The default-preset theme's node fill + background — the memo key for [`node_gradient_svg`].
 /// Pinned by `default_node_gradient_colors_match_preset`.
-const DEFAULT_NODE_FILL: &str = "#ffffff";
-const DEFAULT_NODE_BG: &str = "#fafbfc";
+const DEFAULT_NODE_FILL: &str = "#f8fafc";
+const DEFAULT_NODE_BG: &str = "#ffffff";
 
 /// The node-gradient `<defs>` fragment for `(config, theme)` — the serialized `<linearGradient>`/
 /// `<radialGradient>` that [`node_gradient_for`] builds — memoized for the default theme + style.
@@ -3584,7 +3581,7 @@ fn animation_css(config: &SvgRenderConfig) -> String {
 /// `gradient_def_emitted` must be "does this document actually contain the `fm-node-gradient` def",
 /// not merely `config.node_gradients`: the dedicated chart renderers have the flag on yet never emit
 /// the def, and a neutralisation rule for an absent id is 79 dead bytes (bd-w5f7).
-fn print_css(min_font_size: f32, gradient_def_emitted: bool) -> String {
+fn print_css(gradient_def_emitted: bool) -> String {
     // Flatten the node gradient for print by neutralising its STOPS, not by overriding node fill.
     //
     // The gradient reaches nodes as an inline `fill="url(#fm-node-gradient)"` presentation
@@ -3609,7 +3606,6 @@ fn print_css(min_font_size: f32, gradient_def_emitted: bool) -> String {
     format!(
         "@media print {{
   .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
-    font-size: {min_font_size:.1}px !important;
     fill: #111 !important;
   }}
   .fm-node path, .fm-node rect, .fm-node circle, .fm-edge {{
@@ -4342,7 +4338,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
+            css.push_str(&print_css(gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -4385,7 +4381,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
+            css.push_str(&print_css(gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -4700,11 +4696,9 @@ fn render_layout_to_svg(
     // and the `alt` label chip lost its left edge with it. Every alt/opt/loop/par frame in every
     // sequence diagram was drawn open at the ends instead of closed.
     //
-    // Clamping here rather than widening the canvas is the faithful choice: our canvas IS the
-    // participant span, which is what mermaid draws the frame within, so growing it would add
-    // whitespace the incumbent does not have. Layout emitting out-of-bounds geometry is still worth
-    // fixing at the source for the other renderers — recorded on the bead — but no consumer should
-    // have to draw outside its own viewBox to honour it.
+    // Built-in layout reserves room for fragment and note overhang in the diagram bounds.
+    // Retain this clamp for externally supplied layouts with incomplete bounds; it must not
+    // constrain the room layout can reserve to the participant span.
     let drawable_left = offset_x + layout.bounds.x;
     let drawable_right = drawable_left + layout.bounds.width;
     for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
@@ -13637,6 +13631,7 @@ fn render_node_icon(
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(size)
                 .anchor(TextAnchor::Middle)
+                .fill(&colors.text)
                 .class("fm-node-icon")
                 .class("fm-node-icon-emoji")
                 .build(),
@@ -20476,7 +20471,77 @@ mod tests {
             ..Default::default()
         };
         let svg = render_svg_with_config(&ir, &config);
-        assert!(svg.contains("data-detail-tier=\"normal\""));
+        assert!(svg.contains("data-detail-tier=\"rich\""));
+    }
+
+    #[test]
+    fn default_svg_preserves_complete_labels_without_an_intrinsic_area_budget() {
+        let source = "flowchart LR\nA[A complete descriptive label that is longer than forty eight characters] -->|An equally descriptive edge label longer than forty characters| B[Done]";
+        let parsed = fm_parser::parse(source);
+        let expected_node =
+            "A complete descriptive label that is longer than forty eight characters";
+        let expected_edge = "An equally descriptive edge label longer than forty characters";
+        let config = SvgRenderConfig {
+            padding: 0.0,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&parsed.ir, &config);
+        let drawn = issue14_drawn_text(&svg);
+        assert!(
+            drawn.contains_key(expected_node),
+            "complete node text: {drawn:?}"
+        );
+        assert!(
+            drawn.contains_key(expected_edge),
+            "complete edge text: {drawn:?}"
+        );
+
+        let mut tiny = create_ir_with_single_node("Still readable", NodeShape::Rect);
+        tiny.labels[0].text = "Still readable".to_string();
+        let svg = render_svg_with_config(&tiny, &config);
+        assert!(issue14_drawn_text(&svg).contains_key("Still readable"));
+        for (width, height) in [(40.0, 30.0), (320.0, 180.0), (2400.0, 1800.0)] {
+            let detail = resolve_detail_profile(width, height, &config);
+            assert!(
+                detail.show_node_labels && detail.show_edge_labels && detail.show_cluster_labels
+            );
+            assert_eq!(detail.node_font_size, config.font_size);
+            assert!(detail.node_label_max_chars.is_none() && detail.edge_label_max_chars.is_none());
+        }
+    }
+
+    #[test]
+    fn embedded_theme_uses_the_same_font_settings_as_layout_and_export() {
+        let parsed = fm_parser::parse("flowchart LR\nA[Wide words] -->|Label| B[Done]");
+        let config = SvgRenderConfig {
+            font_family: "monospace".into(),
+            font_size: 24.0,
+            ..Default::default()
+        };
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                ..config.clone()
+            };
+            let theme = resolve_theme(Some(&parsed.ir), &config);
+            assert_eq!(theme.font.family, config.font_family);
+            assert_eq!(theme.font.size, config.font_metrics().font_size());
+            let svg = render_svg_with_config(&parsed.ir, &config);
+            assert!(svg.contains("font-family: monospace"));
+            assert!(svg.contains("font-size: 24px"));
+            assert!(!svg.contains("@import"));
+            let print = svg
+                .split_once("@media print")
+                .expect("print stylesheet")
+                .1
+                .split_once("</style>")
+                .expect("print stylesheet end")
+                .0;
+            assert!(
+                !print.contains("font-size:"),
+                "printing must retain fitted label sizes"
+            );
+        }
     }
 
     #[test]
