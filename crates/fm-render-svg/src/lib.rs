@@ -27,6 +27,9 @@ pub use a11y::{
     describe_node,
 };
 pub use attributes::{Attribute, AttributeValue, Attributes, escape_xml_text};
+pub use cga_transform::{
+    CgaTransformStack, render_transform_to_svg_matrix, try_render_transform_to_cga,
+};
 pub use deck::{deck_manifest, render_svg_with_deck};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
@@ -2562,7 +2565,6 @@ fn register_clip_path(
 }
 
 fn scene_transform_value(transform: RenderTransform) -> String {
-    #[cfg(not(target_arch = "wasm32"))]
     if let Some(cga_stack) = cga_transform::try_render_transform_to_cga(transform) {
         let _rotation_deg = cga_stack.rotation_degrees();
         let _scale = cga_stack.scale_factor();
