@@ -152,6 +152,48 @@ fn a_generic_bracket_label_reaches_the_svg_as_the_class_heading() {
     );
 }
 
+#[test]
+fn memberless_generic_headers_reach_both_svg_backends() {
+    for (source, expected) in [
+        ("classDiagram\n  class Repository~T~\n", "Repository<T>"),
+        (
+            "classDiagram\n  class A~T~[\"Stored Payload\"]\n",
+            "Stored Payload<T>",
+        ),
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.nodes.len(), 1, "the generic class must be declared");
+        let meta = ir.nodes[0]
+            .class_meta
+            .as_deref()
+            .expect("generic class metadata");
+        assert_eq!(meta.generics, ["T"]);
+        assert!(meta.attributes.is_empty() && meta.methods.is_empty());
+        assert!(meta.stereotype.is_none());
+
+        for backend in [
+            fm_render_svg::SvgBackend::LegacyLayout,
+            fm_render_svg::SvgBackend::Scene,
+        ] {
+            // Embedded CSS streams the class header; attribute-driven SVG exercises its
+            // Element path. Both must draw the same complete heading without needing a member.
+            for embed_theme_css in [true, false] {
+                let config = fm_render_svg::SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                let runs = text_runs(&fm_render_svg::render_svg_with_config(&ir, &config));
+                assert!(
+                    runs.iter()
+                        .any(|run| run.replace("&lt;", "<").replace("&gt;", ">") == expected),
+                    "{backend:?} (embedded CSS: {embed_theme_css}) lost the generic heading: {runs:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The brace spelling must retain the same label and generic metadata as the bare declaration.
 #[test]
 fn a_generic_bracket_label_inside_a_class_block_reaches_the_svg() {

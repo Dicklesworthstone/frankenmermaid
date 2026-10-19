@@ -2544,9 +2544,7 @@ impl Canvas2dRenderer {
             // Check for class diagram three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty()
-                    || !meta.methods.is_empty()
-                    || meta.stereotype.is_some())
+                && meta.has_compartments()
             {
                 let line_h = self.config.font_size * 1.3;
                 let member_font = self.config.font_size * 0.9;
@@ -2561,11 +2559,7 @@ impl Canvas2dRenderer {
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let display_name = if meta.generics.is_empty() {
-                    class_name.to_string()
-                } else {
-                    format!("{class_name}<{}>", meta.generics.join(", "))
-                };
+                let display_name = meta.display_header(class_name);
 
                 let class_fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
@@ -5207,6 +5201,44 @@ mod tests {
             |operation| matches!(operation, DrawOperation::Translate(x, y)
                     if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
         ));
+    }
+
+    #[test]
+    fn generic_class_headers_reach_canvas_with_and_without_members() {
+        for members in ["", "  A : +go()\n"] {
+            let source = format!("classDiagram\n  class A~T~[\"Repository\"]\n{members}");
+            let ir = fm_parser::parse(&source).ir;
+            let meta = ir.nodes[0]
+                .class_meta
+                .as_deref()
+                .expect("generic class metadata");
+            assert_eq!(meta.generics, ["T"]);
+            assert_eq!(meta.methods.len(), usize::from(!members.is_empty()));
+            let layout = layout_diagram(&ir);
+
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+                let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+                if use_scene {
+                    renderer.render_scene(&build_render_scene(&ir, &layout), &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                assert!(
+                    ctx.operations().iter().any(
+                        |operation| matches!(operation, DrawOperation::FillText(text, _, _)
+                            if text == "Repository<T>")
+                    ),
+                    "canvas (scene: {use_scene}) lost the complete generic heading"
+                );
+                if !use_scene && !members.is_empty() {
+                    assert!(ctx.operations().iter().any(
+                        |operation| matches!(operation, DrawOperation::FillText(text, _, _)
+                            if text == "+go()")
+                    ));
+                }
+            }
+        }
     }
 
     #[test]

@@ -9179,31 +9179,17 @@ fn write_class_compartments_into(
         );
         cursor_y += line_h;
     }
-    // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
-    if meta.generics.is_empty() {
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size,
-            " font-weight=\"bold\"",
-            fill,
-            class_name,
-        );
-    } else {
-        let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size,
-            " font-weight=\"bold\"",
-            fill,
-            &display_name,
-        );
-    }
+    let display_name = meta.display_header(class_name);
+    write_class_text_into(
+        f,
+        x + w / 2.0,
+        cursor_y,
+        "middle",
+        font_size,
+        " font-weight=\"bold\"",
+        fill,
+        &display_name,
+    );
     cursor_y += line_h * 0.5;
     write_class_separator_into(f, x, cursor_y, x + w);
     cursor_y += line_h * 0.3;
@@ -10636,7 +10622,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
+        && meta.has_compartments()
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -10680,7 +10666,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
+        && meta.has_compartments()
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -12560,9 +12546,7 @@ fn render_node(
     if detail.show_node_labels && !placeholder_space_node {
         if let Some(node) = ir_node
             && let Some(ref meta) = node.class_meta
-            && (!meta.attributes.is_empty()
-                || !meta.methods.is_empty()
-                || meta.stereotype.is_some())
+            && meta.has_compartments()
         {
             group = render_class_compartments(
                 group,
@@ -13291,11 +13275,7 @@ fn render_class_compartments(
     }
 
     // Append generic parameters to class name if present (e.g., "List<T>").
-    let display_name = if meta.generics.is_empty() {
-        class_name.to_string()
-    } else {
-        format!("{class_name}<{}>", meta.generics.join(", "))
-    };
+    let display_name = meta.display_header(class_name);
 
     let name_elem = TextBuilder::new(&display_name)
         .x(x + w / 2.0)

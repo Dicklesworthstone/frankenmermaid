@@ -2494,9 +2494,7 @@ impl TermRenderer {
             // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty()
-                    || !meta.methods.is_empty()
-                    || meta.stereotype.is_some())
+                && meta.has_compartments()
             {
                 self.overlay_class_compartments(&mut lines, x, y, w, h, ir, node, meta, cell_width);
                 continue;
@@ -3579,7 +3577,8 @@ impl TermRenderer {
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
-        let name_text = self.truncate_label(class_name);
+        let display_name = meta.display_header(class_name);
+        let name_text = self.truncate_label(&display_name);
         let name_chars = name_text.chars().count();
         let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
         write_text(grid, row, name_x, &name_text, inner_w);
@@ -4623,6 +4622,32 @@ mod tests {
             out.contains("Shape"),
             "the class name was lost when the stereotype was drawn:\n{out}"
         );
+    }
+
+    #[test]
+    fn generic_class_headers_reach_the_terminal_with_and_without_members() {
+        for members in ["", "  A : +go()\n"] {
+            let source = format!("classDiagram\n  class A~T~[\"Repository\"]\n{members}");
+            let ir = fm_parser::parse(&source).ir;
+            let meta = ir.nodes[0]
+                .class_meta
+                .as_deref()
+                .expect("generic class metadata");
+            assert_eq!(meta.generics, ["T"]);
+            assert_eq!(meta.methods.len(), usize::from(!members.is_empty()));
+
+            let out = crate::render_term(&ir);
+            assert!(
+                out.contains("Repository<T>"),
+                "the terminal lost the declared generic heading:\n{out}"
+            );
+            if !members.is_empty() {
+                assert!(
+                    out.contains("+go()"),
+                    "the class member was lost when its generic heading was drawn:\n{out}"
+                );
+            }
+        }
     }
 
     fn sample_ir() -> MermaidDiagramIr {

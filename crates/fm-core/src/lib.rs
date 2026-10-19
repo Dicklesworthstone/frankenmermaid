@@ -2962,6 +2962,30 @@ pub struct IrClassNodeMeta {
     pub generics: Vec<String>,
 }
 
+impl IrClassNodeMeta {
+    /// Whether this class needs its header and compartment renderer, even without members.
+    #[must_use]
+    pub fn has_compartments(&self) -> bool {
+        !self.attributes.is_empty()
+            || !self.methods.is_empty()
+            || self.stereotype.is_some()
+            || !self.generics.is_empty()
+    }
+
+    /// The displayed class name, including generic parameters in declaration order.
+    ///
+    /// Layout and every renderer use the same header so a generic declaration is both measured
+    /// and drawn in full. A name without type parameters stays borrowed.
+    #[must_use]
+    pub fn display_header<'a>(&self, class_name: &'a str) -> Cow<'a, str> {
+        if self.generics.is_empty() {
+            Cow::Borrowed(class_name)
+        } else {
+            Cow::Owned(format!("{class_name}<{}>", self.generics.join(", ")))
+        }
+    }
+}
+
 /// C4-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrC4NodeMeta {

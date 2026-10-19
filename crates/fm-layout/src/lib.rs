@@ -12800,7 +12800,12 @@ fn compute_node_size(
             } else {
                 text
             };
-            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let class_header = node
+                .class_meta
+                .as_deref()
+                .map(|meta| meta.display_header(text));
+            let (label_width, label_height) =
+                metrics.estimate_dimensions(class_header.as_deref().unwrap_or(text));
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
             let width = label_width
                 .max(icon_width)
@@ -13113,12 +13118,9 @@ fn class_compartment_dimensions(
     metrics: &fm_core::FontMetrics,
 ) -> Option<(f32, f32)> {
     let meta = node.class_meta.as_deref()?;
-    // A STEREOTYPE ALONE is enough to need a compartment stack (bd-d48wi). A marker interface —
-    // `class Shape { <<interface>> }` with no members — is idiomatic mermaid, and the pinned
-    // incumbent gates its annotation row on `annotations.length > 0` with no member requirement.
-    // Returning `None` here left the box sized from the class name alone, and every backend then
-    // declined to draw the stereotype at all rather than draw it into an unsized box.
-    if meta.attributes.is_empty() && meta.methods.is_empty() && meta.stereotype.is_none() {
+    // A stereotype (bd-d48wi) or generic header still needs the class renderer when no members
+    // are declared. Keep this gate shared with the renderers so the box holds what they draw.
+    if !meta.has_compartments() {
         return None;
     }
 
@@ -13294,6 +13296,13 @@ fn node_size_cache_key(
         hash_u64(&mut hash, meta.attributes.len() as u64);
         hash_u64(&mut hash, meta.methods.len() as u64);
         hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
+        if let Some(stereotype) = &meta.stereotype {
+            hash_str(&mut hash, &stereotype.label());
+        }
+        hash_u64(&mut hash, meta.generics.len() as u64);
+        for generic in &meta.generics {
+            hash_str(&mut hash, generic);
+        }
         for member in meta.attributes.iter().chain(meta.methods.iter()) {
             hash_str(&mut hash, &member.name);
             hash_str(&mut hash, member.return_type.as_deref().unwrap_or_default());
@@ -13362,13 +13371,19 @@ fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) 
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
-    display_node_label_ref(ir, node).to_string()
+    let text = display_node_label_ref(ir, node);
+    if let Some(meta) = node.class_meta.as_deref() {
+        meta.display_header(text).into_owned()
+    } else {
+        text.to_string()
+    }
 }
 
-/// Borrowing core of [`display_node_label`]: the displayed label text is always either the IR label
-/// text, the node id, or empty — all borrowable from `ir`/`node` — so callers that only READ it (text
-/// measurement, hashing) need not clone. Byte-identical content to `display_node_label`; the owning
-/// version just `.to_string()`s this for callers that store the result.
+/// Resolve the base label without allocating, before class type parameters are appended.
+///
+/// The result is either the IR label text, the node id, or empty, all borrowable from `ir`/`node`.
+/// Scene text adds the class header in [`display_node_label`]; measurement does so in
+/// [`compute_node_size`].
 ///
 /// ⚠️ THE RULE ITSELF LIVES IN `fm_core` and is shared with fm-render-svg on purpose (bd-3cj8v).
 /// Layout SIZES the box from this string and the renderer PAINTS from it; a local copy here drifted
@@ -33328,6 +33343,115 @@ mod tests {
             long_label.layout.nodes[5].bounds.width,
             short_label.layout.nodes[5].bounds.width,
         );
+    }
+
+    #[test]
+    fn memberless_generic_classes_are_sized_for_the_complete_header() {
+        let ir = parse("classDiagram\n  class A~EntityIdentifier~[\"Repository\"]\n").ir;
+        let node = &ir.nodes[0];
+        let meta = node.class_meta.as_deref().expect("generic class metadata");
+        assert!(meta.attributes.is_empty() && meta.methods.is_empty());
+        assert_eq!(meta.generics, ["EntityIdentifier"]);
+
+        let metrics = fm_core::FontMetrics::default();
+        let (width, _) = compute_node_size(&ir, node, &metrics);
+        let header_width = metrics.estimate_dimensions("Repository<EntityIdentifier>").0;
+        assert!(
+            width >= header_width + 16.0,
+            "class width {width} must contain the full generic header ({header_width}) and padding"
+        );
+        assert!(
+            super::class_compartment_dimensions(node, &metrics).is_some(),
+            "a generic-only class still uses the class header renderer"
+        );
+    }
+
+    #[test]
+    fn fault_node_size_cache_reflects_generic_header_edits() {
+        let mut ir = parse("classDiagram\n  class A~T~[\"Repository\"]\n").ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let metrics = fm_core::FontMetrics::default();
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let initial_width = before.layout.nodes[0].bounds.width;
+
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("generic class metadata")
+            .generics = vec!["EntityIdentifier".to_string(), "EntityPayload".to_string()];
+        let expanded = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let required_width = metrics
+            .estimate_dimensions("Repository<EntityIdentifier, EntityPayload>")
+            .0;
+        assert!(expanded.layout.nodes[0].bounds.width > initial_width);
+        assert!(expanded.layout.nodes[0].bounds.width >= required_width + 16.0);
+
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("generic class metadata")
+            .generics = vec!["T".to_string()];
+        let restored = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert_eq!(restored.layout.nodes[0].bounds.width, initial_width);
+    }
+
+    #[test]
+    fn fault_node_size_cache_reflects_stereotype_text_edits() {
+        let mut ir = parse("classDiagram\n  class A {\n    <<interface>>\n  }\n").ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let metrics = fm_core::FontMetrics::default();
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        // Presence stays true; only the text changes, so a presence-only key cannot detect this.
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("stereotype metadata")
+            .stereotype = Some(fm_core::ClassStereotype::Custom(
+            "DomainSpecificRepositoryContract".to_string(),
+        ));
+        let expanded = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        let required_width = metrics
+            .estimate_dimensions("«DomainSpecificRepositoryContract»")
+            .0
+            * 0.85;
+        assert!(expanded.layout.nodes[0].bounds.width > before.layout.nodes[0].bounds.width);
+        assert!(expanded.layout.nodes[0].bounds.width >= required_width + 16.0);
     }
 
     /// An ER attribute edit must not be served from the node-size cache (bd-090g).
