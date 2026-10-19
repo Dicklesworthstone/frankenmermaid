@@ -19338,37 +19338,46 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
 }
 
-/// Give unrelated edges that share a line their own track.
-///
-/// The router runs every edge between two ranks through the channel's midline, and every edge
-/// whose straight run is blocked to the same line just past the obstacles, so unrelated edges lay
-/// on top of each other for part of their length and the reader could not tell which line went
-/// where. Edges sharing a source or a target keep sharing (that trunk reads as one fan-out or
-/// fan-in); any other pair overlapping on one line is moved apart a track at a time, by moving
-/// the segment's two bends. A segment whose neighbours both come from one side (a detour past
-/// obstacles) moves further from them; one crossing a channel alternates about its line, kept
-/// inside the channel. End segments stay where they meet their nodes.
+/// Separate connected orthogonal runs that would imply relationships absent from the graph.
+/// Preserve genuine fan-in or fan-out buses while splitting mixed fans into distinct tracks.
+/// Keep endpoint ports fixed; constrained routes remain unchanged when no local track fits.
 fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
     const TRACK_GAP: f32 = 10.0;
-    // Past this many segments on one line the edges are a dense mesh that tracks cannot untangle,
-    // and the pairwise pass would cost quadratically for nothing.
+    const MIN_TRACK_GAP: f32 = 2.0;
+    const CONTACT_EPS: f32 = 0.5;
+    const GEOMETRY_EPS: f32 = 0.01;
     const MAX_SHARED: usize = 64;
+
+    #[derive(Clone, Copy)]
+    struct Run {
+        path: usize,
+        start: usize,
+        lo: f32,
+        hi: f32,
+        from: usize,
+        to: usize,
+        movable: bool,
+    }
+
     for horizontal in [true, false] {
         let across = |point: LayoutPoint| if horizontal { point.y } else { point.x };
         let along = |point: LayoutPoint| if horizontal { point.x } else { point.y };
-        // (path, the segment's first point, its low and high end, its edge's source and target)
-        // and, to group them by line, (quantized line, segment).
-        let mut segments: Vec<(usize, usize, f32, f32, usize, usize)> = Vec::new();
-        let mut keys: Vec<(usize, usize)> = Vec::new();
+        let key = |line: f32| (line * 2.0).round() as i32;
+        let nearby = |line: f32| {
+            key(line - MIN_TRACK_GAP).saturating_sub(1)
+                ..=key(line + MIN_TRACK_GAP).saturating_add(1)
+        };
+        let mut runs = Vec::new();
+        let mut occupied = std::collections::BTreeMap::<i32, Vec<usize>>::new();
+        let mut perpendicular =
+            std::collections::BTreeMap::<i32, Vec<(usize, usize, usize, usize)>>::new();
         for (p, path) in edges.iter().enumerate() {
             let Some(edge) = ir.edges.get(path.edge_index) else {
                 continue;
             };
-            if path.is_self_loop || path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+            if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
                 continue;
             }
-            // An end written to a subgraph is drawn to its border, so it shares nothing with the
-            // member it resolved to; it is told apart by the subgraph instead.
             let end = |endpoint, subgraph: Option<fm_core::IrSubgraphId>| {
                 subgraph.map_or_else(
                     || endpoint_node_index(ir, endpoint).unwrap_or(usize::MAX),
@@ -19377,69 +19386,229 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
             };
             let (from_subgraph, to_subgraph) = edge.named_subgraphs();
             let (from, to) = (end(edge.from, from_subgraph), end(edge.to, to_subgraph));
-            for i in 1..path.points.len().saturating_sub(2) {
-                let (a, b) = (path.points[i], path.points[i + 1]);
-                if (across(a) - across(b)).abs() > 0.01 {
-                    continue;
+            for (i, pair) in path.points.windows(2).enumerate() {
+                let (a, b) = (pair[0], pair[1]);
+                if (across(a) - across(b)).abs() <= GEOMETRY_EPS
+                    && (along(a) - along(b)).abs() > GEOMETRY_EPS
+                {
+                    let movable = !path.is_self_loop
+                        && i > 0
+                        && i + 2 < path.points.len()
+                        && (along(path.points[i - 1]) - along(a)).abs() <= GEOMETRY_EPS
+                        && (along(path.points[i + 2]) - along(b)).abs() <= GEOMETRY_EPS;
+                    occupied.entry(key(across(a))).or_default().push(runs.len());
+                    runs.push(Run {
+                        path: p,
+                        start: i,
+                        lo: along(a).min(along(b)),
+                        hi: along(a).max(along(b)),
+                        from,
+                        to,
+                        movable,
+                    });
+                } else if (along(a) - along(b)).abs() <= GEOMETRY_EPS
+                    && (across(a) - across(b)).abs() > GEOMETRY_EPS
+                {
+                    perpendicular
+                        .entry(key(along(a)))
+                        .or_default()
+                        .push((p, i, from, to));
                 }
-                let line = (across(a) * 2.0).round() as i32 as u32 ^ 0x8000_0000;
-                keys.push((line as usize, segments.len()));
-                let (lo, hi) = (along(a).min(along(b)), along(a).max(along(b)));
-                segments.push((p, i, lo, hi, from, to));
             }
         }
-        keys.sort_unstable();
-        let mut tracks = vec![0_usize; segments.len()];
-        let mut start = 0;
-        while start < keys.len() {
-            let end = keys[start..]
-                .iter()
-                .position(|key| key.0 != keys[start].0)
-                .map_or(keys.len(), |n| start + n);
-            for k in (start + 1..end).filter(|_| end - start <= MAX_SHARED) {
-                let (p, _, lo, hi, from, to) = segments[keys[k].1];
-                let blocks = |&(_, other): &(usize, usize), track: usize| {
-                    let (q, _, other_lo, other_hi, other_from, other_to) = segments[other];
-                    tracks[other] == track
-                        && q != p
-                        && lo < other_hi - 0.5
-                        && other_lo < hi - 0.5
-                        && from != other_from
-                        && to != other_to
-                };
-                let mut track = 0;
-                while keys[start..k].iter().any(|key| blocks(key, track)) {
-                    track += 1;
+
+        // These snapshots keep original components independent of occupancy updates.
+        let mut groups: Vec<Vec<usize>> = occupied.values().cloned().collect();
+        let mut buses = vec![(usize::MAX, usize::MAX); runs.len()];
+        let mut component = 0;
+        for group in &mut groups {
+            group.sort_unstable_by(|&a, &b| {
+                runs[a].lo.total_cmp(&runs[b].lo).then_with(|| a.cmp(&b))
+            });
+            let mut start = 0;
+            while start < group.len() {
+                let mut end = start + 1;
+                let mut hi = runs[group[start]].hi;
+                let target = runs[group[start]].to;
+                let mut same_target = true;
+                while end < group.len() && runs[group[end]].lo <= hi + CONTACT_EPS {
+                    hi = hi.max(runs[group[end]].hi);
+                    same_target &= runs[group[end]].to == target;
+                    end += 1;
                 }
-                tracks[keys[k].1] = track;
+                for &index in &group[start..end] {
+                    // A genuine fan-in stays shared. Otherwise every bus belongs to one source:
+                    // pairwise source/target exemptions could join several fans into a false bus.
+                    buses[index] = (component, if same_target { target } else { runs[index].from });
+                }
+                component += 1;
+                start = end;
             }
-            start = end;
         }
-        for (&(p, i, ..), &track) in segments.iter().zip(&tracks) {
-            if track == 0 {
+
+        let room_for = |run: Run, edges: &[LayoutEdgePath]| {
+            if !run.movable {
+                return 0.0;
+            }
+            let points = &edges[run.path].points;
+            let line = across(points[run.start]);
+            let before = across(points[run.start - 1]) - line;
+            let after = across(points[run.start + 2]) - line;
+            if before * after > 0.0 {
+                f32::INFINITY
+            } else {
+                let clearance = before.abs().min(after.abs());
+                // Keep the existing 10px stub margin when space allows; in a short channel
+                // preserve at least half the available stub instead of clamping every track to 0.
+                clearance - TRACK_GAP.min(clearance * 0.5)
+            }
+        };
+        let mut assigned: Vec<bool> = runs.iter().map(|run| !run.movable).collect();
+        for group in &mut groups {
+            // Dense meshes retain their geometry and remain obstacles for neighboring groups.
+            if group.len() > MAX_SHARED {
                 continue;
             }
-            let points = &mut edges[p].points;
-            let line = across(points[i]);
-            let before = across(points[i - 1]) - line;
-            let after = across(points[i + 2]) - line;
-            let offset = if before * after > 0.0 {
-                -before.signum() * track as f32 * TRACK_GAP
-            } else {
-                // Alternately either side of the line, never past either neighbour's end.
-                let side = if track % 2 == 1 {
-                    (track / 2 + 1) as f32
-                } else {
-                    -((track / 2) as f32)
+            group.sort_unstable_by(|&a, &b| {
+                room_for(runs[a], edges)
+                    .total_cmp(&room_for(runs[b], edges))
+                    .then_with(|| a.cmp(&b))
+            });
+            for &index in group.iter() {
+                let run = runs[index];
+                if !run.movable {
+                    continue;
+                }
+                let points = &edges[run.path].points;
+                let line = across(points[run.start]);
+                let before = across(points[run.start - 1]) - line;
+                let room = room_for(run, edges);
+                let blocked = |candidate: f32| {
+                    for members in occupied.range(nearby(candidate)).map(|(_, members)| members) {
+                        for &other in members {
+                            let neighbor = runs[other];
+                            if neighbor.path == run.path
+                                || (!assigned[other] && buses[other].0 == buses[index].0)
+                            {
+                                continue;
+                            }
+                            let other_line = across(edges[neighbor.path].points[neighbor.start]);
+                            if (candidate - other_line).abs() < MIN_TRACK_GAP - GEOMETRY_EPS
+                                && run.lo <= neighbor.hi + CONTACT_EPS
+                                && neighbor.lo <= run.hi + CONTACT_EPS
+                                && buses[index] != buses[other]
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    // A displaced bend also changes two perpendicular stubs. Do not turn a
+                    // corner contact into an overlapping stub, or join another nearby path.
+                    for (fixed_index, bend_index) in [
+                        (run.start - 1, run.start),
+                        (run.start + 2, run.start + 1),
+                    ] {
+                        let fixed = points[fixed_index];
+                        let bend = points[bend_index];
+                        let stub_line = along(bend);
+                        let old_lo = across(fixed).min(across(bend));
+                        let old_hi = across(fixed).max(across(bend));
+                        let new_lo = across(fixed).min(candidate);
+                        let new_hi = across(fixed).max(candidate);
+                        for members in perpendicular
+                            .range(nearby(stub_line))
+                            .map(|(_, members)| members)
+                        {
+                            for &(p, i, from, to) in members {
+                                if p == run.path {
+                                    continue;
+                                }
+                                let a = edges[p].points[i];
+                                let b = edges[p].points[i + 1];
+                                if (along(a) - stub_line).abs() >= MIN_TRACK_GAP - GEOMETRY_EPS {
+                                    continue;
+                                }
+                                // Coincident endpoint stubs already form a genuine bus. Extending
+                                // that shared prefix is safe; interior stubs and other ports still
+                                // undergo the overlap-growth check below.
+                                let shared_port = if fixed_index == 0
+                                    && i == 0
+                                    && run.from == from
+                                {
+                                    Some(a)
+                                } else if fixed_index + 1 == points.len()
+                                    && i + 2 == edges[p].points.len()
+                                    && run.to == to
+                                {
+                                    Some(b)
+                                } else {
+                                    None
+                                };
+                                if edges[p].points.len() > 2
+                                    && shared_port.is_some_and(|port| {
+                                        (port.x - fixed.x).abs() <= GEOMETRY_EPS
+                                            && (port.y - fixed.y).abs() <= GEOMETRY_EPS
+                                    })
+                                {
+                                    continue;
+                                }
+                                let lo = across(a).min(across(b));
+                                let hi = across(a).max(across(b));
+                                let old_overlap = old_hi.min(hi) - old_lo.max(lo);
+                                let new_overlap = new_hi.min(hi) - new_lo.max(lo);
+                                if new_overlap >= -CONTACT_EPS
+                                    && new_overlap > old_overlap + GEOMETRY_EPS
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    false
                 };
-                let room = before.abs().min(after.abs()) - TRACK_GAP;
-                (side * TRACK_GAP).clamp(-room.max(0.0), room.max(0.0))
-            };
-            for bend in [i, i + 1] {
-                if horizontal {
-                    points[bend].y += offset;
-                } else {
-                    points[bend].x += offset;
+                let mut destination = None;
+                'find_track: for gap in [TRACK_GAP, MIN_TRACK_GAP] {
+                    let steps = if room.is_infinite() {
+                        MAX_SHARED
+                    } else {
+                        ((room / gap).ceil() as usize).min(MAX_SHARED) * 2
+                    };
+                    for step in 0..=steps {
+                        let offset = if room.is_infinite() {
+                            -before.signum() * step as f32 * gap
+                        } else {
+                            let distance = step.div_ceil(2) as f32 * gap;
+                            let signed = if step % 2 == 1 { distance } else { -distance };
+                            signed.clamp(-room, room)
+                        };
+                        if !blocked(line + offset) {
+                            destination = Some(line + offset);
+                            break 'find_track;
+                        }
+                    }
+                }
+                assigned[index] = true;
+                // Without enough room for a distinct channel, retaining the route is safer than
+                // crossing an endpoint or another wire. Resolving that case requires new bends.
+                let Some(destination) = destination else {
+                    continue;
+                };
+                for bend in [run.start, run.start + 1] {
+                    if horizontal {
+                        edges[run.path].points[bend].y = destination;
+                    } else {
+                        edges[run.path].points[bend].x = destination;
+                    }
+                }
+                let (old_key, new_key) = (key(line), key(destination));
+                if old_key != new_key {
+                    let members = occupied.get_mut(&old_key).expect("indexed channel");
+                    let position = members
+                        .iter()
+                        .position(|&other| other == index)
+                        .expect("indexed run");
+                    members.swap_remove(position);
+                    occupied.entry(new_key).or_default().push(index);
                 }
             }
         }
@@ -28082,6 +28251,474 @@ mod tests {
                 (end.x - b.x).abs() < 1.0,
                 "{from} -> {to} enters the left face"
             );
+        }
+    }
+
+    use super::{LayoutEdgePath, endpoint_node_index, separate_shared_channels};
+
+    fn shared_channel_test_path(
+        edge_index: usize,
+        coordinates: &[(f32, f32)],
+        transpose: bool,
+    ) -> LayoutEdgePath {
+        LayoutEdgePath {
+            edge_index,
+            span: Span::default(),
+            points: coordinates
+                .iter()
+                .map(|&(x, y)| {
+                    if transpose {
+                        LayoutPoint { x: y, y: x }
+                    } else {
+                        LayoutPoint { x, y }
+                    }
+                })
+                .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        }
+    }
+
+    fn assert_shared_channel_geometry_preserved(
+        before: &[LayoutEdgePath],
+        after: &[LayoutEdgePath],
+    ) {
+        for (old, new) in before.iter().zip(after) {
+            assert_eq!(old.points.first(), new.points.first(), "source port moved");
+            assert_eq!(old.points.last(), new.points.last(), "target port moved");
+            assert_eq!(old.points.len(), new.points.len());
+            for (old_pair, new_pair) in old.points.windows(2).zip(new.points.windows(2)) {
+                let dx = new_pair[1].x - new_pair[0].x;
+                let dy = new_pair[1].y - new_pair[0].y;
+                assert!(dx.is_finite() && dy.is_finite());
+                assert!(
+                    dx.abs() <= 0.01 || dy.abs() <= 0.01,
+                    "diagonal segment: {new_pair:?}"
+                );
+                let old_dx = old_pair[1].x - old_pair[0].x;
+                let old_dy = old_pair[1].y - old_pair[0].y;
+                assert!(
+                    old_dx * dx + old_dy * dy >= -0.01,
+                    "segment reversed: {old_pair:?} -> {new_pair:?}"
+                );
+            }
+        }
+    }
+
+    /// Independent graph walk over drawn segments, including endpoint stubs: a connected
+    /// collinear component must have one common source or one common target.
+    fn shared_channel_has_false_junction(ir: &MermaidDiagramIr, paths: &[LayoutEdgePath]) -> bool {
+        for horizontal in [true, false] {
+            let across = |point: LayoutPoint| if horizontal { point.y } else { point.x };
+            let along = |point: LayoutPoint| if horizontal { point.x } else { point.y };
+            let mut runs = Vec::new();
+            for path in paths {
+                let edge = &ir.edges[path.edge_index];
+                if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+                    continue;
+                }
+                let from = endpoint_node_index(ir, edge.from).expect("source node");
+                let to = endpoint_node_index(ir, edge.to).expect("target node");
+                for pair in path.points.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    if (across(a) - across(b)).abs() <= 0.01
+                        && (along(a) - along(b)).abs() > 0.01
+                    {
+                        runs.push((
+                            across(a),
+                            along(a).min(along(b)),
+                            along(a).max(along(b)),
+                            from,
+                            to,
+                        ));
+                    }
+                }
+            }
+            let mut visited = vec![false; runs.len()];
+            for first in 0..runs.len() {
+                if visited[first] {
+                    continue;
+                }
+                let mut pending = vec![first];
+                visited[first] = true;
+                let mut common_source = Some(runs[first].3);
+                let mut common_target = Some(runs[first].4);
+                while let Some(current) = pending.pop() {
+                    let a = runs[current];
+                    common_source = common_source.filter(|&source| source == a.3);
+                    common_target = common_target.filter(|&target| target == a.4);
+                    for (other, &b) in runs.iter().enumerate() {
+                        if !visited[other]
+                            && (a.0 - b.0).abs() < 0.5
+                            && a.1 <= b.2 + 0.5
+                            && b.1 <= a.2 + 0.5
+                        {
+                            visited[other] = true;
+                            pending.push(other);
+                        }
+                    }
+                }
+                if common_source.is_none() && common_target.is_none() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn shared_channels_separate_mixed_fans_in_both_axes() {
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->C\n B-->E\n").ir;
+        for transpose in [false, true] {
+            let paths = [
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (0.0, 50.0), (0.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    2,
+                    &[(300.0, 0.0), (300.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    3,
+                    &[(300.0, 0.0), (300.0, 50.0), (400.0, 50.0), (400.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            for rotation in 0..paths.len() {
+                let mut before = paths.to_vec();
+                before.rotate_left(rotation);
+                assert!(
+                    shared_channel_has_false_junction(&ir, &before),
+                    "fixture must expose the mixed bus"
+                );
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &mut after);
+                assert_shared_channel_geometry_preserved(&before, &after);
+                assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+                let mut repeated = before.clone();
+                separate_shared_channels(&ir, &mut repeated);
+                assert_eq!(after, repeated, "channel assignment must be deterministic");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_preserve_genuine_fan_in_and_fan_out() {
+        for (source, intervals) in [
+            (
+                "flowchart TD\n A-->B\n A-->C\n A-->D\n",
+                [(100.0, 0.0), (100.0, 200.0), (100.0, 300.0)],
+            ),
+            (
+                "flowchart TD\n A-->D\n B-->D\n C-->D\n",
+                [(0.0, 200.0), (100.0, 200.0), (300.0, 200.0)],
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            for transpose in [false, true] {
+                let before: Vec<_> = intervals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(from, to))| {
+                        shared_channel_test_path(
+                            i,
+                            &[(from, 0.0), (from, 50.0), (to, 50.0), (to, 100.0)],
+                            transpose,
+                        )
+                    })
+                    .collect();
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &mut after);
+                assert_eq!(after, before, "a genuine bus should retain its original route");
+                assert!(!shared_channel_has_false_junction(&ir, &after));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_separate_tangencies_without_extending_a_false_stub() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    2,
+                    &[(400.0, 0.0), (400.0, 50.0), (400.0, 50.0), (400.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            assert!(shared_channel_has_false_junction(&ir, &before));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(
+                after[2], before[2],
+                "a zero-length run must not create a movable channel"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_respect_neighboring_fixed_channels() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(2, &[(110.0, 60.0), (190.0, 60.0)], transpose),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(after[2], before[2], "an endpoint segment cannot move");
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_index_each_new_physical_track() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before: Vec<_> = [0.0, 50.0, 100.0]
+                .iter()
+                .enumerate()
+                .map(|(i, &start)| {
+                    shared_channel_test_path(
+                        i,
+                        &[
+                            (start, 0.0),
+                            (start, 50.0),
+                            (start + 200.0, 50.0),
+                            (start + 200.0, 100.0),
+                        ],
+                        transpose,
+                    )
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(
+                !shared_channel_has_false_junction(&ir, &after),
+                "moved tracks must remain occupied: {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_use_available_short_channel_clearance() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 8.0), (100.0, 8.0), (100.0, 16.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 8.0), (200.0, 8.0), (200.0, 16.0)],
+                    transpose,
+                ),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+            let line = |path: &LayoutEdgePath| {
+                if transpose {
+                    path.points[1].x
+                } else {
+                    path.points[1].y
+                }
+            };
+            assert!((line(&after[0]) - line(&after[1])).abs() >= 1.99);
+            for path in &after {
+                assert!(
+                    (4.0..=12.0).contains(&line(path)),
+                    "at least half each 8px stub remains"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_retain_routes_when_no_safe_track_exists() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n").ir;
+        for transpose in [false, true] {
+            let before: Vec<_> = (0..2)
+                .map(|i| {
+                    shared_channel_test_path(
+                        i,
+                        &[(0.0, 50.0), (0.0, 50.0), (100.0, 50.0), (100.0, 50.0)],
+                        transpose,
+                    )
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_eq!(
+                after, before,
+                "zero-clearance routes need new bends, not reversed stubs"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
+        }
+    }
+
+    #[test]
+    fn shared_channels_leave_dense_groups_as_obstacles() {
+        let mut source = String::from("flowchart TD\n");
+        for i in 0..67 {
+            source.push_str(&format!(" A{i}-->B{i}\n"));
+        }
+        let ir = fm_parser::parse(&source).ir;
+        for transpose in [false, true] {
+            let mut before: Vec<_> = (0..65)
+                .map(|i| {
+                    let start = i as f32 * 10.0;
+                    shared_channel_test_path(
+                        i,
+                        &[
+                            (start, 0.0),
+                            (start, 60.0),
+                            (start + 1000.0, 60.0),
+                            (start + 1000.0, 100.0),
+                        ],
+                        transpose,
+                    )
+                })
+                .collect();
+            before.push(shared_channel_test_path(
+                65,
+                &[(5.0, 0.0), (5.0, 50.0), (105.0, 50.0), (105.0, 100.0)],
+                transpose,
+            ));
+            before.push(shared_channel_test_path(
+                66,
+                &[(55.0, 0.0), (55.0, 50.0), (155.0, 50.0), (155.0, 100.0)],
+                transpose,
+            ));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_eq!(
+                &after[..65],
+                &before[..65],
+                "the bounded pass must retain a dense mesh"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(!shared_channel_has_false_junction(&ir, &after[65..]));
+            for path in &after[65..] {
+                let line = if transpose {
+                    path.points[1].x
+                } else {
+                    path.points[1].y
+                };
+                assert!(
+                    (line - 60.0).abs() >= 1.99,
+                    "a dense skipped group must remain occupied"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_keep_the_asymmetric_default_layout_unambiguous() {
+        for direction in ["TB", "LR"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart {direction}\n A[API gateway] --> C{{Request valid?}}\n A --> D[Audit event]\n B[Background workers] --> C\n B --> E[Long running job queue]\n C --> G[Response delivered]\n E --> F[Persist job results]\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            assert_eq!(layout.edges.len(), 6);
+            assert!(
+                !shared_channel_has_false_junction(&ir, &layout.edges),
+                "{direction}: {:?}",
+                layout.edges
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_can_extend_a_genuine_shared_port_stub() {
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 100.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 100.0), (100.0, 30.0), (300.0, 30.0), (300.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(2, &[(0.0, 50.0), (400.0, 50.0)], transpose),
+            ];
+            assert!(shared_channel_has_false_junction(&ir, &before));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(
+                after[2], before[2],
+                "the fixed endpoint segment remains attached"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_do_not_extend_through_a_straight_peers_far_port() {
+        let ir =
+            fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n F-->G\n H-->I\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 100.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(1, &[(100.0, 100.0), (100.0, 30.0)], transpose),
+                shared_channel_test_path(2, &[(0.0, 50.0), (400.0, 50.0)], transpose),
+                shared_channel_test_path(3, &[(150.0, 40.0), (250.0, 40.0)], transpose),
+                shared_channel_test_path(4, &[(150.0, 30.0), (250.0, 30.0)], transpose),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &mut after);
+            assert_eq!(
+                after, before,
+                "a shared source cannot justify extending through a straight peer's target port"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
         }
     }
 
