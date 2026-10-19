@@ -11641,7 +11641,11 @@ fn render_node(
                     label_id,
                     label_text.as_ref(),
                     cx,
-                    cy + node_font_size / 3.0,
+                    cy - label_text.lines().count().saturating_sub(1) as f32
+                        * node_font_size
+                        * config.line_height
+                        * 0.5
+                        + node_font_size / 3.0,
                     node_font_size,
                     fit_width((w - 16.0).max(node_font_size)),
                     (h - 16.0).max(node_font_size),
@@ -11883,7 +11887,11 @@ fn render_node(
                     label_id,
                     &label_text,
                     cx,
-                    cy + node_font_size / 3.0,
+                    cy - label_text.lines().count().saturating_sub(1) as f32
+                        * node_font_size
+                        * config.line_height
+                        * 0.5
+                        + node_font_size / 3.0,
                     node_font_size,
                     fit_width((w * 0.8).max(node_font_size)),
                     (h * 0.8).max(node_font_size),
@@ -14137,6 +14145,7 @@ fn fit_node_label_text<'a>(
     if label.is_empty()
         || !max_width.is_finite()
         || !max_height.is_finite()
+        || !font_size.is_finite()
         || max_width <= 0.0
         || max_height <= 0.0
         || font_size <= 0.0
@@ -14159,7 +14168,13 @@ fn fit_node_label_text<'a>(
             })
             .fold(0.0_f32, f32::max)
     };
-    if calibrated_width(label, font_size) <= max_width {
+    let line_height = config.line_height.max(1.0);
+    let text_height = |line_count: usize, size: f32| {
+        size + line_count.saturating_sub(1) as f32 * size * line_height
+    };
+    if calibrated_width(label, font_size) <= max_width
+        && text_height(label.lines().count().max(1), font_size) <= max_height
+    {
         return FittedNodeLabel {
             text: Cow::Borrowed(label),
             font_size,
@@ -14167,28 +14182,51 @@ fn fit_node_label_text<'a>(
         };
     }
 
-    let min_size = config.min_font_size.max(10.0).min(font_size);
-    let reduced_size =
-        (font_size * max_width / calibrated_width(label, font_size)).clamp(min_size, font_size);
-    let mut fitted_size = reduced_size;
-    let max_lines =
-        |size: f32| ((max_height / (size * config.line_height.max(1.0))).floor() as usize).max(1);
+    let fits = |lines: &[String], size: f32| {
+        text_height(lines.len(), size) <= max_height
+            && lines
+                .iter()
+                .all(|line| calibrated_width(line, size) <= max_width)
+    };
+    // Wrapping often provides all the room a label needs without making it harder to read.
+    let mut fitted_size = font_size;
     let mut lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
-
-    if lines.len() > max_lines(fitted_size) && fitted_size > min_size {
-        fitted_size = min_size;
+    if !fits(&lines, fitted_size) {
+        fitted_size = config.min_font_size.max(10.0).min(font_size);
         lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+        if fits(&lines, fitted_size) {
+            // Find the largest readable size that fits, retaining the best successful wrapping.
+            let mut upper_size = font_size;
+            for _ in 0..10 {
+                let candidate_size = fitted_size + (upper_size - fitted_size) * 0.5;
+                let candidate =
+                    wrap_node_label_lines(label, max_width, candidate_size, &calibrated_width);
+                if fits(&candidate, candidate_size) {
+                    fitted_size = candidate_size;
+                    lines = candidate;
+                } else {
+                    upper_size = candidate_size;
+                }
+            }
+        }
     }
 
-    let visible_lines = max_lines(fitted_size);
-    let was_truncated = lines.len() > visible_lines
-        || lines
-            .iter()
-            .any(|line| calibrated_width(line, fitted_size) > max_width);
-    if was_truncated && !config.preserve_labels {
+    let visible_lines = lines
+        .iter()
+        .enumerate()
+        .take_while(|(index, _)| text_height(*index + 1, fitted_size) <= max_height)
+        .count()
+        .max(1);
+    let hidden_lines = lines.len() > visible_lines;
+    if !config.preserve_labels {
         lines.truncate(visible_lines);
-        if let Some(last) = lines.last_mut() {
-            *last = ellipsize_label_line(last, max_width, fitted_size, &calibrated_width);
+        let last_index = lines.len().saturating_sub(1);
+        for (index, line) in lines.iter_mut().enumerate() {
+            if calibrated_width(line, fitted_size) > max_width
+                || (hidden_lines && index == last_index)
+            {
+                *line = ellipsize_label_line(line, max_width, fitted_size, &calibrated_width);
+            }
         }
     }
 
@@ -14256,6 +14294,72 @@ fn ellipsize_label_line(
     result
 }
 
+/// Preserve visible glyph styles when fitting changes only whitespace. Matching the complete
+/// character stream also prevents an ellipsized label from restoring content that was removed.
+fn reflow_label_markup(
+    segments: &[IrLabelSegment],
+    fitted_text: &str,
+) -> Option<Vec<IrLabelSegment>> {
+    let mut source = segments
+        .iter()
+        .flat_map(|segment| {
+            let (text, style) = match segment {
+                IrLabelSegment::Text {
+                    text,
+                    bold,
+                    italic,
+                    code,
+                    strike,
+                } => (text.as_str(), [*bold, *italic, *code, *strike]),
+                IrLabelSegment::LineBreak => ("\n", [false; 4]),
+            };
+            text.chars().map(move |character| (character, style))
+        })
+        .peekable();
+    let mut reflowed = Vec::new();
+    for character in fitted_text.chars() {
+        if character == '\n' {
+            reflowed.push(IrLabelSegment::LineBreak);
+            continue;
+        }
+        let style = if character.is_whitespace() {
+            source.peek().map_or([false; 4], |(_, style)| *style)
+        } else {
+            while source.peek().is_some_and(|(value, _)| value.is_whitespace()) {
+                let _ = source.next();
+            }
+            let (value, style) = source.next()?;
+            if value != character {
+                return None;
+            }
+            style
+        };
+        if let Some(IrLabelSegment::Text {
+            text,
+            bold,
+            italic,
+            code,
+            strike,
+        }) = reflowed.last_mut()
+            && [*bold, *italic, *code, *strike] == style
+        {
+            text.push(character);
+        } else {
+            reflowed.push(IrLabelSegment::Text {
+                text: character.to_string(),
+                bold: style[0],
+                italic: style[1],
+                code: style[2],
+                strike: style[3],
+            });
+        }
+    }
+    if source.any(|(character, _)| !character.is_whitespace()) {
+        return None;
+    }
+    Some(reflowed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_node_label_text(
     ir: &MermaidDiagramIr,
@@ -14272,27 +14376,43 @@ fn render_node_label_text(
     emit_classdef_classes: bool,
 ) -> Element {
     let fitted = fit_node_label_text(label_text, max_width, max_height, font_size, config);
-    // Markup survives a smaller font; only a wrapped or ellipsized text has lost the segment
-    // boundaries and must fall back to plain. Gating on `changed` alone dropped a label's bold and
-    // italics whenever it was merely shrunk to fit.
-    let markup_survives = !fitted.changed || fitted.text.as_ref() == label_text;
+    // Callers position the first baseline of the original block. Keep its visual center when
+    // fitting changes either the number of lines or their font size.
+    let y = if fitted.changed {
+        let original_span = label_text.lines().count().saturating_sub(1) as f32
+            * font_size
+            * config.line_height;
+        let fitted_span = fitted.text.lines().count().saturating_sub(1) as f32
+            * fitted.font_size
+            * config.line_height;
+        y + (original_span - fitted_span) * 0.5 + (fitted.font_size - font_size) / 3.0
+    } else {
+        y
+    };
+    let markup_unchanged = fitted.text.as_ref() == label_text;
     let label_text = fitted.text.as_ref();
     let font_size = fitted.font_size;
-    if markup_survives
-        && let Some(label_id) = label_id
+    if let Some(label_id) = label_id
         && let Some(segments) = ir.label_markup.get(&label_id)
         && !segments.is_empty()
     {
-        return render_markdown_text_segments(
-            segments,
-            x,
-            y,
-            font_size,
-            config,
-            colors.text.as_str(),
-            label_style,
-            emit_classdef_classes,
-        );
+        let segments = if markup_unchanged {
+            Some(Cow::Borrowed(segments.as_slice()))
+        } else {
+            reflow_label_markup(segments, label_text).map(Cow::Owned)
+        };
+        if let Some(segments) = segments {
+            return render_markdown_text_segments(
+                &segments,
+                x,
+                y,
+                font_size,
+                config,
+                colors.text.as_str(),
+                label_style,
+                emit_classdef_classes,
+            );
+        }
     }
 
     let mut text = if label_has_line_break(label_text) {
@@ -18851,6 +18971,187 @@ mod tests {
         assert!(!fitted.changed);
         assert!(matches!(fitted.text, Cow::Borrowed("Short label")));
         assert_eq!(fitted.font_size, 15.0);
+    }
+
+    #[test]
+    fn node_label_fitting_wraps_at_full_size_when_two_lines_fit() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("alpha beta", 48.0, 48.0, 15.0, &config);
+
+        assert_eq!(fitted.font_size, 15.0);
+        assert_eq!(fitted.text.as_ref(), "alpha\nbeta");
+    }
+
+    #[test]
+    fn node_label_fitting_checks_height_even_when_every_line_fits_width() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("one\ntwo\nthree", 240.0, 48.0, 15.0, &config);
+
+        assert_eq!(fitted.text.as_ref(), "one\ntwo\nthree");
+        assert!(fitted.font_size > 11.9 && fitted.font_size <= 12.0);
+        assert!(fitted.changed);
+    }
+
+    #[test]
+    fn node_label_fitting_clips_an_overlong_word_before_the_last_line() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text(
+            "extraordinarily-long-unbreakable-identifier\nOK",
+            48.0,
+            64.0,
+            15.0,
+            &config,
+        );
+
+        let lines: Vec<_> = fitted.text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with('…'));
+        assert_eq!(lines[1], "OK");
+    }
+
+    #[test]
+    fn wrapped_node_labels_keep_the_original_visual_center() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig::default();
+        let center_y = 50.0;
+        let svg = render_node_label_text(
+            &ir,
+            None,
+            "alpha beta",
+            24.0,
+            center_y + config.font_size / 3.0,
+            config.font_size,
+            48.0,
+            48.0,
+            &config,
+            &ThemeColors::default(),
+            None,
+            false,
+        )
+        .render();
+
+        let number = |tag: &str, name: &str| -> f32 {
+            let needle = format!(" {name}=\"");
+            let value = tag.split_once(&needle).expect("numeric attribute").1;
+            value.split('"').next().unwrap().parse().unwrap()
+        };
+        let first_baseline = number(&svg, "y");
+        let font_size = number(&svg, "font-size");
+        let line_offsets: Vec<_> = svg
+            .split("<tspan ")
+            .skip(1)
+            .map(|span| number(span, "dy"))
+            .collect();
+        assert_eq!(line_offsets.len(), 2);
+        assert_eq!(font_size, config.font_size);
+        let final_baseline = first_baseline + line_offsets.iter().sum::<f32>();
+        let rendered_center = (first_baseline + final_baseline) * 0.5 - font_size / 3.0;
+        assert!((rendered_center - center_y).abs() < 0.01);
+        assert!(first_baseline - font_size >= center_y - 24.0);
+        assert!(final_baseline <= center_y + 24.0);
+    }
+
+    #[test]
+    fn wrapped_node_labels_preserve_markdown_styles_and_content() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let segments = vec![
+            IrLabelSegment::Text {
+                text: "alpha ".to_string(),
+                bold: true,
+                italic: false,
+                code: false,
+                strike: false,
+            },
+            IrLabelSegment::Text {
+                text: "beta".to_string(),
+                bold: false,
+                italic: true,
+                code: false,
+                strike: false,
+            },
+        ];
+        assert!(reflow_label_markup(&segments, "alpha…").is_none());
+        ir.label_markup.insert(IrLabelId(0), segments);
+        let config = SvgRenderConfig::default();
+        let svg = render_node_label_text(
+            &ir,
+            Some(IrLabelId(0)),
+            "alpha beta",
+            24.0,
+            50.0,
+            15.0,
+            48.0,
+            48.0,
+            &config,
+            &ThemeColors::default(),
+            None,
+            false,
+        )
+        .render();
+
+        assert!(svg.contains("font-size=\"15\""), "{svg}");
+        assert!(svg.contains("font-weight=\"700\">alpha</tspan>"), "{svg}");
+        assert!(svg.contains("font-style=\"italic\">beta</tspan>"), "{svg}");
+        assert_eq!(svg.matches("<tspan x=").count(), 2, "{svg}");
+        assert!(!svg.contains('…'), "{svg}");
+    }
+
+    #[test]
+    fn multiline_labels_are_centered_in_ordinary_and_special_shapes() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(120.0, 100.0, &config);
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "N0".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 120.0,
+                height: 100.0,
+            },
+        };
+        for shape in [NodeShape::Rect, NodeShape::Subroutine, NodeShape::CrossedCircle] {
+            let mut ir = create_ir_with_single_node("N0", shape);
+            ir.labels[0].text = "one\ntwo".to_string();
+            let svg = render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &HashMap::new(),
+                false,
+            )
+            .render();
+            let text = svg.split("<text ").nth(1).expect("node label");
+            let number = |tag: &str, name: &str| -> f32 {
+                let needle = format!(" {name}=\"");
+                let value = tag.split_once(&needle).expect("numeric attribute").1;
+                value.split('"').next().unwrap().parse().unwrap()
+            };
+            let first_baseline = number(text, "y");
+            let font_size = number(text, "font-size");
+            let offsets: Vec<_> = text
+                .split("<tspan ")
+                .skip(1)
+                .map(|span| number(span, "dy"))
+                .collect();
+            assert_eq!(offsets.len(), 2, "{shape:?}: {svg}");
+            let rendered_center =
+                first_baseline + offsets.iter().sum::<f32>() * 0.5 - font_size / 3.0;
+            let expected_center = node_box.bounds.y + node_box.bounds.height * 0.5;
+            assert!(
+                (rendered_center - expected_center).abs() < 0.01,
+                "{shape:?}: {svg}"
+            );
+        }
     }
 
     #[test]
@@ -24270,10 +24571,17 @@ marker#arrow-open path {
     #[test]
     fn truncated_markdown_label_falls_back_to_its_plain_text() {
         let long = "word ".repeat(14);
-        let svg = render_source(&format!("flowchart LR\n  a(\"`**{}**`\")\n", long.trim()));
+        let parsed = fm_parser::parse(&format!("flowchart LR\n  a(\"`**{}**`\")\n", long.trim()));
+        let svg = render_svg_with_config(
+            &parsed.ir,
+            &SvgRenderConfig {
+                detail_tier: MermaidTier::Normal,
+                ..Default::default()
+            },
+        );
         assert!(
             svg.contains('…'),
-            "the 48-char cap should truncate this label"
+            "the explicit Normal tier's 48-char cap should truncate this label"
         );
         assert!(!svg.contains(r#"font-weight="700""#), "{svg}");
     }
