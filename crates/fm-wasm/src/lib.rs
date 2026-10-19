@@ -1942,12 +1942,7 @@ pub async fn render_webgpu_to_rgba_js(
 ///
 /// # Errors
 /// Returns the device or readback failure.
-#[cfg(feature = "webgpu")]
-// Unused in a NATIVE non-test build, and deliberately so: its only production caller is the
-// wasm32-gated `renderWebGpuToRgba`, while the native test suite is what proves it works. Making it
-// wasm-only would put the browser render path beyond the reach of every test that can run here,
-// which is the trade this whole split exists to avoid.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(all(feature = "webgpu", any(test, target_arch = "wasm32")))]
 pub(crate) async fn render_webgpu_pixels(
     plan: &GpuRenderPlan,
     width: u32,

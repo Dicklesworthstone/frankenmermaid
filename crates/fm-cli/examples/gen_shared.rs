@@ -113,5 +113,6 @@ pub fn gen_input(shape: &str, n: usize) -> String {
 }
 
 // Cargo auto-discovers every file in examples/ as an example binary.
-#[allow(dead_code)]
-fn main() {}
+pub fn main() {
+    let _ = gen_input("flow", 1);
+}

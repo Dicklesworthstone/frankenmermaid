@@ -131,6 +131,21 @@ pub fn compute_criticality_scores(
         .unwrap_or_default()
 }
 
+/// Compute edge criticality scores with deterministic LRU caching via [`crate::fnx_cache::AnalysisCache`] (`bd-lw6f5`).
+pub fn compute_criticality_scores_cached(
+    ir: &MermaidDiagramIr,
+    proj_config: &crate::fnx_adapter::ProjectionConfig,
+    scoring_config: &CriticalityScoringConfig,
+    cache: &mut crate::fnx_cache::AnalysisCache,
+) -> CriticalityScoringResults {
+    if let Some(cached) = cache.get_criticality(ir, proj_config, scoring_config) {
+        return cached;
+    }
+    let results = compute_criticality_scores(ir, scoring_config);
+    cache.put_criticality(ir, proj_config, scoring_config, results.clone());
+    results
+}
+
 /// Compute edge criticality scores under an explicit [`AnalysisBudget`].
 #[must_use]
 pub fn compute_criticality_scores_with_budget(

@@ -246,6 +246,22 @@ impl SvgRenderConfig {
             trace_fallbacks: false,
         })
     }
+
+    /// Render the CSS custom property block (`--fm-bg`, `--fm-primary-fill`, etc.)
+    /// for this configuration's theme preset (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn theme_css_vars(&self) -> String {
+        render_theme_css_vars(self.theme)
+    }
+}
+
+/// Render the CSS custom property declarations (`--fm-bg`, `--fm-primary-fill`, etc.)
+/// for a given [`ThemePreset`] (`bd-5ben5`).
+#[inline]
+#[must_use]
+pub fn render_theme_css_vars(preset: ThemePreset) -> String {
+    ThemeColors::from_preset(preset).to_css_vars()
 }
 
 impl Default for SvgRenderConfig {
@@ -23227,5 +23243,16 @@ marker#arrow-open path {
         assert!(debug_svg.contains(r#"class="fm-debug-node-bbox""#));
         assert!(debug_svg.contains(r#"class="fm-debug-edge-point""#));
         assert!(debug_svg.contains("debug: nodes=2 edges=1"));
+    }
+
+    #[test]
+    fn render_theme_css_vars_emits_theme_custom_properties() {
+        let cfg = SvgRenderConfig::default();
+        let vars = cfg.theme_css_vars();
+        assert!(vars.contains("--fm-bg:"));
+        assert!(vars.contains("--fm-primary-fill:"));
+        assert!(vars.contains("--fm-line:"));
+        let dark_vars = render_theme_css_vars(ThemePreset::Dark);
+        assert_ne!(vars, dark_vars);
     }
 }

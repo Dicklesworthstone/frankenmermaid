@@ -2,7 +2,7 @@ use fm_parser::parse;
 use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-mod g {
+pub mod g {
     include!("gen_shared.rs");
 }
 fn main() {

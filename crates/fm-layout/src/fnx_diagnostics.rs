@@ -355,6 +355,20 @@ pub fn analyze_structure(ir: &MermaidDiagramIr) -> FnxAnalysisResults {
         .unwrap_or_default()
 }
 
+/// Run FNX structural analyses with deterministic LRU caching via [`crate::fnx_cache::AnalysisCache`] (`bd-lw6f5`).
+pub fn analyze_structure_cached(
+    ir: &MermaidDiagramIr,
+    config: &crate::fnx_adapter::ProjectionConfig,
+    cache: &mut crate::fnx_cache::AnalysisCache,
+) -> FnxAnalysisResults {
+    if let Some(cached) = cache.get_diagnostics(ir, config) {
+        return cached;
+    }
+    let results = analyze_structure(ir);
+    cache.put_diagnostics(ir, config, results.clone());
+    results
+}
+
 /// Run FNX structural analyses under an explicit [`AnalysisBudget`].
 ///
 /// Tracks graph-projection and per-pass work units via [`BudgetExecutor`] and stops

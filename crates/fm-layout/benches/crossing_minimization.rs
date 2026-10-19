@@ -104,7 +104,6 @@ fn generate_bipartite(n: usize, m: usize) -> (Vec<LayerOrdering>, Vec<LayerEdges
 
 /// Metrics from a crossing minimization run.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CrossingMetrics {
     /// Final crossing count.
     crossing_count: usize,
@@ -116,7 +115,6 @@ struct CrossingMetrics {
 
 /// Comparison between E-graph and greedy.
 #[derive(Debug)]
-#[allow(dead_code)]
 struct Comparison {
     egraph: CrossingMetrics,
     greedy: CrossingMetrics,
@@ -349,8 +347,17 @@ fn benchmark_quality_comparison(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("compare", name), |b| {
             b.iter(|| {
                 let comparison = compare_strategies(initial, &ctx, &config);
-                // Return comparison to prevent optimization
-                comparison.improvement_pct
+                // Return comparison fields to prevent dead-code elimination
+                (
+                    comparison.egraph.crossing_count,
+                    comparison.egraph.time_us,
+                    comparison.egraph.strategy,
+                    comparison.greedy.crossing_count,
+                    comparison.greedy.time_us,
+                    comparison.greedy.strategy,
+                    comparison.improvement_pct,
+                    comparison.time_ratio,
+                )
             });
         });
     }

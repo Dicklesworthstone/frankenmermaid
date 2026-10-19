@@ -14,6 +14,10 @@ pub mod quotient_filter;
 pub mod reuse_proof;
 pub mod succinct;
 
+pub use constraints::{
+    ConstraintCounterexample, ConstraintExample, ConstraintExamplePosition,
+    ConstraintSynthesisResult, synthesize_order_constraints,
+};
 pub use evidence::{
     DecisionMode, EvidenceBundle, EvidenceLogEntry, EvidenceSummary, FallbackReason, FnxFeatures,
     FnxMode, PassFailReason, ProjectionMode, fnv1a_hex,
@@ -8503,6 +8507,46 @@ impl MermaidDiagramIr {
             .collect()
     }
 
+    /// Extract all alignment constraints declared on this diagram (`bd-3616r`).
+    #[inline]
+    #[must_use]
+    pub fn alignment_constraints(&self) -> Vec<crate::constraints::AlignConstraint> {
+        self.constraint_set().alignments().into_iter().cloned().collect()
+    }
+
+    /// Return the succinct CSR edge count (directed or undirected) for this diagram (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn succinct_edge_count(&self, directed: bool) -> usize {
+        self.csr_graph(directed).num_edges()
+    }
+
+    /// Compute the sorted union of outgoing neighbor [`IrNodeId`]s for the given `node_ids`
+    /// using [`crate::leapfrog::leapfrog_union`] (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn union_outgoing_neighbors_leapfrog(&self, node_ids: &[IrNodeId]) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_union};
+
+        if node_ids.is_empty() {
+            return Vec::new();
+        }
+        let csr = self.csr_graph(true);
+        let relations: Vec<SortedRelation> = node_ids
+            .iter()
+            .map(|id| {
+                let neighbors: Vec<u64> =
+                    csr.neighbors(id.0).iter().map(|&n| u64::from(n)).collect();
+                SortedRelation::from_unsorted(&neighbors)
+            })
+            .collect();
+        let refs: Vec<&SortedRelation> = relations.iter().collect();
+        leapfrog_union(&refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
+    }
+
     #[must_use]
     pub fn source_map(&self) -> MermaidSourceMap {
         let entry_capacity = self.nodes.len() + self.edges.len() + self.clusters.len();
@@ -15814,11 +15858,16 @@ mod tests {
         // 3. QuotientFilter duplicate edge count
         assert_eq!(ir.duplicate_edge_count(), 1);
 
-        // 4. Leapfrog join & anti-join on clusters
+        // 4. Leapfrog join, anti-join & union on clusters/neighbors
         assert_eq!(ir.shared_cluster_members(&[0, 1]), vec![IrNodeId(1)]);
         assert_eq!(ir.unclustered_nodes(), vec![IrNodeId(3)]);
+        assert_eq!(ir.succinct_edge_count(true), 3);
+        assert_eq!(
+            ir.union_outgoing_neighbors_leapfrog(&[IrNodeId(0), IrNodeId(1)]),
+            vec![IrNodeId(1), IrNodeId(2)]
+        );
 
-        // 5. ConstraintSet conflict detection
+        // 5. ConstraintSet conflict detection & alignment_constraints
         ir.constraints.push(super::IrConstraint::Pin {
             node_id: "api_gateway".to_string(),
             x: 10.0,
@@ -15831,8 +15880,13 @@ mod tests {
             y: 60.0,
             span: Span::default(),
         });
+        ir.constraints.push(super::IrConstraint::SameRank {
+            node_ids: vec!["api_gateway".to_string(), "auth_service".to_string()],
+            span: Span::default(),
+        });
         let cset = ir.constraint_set();
-        assert_eq!(cset.len(), 2);
+        assert_eq!(cset.len(), 3);
         assert!(cset.has_conflicts());
+        assert_eq!(ir.alignment_constraints().len(), 1);
     }
 }

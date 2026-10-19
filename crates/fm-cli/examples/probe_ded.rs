@@ -1,5 +1,5 @@
 use fm_parser::parse;
-mod g {
+pub mod g {
     include!("gen_shared.rs");
 }
 use fm_layout::{

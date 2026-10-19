@@ -419,7 +419,7 @@ struct CachedParsedBatch {
 /// This is deliberately separate from [`CachedRenderedBatch`]: every revision still parses and
 /// renders, while only layout carries state from the prior revision. A rendered-output memo would
 /// turn later samples into probes rather than edits (bd-bh7d).
-#[allow(dead_code)]
+#[cfg(test)]
 struct IncrementalRenderedBatch {
     output: Arc<[String]>,
     size_stable_revisions: usize,
@@ -994,6 +994,7 @@ impl RenderExecutor {
 
     /// Render a live-edit trace through one layout engine, preserving only layout state across
     /// successive documents. Parsing and SVG emission remain per-revision work inside the caller.
+    #[cfg(test)]
     fn render_all_incremental_revisions(
         &self,
         texts: &Arc<[String]>,

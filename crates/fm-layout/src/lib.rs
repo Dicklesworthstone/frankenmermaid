@@ -2864,6 +2864,38 @@ impl DiagramLayout {
         };
         egraph_crossing::saturate_with_fallback(&initial, &ctx, config)
     }
+
+    /// Convert this [`DiagramLayout`] into a [`fm_core::constraints::ConstraintExample`]
+    /// suitable for CEGIS constraint synthesis (`bd-3616r`).
+    #[inline]
+    #[must_use]
+    pub fn to_constraint_example(&self) -> fm_core::constraints::ConstraintExample {
+        let positions = self
+            .nodes
+            .iter()
+            .map(|node| fm_core::constraints::ConstraintExamplePosition {
+                node_id: node.node_id.clone(),
+                x: node.bounds.x + node.bounds.width * 0.5,
+                y: node.bounds.y + node.bounds.height * 0.5,
+                rank: Some(node.rank),
+            })
+            .collect();
+        fm_core::constraints::ConstraintExample { positions }
+    }
+
+    /// Synthesize horizontal, vertical, and rank order constraints that hold across all
+    /// provided [`DiagramLayout`] examples using CEGIS (`bd-3616r`).
+    #[inline]
+    #[must_use]
+    pub fn synthesize_constraints_from_layouts(
+        layouts: &[&Self],
+    ) -> fm_core::constraints::ConstraintSynthesisResult {
+        let examples: Vec<fm_core::constraints::ConstraintExample> = layouts
+            .iter()
+            .map(|layout| layout.to_constraint_example())
+            .collect();
+        fm_core::constraints::synthesize_order_constraints(&examples)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3443,6 +3475,8 @@ pub mod spatial;
 pub mod spectral;
 
 pub use cache_oblivious::BlockedEdgeGroups;
+#[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+pub use fnx_cache::{AnalysisCache, CacheConfig, CacheKey, CacheStats};
 use shapes::{node_path, rounded_rect_path};
 
 fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
@@ -4337,6 +4371,98 @@ impl IncrementalLayoutEngine {
     #[must_use]
     pub fn dcg_stats(&self) -> crate::adapton::LayoutDcgStats {
         self.dcg.stats()
+    }
+
+    /// Return a reference to the engine's Adapton [`crate::adapton::LayoutDcg`] (`bd-o028k`).
+    #[inline]
+    #[must_use]
+    pub fn dcg(&self) -> &crate::adapton::LayoutDcg {
+        &self.dcg
+    }
+
+    /// Return a human-readable summary of which Adapton DCG phases are dirty (`bd-o028k`).
+    #[inline]
+    #[must_use]
+    pub fn dcg_dirty_summary(&self) -> String {
+        self.dcg.dirty_summary()
+    }
+
+    /// Check whether any Adapton DCG phase is currently dirty (`bd-o028k`).
+    #[inline]
+    #[must_use]
+    pub fn dcg_any_dirty(&self) -> bool {
+        self.dcg.any_dirty()
+    }
+
+    /// Check whether all Adapton DCG phases (`metrics`, `ranks`, `orderings`, `layout`) are clean (`bd-o028k`).
+    #[inline]
+    #[must_use]
+    pub fn dcg_fully_cached(&self) -> bool {
+        self.dcg.fully_cached()
+    }
+
+    /// Synchronize the Adapton [`crate::adapton::LayoutDcg`] fingerprints (`ir_fingerprint`,
+    /// `config_fingerprint`) and populate its phase caches (`metrics`, `ranks`, `orderings`,
+    /// `layout`) from the engine's current cached state (`bd-o028k`).
+    #[inline]
+    pub fn sync_dcg_phases(&self, ir: &MermaidDiagramIr, config: &MermaidConfig) {
+        self.dcg
+            .set_ir_fingerprint(crate::adapton::ir_fingerprint(ir));
+        self.dcg
+            .set_config_fingerprint(crate::adapton::config_fingerprint(config));
+
+        if self.dcg.metrics_dirty() {
+            let metrics = self
+                .graph_metrics_cache
+                .as_ref()
+                .filter(|(snap, _)| metrics_topology_equal(snap, ir))
+                .map_or_else(|| GraphMetrics::from_ir(ir), |(_, m)| *m);
+            self.dcg.set_metrics(metrics);
+        }
+
+        if let Some(cached) = &self.cached {
+            if self.dcg.ranks_dirty() {
+                let mut ranks = vec![0_usize; cached.traced.layout.nodes.len()];
+                for node in &cached.traced.layout.nodes {
+                    if node.node_index < ranks.len() {
+                        ranks[node.node_index] = node.rank;
+                    }
+                }
+                self.dcg.set_ranks(ranks);
+            }
+            if self.dcg.orderings_dirty() {
+                let max_rank = cached
+                    .traced
+                    .layout
+                    .nodes
+                    .iter()
+                    .map(|n| n.rank)
+                    .max()
+                    .unwrap_or(0);
+                let mut by_rank: Vec<Vec<(usize, usize)>> = if cached.traced.layout.nodes.is_empty()
+                {
+                    Vec::new()
+                } else {
+                    vec![Vec::new(); max_rank + 1]
+                };
+                for node in &cached.traced.layout.nodes {
+                    if let Some(bucket) = by_rank.get_mut(node.rank) {
+                        bucket.push((node.order, node.node_index));
+                    }
+                }
+                let orderings = by_rank
+                    .into_iter()
+                    .map(|mut bucket| {
+                        bucket.sort_unstable();
+                        bucket.into_iter().map(|(_, idx)| idx).collect()
+                    })
+                    .collect();
+                self.dcg.set_orderings(orderings);
+            }
+            if self.dcg.layout_dirty() {
+                self.dcg.set_layout((*cached.traced.layout).clone());
+            }
+        }
     }
 
     /// Capture an epoch-tagged snapshot of the active IR (`bd-yyt62`).
@@ -32452,6 +32578,60 @@ mod tests {
         );
         assert_eq!(fallback.ordering.len(), rank_1_count);
         assert!(fallback.crossing_count <= fallback.greedy_result.crossing_count);
+    }
+
+    #[test]
+    fn wave7_adapton_dcg_cegis_and_fnx_cache_helpers_work() {
+        let ir = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        let mut engine = IncrementalLayoutEngine::default();
+        assert!(engine.dcg_any_dirty());
+        assert!(!engine.dcg_fully_cached());
+
+        let traced = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        engine.sync_dcg_phases(&ir, &MermaidConfig::default());
+        assert!(!engine.dcg_any_dirty());
+        assert!(engine.dcg_fully_cached());
+        assert_eq!(engine.dcg_dirty_summary(), "clean");
+        assert!(engine.dcg().get_metrics().is_some());
+        assert_eq!(
+            engine.dcg().get_ranks().as_ref().map(Vec::len),
+            Some(ir.nodes.len())
+        );
+        assert!(engine.dcg().get_orderings().is_some());
+        assert!(engine.dcg().get_layout().is_some());
+
+        let example = traced.layout.to_constraint_example();
+        assert_eq!(example.positions.len(), 4);
+        let synth = DiagramLayout::synthesize_constraints_from_layouts(&[&traced.layout]);
+        assert!(synth.is_consistent());
+        assert!(!synth.constraints.is_empty());
+
+        #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
+        {
+            let mut cache = AnalysisCache::default();
+            let proj_cfg = crate::fnx_adapter::ProjectionConfig::default();
+            let diag1 =
+                crate::fnx_diagnostics::analyze_structure_cached(&ir, &proj_cfg, &mut cache);
+            let diag2 =
+                crate::fnx_diagnostics::analyze_structure_cached(&ir, &proj_cfg, &mut cache);
+            assert_eq!(diag1.component_count, diag2.component_count);
+            assert_eq!(cache.stats().hits, 1);
+
+            let score_cfg = crate::fnx_cycle_scorer::CriticalityScoringConfig::default();
+            let crit1 = crate::fnx_cycle_scorer::compute_criticality_scores_cached(
+                &ir, &proj_cfg, &score_cfg, &mut cache,
+            );
+            let crit2 = crate::fnx_cycle_scorer::compute_criticality_scores_cached(
+                &ir, &proj_cfg, &score_cfg, &mut cache,
+            );
+            assert_eq!(crit1.scores.len(), crit2.scores.len());
+            assert_eq!(cache.stats().hits, 2);
+        }
     }
 
     // ─── Property-based layout invariant tests (bd-30y.13) ──────────────
