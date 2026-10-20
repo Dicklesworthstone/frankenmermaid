@@ -572,7 +572,9 @@ fn union(a: LayoutRect, b: LayoutRect) -> LayoutRect {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlatLayout, Source, compound_node_boxes, flat_boxes, parent_ir, top_level_clusters};
+    use super::{
+        FlatLayout, Source, compound_node_boxes, flat_boxes, parent_ir, top_level_clusters,
+    };
     use crate::{LayoutAlgorithm, LayoutConfig, LayoutRect, LayoutSpacing, build_cluster_boxes};
     use fm_core::{FontMetrics, FontMetricsConfig};
 

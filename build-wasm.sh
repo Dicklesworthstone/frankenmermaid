@@ -237,7 +237,18 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # replays rejected above are not a size reduction. This smallest whole-KiB ceiling leaves 236
 # bytes. Browser/API correctness and artifact/source freshness gates remain unchanged.
 # See evidence/issue14_font_regression.md for before/after rendering and size evidence.
-MAX_GZIP_BYTES=$((785 * 1024))
+# Raised 785K -> 787K on 2026-10-20 after measuring integrated current main and GH#14:
+#   803958 gzip  unchanged main 29536a, compiled in a fresh isolated target
+#   805290 gzip  integrated label/font geometry fixes (+1332 over fresh main)
+# The fresh main baseline itself is 118 bytes above the previous 785K ceiling. The issue
+# fixes add 2844 raw bytes: code-section bytes +2810, type-section bytes +24, and
+# function-section bytes +10. Data-section size remains 158119 bytes; both modules have
+# zero custom sections, 89 imports, and 50 exports, so no metadata remains to strip.
+# Keep the canonical -Oz --converge, LTO, one codegen unit, and immediate-abort std flags.
+# 787K is the smallest whole-KiB ceiling that fits this measured output, with 598 bytes
+# of headroom. Browser/API correctness and source-freshness gates remain unchanged.
+# See evidence/issue14_font_regression.md for the independent size and runtime evidence.
+MAX_GZIP_BYTES=$((787 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

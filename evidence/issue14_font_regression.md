@@ -1,46 +1,40 @@
-# Issue #14: scaled-label and cluster geometry follow-up
+# Issue #14: browser labels, viewport, and font geometry
 
-Recorded October 19–20, 2026. The validated source candidate is
-[a8ccad19305eff6bf3142940af4f962d4c646801](https://github.com/Dicklesworthstone/frankenmermaid/commit/a8ccad19305eff6bf3142940af4f962d4c646801),
-based on `41afadc7a021ab6e75e5d4ec25656f6ec5696449`.
+Recorded October 19–20, 2026. The integrated source improvements landed directly
+on main in
+[03fc62ed1cd058bc9b25ff98af4f6b8ff5f449e9](https://github.com/Dicklesworthstone/frankenmermaid/commit/03fc62ed1cd058bc9b25ff98af4f6b8ff5f449e9).
+This package follow-up completes the matching canonical browser build and its
+integrated validation record.
 
 ## Delivery status
 
-The results below apply to that pre-integration candidate: 110 browser checks,
-71 WASM API checks, and 1,041 native layout/SVG/WASM tests passed against its
-rebuilt package.
+The source integrates the issue-14 candidate `a8ccad19305eff6bf3142940af4f962d4c646801`
+with main through `29536a1308acd1bae4da8b72b4cebffb39709ae0`. It preserves all four
+concurrent circle/diamond, Canvas, ER, and grouped-tree/sequence-note changes.
+Independent source review checked shared cluster bounds, tree metrics, Canvas
+typography alignment, and retention of the upstream SVG/WASM work.
 
-Main subsequently advanced through `29536a1308acd1bae4da8b72b4cebffb39709ae0`.
-This integration preserves all four concurrent circle/diamond, Canvas, ER, and
-grouped-tree/sequence-note changes. Independent source review checked the shared
-cluster bounds, every new tree-metric argument, Canvas typography alignment, and
-retention of all upstream SVG/WASM changes.
+The matching runtime was rebuilt from an empty isolated target. A fresh browser
+run passed **110/110 checks on the integrated runtime**, and the actual WASM API
+suite passed **71/71**. Subsequent canonical rebuilds changed only the source
+fingerprint in package metadata: the WASM, JavaScript, declarations, README, and
+license are byte-identical to the tested package. The final native gate results
+are recorded below. Production deployment is not claimed.
 
-An execution-host outage interrupted delivery. Automated workspace maintenance
-subsequently removed the memory-backed checkout, build caches, and browser-report
-directory. The source survived in GitHub objects, and the candidate WASM package
-and detailed validation JSON survived in a partial checkpoint with matching
-SHA-256 hashes. Execution access, the pinned toolchain, and the merged checkout
-have been restored. The recovered detailed results are retained in
-[issue14_font_validation_summary.json](issue14_font_validation_summary.json),
-SHA-256 `f8013b4736641f5bad7306948ac5ef9e0ef2a7cfbfc103ea9d971af38e15ca75`.
+The detailed JSON retains the recovered pre-integration record in its original
+top-level fields and adds current results under `integrated_main_validation`:
+[issue14_font_validation_summary.json](issue14_font_validation_summary.json).
+Its historical version at source commit `03fc62ed` has SHA-256
+`f8013b4736641f5bad7306948ac5ef9e0ef2a7cfbfc103ea9d971af38e15ca75`.
+That older record covers the candidate based on `41afadc7`; it is not substituted
+for the new integrated runs.
 
-**Integrated-tree validation and its matching package remain pending in this
-source commit.** The measurements and digest pins below identify the
-pre-integration candidate. Rebuild the combined source, audit its size and
-native/WASM output, and rerun browser/native gates before updating the generated
-package and reviewed pins. The previous package remains in this source commit;
-deployment is not claimed.
-
-Both positive path-reuse fixtures now use independently parsed flat prefixes,
-because grouped paths correctly reject transplantation. The test helper checks
-complete prefix node/edge objects, referenced labels and markup, direction,
-styles, and the absence of groups, clusters, and ports before constructing its
-certificate. Fresh-render equality, eligibility, changing label placement, and
-the original reuse-count assertions remain. Scoped formatting and whitespace
-checks pass; the focused native compilation is in progress. Canonical WASM
-compilation is resuming from preserved dependencies after the shared-host
-memory guard stopped two attempts. These pending runs are not counted as passes.
+Both positive path-reuse fixtures pass using independently parsed flat prefixes,
+because grouped paths correctly reject transplantation. The helper checks complete
+prefix node/edge objects, referenced labels and markup, direction, styles, and the
+absence of groups, clusters, and ports before constructing its certificate.
+Fresh-render equality, eligibility, changing label placement, and the original
+reuse-count assertions remain. The focused two-test run and full SVG suite pass.
 
 ## Original report and reproduction
 
@@ -109,7 +103,7 @@ initial frame. Cached fragments still revalidate affected positions and offsets.
 
 At font size 30, with the same actual browser font:
 
-| Probe | Fresh unchanged main | Rebuilt candidate |
+| Probe | Fresh `41afadc7` baseline | Rebuilt issue-14 runtime |
 | --- | ---: | ---: |
 | W20 backing width | 178 px | 703 px |
 | W20 glyph width | 504.28 px | 504.28 px |
@@ -170,11 +164,16 @@ A title-occlusion oracle checks later opaque node/edge fills. Ten controlled
 SVGs validate its positive cases and exclusions for earlier, transparent,
 and disjoint fills.
 
-At approximately 30.63% and 95% zoom, the reported diagram retains
+At approximately 31.47% and 95% zoom, the reported diagram retains
 `data-detail-tier="compact"` and `data-label-detail="full"`, with all 24 node
 labels, 24 edge labels, and two titles drawn. Text preservation is independent
 of the presentation tier; CSS zoom is not claimed to change Compact to Rich.
 Explicit opt-out and resource-pressure presentation remain covered.
+
+As a negative control, Chromium independently reopened the reporter's unchanged
+captured SVG at scales 0.31 and 0.95. Both views retain Compact detail, only 24
+painted text elements, 23 inserted ellipses, and zero drawn edge/subgraph labels.
+This measures the captured artifact; it does not claim a current-source failure.
 
 At 1466 × 904, the maximized root measures exactly 1466 × 904. The pan container
 is 855.16 × 635, from y=164.5 to y=799.5, inside the viewport. Zoom/fullscreen
@@ -190,45 +189,58 @@ initialization, and override precedence. It checks actual text, full-label
 counts, authored line breaks, font-sensitive geometry, pressure, and opt-out.
 No original correctness threshold was weakened.
 
-## Rebuilt candidate identity and digest audit
+Both routes recorded zero uncaught JavaScript errors. The optional Mermaid CDN
+comparison failed certificate validation on this execution host, so this run
+does not establish a live Mermaid comparison. FrankenMermaid, its actual WASM,
+and 15 hash-verified production CSS/font resources loaded successfully.
 
-These identities describe the successfully built and tested candidate, whose
-binary transfer is still outstanding:
+## Final integrated package identity and digest audit
+
+These identities describe the canonical integrated package in this follow-up:
 
 | Artifact | Measurement |
 | --- | --- |
-| Raw WASM | 2,006,518 bytes |
-| Canonical gzip | 803,604 bytes |
-| Ceiling | 803,840 bytes (785 KiB), 236 bytes headroom |
-| WASM SHA-256 | `e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813` |
-| Source fingerprint | `3620b40964bf0201ef579aa3e3aa9999cd1e36e15f3c23175bf2362aa7456d59` |
-| Five-artifact FNV-1a | `0x5b05c0d4c6024321` |
-| Expected binary Git blob | `da88e9588f4492c8078990786135f9f9dc5b0369` |
-| Expected package.json Git blob | `0d5584d3763e6e8c09097940f58a905663e4469c` |
+| Raw WASM | 2,010,209 bytes |
+| Canonical gzip | 805,290 bytes |
+| Ceiling | 805,888 bytes (787 KiB), 598 bytes headroom |
+| WASM SHA-256 | `512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1` |
+| Source fingerprint | `8ca904f5f1ed92114f5021c83d8953f9159604721743a6968cd3ada0d1b019b5` |
+| Five-artifact FNV-1a | `0x6999f28e7ea66697` |
+| Verified binary Git blob | `16a906f4b2ccd15b33f97182f18c811d99d4bdc1` |
+| Verified package.json Git blob | `21ca6821ab71aa06c0e6ed2b47ef7b8447b8efdb` |
 
-Previous package gzip was 794,414 bytes. Fresh unchanged main was 802,138,
-already 7,514 bytes beyond the old 776 KiB ceiling. This follow-up adds 1,466
-bytes over that fresh baseline. The documented measured resource-budget
-procedure raises the ceiling to the smallest whole KiB that fits.
+The unchanged integrated baseline `29536a1308acd1bae4da8b72b4cebffb39709ae0`
+was compiled independently in a new empty target. It measures 2,007,365 raw
+bytes and 803,958 gzip bytes, already 118 bytes beyond the interim 785 KiB
+ceiling. The integrated issue-14 fixes add **2,844 raw bytes and 1,332 gzip bytes**.
+The measured resource-budget procedure raises the ceiling to the smallest whole
+KiB that fits, 787 KiB. Compiler, optimizer, and correctness settings are unchanged.
 
-Both baseline modules have zero custom sections, 89 imports, and 50 exports.
-Across the eight prior source commits, code grew 22,017 raw bytes and data
-shrunk 2,306. No metadata remains to strip. Previously measured extra optimizer
-round trips grew output. Canonical -Oz/--converge, LTO, one codegen unit, and
-the immediate-abort standard library remain. The metadata-only final rebuild
-produced identical WASM bytes.
+The raw delta comprises 2,810 code-section bytes, 24 type-section bytes, and
+10 function-section bytes. Both modules have zero custom sections, 89 imports,
+50 exports, and a 158,119-byte data section. Equal data-section size does not
+assert byte identity. Canonical -Oz/--converge, LTO, one codegen unit, and the
+immediate-abort standard library remain. The final package was independently
+compiled from an empty target, then canonically rebuilt after the test-only
+source-fingerprint change; both final builds pass freshness and size gates.
 
-Before updating digest pins, every SVG element was audited against fresh
-unchanged main. Flowchart and class outputs are byte-identical. Sequence and
-state retain all elements and text; only four plate x/width pairs change.
-Native output passes against these actual WASM digests:
+A first baseline attempt reused a shared Cargo target and incorrectly reused the
+candidate binary. Its result was rejected and is not used in these measurements.
+The retained valid comparison uses independently populated baseline/final targets.
+
+Before retaining the render pins, all four fixture SVGs were generated through
+the actual old and integrated WASM packages. They are byte-identical, including
+all text, geometry, root attributes, and element structure. The reviewed WASM
+output digests remain:
 
 - Flowchart: `0xafe8712eaa94163c`
 - Sequence: `0x312f713e23dd8c2b`
 - Class: `0x86fb0b6a73147bb7`
 - State: `0xd5c3891b75b12cd9`
 
-Test-only pins are excluded from the source fingerprint.
+The `fm-wasm` test module containing these pins is excluded from the source
+fingerprint. The final native test separately checks package identity, source
+freshness, and rendering equality, so a stale package cannot pass as a target match.
 
 ## Native gates and limitations
 
@@ -237,30 +249,48 @@ nightly toolchain, serial Cargo/CMake jobs, disabled native debug information,
 no Rust flag override, and a shared-host resource guard. Sources remained
 unchanged during each reported final run.
 
-| Gate on the rebuilt candidate | Result |
+| Gate on the integrated package | Result |
 | --- | --- |
-| Workspace/all-targets cargo check | Pass |
-| Workspace/all-targets strict Clippy, -D warnings | Pass |
-| Native layout unit suite | 621 pass, 1 ignored |
-| Native SVG unit suite | 353 pass, 2 ignored |
-| Native WASM unit suite | 67 pass, 1 ignored |
+| Workspace/all-targets cargo check | Stopped by shared-host memory guard before Rust errors; retry blocked by host capacity |
+| Workspace/all-targets strict Clippy, -D warnings | Not run: required host memory/filesystem reserves unavailable |
+| Native layout unit suite | 634 pass, 1 ignored |
+| Native SVG unit suite | 354 pass, 2 ignored |
+| Native WASM unit suite | 68 pass, 1 ignored |
 | Package freshness smoke checks | 4/4 pass |
-| Native/WASM comparison | 4/4 fixtures agree |
+| Native/WASM comparison | 4/4 fixtures agree, with package/source freshness checked |
 | git diff --check | Pass |
-| cargo fmt --check | 90 preexisting hunks in 9 files; no new hunk bodies |
+| cargo fmt --check | 78 preexisting hunks in 7 files; no new hunk bodies |
 
-Two old fixtures failed setup after prior layout changes. The directed-path
-fixture now starts at the certifier's real three-node minimum. The SVG
-transplant fixture uses a certifiable WW label and deliberately wide SVG
-calibration so its plate still collides with the changing suffix. All
-label-change, fresh-output equality, eligibility, and exact reuse assertions
-remain and pass.
+The integrated native suites total **1,056 passed tests and four existing ignored
+tests**. Workspace-wide check/Clippy passes from the older candidate are retained
+only as history and are not claimed for this integration. The fresh workspace
+check reached 7,899,369,472 bytes of shared unreclaimable memory on the
+8,589,934,592-byte host and was stopped by the unchanged 700 MB reserve guard,
+without a Rust error diagnostic. The resumptive check could not start when the
+available filesystem space fell below its unchanged 900 MB reserve. No other
+jobs were stopped, files deleted, or guard thresholds lowered to finish these
+gates. Rerun workspace check and strict Clippy when host capacity is available.
+
+The directed-path fixture starts at the certifier's real three-node minimum.
+The two SVG transplant fixtures use checked flat IR prefixes; the changing-label
+case uses WW and deliberately wide SVG calibration so its plate still collides
+with the changing suffix. All label-change, fresh-output equality, eligibility,
+and exact reuse assertions remain and pass.
+
+The integrated circle geometry also exposed an exact-equality assertion in the
+gitgraph lane test: reconstructed centers were 293.404144287109375 and
+293.40411376953125, exactly one f32 ULP apart. The unchanged production formula
+places both at the common lane center. The test now permits at most one ULP for
+finite nonnegative centers, explicitly requires unequal commit widths, and retains
+diameter separation and strict chain ordering. Production coordinates are not
+rounded to satisfy a test.
 
 Two small existing Clippy blockers were repaired without suppression:
 quadrant cell dimensions are passed as a tuple, and validated lasso pairs use
 typed chunks. Existing lasso correctness coverage passes. The latter also
-resolves one old formatting hunk. All remaining 90 hunk bodies match the prior
-report after ignoring line numbers.
+resolves one old formatting hunk. After the four upstream changes were integrated,
+the remaining 78 formatting hunk bodies match unchanged `29536a`; the small new
+compound-test import hunk was fixed. The final formatting audit finds no new hunk.
 
 The ignored layout test
 `routed_edges_do_not_run_through_unrelated_nodes` remains the preexisting live
@@ -268,7 +298,7 @@ routing acceptance gap in bead `bd-h2ze`. The two ignored SVG tests and one
 ignored WASM test are existing manual performance probes. A full-workspace
 test run is not claimed.
 
-## Reproduction and remaining delivery
+## Reproduction and deployment status
 
 ```bash
 ./build-wasm.sh
@@ -285,25 +315,20 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 Set CHROMIUM if needed. The browser harness accepts --tailwind-script and
 --resource-cache for hash-verified production resources.
 
-The completed raw browser report SHA-256 is
-`bc038c7c8e21c8e6fa1a39415365e83d82174b7066883ef43134f4c78b1bcdce`.
-Its workspace path is
-`/dev/shm/issue14-final-e71fff0f-browser/issue14-results.json`.
-Native logs are in `/dev/shm/frankenmermaid-native-logs-20261019`.
-The completed source/package workspace is
-`/dev/shm/frankenmermaid-issue14-20261019`.
-These paths are unavailable while the executor is disconnected; their contents
-must not be assumed recovered until access and hashes are verified again.
+The new integrated raw browser report SHA-256 is
+`f37b57ec97259195af9cbc97014369c5e477e24c95dc60c0853309b5636ea649`.
+Its run path is
+`/dev/shm/frankenmermaid-browser-validation-20261020/runtime-512402ad/issue14-results.json`.
+The authoritative source/package checkout is
+`/dev/shm/frankenmermaid-issue14-integrated-20261020`.
+The committed JSON embeds current browser measurements, API results, package/size
+audits, and gate records so these transient run paths are not the only evidence.
 
-A complete Cloudflare bundle was assembled before disconnection: 27 copied
-files, generated headers, seven passing hosting-plan checks, and the same
-tested WASM hash. Wrangler and Cloudflare credentials were unavailable, so
-production deployment was not performed. Complete delivery requires:
-
-1. Recover and verify the matching binary and generated package metadata, or
-   rebuild them with the pinned canonical toolchain.
-2. Commit those artifacts and the retained detailed validation JSON directly
-   to main, then verify source freshness and package digest.
-3. Deploy the complete distribution through Wrangler and verify the live asset.
+A complete distribution was assembled from the final package at
+`/dev/shm/frankenmermaid-site-integrated-final-20261020`: 27 copied files,
+generated headers, seven passing hosting-plan checks, and the exact tested WASM
+and package metadata. Wrangler and Cloudflare credentials are unavailable in this
+session. Deployment through Wrangler and verification of the live asset remain
+outstanding; a main-branch commit is not evidence of production deployment.
 
 No pull request, issue comment, or issue-state change is part of this work.

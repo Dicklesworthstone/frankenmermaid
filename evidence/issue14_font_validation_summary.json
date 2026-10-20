@@ -3474,5 +3474,3313 @@
     "production_deployed": false,
     "blocker": "Wrangler executable and Cloudflare credentials are unavailable",
     "pull_request_created": false
+  },
+  "integrated_main_validation": {
+    "recorded_date": "2026-10-20",
+    "source_integration_commit": "03fc62ed1cd058bc9b25ff98af4f6b8ff5f449e9",
+    "integrated_upstream_commit": "29536a1308acd1bae4da8b72b4cebffb39709ae0",
+    "delivery": "The source improvements landed directly on main in 03fc62ed; this main-branch follow-up supplies the matching canonical WASM package and final integrated validation evidence without a pull request.",
+    "package": {
+      "workspace": "/dev/shm/frankenmermaid-issue14-integrated-20261020",
+      "head": "03fc62ed1cd058bc9b25ff98af4f6b8ff5f449e9",
+      "canonical_build_exit": 0,
+      "target": "/dev/shm/frankenmermaid-wasm-final-fresh-20261020",
+      "target_provenance": "Same authoritative checkout and final target initially compiled from empty; no baseline artifacts reused.",
+      "source_sha256": "8ca904f5f1ed92114f5021c83d8953f9159604721743a6968cd3ada0d1b019b5",
+      "source_freshness_passed": true,
+      "build_script_sha256": "d1faba3a7c405143d8034ac0df9f7648eb6a7004787d75ea8e3d29d63713cc1c",
+      "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+      "raw_wasm_bytes": 2010209,
+      "canonical_gzip_bytes": 805290,
+      "budget_bytes": 805888,
+      "size_gate_passed": true,
+      "headroom_bytes": 598,
+      "byte_equality_to_validated_runtime": {
+        "LICENSE": true,
+        "README.md": true,
+        "frankenmermaid.d.ts": true,
+        "frankenmermaid.js": true,
+        "frankenmermaid_bg.wasm": true,
+        "frankenmermaid_bg.wasm.d.ts": true
+      },
+      "package_metadata_changed_fields": [
+        "frankenmermaidSourceSha256"
+      ],
+      "package_artifact_fnv1a_u64": "0x6999f28e7ea66697",
+      "package_artifact_fnv1a_file_order": [
+        "frankenmermaid_bg.wasm",
+        "frankenmermaid.js",
+        "frankenmermaid.d.ts",
+        "frankenmermaid_bg.wasm.d.ts",
+        "package.json"
+      ],
+      "artifacts": {
+        "LICENSE": {
+          "bytes": 3939,
+          "sha256": "32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509"
+        },
+        "README.md": {
+          "bytes": 191043,
+          "sha256": "b2cd79916d9f49d1404eb5a89efa767e1efb2a9b98ea2f74ac9e4884791ac73f"
+        },
+        "frankenmermaid.d.ts": {
+          "bytes": 18068,
+          "sha256": "11b5b50e46df17674335a82ff24b02eb2262a0f3b8a1787942e4fca99027025f"
+        },
+        "frankenmermaid.js": {
+          "bytes": 112590,
+          "sha256": "0c5f169d3690e7b525f4a3f7eb739adfbd04ab7872592b52952977e46d0dcec9"
+        },
+        "frankenmermaid_bg.wasm": {
+          "bytes": 2010209,
+          "sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1"
+        },
+        "frankenmermaid_bg.wasm.d.ts": {
+          "bytes": 4013,
+          "sha256": "091c1a7e75178fae01d0494cb7733ea223980df66829395542311e94c276b1cc"
+        },
+        "package.json": {
+          "bytes": 963,
+          "sha256": "04fe39f4adc8afbdc924462cb6d53da5f8b44ca84b8ba9f2231aa9e98a441518"
+        }
+      },
+      "elapsed_seconds": 54.7,
+      "peak_unreclaimable_memory": 7189868544,
+      "resource_guard": null
+    },
+    "verified_package_git_blobs": {
+      "pkg/frankenmermaid_bg.wasm": "16a906f4b2ccd15b33f97182f18c811d99d4bdc1",
+      "pkg/package.json": "21ca6821ab71aa06c0e6ed2b47ef7b8447b8efdb"
+    },
+    "canonical_builds": [
+      {
+        "command": [
+          "./build-wasm.sh"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 162.45,
+        "resource_wait_seconds": 0.0,
+        "peak_unreclaimable_memory": 5860388864,
+        "memory_before": {
+          "anon": 847040512,
+          "shmem": 2312273920,
+          "kernel": 922972160,
+          "unreclaimable": 4082286592,
+          "max": 8589934592
+        },
+        "memory_after": {
+          "anon": 1047740416,
+          "shmem": 2598653952,
+          "kernel": 918208512,
+          "unreclaimable": 4564602880,
+          "max": 8589934592
+        },
+        "build_filesystem": "/dev/shm/frankenmermaid-wasm-final-fresh-20261020",
+        "free_build_filesystem_after": 2627063808,
+        "free_root_filesystem_after": 2627063808,
+        "root_write_reserve": 900000000,
+        "resource_guard": null,
+        "log": "/dev/shm/frankenmermaid-wasm-final-fresh-20261020.log",
+        "log_sha256": "f5aca719f0d9220845afc94bdf2abddff6f63dd936a440304b106988f549e1dd",
+        "resource_record_sha256": "c60313a85e460f352cf61a0c6a78af3f2075969b60cb79d3e90aa9fa6997c0a6",
+        "test_summaries": []
+      },
+      {
+        "command": [
+          "./build-wasm.sh"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 54.7,
+        "resource_wait_seconds": 0.0,
+        "peak_unreclaimable_memory": 7189868544,
+        "memory_before": {
+          "anon": 1298485248,
+          "shmem": 3055857664,
+          "kernel": 751038464,
+          "unreclaimable": 5105381376,
+          "max": 8589934592
+        },
+        "memory_after": {
+          "anon": 268877824,
+          "shmem": 3061215232,
+          "kernel": 761606144,
+          "unreclaimable": 4091699200,
+          "max": 8589934592
+        },
+        "build_filesystem": "/dev/shm/frankenmermaid-wasm-final-fresh-20261020",
+        "free_build_filesystem_after": 2164502528,
+        "free_root_filesystem_after": 2164502528,
+        "root_write_reserve": 900000000,
+        "resource_guard": null,
+        "log": "/dev/shm/frankenmermaid-wasm-final-metadata-20261020.log",
+        "log_sha256": "c314939daab33ecd49d69b5c89d8476c2a30b38058dc9488aa30f47a31e93116",
+        "resource_record_sha256": "2951222de2d219a81c57df070779b446d7c99998a70c954381a7ce999a2ff027",
+        "test_summaries": []
+      }
+    ],
+    "size_attribution": {
+      "valid_baseline": true,
+      "baseline_commit": "29536a1308acd1bae4da8b72b4cebffb39709ae0",
+      "fresh_baseline_target": "/dev/shm/frankenmermaid-wasm-baseline-fresh-20261020",
+      "baseline": {
+        "workspace": "/dev/shm/frankenmermaid-size-baseline-29536-20261020",
+        "wasm_sha256": "a4bc72989bf94ed61ae4ae324b1916b8bc1b2cc73b1ab7b2321d23bdbe542aff",
+        "source_sha256": "c4eaa1e41017af3010f067b6790c8b8838148d1ce32822809c5bfbf27c629b47",
+        "raw_bytes": 2007365,
+        "canonical_gzip_bytes": 803958,
+        "sections": [
+          {
+            "id": 1,
+            "bytes": 1427
+          },
+          {
+            "id": 2,
+            "bytes": 5358,
+            "count": 89
+          },
+          {
+            "id": 3,
+            "bytes": 4129
+          },
+          {
+            "id": 4,
+            "bytes": 7
+          },
+          {
+            "id": 5,
+            "bytes": 3
+          },
+          {
+            "id": 6,
+            "bytes": 25
+          },
+          {
+            "id": 7,
+            "bytes": 1086,
+            "count": 50
+          },
+          {
+            "id": 9,
+            "bytes": 470
+          },
+          {
+            "id": 12,
+            "bytes": 2
+          },
+          {
+            "id": 10,
+            "bytes": 1836700
+          },
+          {
+            "id": 11,
+            "bytes": 158119
+          }
+        ]
+      },
+      "candidate": {
+        "workspace": "/dev/shm/frankenmermaid-issue14-integrated-20261020",
+        "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+        "source_sha256": "37bd494e7b366aca200422bca57078ceaaca878463ea9e818255d248ba92dfc4",
+        "raw_bytes": 2010209,
+        "canonical_gzip_bytes": 805290,
+        "sections": [
+          {
+            "id": 1,
+            "bytes": 1451
+          },
+          {
+            "id": 2,
+            "bytes": 5358,
+            "count": 89
+          },
+          {
+            "id": 3,
+            "bytes": 4139
+          },
+          {
+            "id": 4,
+            "bytes": 7
+          },
+          {
+            "id": 5,
+            "bytes": 3
+          },
+          {
+            "id": 6,
+            "bytes": 25
+          },
+          {
+            "id": 7,
+            "bytes": 1086,
+            "count": 50
+          },
+          {
+            "id": 9,
+            "bytes": 470
+          },
+          {
+            "id": 12,
+            "bytes": 2
+          },
+          {
+            "id": 10,
+            "bytes": 1839510
+          },
+          {
+            "id": 11,
+            "bytes": 158119
+          }
+        ]
+      },
+      "raw_delta": 2844,
+      "gzip_delta": 1332,
+      "section_byte_deltas": {
+        "1": 24,
+        "2": 0,
+        "3": 10,
+        "4": 0,
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "9": 0,
+        "12": 0,
+        "10": 2810,
+        "11": 0
+      },
+      "same_import_export_counts": true,
+      "custom_section_count_baseline": 0,
+      "custom_section_count_candidate": 0,
+      "smallest_whole_kib_ceiling": 787,
+      "headroom_at_smallest_whole_kib": 598
+    },
+    "browser": {
+      "result": "passed",
+      "checks": 110,
+      "failed": [],
+      "checks_per_route": {
+        "index.html": 55,
+        "frankenmermaid_demo_showcase.html": 55
+      },
+      "report_path": "/dev/shm/frankenmermaid-browser-validation-20261020/runtime-512402ad/issue14-results.json",
+      "report_sha256": "f37b57ec97259195af9cbc97014369c5e477e24c95dc60c0853309b5636ea649",
+      "identity": {
+        "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+        "source_fingerprint": "37bd494e7b366aca200422bca57078ceaaca878463ea9e818255d248ba92dfc4",
+        "git_head": "03fc62ed1cd058bc9b25ff98af4f6b8ff5f449e9",
+        "harness_sha256": "b3a14018c90525f5b1e7b070efb9dd06cc25ea8380d912d9612ccc5cfc97f445",
+        "showcase_sha256": "e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26",
+        "fixture_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+        "size_gate": "failed by 1450 bytes; separate audit pending",
+        "run_started_utc": "2026-10-20T18:50:48Z"
+      },
+      "fixtures_and_resources": {
+        "fixture_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+        "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+        "showcase_sha256": "e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26",
+        "tailwind_sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+        "resource_cache": {
+          "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap": {
+            "content_type": "text/css; charset=utf-8",
+            "sha256": "450d41b4d43c418e22a76f7b2f17d7ec84b835681d7e90d61496958a633d1027"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuBWYMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "5b717029a2c4cfca2167e97be1157edb24151591e5ec96eb484745c392817a7a"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "e7a1aaf7eda9f2fad4131725fa556265ec75ca7b2d756260173a040363e8d4f7"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "1b08e7fc267a5c7e1d614100f604b83e7e8a0be241f0f288faa2b3ac93a683ba"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuDyYMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "eec66af7f2337bd34fe6e801cf92ededcb57a20c0d7bc40a61d4eefcbe3dd40c"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuFuYMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "b37284b5701b6b168dfc770aa1a4ac492106422fd3ba76bc7641e37434e8019c"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuI6fMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "8c883f63b2c4157d997319f2c8bc6995ed4357ef371940d31ca159004a4aae63"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8L6tjPQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "a1d92abc6b02a87faed23d98067ab1027e8e95242fd7c9978a072ea383b89d1a"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8"
+          },
+          "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuOKfMZg.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "d0f4bc7faca468376e3db9b5e57afcdc2192134c9ac82a9511f32767b56853a4"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8SKtjPQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "bc31e0b0583e8530795907883e768597bf7bdb4e47a65861dc393b4411439e22"
+          },
+          "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDba2o-flEEny0FZhsfKu5WU4xD-IQ-PuZJJXxfpAO-LflOQ.ttf": {
+            "content_type": "font/ttf",
+            "sha256": "f3ad0f703a734b38b49b3ee2d8121ef2718fba185198c3482e81a618272cb4af"
+          }
+        }
+      },
+      "label_preservation": [
+        {
+          "route": "index.html",
+          "case": "fit-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.278621,
+          "zoom_label": "28%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        },
+        {
+          "route": "index.html",
+          "case": "zoom-31-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.314698,
+          "zoom_label": "31%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        },
+        {
+          "route": "index.html",
+          "case": "zoom-95-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.95,
+          "zoom_label": "95%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "case": "fit-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.278621,
+          "zoom_label": "28%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "case": "zoom-31-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.314698,
+          "zoom_label": "31%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "case": "zoom-95-labels",
+          "tier": "compact",
+          "label_detail": "full",
+          "zoom": 0.95,
+          "zoom_label": "95%",
+          "node_texts": 24,
+          "edge_texts": 24,
+          "cluster_texts": 2,
+          "all_text_painted": true,
+          "edges": 43,
+          "nodes": 24,
+          "ellipsis_count": 0
+        }
+      ],
+      "maximized_viewports": [
+        {
+          "route": "index.html",
+          "viewport": {
+            "width": 1466,
+            "height": 904
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 1466,
+            "bottom": 904,
+            "width": 1466,
+            "height": 904
+          },
+          "pan": {
+            "left": 610.828125,
+            "top": 164.5,
+            "right": 1465.984375,
+            "bottom": 799.5,
+            "width": 855.15625,
+            "height": 635
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "index.html",
+          "viewport": {
+            "width": 1100,
+            "height": 650
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 1100,
+            "bottom": 650,
+            "width": 1100,
+            "height": 650
+          },
+          "pan": {
+            "left": 458.328125,
+            "top": 116.5,
+            "right": 1099.984375,
+            "bottom": 577.5,
+            "width": 641.65625,
+            "height": 461
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "index.html",
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 844,
+            "width": 390,
+            "height": 844
+          },
+          "pan": {
+            "left": 0,
+            "top": 301.5,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 369.5
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "index.html",
+          "viewport": {
+            "width": 390,
+            "height": 650
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 650,
+            "width": 390,
+            "height": 650
+          },
+          "pan": {
+            "left": 0,
+            "top": 188.5,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 387
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "index.html",
+          "viewport": {
+            "width": 844,
+            "height": 390
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 844,
+            "bottom": 390,
+            "width": 844,
+            "height": 390
+          },
+          "pan": {
+            "left": 0,
+            "top": 151.5,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 182
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "viewport": {
+            "width": 1466,
+            "height": 904
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 1466,
+            "bottom": 904,
+            "width": 1466,
+            "height": 904
+          },
+          "pan": {
+            "left": 610.828125,
+            "top": 164.5,
+            "right": 1465.984375,
+            "bottom": 799.5,
+            "width": 855.15625,
+            "height": 635
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "viewport": {
+            "width": 1100,
+            "height": 650
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 1100,
+            "bottom": 650,
+            "width": 1100,
+            "height": 650
+          },
+          "pan": {
+            "left": 458.328125,
+            "top": 116.5,
+            "right": 1099.984375,
+            "bottom": 577.5,
+            "width": 641.65625,
+            "height": 461
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "viewport": {
+            "width": 390,
+            "height": 844
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 844,
+            "width": 390,
+            "height": 844
+          },
+          "pan": {
+            "left": 0,
+            "top": 301.5,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 369.5
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "viewport": {
+            "width": 390,
+            "height": 650
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 650,
+            "width": 390,
+            "height": 650
+          },
+          "pan": {
+            "left": 0,
+            "top": 188.5,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 387
+          },
+          "all_controls_reachable": true
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "viewport": {
+            "width": 844,
+            "height": 390
+          },
+          "root": {
+            "left": 0,
+            "top": 0,
+            "right": 844,
+            "bottom": 390,
+            "width": 844,
+            "height": 390
+          },
+          "pan": {
+            "left": 0,
+            "top": 151.5,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 182
+          },
+          "all_controls_reachable": true
+        }
+      ],
+      "representative_adversarial_font_geometry": [
+        {
+          "case": "api-wide-20-font-15",
+          "passed_both_routes": true,
+          "actual_fonts": [
+            {
+              "familyName": "DejaVu Sans",
+              "postScriptName": "DejaVuSans",
+              "isCustomFont": false,
+              "glyphCount": 20
+            }
+          ],
+          "scales": [
+            1,
+            0.31,
+            0.95
+          ],
+          "glyph_width": 252.5294189453125,
+          "glyph_height": 15.0,
+          "owner_width": 365.5,
+          "owner_height": 26.75,
+          "glyph_bounds": {
+            "left": 261.379699707031,
+            "top": 101.75,
+            "right": 513.9091186523435,
+            "bottom": 116.75
+          },
+          "owner_bounds": {
+            "left": 204.69999694824196,
+            "top": 95.87999725341797,
+            "right": 570.199996948242,
+            "bottom": 122.62999725341797
+          },
+          "edge_node_overlaps": [],
+          "edge_background_overlaps": [],
+          "edge_label_overlaps": []
+        },
+        {
+          "case": "api-wide-80-font-30",
+          "passed_both_routes": true,
+          "actual_fonts": [
+            {
+              "familyName": "DejaVu Sans",
+              "postScriptName": "DejaVuSans",
+              "isCustomFont": false,
+              "glyphCount": 80
+            }
+          ],
+          "scales": [
+            1,
+            0.31,
+            0.95
+          ],
+          "glyph_width": 2017.0937499999995,
+          "glyph_height": 29.999999999999986,
+          "owner_width": 2727.9999999999995,
+          "owner_height": 39.499999999999986,
+          "glyph_bounds": {
+            "left": 637.8532714843749,
+            "top": 105.49999999999999,
+            "right": 2654.9470214843745,
+            "bottom": 135.49999999999997
+          },
+          "owner_bounds": {
+            "left": 282.3999938964843,
+            "top": 100.74999999999999,
+            "right": 3010.399993896484,
+            "bottom": 140.24999999999997
+          },
+          "edge_node_overlaps": [],
+          "edge_background_overlaps": [],
+          "edge_label_overlaps": []
+        },
+        {
+          "case": "api-cluster-font-60",
+          "passed_both_routes": true,
+          "actual_fonts": [
+            {
+              "familyName": "DejaVu Sans",
+              "postScriptName": "DejaVuSans-Bold",
+              "isCustomFont": false,
+              "glyphCount": 15
+            }
+          ],
+          "scales": [
+            1,
+            0.31,
+            0.95
+          ],
+          "glyph_width": 432.875,
+          "glyph_height": 63,
+          "owner_width": 473.3800048828125,
+          "owner_height": 250.1999969482422,
+          "glyph_bounds": {
+            "left": 84,
+            "top": 82,
+            "right": 516.875,
+            "bottom": 145
+          },
+          "owner_bounds": {
+            "left": 76,
+            "top": 76,
+            "right": 549.3800048828125,
+            "bottom": 326.1999969482422
+          },
+          "edge_node_overlaps": [],
+          "edge_background_overlaps": [],
+          "edge_label_overlaps": []
+        }
+      ],
+      "resource_and_runtime_errors": [
+        {
+          "route": "index.html",
+          "uncaught_errors": [],
+          "resource_errors": [
+            {
+              "url": "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js",
+              "failure": "net::ERR_CERT_AUTHORITY_INVALID"
+            },
+            {
+              "url": "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs",
+              "failure": "net::ERR_CERT_AUTHORITY_INVALID"
+            }
+          ]
+        },
+        {
+          "route": "frankenmermaid_demo_showcase.html",
+          "uncaught_errors": [],
+          "resource_errors": [
+            {
+              "url": "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js",
+              "failure": "net::ERR_CERT_AUTHORITY_INVALID"
+            },
+            {
+              "url": "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs",
+              "failure": "net::ERR_CERT_AUTHORITY_INVALID"
+            }
+          ]
+        }
+      ],
+      "captured_svg_negative_control": {
+        "captured_svg_sha256": "ccec4cd4463d1e0504131147d5ba01ef056a2d9c61eaef89bfcc16826c5dd446",
+        "checks": [
+          {
+            "scale": 0.31,
+            "tier": "compact",
+            "textCount": 24,
+            "paintedTextCount": 24,
+            "truncatedTextCount": 23,
+            "edgeLabels": 0,
+            "clusterLabels": 0,
+            "texts": [
+              {
+                "text": "Klientky vybran\u00e9 v \u2026",
+                "painted": true
+              },
+              {
+                "text": "Dostupn\u00e9 term\u00edny za\u2026",
+                "painted": true
+              },
+              {
+                "text": "Spole\u010dn\u00e1 nab\u00eddka ko\u2026",
+                "painted": true
+              },
+              {
+                "text": "SMS: av\u00edzo hovoru a\u2026",
+                "painted": true
+              },
+              {
+                "text": "E-mail: konkr\u00e9tn\u00ed t\u2026",
+                "painted": true
+              },
+              {
+                "text": "Push + Moje VZP u u\u2026",
+                "painted": true
+              },
+              {
+                "text": "Robotick\u00fd hovor po \u2026",
+                "painted": true
+              },
+              {
+                "text": "EduAIttractiveTvor\u2026",
+                "painted": true
+              },
+              {
+                "text": "Video: v\u00fdznam scree\u2026",
+                "painted": true
+              },
+              {
+                "text": "Video: jak vy\u0161et\u0159en\u2026",
+                "painted": true
+              },
+              {
+                "text": "Notifikace o pr\u00e1v\u011b \u2026",
+                "painted": true
+              },
+              {
+                "text": "Poda\u0159ilo se dovolat?",
+                "painted": true
+              },
+              {
+                "text": "Robot rovnou nab\u00eddn\u2026",
+                "painted": true
+              },
+              {
+                "text": "Vyhovuje n\u011bkter\u00fd te\u2026",
+                "painted": true
+              },
+              {
+                "text": "Klientka zvol\u00ed a po\u2026",
+                "painted": true
+              },
+              {
+                "text": "Dal\u0161\u00ed konkr\u00e9tn\u00ed dos\u2026",
+                "painted": true
+              },
+              {
+                "text": "Navazuj\u00edc\u00ed zpr\u00e1va s\u2026",
+                "painted": true
+              },
+              {
+                "text": "Potvrzen\u00e1 rezervace\u2026",
+                "painted": true
+              },
+              {
+                "text": "Ukon\u010dit dal\u0161\u00ed zvac\u00ed\u2026",
+                "painted": true
+              },
+              {
+                "text": "Potvrzen\u00ed a informa\u2026",
+                "painted": true
+              },
+              {
+                "text": "P\u0159ipomenut\u00ed n\u00e1v\u0161t\u011bv\u2026",
+                "painted": true
+              },
+              {
+                "text": "Skute\u010dn\u011b absolvovan\u2026",
+                "painted": true
+              },
+              {
+                "text": "K\u00f3d + agenti + dato\u2026",
+                "painted": true
+              },
+              {
+                "text": "Vyhodnocov\u00e1n\u00ed a ov\u011b\u2026",
+                "painted": true
+              }
+            ]
+          },
+          {
+            "scale": 0.95,
+            "tier": "compact",
+            "textCount": 24,
+            "paintedTextCount": 24,
+            "truncatedTextCount": 23,
+            "edgeLabels": 0,
+            "clusterLabels": 0,
+            "texts": [
+              {
+                "text": "Klientky vybran\u00e9 v \u2026",
+                "painted": true
+              },
+              {
+                "text": "Dostupn\u00e9 term\u00edny za\u2026",
+                "painted": true
+              },
+              {
+                "text": "Spole\u010dn\u00e1 nab\u00eddka ko\u2026",
+                "painted": true
+              },
+              {
+                "text": "SMS: av\u00edzo hovoru a\u2026",
+                "painted": true
+              },
+              {
+                "text": "E-mail: konkr\u00e9tn\u00ed t\u2026",
+                "painted": true
+              },
+              {
+                "text": "Push + Moje VZP u u\u2026",
+                "painted": true
+              },
+              {
+                "text": "Robotick\u00fd hovor po \u2026",
+                "painted": true
+              },
+              {
+                "text": "EduAIttractiveTvor\u2026",
+                "painted": true
+              },
+              {
+                "text": "Video: v\u00fdznam scree\u2026",
+                "painted": true
+              },
+              {
+                "text": "Video: jak vy\u0161et\u0159en\u2026",
+                "painted": true
+              },
+              {
+                "text": "Notifikace o pr\u00e1v\u011b \u2026",
+                "painted": true
+              },
+              {
+                "text": "Poda\u0159ilo se dovolat?",
+                "painted": true
+              },
+              {
+                "text": "Robot rovnou nab\u00eddn\u2026",
+                "painted": true
+              },
+              {
+                "text": "Vyhovuje n\u011bkter\u00fd te\u2026",
+                "painted": true
+              },
+              {
+                "text": "Klientka zvol\u00ed a po\u2026",
+                "painted": true
+              },
+              {
+                "text": "Dal\u0161\u00ed konkr\u00e9tn\u00ed dos\u2026",
+                "painted": true
+              },
+              {
+                "text": "Navazuj\u00edc\u00ed zpr\u00e1va s\u2026",
+                "painted": true
+              },
+              {
+                "text": "Potvrzen\u00e1 rezervace\u2026",
+                "painted": true
+              },
+              {
+                "text": "Ukon\u010dit dal\u0161\u00ed zvac\u00ed\u2026",
+                "painted": true
+              },
+              {
+                "text": "Potvrzen\u00ed a informa\u2026",
+                "painted": true
+              },
+              {
+                "text": "P\u0159ipomenut\u00ed n\u00e1v\u0161t\u011bv\u2026",
+                "painted": true
+              },
+              {
+                "text": "Skute\u010dn\u011b absolvovan\u2026",
+                "painted": true
+              },
+              {
+                "text": "K\u00f3d + agenti + dato\u2026",
+                "painted": true
+              },
+              {
+                "text": "Vyhodnocov\u00e1n\u00ed a ov\u011b\u2026",
+                "painted": true
+              }
+            ]
+          }
+        ]
+      },
+      "captured_svg_audit_sha256": "59f5db9421ee3187f96774ea8c95bcdd0d981ddc095ed5c9aa99fb7ffbe33588",
+      "cross_target_comparison_path": "/dev/shm/frankenmermaid-browser-validation-20261020/cross-target-comparison/comparison.json",
+      "cross_target_comparison_sha256": "2713395788dd9ea7e390afc0f613b022f529d1c317b50e17935ab76860b35347",
+      "scope_notes": [
+        "This is a fresh browser run on the integrated runtime; the older e71 report is not counted.",
+        "The captured reporter SVG is a separate negative control, not a run of the current renderer.",
+        "The optional Mermaid comparison CDN failed certificate validation. FrankenMermaid WASM, exact production Tailwind and production font resources were tested.",
+        "The size gate was pending during this runtime run; it is not declared passed by this evidence.",
+        "The browser and ephemeral HTTP server exited normally."
+      ],
+      "check_results": [
+        {
+          "scenario_id": "index.html/production-fonts",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/fit-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/zoom-31-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/zoom-31-controls",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/zoom-95-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/zoom-95-controls",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/svg-export-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1466x904",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1466x904-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1466x904-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1100x650",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1100x650-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-1100x650-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x844",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x844-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x844-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x844-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x844-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x650",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x650-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x650-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x650-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-390x650-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-844x390",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-844x390-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-844x390-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-844x390-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/maximized-844x390-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/restore",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-22-default",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-22-default-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-30-default",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-30-default-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-22-rich",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-22-rich-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-30-rich",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-font-30-rich-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-11",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-11-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-15",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-15-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-22",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-22-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-20-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-80-font-22",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-80-font-22-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-80-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-wide-80-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-cluster-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-cluster-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-cluster-font-60",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/api-cluster-font-60-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "index.html/uncaught-errors",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/production-fonts",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/fit-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-controls",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-controls",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/svg-export-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-fit-bounds",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor-return-labels",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/restore",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-30",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-30-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-60",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-60-export",
+          "passed": true,
+          "errors": []
+        },
+        {
+          "scenario_id": "frankenmermaid_demo_showcase.html/uncaught-errors",
+          "passed": true,
+          "errors": []
+        }
+      ],
+      "run_provenance_note": "The run identity accurately records the source fingerprint and pending size audit at browser execution. The final canonical artifact audit proves all six non-package-JSON files are byte-identical; only package.json source metadata changed after the audited budget and test-only edits."
+    },
+    "api": {
+      "source_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+      "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+      "checks": 71,
+      "results": [
+        {
+          "name": "renderSvg/default",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/auto",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/normal",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/rich",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/critical",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/critical-rich-request",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/nested-preservation-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderSvg/explicit-overview",
+          "tier": "compact",
+          "full": false,
+          "textCount": 24,
+          "edgeLabels": 0,
+          "clusterLabels": 0,
+          "sha256": "fc02d5886de728c92271092181d9bdfc23f9eacdfe465de504fe9d601c3b3fc1"
+        },
+        {
+          "name": "renderSvg/nominal-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "renderSvg/nominal-normal",
+          "tier": "normal",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.3
+          },
+          "sha256": "d7c2ae4f031307a91ce9a9fa9011f485f46e2cda6544f4ce73b52a9d32da55f8"
+        },
+        {
+          "name": "renderSvg/nominal-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "813e0a54b01187874cfaa9dbb2bd28d9df3106f186970e7fafa5198f953ad686"
+        },
+        {
+          "name": "renderSvg/font-11-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderSvg/font-22-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderSvg/font-30-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "renderSvg/nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderSvg/font-30-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 25.5
+          },
+          "sha256": "25919a96adfff6b9a06d9277c9e4393f2e0e09c50a097a9ec2c80e460ccfdb6c"
+        },
+        {
+          "name": "renderDeck/default",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/auto",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/normal",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/rich",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/critical",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/critical-rich-request",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/nested-preservation-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "5f74050f5b4b64abfd13c2b914d28072ec522d59ebef045737cdde7787bd9c34"
+        },
+        {
+          "name": "renderDeck/explicit-overview",
+          "tier": "compact",
+          "full": false,
+          "textCount": 24,
+          "edgeLabels": 0,
+          "clusterLabels": 0,
+          "sha256": "fc02d5886de728c92271092181d9bdfc23f9eacdfe465de504fe9d601c3b3fc1"
+        },
+        {
+          "name": "renderDeck/nominal-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "renderDeck/nominal-normal",
+          "tier": "normal",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.3
+          },
+          "sha256": "d7c2ae4f031307a91ce9a9fa9011f485f46e2cda6544f4ce73b52a9d32da55f8"
+        },
+        {
+          "name": "renderDeck/nominal-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "813e0a54b01187874cfaa9dbb2bd28d9df3106f186970e7fafa5198f953ad686"
+        },
+        {
+          "name": "renderDeck/font-11-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderDeck/font-22-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderDeck/font-30-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "renderDeck/nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderDeck/font-30-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 25.5
+          },
+          "sha256": "25919a96adfff6b9a06d9277c9e4393f2e0e09c50a097a9ec2c80e460ccfdb6c"
+        },
+        {
+          "name": "worker/default",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "879cd30fb4e638047b6d10de54f90f28719c71b8178ebc21078d7482ec0a9a19"
+        },
+        {
+          "name": "worker/auto",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "879cd30fb4e638047b6d10de54f90f28719c71b8178ebc21078d7482ec0a9a19"
+        },
+        {
+          "name": "worker/compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "worker/normal",
+          "tier": "normal",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.3
+          },
+          "sha256": "5b057fec1165eac7588274f981df838c2a33c3461f094eb5d0285692d99df3b4"
+        },
+        {
+          "name": "worker/rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "879cd30fb4e638047b6d10de54f90f28719c71b8178ebc21078d7482ec0a9a19"
+        },
+        {
+          "name": "worker/critical",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "879cd30fb4e638047b6d10de54f90f28719c71b8178ebc21078d7482ec0a9a19"
+        },
+        {
+          "name": "worker/critical-rich-request",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "879cd30fb4e638047b6d10de54f90f28719c71b8178ebc21078d7482ec0a9a19"
+        },
+        {
+          "name": "worker/nested-preservation-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "worker/explicit-overview",
+          "tier": "compact",
+          "full": false,
+          "textCount": 24,
+          "edgeLabels": 0,
+          "clusterLabels": 0,
+          "sha256": "9ebf4cced01e31ed03fa14aa8d136182c8d538521695a53598a0efec79955062"
+        },
+        {
+          "name": "worker/nominal-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "worker/nominal-normal",
+          "tier": "normal",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.3
+          },
+          "sha256": "d7c2ae4f031307a91ce9a9fa9011f485f46e2cda6544f4ce73b52a9d32da55f8"
+        },
+        {
+          "name": "worker/nominal-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 12.75
+          },
+          "sha256": "813e0a54b01187874cfaa9dbb2bd28d9df3106f186970e7fafa5198f953ad686"
+        },
+        {
+          "name": "worker/font-11-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "worker/font-22-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "worker/font-30-compact",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "worker/nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "worker/font-30-rich",
+          "tier": "rich",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 25.5
+          },
+          "sha256": "25919a96adfff6b9a06d9277c9e4393f2e0e09c50a097a9ec2c80e460ccfdb6c"
+        },
+        {
+          "name": "init/nested-preservation-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "init/explicit-overview",
+          "tier": "compact",
+          "full": false,
+          "textCount": 24,
+          "edgeLabels": 0,
+          "clusterLabels": 0,
+          "sha256": "9ebf4cced01e31ed03fa14aa8d136182c8d538521695a53598a0efec79955062"
+        },
+        {
+          "name": "renderSvg/init-font-30",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "renderDeck/init-font-30",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "worker/init-font-30",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 633.48,
+            "fontSize": 22.2
+          },
+          "sha256": "2b22d0ea62188f02c7ac4f27c50ebd61b3f3dda5d6114f0e48cf38842744f1b1"
+        },
+        {
+          "name": "renderSvg/init-font-11",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderDeck/init-font-11",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "worker/init-font-11",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderSvg/init-font-15",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "renderDeck/init-font-15",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "worker/init-font-15",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 330.74,
+            "fontSize": 11.1
+          },
+          "sha256": "ec7bb529b7c531fef06cdc0597938478142c0416ef6747ea9d72c3f1052f97e6"
+        },
+        {
+          "name": "renderSvg/init-nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderDeck/init-nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "worker/init-nested-font-size-wins",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderSvg/font-override-after-init",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderDeck/font-override-after-init",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "worker/font-override-after-init",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 250.01,
+            "fontSize": 8.14
+          },
+          "sha256": "aa9d2579dc08543636caa66ee154502645b98a4841aa9363125418e51fb80e6e"
+        },
+        {
+          "name": "renderSvg/font-override-keeps-runtime-default",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "renderDeck/font-override-keeps-runtime-default",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        },
+        {
+          "name": "worker/font-override-keeps-runtime-default",
+          "tier": "compact",
+          "full": true,
+          "textCount": 50,
+          "edgeLabels": 24,
+          "clusterLabels": 2,
+          "longEdge": {
+            "width": 472.02,
+            "fontSize": 16.28
+          },
+          "sha256": "0fbba6da818ba9710b0690a375b57332b7f8ce8c418e697dcb1334021f7b011f"
+        }
+      ]
+    },
+    "cross_target": {
+      "final_package_and_render_digests": {
+        "command": [
+          "node",
+          "scripts/wasm_cross_target_digest.mjs"
+        ],
+        "exit_code": 0,
+        "output": "package artifacts=5 digest=0x6999f28e7ea66697\nflowchart bytes=8352 digest=0xafe8712eaa94163c\nsequence bytes=7472 digest=0x312f713e23dd8c2b\nclass bytes=6112 digest=0x86fb0b6a73147bb7\nstate bytes=7877 digest=0xd5c3891b75b12cd9\n",
+        "stderr": "",
+        "log_sha256": "c03ae8eea3a9217e344e43993a2e299cbee5d56c38db247de18b07073f2b703e"
+      },
+      "preintegration_to_integrated_svg_audit": {
+        "source_driver_sha256": "7678ad4b54f724b05a79773b231dd905fd001f5e0104b37c5d96205bcee8560b",
+        "method": "Unchanged authoritative digest fixture definitions and renderSvg(source) calls; scratch copies only redirect the package import and save returned SVG bytes. No source, expected outputs, or pins edited.",
+        "packages": {
+          "pre-integration-e71": {
+            "exit_code": 0,
+            "stdout": "package artifacts=5 digest=0x5b05c0d4c6024321\nflowchart bytes=8352 digest=0xafe8712eaa94163c\nsequence bytes=7472 digest=0x312f713e23dd8c2b\nclass bytes=6112 digest=0x86fb0b6a73147bb7\nstate bytes=7877 digest=0xd5c3891b75b12cd9\n",
+            "stderr": "",
+            "wasm_sha256": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813"
+          },
+          "integrated-512402ad": {
+            "exit_code": 0,
+            "stdout": "package artifacts=5 digest=0x97c241ff3d769fbb\nflowchart bytes=8352 digest=0xafe8712eaa94163c\nsequence bytes=7472 digest=0x312f713e23dd8c2b\nclass bytes=6112 digest=0x86fb0b6a73147bb7\nstate bytes=7877 digest=0xd5c3891b75b12cd9\n",
+            "stderr": "",
+            "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1"
+          }
+        },
+        "results": [
+          {
+            "fixture": "flowchart",
+            "byte_identical": true,
+            "old_bytes": 8352,
+            "new_bytes": 8352,
+            "old_sha256": "f7516fe6023f81b714592d86eaf23315a54ddf0a597d6bbea9adc2c9f6b389f7",
+            "new_sha256": "f7516fe6023f81b714592d86eaf23315a54ddf0a597d6bbea9adc2c9f6b389f7",
+            "texts_identical": true,
+            "text_element_count": 5,
+            "texts": [
+              "Alpha",
+              "Beta",
+              "Gamma",
+              "a",
+              "Delta"
+            ],
+            "geometry_and_structure_identical": true,
+            "root_attributes": {
+              "viewBox": "0 0 429.55 658",
+              "width": "100%",
+              "height": "100%",
+              "preserveAspectRatio": "xMidYMid meet",
+              "font-family": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+              "role": "graphics-document document",
+              "aria-roledescription": "flowchart-v2",
+              "data-nodes": "5",
+              "data-edges": "4",
+              "data-type": "flowchart",
+              "data-detail-tier": "rich",
+              "data-label-detail": "full"
+            },
+            "element_count": 43
+          },
+          {
+            "fixture": "sequence",
+            "byte_identical": true,
+            "old_bytes": 7472,
+            "new_bytes": 7472,
+            "old_sha256": "e7fa59cbba3c2551639fd02e065cf2e3732bb01233b3320cfe6d5c0a1c104cab",
+            "new_sha256": "e7fa59cbba3c2551639fd02e065cf2e3732bb01233b3320cfe6d5c0a1c104cab",
+            "texts_identical": true,
+            "text_element_count": 4,
+            "texts": [
+              "hello",
+              "reply",
+              "A",
+              "B"
+            ],
+            "geometry_and_structure_identical": true,
+            "root_attributes": {
+              "viewBox": "0 0 416 426.5",
+              "width": "100%",
+              "height": "100%",
+              "preserveAspectRatio": "xMidYMid meet",
+              "font-family": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+              "role": "graphics-document document",
+              "aria-roledescription": "sequence",
+              "data-nodes": "2",
+              "data-edges": "2",
+              "data-type": "sequence",
+              "data-detail-tier": "rich",
+              "data-label-detail": "full"
+            },
+            "element_count": 33
+          },
+          {
+            "fixture": "class",
+            "byte_identical": true,
+            "old_bytes": 6112,
+            "new_bytes": 6112,
+            "old_sha256": "457113370a82d0283f7a2bfa6b054ae160b5336d168dd2ef3949e7af04e8223f",
+            "new_sha256": "457113370a82d0283f7a2bfa6b054ae160b5336d168dd2ef3949e7af04e8223f",
+            "texts_identical": true,
+            "text_element_count": 4,
+            "texts": [
+              "Alpha",
+              "+String name",
+              "+run()",
+              "Beta"
+            ],
+            "geometry_and_structure_identical": true,
+            "root_attributes": {
+              "viewBox": "0 0 260.3 409.3125",
+              "width": "100%",
+              "height": "100%",
+              "preserveAspectRatio": "xMidYMid meet",
+              "font-family": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+              "role": "graphics-document document",
+              "aria-roledescription": "class",
+              "data-nodes": "2",
+              "data-edges": "1",
+              "data-type": "class",
+              "data-detail-tier": "rich",
+              "data-label-detail": "full"
+            },
+            "element_count": 26
+          },
+          {
+            "fixture": "state",
+            "byte_identical": true,
+            "old_bytes": 7877,
+            "new_bytes": 7877,
+            "old_sha256": "c8ec5a17e8e8bf231fda9a8335067f9f93aa58e96c568a0c326b72c0124a8b7b",
+            "new_sha256": "c8ec5a17e8e8bf231fda9a8335067f9f93aa58e96c568a0c326b72c0124a8b7b",
+            "texts_identical": true,
+            "text_element_count": 5,
+            "texts": [
+              "start",
+              "done",
+              "",
+              "Idle",
+              "Busy"
+            ],
+            "geometry_and_structure_identical": true,
+            "root_attributes": {
+              "viewBox": "0 0 257 465",
+              "width": "100%",
+              "height": "100%",
+              "preserveAspectRatio": "xMidYMid meet",
+              "font-family": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+              "role": "graphics-document document",
+              "aria-roledescription": "stateDiagram",
+              "data-nodes": "3",
+              "data-edges": "3",
+              "data-type": "state",
+              "data-detail-tier": "rich",
+              "data-label-detail": "full"
+            },
+            "element_count": 38
+          }
+        ]
+      },
+      "native_matches_actual_wasm": true
+    },
+    "native": {
+      "gates": [
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "fm-layout",
+            "-p",
+            "fm-render-svg",
+            "--lib",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 97.0,
+          "resource_wait_seconds": 0.0,
+          "peak_unreclaimable_memory": 7543472128,
+          "memory_before": {
+            "anon": 350867456,
+            "shmem": 3044810752,
+            "kernel": 818929664,
+            "unreclaimable": 4214607872,
+            "max": 8589934592
+          },
+          "memory_after": {
+            "anon": 112898048,
+            "shmem": 3876560896,
+            "kernel": 853450752,
+            "unreclaimable": 4842909696,
+            "max": 8589934592
+          },
+          "build_filesystem": "/dev/shm/frankenmermaid-native-final-20261020",
+          "free_build_filesystem_after": 1349156864,
+          "free_root_filesystem_after": 1349156864,
+          "root_write_reserve": 900000000,
+          "resource_guard": null,
+          "log": "/dev/shm/frankenmermaid-layout-svg-serial-final-20261020.log",
+          "log_sha256": "dfc7d51c6ae3fa9229b5c08a28f5a90c3ca979ae25d3532c4cdd4a447df948df",
+          "resource_record_sha256": "1f69de8ab373e18de3e8deb867d443949426732ff7046385dd07b83cf2e1c386",
+          "test_summaries": [
+            "test result: ok. 634 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.79s",
+            "test result: ok. 354 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 5.49s"
+          ]
+        },
+        {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "fm-wasm",
+            "--lib",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 104.77,
+          "resource_wait_seconds": 0.0,
+          "peak_unreclaimable_memory": 7189512192,
+          "memory_before": {
+            "anon": 491966464,
+            "shmem": 3968876544,
+            "kernel": 860168192,
+            "unreclaimable": 5321011200,
+            "max": 8589934592
+          },
+          "memory_after": {
+            "anon": 1996488704,
+            "shmem": 4184588288,
+            "kernel": 861409280,
+            "unreclaimable": 7042486272,
+            "max": 8589934592
+          },
+          "build_filesystem": "/dev/shm/frankenmermaid-native-final-20261020",
+          "free_build_filesystem_after": 1041129472,
+          "free_root_filesystem_after": 1041129472,
+          "root_write_reserve": 900000000,
+          "resource_guard": null,
+          "log": "/dev/shm/frankenmermaid-wasm-native-serial-final-20261020.log",
+          "log_sha256": "e2449bcae3a548bd81bcdb9b68a0a8796b7292d22aa67a0f3f20652d0fb2b3ac",
+          "resource_record_sha256": "bb85a8d144515a72eb0989e26e1c7d6232f9b4fe19815ad4ff2fb5a61b66c73c",
+          "test_summaries": [
+            "test result: ok. 68 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.61s"
+          ]
+        }
+      ],
+      "tests": {
+        "layout": {
+          "passed": 634,
+          "failed": 0,
+          "ignored": 1
+        },
+        "svg": {
+          "passed": 354,
+          "failed": 0,
+          "ignored": 2
+        },
+        "wasm": {
+          "passed": 68,
+          "failed": 0,
+          "ignored": 1
+        }
+      },
+      "passed_total": 1056,
+      "workspace_check": {
+        "status": "resource_blocked",
+        "attempt": {
+          "command": [
+            "cargo",
+            "check",
+            "--workspace",
+            "--all-targets",
+            "--locked"
+          ],
+          "exit_code": -15,
+          "elapsed_seconds": 60.22,
+          "resource_wait_seconds": 0.0,
+          "peak_unreclaimable_memory": 7899369472,
+          "memory_before": {
+            "anon": 235524096,
+            "shmem": 4162531328,
+            "kernel": 860811264,
+            "unreclaimable": 5258866688,
+            "max": 8589934592
+          },
+          "memory_after": {
+            "anon": 2457096192,
+            "shmem": 4242198528,
+            "kernel": 844537856,
+            "unreclaimable": 7543832576,
+            "max": 8589934592
+          },
+          "build_filesystem": "/dev/shm",
+          "free_build_filesystem_after": 983519232,
+          "free_root_filesystem_after": 983519232,
+          "root_write_reserve": 900000000,
+          "resource_guard": {
+            "memory": {
+              "anon": 2812452864,
+              "shmem": 4242198528,
+              "kernel": 844718080,
+              "unreclaimable": 7899369472,
+              "max": 8589934592
+            },
+            "free_build_filesystem": 983519232,
+            "free_root_filesystem": 983519232
+          },
+          "log": "/dev/shm/frankenmermaid-workspace-check-final-20261020.log",
+          "log_sha256": "37ad7f1aac58cb3fb5e8a15915931a385f99a5b949f5fb780e1a9a17a113c113",
+          "resource_record_sha256": "f61ce5df25221682f78b97d459e21c326645717e7dd208b162d2bf210e3c7296",
+          "rust_error_diagnostics": []
+        },
+        "retry": {
+          "command": [
+            "cargo",
+            "check",
+            "--workspace",
+            "--all-targets",
+            "--locked"
+          ],
+          "status": "blocked_at_startup",
+          "cargo_launched": false,
+          "guard_pid": 159452,
+          "stop_signal": "SIGINT",
+          "reason": "Parent ended resource waiting because retained external build outputs prevent the required filesystem reserve from recovering; no source/guard changes or deletion authorized.",
+          "stopped_at_utc": "2026-10-20T19:32:17Z",
+          "memory_at_stop": {
+            "anon": 117727232,
+            "shmem": 5225713664,
+            "kernel": 760102912,
+            "unreclaimable": 6103543808,
+            "max": 8589934592
+          },
+          "free_build_filesystem_bytes_at_stop": 4096,
+          "startup_memory_headroom_required": 3000000000,
+          "memory_stop_reserve": 700000000,
+          "filesystem_reserve": 900000000,
+          "log": "/dev/shm/frankenmermaid-workspace-check-retry-final-20261020.log",
+          "strict_clippy": {
+            "command": [
+              "cargo",
+              "clippy",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "status": "not_run",
+            "reason": "Same unrecovered host memory and shared-memory filesystem limits."
+          },
+          "log_sha256": "505b1a7d60c22e1c972e4c6d3168a081cba4b92048dbd7736a76d4df70fda270",
+          "resource_record_sha256": "115dcbcf1772fe94276095d3ea240dd310d00c7a6992261745aa5b41453f313f",
+          "rust_error_diagnostics": []
+        },
+        "pass_claimed": false
+      },
+      "strict_clippy": {
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "status": "not_run",
+        "reason": "Same unrecovered host memory and shared-memory filesystem limits."
+      },
+      "formatting": {
+        "exit_code": 1,
+        "preexisting_hunks": 78,
+        "files": 7,
+        "new_hunks": 0,
+        "baseline_comparison": "Matches the prior integrated formatting audit, whose hunk bodies were checked against unchanged 29536a1308acd1bae4da8b72b4cebffb39709ae0",
+        "log_sha256": "09bf94e0e1361d17b0e1efb2372f722592dcb9c964ef0927106144199dd6813c",
+        "prior_integrated_log_sha256": "4d543722247e19682142d9f5683eab4ccb5258d7ffe4183564ec38a8c6231829",
+        "same_hunk_bodies": true
+      },
+      "freshness_smoke_checks": {
+        "command": [
+          "node",
+          "scripts/check-wasm-freshness.mjs"
+        ],
+        "exit_code": 0,
+        "output": "ok     bd-eg44  kanban lanes are columns, not one stacked pile\nok     bd-51tz  packet field width is its bit count, not its label length\nok     bd-f3tc  a requirement's declared id: and text: reach the output\nok     bd-9w54  a composite state is drawn once, as its container\n\nall 4 checks passed: pkg/ carries the fixes it is pinned against.\n",
+        "stderr": "",
+        "log_sha256": "a03f6a4bdf4b82c351d4729d7fb3a5c11f0be2eb2a787e506a5bebeed77a8de2"
+      },
+      "ignored_layout_gate": {
+        "name": "routed_edges_do_not_run_through_unrelated_nodes",
+        "bead": "bd-h2ze",
+        "reason": "preexisting live routing acceptance gap"
+      },
+      "other_ignored_tests": "two SVG and one WASM existing manual performance probes",
+      "full_workspace_tests_claimed": false,
+      "initial_lane_test_failure": {
+        "gate": {
+          "command": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "fm-layout",
+            "-p",
+            "fm-render-svg",
+            "--lib",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "elapsed_seconds": 187.71,
+          "resource_wait_seconds": 0.0,
+          "peak_unreclaimable_memory": 5029142528,
+          "memory_before": {
+            "anon": 114593792,
+            "shmem": 2125783040,
+            "kernel": 872361984,
+            "unreclaimable": 3112738816,
+            "max": 8589934592
+          },
+          "memory_after": {
+            "anon": 207171584,
+            "shmem": 2409431040,
+            "kernel": 920846336,
+            "unreclaimable": 3537448960,
+            "max": 8589934592
+          },
+          "build_filesystem": "/dev/shm/frankenmermaid-native-final-20261020",
+          "free_build_filesystem_after": 2816286720,
+          "free_root_filesystem_after": 2816286720,
+          "root_write_reserve": 900000000,
+          "resource_guard": null,
+          "log": "/dev/shm/frankenmermaid-layout-svg-final-20261020.log",
+          "log_sha256": "cf521b5cefe4a8728977ca003db0d7348bc4093fa4f656fdd2bf172a2b452f25",
+          "resource_record_sha256": "dfa45dc2ee70a069e51c1178be9183196c9fe43b9215ee34ff93be851c1243ec",
+          "test_summaries": [
+            "test result: FAILED. 633 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.99s"
+          ]
+        },
+        "test": "gitgraph_commits_are_placed_in_their_branch_lane",
+        "left": 293.4041442871094,
+        "right": 293.40411376953125,
+        "difference": 3.0517578125e-05,
+        "difference_in_f32_ulps": 1,
+        "resolution": "Production lane formula is correct and unchanged. Test permits at most one ULP for finite nonnegative centers, explicitly verifies unequal commit widths, and retains lane separation and chain ordering."
+      },
+      "guarded_retry_not_counted_as_a_test_pass": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fm-layout",
+          "-p",
+          "fm-render-svg",
+          "--lib",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit_code": -15,
+        "elapsed_seconds": 90.05,
+        "resource_wait_seconds": 0.0,
+        "peak_unreclaimable_memory": 7925940224,
+        "memory_before": {
+          "anon": 281710592,
+          "shmem": 3019362304,
+          "kernel": 756785152,
+          "unreclaimable": 4057858048,
+          "max": 8589934592
+        },
+        "memory_after": {
+          "anon": 3923939328,
+          "shmem": 3019374592,
+          "kernel": 777801728,
+          "unreclaimable": 7721115648,
+          "max": 8589934592
+        },
+        "build_filesystem": "/dev/shm/frankenmermaid-native-final-20261020",
+        "free_build_filesystem_after": 2206343168,
+        "free_root_filesystem_after": 2206343168,
+        "root_write_reserve": 900000000,
+        "resource_guard": {
+          "memory": {
+            "anon": 4128530432,
+            "shmem": 3019374592,
+            "kernel": 778035200,
+            "unreclaimable": 7925940224,
+            "max": 8589934592
+          },
+          "free_build_filesystem": 2206343168,
+          "free_root_filesystem": 2206343168
+        },
+        "log": "/dev/shm/frankenmermaid-layout-svg-rechecked-20261020.log",
+        "log_sha256": "0c16a75ade281014591d4a0c1c79ef0b0ebd80690fe9edf6de3118038890bd4a",
+        "resource_record_sha256": "b686baa536d9462be6a3f57cdbe35ce5d7202ba0209dc58efd42f31887c3c48e",
+        "test_summaries": []
+      },
+      "focused_transplant_gate": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fm-render-svg",
+          "--lib",
+          "transplant"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 464.85,
+        "resource_wait_seconds": 0.0,
+        "peak_unreclaimable_memory": 4245577728,
+        "memory_before": {
+          "anon": 106024960,
+          "shmem": 1299988480,
+          "kernel": 759504896,
+          "unreclaimable": 2165518336,
+          "max": 8589934592
+        },
+        "memory_after": {
+          "anon": 128151552,
+          "shmem": 2026246144,
+          "kernel": 857243648,
+          "unreclaimable": 3011641344,
+          "max": 8589934592
+        },
+        "build_filesystem": "/dev/shm/frankenmermaid-native-final-20261020",
+        "free_build_filesystem_after": 3199471616,
+        "free_root_filesystem_after": 3199471616,
+        "root_write_reserve": 900000000,
+        "resource_guard": null,
+        "log": "/dev/shm/frankenmermaid-transplant-focused-final-20261020.log",
+        "log_sha256": "88346ec59d4425b2b09be0b91b391a34e938dbbff5d86b8aa73fa73cfb42e732",
+        "resource_record_sha256": "37bacaa9fd4c7cc1db66aabe480be094033a8f4a6f8add246b86e51226f4dc02",
+        "test_summaries": [
+          "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 354 filtered out; finished in 0.01s"
+        ]
+      }
+    },
+    "deployment": {
+      "stage": {
+        "action": "stage-bundle",
+        "bundle_root": "/dev/shm/frankenmermaid-site-integrated-final-20261020",
+        "canonical_host": "frankenmermaid.com",
+        "hosting_plan_gate": {
+          "surface": "cloudflare-hosting-plan",
+          "static_headers": "web/_headers",
+          "react_headers": "web_react/_headers",
+          "static_contract": "/dev/shm/frankenmermaid-issue14-integrated-20261020/evidence/contracts/showcase_static_entrypoint_contract.md",
+          "react_contract": "/dev/shm/frankenmermaid-issue14-integrated-20261020/evidence/contracts/showcase_react_embedding_contract.md",
+          "strategy_doc": "/dev/shm/frankenmermaid-issue14-integrated-20261020/evidence/demo_strategy.md",
+          "static_headers_hash": "sha256:bd9c9b2512c69d080110d1bbb52444d3aa3f5bef912653604c03af2153ba27e3",
+          "react_headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+          "static_contract_hash": "sha256:654409ceae4251b238bf4df0737b5b9d5938a60964bdb6450ce0ba3f2d4200cc",
+          "react_contract_hash": "sha256:2c64b80062f6001f0ff04c0ee0af25a62eb21433153fd62586b3f1ec6df8130a",
+          "strategy_doc_hash": "sha256:573e86eb692b5b0a2a1d0fd075dae773f3f020b7f44b94b20fdafb19ec9d082d",
+          "checks": [
+            {
+              "name": "shared pkg cache rule",
+              "ok": true,
+              "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+            },
+            {
+              "name": "shared evidence cache rule",
+              "ok": true,
+              "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+            },
+            {
+              "name": "static route rules",
+              "ok": true,
+              "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+            },
+            {
+              "name": "react route rules",
+              "ok": true,
+              "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+            },
+            {
+              "name": "static contract route matrix",
+              "ok": true,
+              "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+            },
+            {
+              "name": "react contract alignment",
+              "ok": true,
+              "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+            },
+            {
+              "name": "strategy trace",
+              "ok": true,
+              "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+            }
+          ]
+        },
+        "copied_files": [
+          {
+            "source": "evidence/capability_scenario_matrix.json",
+            "destination": "evidence/capability_scenario_matrix.json",
+            "sha256": "sha256:a107363525302e3f67e069baba2aca12c17e62067b6fe60675ec3996c9ff5116"
+          },
+          {
+            "source": "frankenmermaid_demo_showcase.html",
+            "destination": "frankenmermaid_demo_showcase.html",
+            "sha256": "sha256:e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26"
+          },
+          {
+            "source": "frankenmermaid_illustration.webp",
+            "destination": "frankenmermaid_illustration.webp",
+            "sha256": "sha256:a5f1795dbc8d6338322f8b0f5976205c842b950bf1f5b5cb9fc0e578f6d740ed"
+          },
+          {
+            "source": "gh_og_share_image.png",
+            "destination": "gh_og_share_image.png",
+            "sha256": "sha256:5d6d69cab83e8b335aef2aa230dd4d6b427f3ee410c98dd1ae4cb94ad388e940"
+          },
+          {
+            "source": "index.html",
+            "destination": "index.html",
+            "sha256": "sha256:e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26"
+          },
+          {
+            "source": "pkg/LICENSE",
+            "destination": "pkg/LICENSE",
+            "sha256": "sha256:32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509"
+          },
+          {
+            "source": "pkg/README.md",
+            "destination": "pkg/README.md",
+            "sha256": "sha256:b2cd79916d9f49d1404eb5a89efa767e1efb2a9b98ea2f74ac9e4884791ac73f"
+          },
+          {
+            "source": "pkg/frankenmermaid.d.ts",
+            "destination": "pkg/frankenmermaid.d.ts",
+            "sha256": "sha256:11b5b50e46df17674335a82ff24b02eb2262a0f3b8a1787942e4fca99027025f"
+          },
+          {
+            "source": "pkg/frankenmermaid.js",
+            "destination": "pkg/frankenmermaid.js",
+            "sha256": "sha256:0c5f169d3690e7b525f4a3f7eb739adfbd04ab7872592b52952977e46d0dcec9"
+          },
+          {
+            "source": "pkg/frankenmermaid_bg.wasm",
+            "destination": "pkg/frankenmermaid_bg.wasm",
+            "sha256": "sha256:512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1"
+          },
+          {
+            "source": "pkg/frankenmermaid_bg.wasm.d.ts",
+            "destination": "pkg/frankenmermaid_bg.wasm.d.ts",
+            "sha256": "sha256:091c1a7e75178fae01d0494cb7733ea223980df66829395542311e94c276b1cc"
+          },
+          {
+            "source": "pkg/package.json",
+            "destination": "pkg/package.json",
+            "sha256": "sha256:04fe39f4adc8afbdc924462cb6d53da5f8b44ca84b8ba9f2231aa9e98a441518"
+          },
+          {
+            "source": "web/fm-config-editor.js",
+            "destination": "web/fm-config-editor.js",
+            "sha256": "sha256:07dc4eca47d7c5e399bfa93784ba42b5fd4abbe1ccdaab253ae982aab4c37e20"
+          },
+          {
+            "source": "web/fm-deck-editor.js",
+            "destination": "web/fm-deck-editor.js",
+            "sha256": "sha256:2466af21ba42972d7aa56cef214b366a35ede0719953f5cacadfca88efce4043"
+          },
+          {
+            "source": "crates/fm-cli/src/deck_runtime.js",
+            "destination": "web/fm-deck-runtime.js",
+            "sha256": "sha256:c057d936af2ee38274b475dd7dacd6e9a64f938cc12f688e7a9ec19124610fdc"
+          },
+          {
+            "source": "crates/fm-cli/src/deck_template.html",
+            "destination": "web/fm-deck-template.html",
+            "sha256": "sha256:f20323fb330e164a43ebdf352681ff6ac2458500ae64e03454cde4eb684ebd42"
+          },
+          {
+            "source": "web/fm-document.js",
+            "destination": "web/fm-document.js",
+            "sha256": "sha256:9ad4e5d855226b0f2c8f69f6b061b33dc02b0a0a89907c00f1d46f4f94d57222"
+          },
+          {
+            "source": "web/fm-image-export.js",
+            "destination": "web/fm-image-export.js",
+            "sha256": "sha256:7034aff1beb2bbbce337cb1ca5097d18ba3919410d01f22d34ced597a9aa3692"
+          },
+          {
+            "source": "web/fm-render.worker.js",
+            "destination": "web/fm-render.worker.js",
+            "sha256": "sha256:e2d52c39253fc2984898ede881a56cb3d393485e592a8adf81300fdf9ca464a1"
+          },
+          {
+            "source": "web/fm-share.js",
+            "destination": "web/fm-share.js",
+            "sha256": "sha256:0440fadb18b24acb26d6d9e5c19f620a3c031da73cd57844e4f9045982b3a8dc"
+          },
+          {
+            "source": "web/fm-source-editor.js",
+            "destination": "web/fm-source-editor.js",
+            "sha256": "sha256:f90f07588af77cc24b1507bd60f6250bdcb27e7bf77ac8bbc3e0d0dc220b3b11"
+          },
+          {
+            "source": "web/index.html",
+            "destination": "web/index.html",
+            "sha256": "sha256:085aff6da751982bdf9c73859bc1bc09e929e145259e4a7ce7dbb54501edb1f1"
+          },
+          {
+            "source": "web/mermaid-compat.mjs",
+            "destination": "web/mermaid-compat.mjs",
+            "sha256": "sha256:b4c8a829aeeef006ae88e8c922a25dc12fcdddae2cc153a5b10572842f8c13af"
+          },
+          {
+            "source": "web/mermaid-svg.mjs",
+            "destination": "web/mermaid-svg.mjs",
+            "sha256": "sha256:b8b100644ae7fbb46b6c3ece990b81c93f5a5366f9504b505cd81b5e5f37f3c6"
+          },
+          {
+            "source": "web/mermaid.mjs",
+            "destination": "web/mermaid.mjs",
+            "sha256": "sha256:7c735bdda5ba4d00a4224fb7ae47d22fd1795edaa4333b209be19fb7426fc182"
+          },
+          {
+            "source": "web/playground.html",
+            "destination": "web/playground.html",
+            "sha256": "sha256:9a2bf72c9dfd82494a563bd7b89c32ad22fc2734f39bf2806cce16d60039496c"
+          },
+          {
+            "source": "web_react/index.html",
+            "destination": "web_react/index.html",
+            "sha256": "sha256:6b7e4352306f628a5145b32ec16b8ce0c6a4b5e753c6987821450d3c4fdc8774"
+          }
+        ],
+        "generated_files": [
+          {
+            "path": "_headers",
+            "sha256": "sha256:71d4d41089665e27397240181b3eea307ab05e4ced24c7593e3dd833070eb9c8"
+          }
+        ],
+        "redirect_strategy": {
+          "kind": "cloudflare-redirect-rules",
+          "rules": [
+            {
+              "description": "Canonicalize /web/ to /web while preserving the query string.",
+              "source_path": "/web/",
+              "target_url": "https://frankenmermaid.com/web",
+              "status_code": 301,
+              "preserve_query_string": true
+            },
+            {
+              "description": "Canonicalize /web_react/ to /web_react while preserving the query string.",
+              "source_path": "/web_react/",
+              "target_url": "https://frankenmermaid.com/web_react",
+              "status_code": 301,
+              "preserve_query_string": true
+            }
+          ],
+          "reason": "Pages `_redirects` does not expose a preserve-query-string control, so canonical trailing-slash redirects for `/web/` and `/web_react/` are modeled as zone-level Redirect Rules or Bulk Redirects."
+        }
+      },
+      "staged_wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+      "staged_source_fingerprint": "8ca904f5f1ed92114f5021c83d8953f9159604721743a6968cd3ada0d1b019b5",
+      "production_deployed": false,
+      "blocker": "Wrangler executable and Cloudflare credentials are unavailable",
+      "pull_request_created": false,
+      "github_actions_used": false
+    },
+    "historical_record_note": "All preexisting top-level fields are preserved as the pre-integration record. Current integrated results are solely in this section."
   }
 }

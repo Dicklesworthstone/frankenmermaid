@@ -21892,12 +21892,22 @@ mod tests {
             .width
             .min(layout.nodes[0].bounds.height);
 
-        assert_eq!(centre_x(0), centre_x(3), "main commits must share a lane");
-        assert_eq!(
-            centre_x(1),
-            centre_x(2),
-            "develop commits must share a lane"
-        );
+        for (a, b, branch) in [(0, 3, "main"), (1, 2, "develop")] {
+            assert_ne!(
+                layout.nodes[a].bounds.width, layout.nodes[b].bounds.width,
+                "{branch} must exercise differently sized commits"
+            );
+            let left = centre_x(a);
+            let right = centre_x(b);
+            assert!(left.is_finite() && right.is_finite() && left >= 0.0 && right >= 0.0);
+            // Circle diameters come from hypot. Reconstructing a shared centre as x + width / 2
+            // can round to adjacent f32 values for unequal widths; one ULP still rejects the
+            // original left-alignment bug without rounding the production layout coordinates.
+            assert!(
+                left.to_bits().abs_diff(right.to_bits()) <= 1,
+                "{branch} commits must share a lane: {left} versus {right}"
+            );
+        }
         assert!(
             (centre_x(0) - centre_x(1)).abs() >= diameter,
             "lanes {} and {} are closer than one commit diameter ({diameter})",
