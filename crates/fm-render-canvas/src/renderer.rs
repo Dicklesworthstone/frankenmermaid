@@ -1985,6 +1985,9 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) {
         let mut note_font = None;
+        let font_size =
+            f64::from(self.config.font_size as f32 * fm_layout::LayoutSequenceNote::FONT_SCALE);
+        let line_height = font_size * f64::from(self.config.resolved_line_height());
 
         for note in &layout.extensions.sequence_notes {
             let x = f64::from(note.bounds.x) + offset_x;
@@ -1998,19 +2001,27 @@ impl Canvas2dRenderer {
             ctx.set_stroke_style(&self.config.node_stroke);
             ctx.set_line_width(1.0);
             ctx.stroke_rect(x, y, w, h);
+            self.draw_calls += 2;
 
             // Note text.
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
-                let note_font =
-                    note_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
+                let note_font = note_font
+                    .get_or_insert_with(|| format!("{font_size}px {}", self.config.font_family));
                 ctx.set_font(note_font.as_str());
-                ctx.set_text_align(TextAlign::Center);
-                ctx.set_text_baseline(TextBaseline::Middle);
-                ctx.fill_text(&note.text, x + w / 2.0, y + h / 2.0);
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                for (row, line) in note.text.split('\n').enumerate() {
+                    ctx.fill_text(
+                        line,
+                        x + f64::from(fm_layout::LayoutSequenceNote::PADDING_X),
+                        y + f64::from(fm_layout::LayoutSequenceNote::PADDING_Y)
+                            + row as f64 * line_height,
+                    );
+                    self.draw_calls += 1;
+                }
                 *labels_drawn += 1;
             }
-            self.draw_calls += 3;
         }
     }
 
@@ -4826,6 +4837,65 @@ mod tests {
                 + f64::from(node.bounds.y)
                 + f64::from(node.bounds.height) * 0.5;
             assert!(((first.1 + second.1) * 0.5 - center).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn sequence_notes_draw_each_measured_line_inside_the_note() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant A\n  participant B\n  \
+             Note left of A: Customer checks the current account balance before approving a payment<br/><br/>Finish\n  \
+             A->>B: Continue\n",
+        )
+        .ir;
+        let config = CanvasRenderConfig {
+            font_size: 20.0,
+            line_height: 1.75,
+            padding: 12.0,
+            auto_fit: false,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let note = &layout.extensions.sequence_notes[0];
+        let lines: Vec<_> = note.text.split('\n').collect();
+        assert!(
+            lines.len() >= 4,
+            "wrapping and the authored blank line both survive"
+        );
+        assert!(lines.contains(&""));
+        let mut ctx = MockCanvas2dContext::new(1600.0, 1200.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+
+        let mut font = String::new();
+        let mut align = TextAlign::Center;
+        let mut baseline = TextBaseline::Alphabetic;
+        let mut runs = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::SetTextBaseline(value) => baseline = *value,
+                DrawOperation::FillText(text, x, y) if font.starts_with("16px ") => {
+                    assert_eq!(align, TextAlign::Left);
+                    assert_eq!(baseline, TextBaseline::Top);
+                    runs.push((text.as_str(), *x, *y));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(runs.iter().map(|run| run.0).collect::<Vec<_>>(), lines);
+        let x = config.padding + f64::from(note.bounds.x - layout.bounds.x) + 12.0;
+        let top = config.padding + f64::from(note.bounds.y - layout.bounds.y);
+        for (row, (_, actual_x, actual_y)) in runs.iter().enumerate() {
+            assert!((actual_x - x).abs() < 0.01);
+            assert!((actual_y - (top + 10.0 + row as f64 * 28.0)).abs() < 0.01);
+            assert!(*actual_y + 16.0 <= top + f64::from(note.bounds.height) - 10.0 + 0.01);
         }
     }
 

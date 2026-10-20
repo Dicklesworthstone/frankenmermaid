@@ -1,4 +1,4 @@
-//! Compound (cluster-aware) placement for the layered layout.
+//! Compound (cluster-aware) placement for the layered and tree layouts.
 //!
 //! The flat layered pipeline ranks and orders every node of a diagram together and then draws each
 //! cluster as the box around wherever its members happened to land. Nothing keeps a cluster's
@@ -19,8 +19,15 @@ use fm_core::{
 
 use crate::{
     LayoutConfig, LayoutNodeBox, LayoutRect, LayoutSpacing, LayoutTrace, build_cluster_boxes,
-    cycle_preparation, endpoint_node_index, flat_placement,
+    cluster_bounds_for_content, cycle_preparation, endpoint_node_index, flat_placement,
+    tree_node_boxes,
 };
+
+#[derive(Clone, Copy)]
+enum FlatLayout {
+    Layered,
+    Tree,
+}
 
 /// Node boxes for `ir` placed cluster by cluster, or `None` when the flat pipeline should run.
 ///
@@ -33,6 +40,35 @@ pub(crate) fn compound_node_boxes(
     config: &LayoutConfig,
     spacing: LayoutSpacing,
     metrics: &fm_core::FontMetrics,
+) -> Option<Vec<LayoutNodeBox>> {
+    compound_node_boxes_with_layout(
+        ir,
+        node_sizes,
+        config,
+        spacing,
+        metrics,
+        FlatLayout::Layered,
+    )
+}
+
+/// Keep the requested tree layout while reserving complete subgraph frames at every level.
+pub(crate) fn compound_tree_node_boxes(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    config: &LayoutConfig,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> Option<Vec<LayoutNodeBox>> {
+    compound_node_boxes_with_layout(ir, node_sizes, config, spacing, metrics, FlatLayout::Tree)
+}
+
+fn compound_node_boxes_with_layout(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    config: &LayoutConfig,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+    layout: FlatLayout,
 ) -> Option<Vec<LayoutNodeBox>> {
     if !matches!(
         ir.diagram_type,
@@ -51,7 +87,7 @@ pub(crate) fn compound_node_boxes(
     {
         return None;
     }
-    Some(place(ir, node_sizes, config, spacing, metrics))
+    Some(place(ir, node_sizes, config, spacing, metrics, layout))
 }
 
 /// The deepest subgraph nesting compound placement recurses into.
@@ -98,10 +134,8 @@ struct PlacedCluster {
     /// `ir` node index of each node in `boxes`, in the same order.
     members: Vec<usize>,
     boxes: Vec<LayoutNodeBox>,
-    /// The extent of the contents, nested cluster boxes included.
-    content: LayoutRect,
-    /// The size the cluster occupies in its parent: the content plus the cluster's padding.
-    size: (f32, f32),
+    /// The exact frame drawn around these contents, including the title and nested clearances.
+    bounds: LayoutRect,
 }
 
 fn place(
@@ -110,10 +144,11 @@ fn place(
     config: &LayoutConfig,
     spacing: LayoutSpacing,
     metrics: &fm_core::FontMetrics,
+    layout: FlatLayout,
 ) -> Vec<LayoutNodeBox> {
     let tops = top_level_clusters(ir);
     if tops.is_empty() {
-        return flat_boxes(ir, node_sizes, config, spacing);
+        return flat_boxes(ir, node_sizes, config, spacing, layout);
     }
 
     // Which top-level cluster owns each node. A node listed in two clusters stays with the first,
@@ -136,26 +171,28 @@ fn place(
             let (sub, members) = cluster_sub_ir(ir, subgraph, &owner, top);
             let sub_sizes: Vec<(f32, f32)> =
                 members.iter().map(|&member| node_sizes[member]).collect();
-            let boxes = place(&sub, &sub_sizes, config, spacing, metrics);
-            let mut content = bounding_box(boxes.iter().map(|node| node.bounds));
-            for nested in build_cluster_boxes(&sub, &boxes, spacing, metrics) {
-                content = union(content, nested.bounds);
-            }
-            let title_width = subgraph
-                .title
+            let boxes = place(&sub, &sub_sizes, config, spacing, metrics, layout);
+            let content = bounding_box(boxes.iter().map(|node| node.bounds));
+            let nested = build_cluster_boxes(&sub, &boxes, spacing, metrics);
+            let children = sub
+                .graph
+                .subgraphs
+                .iter()
+                .filter(|child| child.parent.is_none())
+                .filter_map(|child| child.cluster)
+                .filter_map(|id| nested.iter().find(|cluster| cluster.cluster_index == id.0))
+                .map(|cluster| cluster.bounds);
+            let title = subgraph
+                .cluster
+                .and_then(|id| ir.clusters.get(id.0))
+                .map_or(subgraph.title, |cluster| cluster.title)
                 .and_then(|label| ir.labels.get(label.0))
-                .map_or(0.0, |label| {
-                    crate::cluster_title_width(&label.text, metrics)
-                });
-            let size = (
-                (2.0f32.mul_add(spacing.cluster_padding, content.width)).max(title_width),
-                2.0f32.mul_add(spacing.cluster_padding, content.height),
-            );
+                .map(|label| label.text.as_str());
+            let bounds = cluster_bounds_for_content(content, children, title, spacing, metrics);
             PlacedCluster {
                 members,
                 boxes,
-                content,
-                size,
+                bounds,
             }
         })
         .collect();
@@ -173,13 +210,13 @@ fn place(
         .iter()
         .map(|source| match *source {
             Source::Node(node) => node_sizes[node],
-            Source::Cluster(top) => placed[top].size,
+            Source::Cluster(top) => (placed[top].bounds.width, placed[top].bounds.height),
         })
         .collect();
     for (top, stand_in) in parent.stand_in.iter().enumerate() {
-        parent_sizes[*stand_in] = placed[top].size;
+        parent_sizes[*stand_in] = (placed[top].bounds.width, placed[top].bounds.height);
     }
-    let parent_boxes = flat_boxes(&parent.ir, &parent_sizes, config, spacing);
+    let parent_boxes = flat_boxes(&parent.ir, &parent_sizes, config, spacing, layout);
 
     let mut out: Vec<Option<LayoutNodeBox>> = vec![None; ir.nodes.len()];
     for (index, source) in parent.source.iter().enumerate() {
@@ -191,11 +228,10 @@ fn place(
     }
     for (top, cluster) in placed.iter().enumerate() {
         let slot = &parent_boxes[parent.stand_in[top]];
-        // Centre the contents in the slot: the slot may be wider than the contents for a title.
-        let dx = (slot.bounds.width - cluster.content.width)
-            .mul_add(0.5, slot.bounds.x - cluster.content.x);
-        let dy = (slot.bounds.height - cluster.content.height)
-            .mul_add(0.5, slot.bounds.y - cluster.content.y);
+        // Translate the exact frame reserved in the parent. Re-centering only the raw contents
+        // shifts title-wide frames and loses the asymmetric clearance above nested subgraphs.
+        let dx = slot.bounds.x - cluster.bounds.x;
+        let dy = slot.bounds.y - cluster.bounds.y;
         for (member, member_box) in cluster.members.iter().zip(&cluster.boxes) {
             let mut node_box = member_box.clone();
             node_box.node_index = *member;
@@ -226,13 +262,17 @@ fn place(
         .collect()
 }
 
-/// The flat layered placement, through the same functions the full pipeline uses.
+/// Use the same coordinate kernel as the requested algorithm at every nesting level.
 fn flat_boxes(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
     config: &LayoutConfig,
     spacing: LayoutSpacing,
+    layout: FlatLayout,
 ) -> Vec<LayoutNodeBox> {
+    if matches!(layout, FlatLayout::Tree) {
+        return tree_node_boxes(ir, node_sizes, spacing);
+    }
     let (node_priority, cycle_result) = cycle_preparation(ir, config);
     let (_, _, nodes) = flat_placement(
         ir,

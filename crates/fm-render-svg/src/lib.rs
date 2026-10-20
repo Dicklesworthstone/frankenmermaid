@@ -4930,11 +4930,11 @@ fn render_layout_to_svg(
 
         // Note text.
         if !note.text.is_empty() {
-            let note_font_size = config.font_size * 0.8;
+            let note_font_size = config.font_size * fm_layout::LayoutSequenceNote::FONT_SCALE;
             doc = doc.child(
                 TextBuilder::new(&note.text)
-                    .x(nx + 8.0)
-                    .y(ny + 8.0)
+                    .x(nx + fm_layout::LayoutSequenceNote::PADDING_X)
+                    .y(ny + fm_layout::LayoutSequenceNote::PADDING_Y)
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(note_font_size)
                     .line_height(config.line_height)
@@ -14305,7 +14305,10 @@ fn reflow_label_markup(
         let style = if character.is_whitespace() {
             source.peek().map_or([false; 4], |(_, style)| *style)
         } else {
-            while source.peek().is_some_and(|(value, _)| value.is_whitespace()) {
+            while source
+                .peek()
+                .is_some_and(|(value, _)| value.is_whitespace())
+            {
                 let _ = source.next();
             }
             let (value, style) = source.next()?;
@@ -14359,9 +14362,8 @@ fn render_node_label_text(
     // Callers position the first baseline of the original block. Keep its visual center when
     // fitting changes either the number of lines or their font size.
     let y = if fitted.changed {
-        let original_span = label_text.lines().count().saturating_sub(1) as f32
-            * font_size
-            * config.line_height;
+        let original_span =
+            label_text.lines().count().saturating_sub(1) as f32 * font_size * config.line_height;
         let fitted_span = fitted.text.lines().count().saturating_sub(1) as f32
             * fitted.font_size
             * config.line_height;
@@ -19094,7 +19096,11 @@ mod tests {
                 height: 100.0,
             },
         };
-        for shape in [NodeShape::Rect, NodeShape::Subroutine, NodeShape::CrossedCircle] {
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Subroutine,
+            NodeShape::CrossedCircle,
+        ] {
             let mut ir = create_ir_with_single_node("N0", shape);
             ir.labels[0].text = "one\ntwo".to_string();
             let svg = render_node(
@@ -23179,6 +23185,49 @@ marker#arrow-open path {
         assert!(svg.contains("<tspan"));
         assert!(svg.contains(">Line 1<"));
         assert!(svg.contains(">Line 2<"));
+    }
+
+    #[test]
+    fn sequence_note_wrapping_reaches_the_drawn_svg_text() {
+        let text = "Customer checks the current account balance before approving a payment";
+        let ir = fm_parser::parse(&format!(
+            "sequenceDiagram\n  participant Customer\n  participant Store\n  \
+             Note left of Customer: {text}\n  Customer->>Store: Continue\n"
+        ))
+        .ir;
+        for (font_size, line_height, note_font, pitch) in
+            [(15.0, 1.5, 12.0, 18.0), (20.0, 1.75, 16.0, 28.0)]
+        {
+            for embed_theme_css in [true, false] {
+                let svg = render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        font_size,
+                        line_height,
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(issue14_drawn_text(&svg).get(text), Some(&1));
+                let note = svg
+                    .split("<text ")
+                    .skip(1)
+                    .find(|element| {
+                        element
+                            .split_once('>')
+                            .unwrap()
+                            .0
+                            .contains("fm-sequence-note-text")
+                    })
+                    .expect("a drawn note body")
+                    .split_once("</text>")
+                    .unwrap()
+                    .0;
+                assert!(note.matches("<tspan ").count() >= 2);
+                assert!(note.contains(&format!("font-size=\"{note_font}\"")));
+                assert!(note.contains(&format!("dy=\"{pitch}\"")));
+            }
+        }
     }
 
     #[test]

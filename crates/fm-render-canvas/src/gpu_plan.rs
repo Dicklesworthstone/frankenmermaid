@@ -2474,18 +2474,19 @@ impl GpuRenderPlan {
             );
         }
 
-        // NOTE BODIES (bd-adabx). Centred in the box exactly as draw_sequence_notes centres them,
-        // and skipped when empty, which is the one case that pass also skips.
+        // Note bodies share the raster pass's measured lines, font scale and top-left inset.
         for (index, note) in layout.extensions.sequence_notes.iter().enumerate() {
             if note.text.is_empty() {
                 continue;
             }
-            sink.push_centred(
+            sink.push_left_multiline(
                 note.text.as_str(),
                 (
-                    note.bounds.x + (note.bounds.width * 0.5),
-                    note.bounds.y + (note.bounds.height * 0.5),
+                    note.bounds.x + fm_layout::LayoutSequenceNote::PADDING_X,
+                    note.bounds.y + fm_layout::LayoutSequenceNote::PADDING_Y,
                 ),
+                DEFAULT_FONT_SIZE_PX * fm_layout::LayoutSequenceNote::FONT_SCALE,
+                DEFAULT_FONT_SIZE_PX * fm_layout::LayoutSequenceNote::FONT_SCALE * 1.5,
                 DEFAULT_LABEL_RGBA,
                 GpuTextSource::SequenceNote,
                 index,
@@ -4536,7 +4537,7 @@ mod tests {
         layout.extensions.sequence_notes = vec![
             fm_layout::LayoutSequenceNote {
                 position: fm_core::NotePosition::Over,
-                text: "Wqkj".to_string(),
+                text: "Wq\nkj".to_string(),
                 bounds: LayoutRect {
                     x: 100.0,
                     y: 50.0,
@@ -4581,21 +4582,20 @@ mod tests {
             .iter()
             .filter(|run| run.source == super::GpuTextSource::SequenceNote)
             .collect();
-        assert_eq!(runs.len(), 1, "the empty note contributes no run");
-        assert_eq!(runs[0].quad_count, 4, "\"Wqkj\" is four glyphs");
         assert_eq!(
-            runs[0].node_index, 0,
-            "node_index indexes the notes, not ir.nodes"
+            runs.len(),
+            2,
+            "each source line has a run; the empty note has none"
         );
-
-        let quads = &plan.text_quads[runs[0].first_quad as usize..][..4];
-        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
-        let midpoint = run_span_midpoint(quads, "Wqkj", super::DEFAULT_FONT_SIZE_PX);
-        assert!(
-            (midpoint - 140.0).abs() < 0.01,
-            "body not centred: {midpoint}"
-        );
-        assert!((quads[0].center[1] - 70.0).abs() < 0.01);
+        for (row, (run, first_glyph)) in runs.iter().zip(['W', 'k']).enumerate() {
+            assert_eq!(run.quad_count, 2);
+            assert_eq!(run.node_index, 0, "node_index indexes the notes");
+            let first = &plan.text_quads[run.first_quad as usize];
+            let left = first.center[0] - super::glyph_advance(first_glyph, 12.0) * 0.5;
+            assert!((left - 112.0).abs() < 0.01);
+            assert!((first.center[1] - (66.0 + row as f32 * 18.0)).abs() < 0.01);
+            assert_eq!(first.half_extent, [6.0, 6.0]);
+        }
     }
 
     /// A parsed interaction fragment reaches the executable GPU plan as a filled frame, a dashed

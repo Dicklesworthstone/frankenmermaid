@@ -2451,8 +2451,18 @@ pub struct LayoutPacketFieldContinuation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutSequenceNote {
     pub position: fm_core::NotePosition,
+    /// Display lines, including measured wraps; the IR retains the authored text.
     pub text: String,
     pub bounds: LayoutRect,
+}
+
+impl LayoutSequenceNote {
+    /// Note text size relative to the diagram's base font.
+    pub const FONT_SCALE: f32 = 0.8;
+    /// Horizontal text inset on each side of the note.
+    pub const PADDING_X: f32 = 12.0;
+    /// Vertical text inset above and below the note.
+    pub const PADDING_Y: f32 = 10.0;
 }
 
 /// A sequence diagram interaction fragment box (loop, alt, par, etc.).
@@ -3950,7 +3960,13 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
         LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
-        LayoutAlgorithm::Sequence => layout_diagram_sequence_traced(ir),
+        LayoutAlgorithm::Sequence => layout_diagram_sequence_traced_with_metrics(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+        ),
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
@@ -5887,7 +5903,8 @@ pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
 pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_sizes = compute_node_sizes(ir, &metrics);
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -5911,87 +5928,55 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         };
     }
 
-    if let Some(path_order) = directed_path_order(ir) {
-        return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
-    }
-
-    let tree = build_tree_layout_structure(ir);
-    push_snapshot(
-        &mut trace,
-        "tree_structure",
-        node_count,
-        ir.edges.len(),
-        0,
-        0,
-    );
-
-    let span_sizes: Vec<f32> = node_sizes
-        .iter()
-        .map(|(width, height)| {
-            if tree.horizontal_depth_axis {
-                *height
-            } else {
-                *width
-            }
-        })
-        .collect();
-
-    let mut span_memo = vec![None; node_count];
-    compute_tree_subtree_spans(
-        &tree.roots,
-        &tree.children,
-        &span_sizes,
-        spacing,
-        &mut span_memo,
-    );
-    let subtree_spans: Vec<f32> = span_memo
-        .into_iter()
-        .map(|span| span.unwrap_or(0.0))
-        .collect();
-
-    let mut span_centers = vec![0.0_f32; node_count];
-    compute_all_tree_span_centers(
-        &tree.roots,
-        &tree.children,
-        &subtree_spans,
-        spacing,
-        &mut span_centers,
-    );
-
-    let depth_level_sizes = tree_depth_level_sizes(&tree, &node_sizes);
-    let depth_centers = depth_level_centers(
+    // Tree selection must preserve the same subgraph containment as the layered algorithm.
+    // Reserve each complete frame before placing its parent, using tree coordinates at every
+    // level; a plain directed path can still take its allocation-saving specialization below.
+    let mut nodes = if let Some(nodes) = compound::compound_tree_node_boxes(
         ir,
-        &depth_level_sizes,
-        &tree.depth,
-        spacing.rank_spacing,
-        tree.reverse_depth_axis,
-    );
-
-    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    for node_index in 0..node_count {
-        let logical_depth = tree.depth[node_index];
-        let depth_center = depth_centers[logical_depth];
-        let span_center = span_centers[node_index];
-        centers[node_index] = if tree.horizontal_depth_axis {
-            (depth_center, span_center)
-        } else {
-            (span_center, depth_center)
-        };
-    }
-    normalize_center_positions(&mut centers, &node_sizes);
-
-    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
-    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges =
+        &node_sizes,
+        &LayoutConfig::default(),
+        spacing,
+        &metrics,
+    ) {
+        push_snapshot(
+            &mut trace,
+            "compound_placement",
+            node_count,
+            ir.edges.len(),
+            0,
+            0,
+        );
+        nodes
+    } else {
+        if let Some(path_order) = directed_path_order(ir) {
+            return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
+        }
+        push_snapshot(
+            &mut trace,
+            "tree_structure",
+            node_count,
+            ir.edges.len(),
+            0,
+            0,
+        );
+        tree_node_boxes(ir, &node_sizes, spacing)
+    };
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    anchor_composite_state_nodes(ir, &mut nodes, &clusters);
+    let edges = if clusters.is_empty() {
         build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
             .unwrap_or_else(|| {
                 build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default())
-            });
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+            })
+    } else {
+        build_edge_paths(
+            ir,
+            &nodes,
+            &clusters,
+            &BTreeSet::new(),
+            EdgeRouting::default(),
+        )
+    };
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -6032,6 +6017,73 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         }),
         trace,
     }
+}
+
+/// The tree coordinate kernel, shared by ordinary and compound tree placement.
+fn tree_node_boxes(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    spacing: LayoutSpacing,
+) -> Vec<LayoutNodeBox> {
+    let node_count = ir.nodes.len();
+    let tree = build_tree_layout_structure(ir);
+    let span_sizes: Vec<f32> = node_sizes
+        .iter()
+        .map(|(width, height)| {
+            if tree.horizontal_depth_axis {
+                *height
+            } else {
+                *width
+            }
+        })
+        .collect();
+
+    let mut span_memo = vec![None; node_count];
+    compute_tree_subtree_spans(
+        &tree.roots,
+        &tree.children,
+        &span_sizes,
+        spacing,
+        &mut span_memo,
+    );
+    let subtree_spans: Vec<f32> = span_memo
+        .into_iter()
+        .map(|span| span.unwrap_or(0.0))
+        .collect();
+
+    let mut span_centers = vec![0.0_f32; node_count];
+    compute_all_tree_span_centers(
+        &tree.roots,
+        &tree.children,
+        &subtree_spans,
+        spacing,
+        &mut span_centers,
+    );
+
+    let depth_level_sizes = tree_depth_level_sizes(&tree, node_sizes);
+    let depth_centers = depth_level_centers(
+        ir,
+        &depth_level_sizes,
+        &tree.depth,
+        spacing.rank_spacing,
+        tree.reverse_depth_axis,
+    );
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let logical_depth = tree.depth[node_index];
+        let depth_center = depth_centers[logical_depth];
+        let span_center = span_centers[node_index];
+        centers[node_index] = if tree.horizontal_depth_axis {
+            (depth_center, span_center)
+        } else {
+            (span_center, depth_center)
+        };
+    }
+    normalize_center_positions(&mut centers, node_sizes);
+
+    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
+    node_boxes_from_centers(ir, node_sizes, &tree.depth, &order_by_rank, &centers)
 }
 
 fn layout_directed_path_tree_traced(
@@ -6170,6 +6222,11 @@ pub fn certify_directed_path_layout_prefix(
     edge_count: usize,
 ) -> Option<DirectedPathLayoutPrefix> {
     if ir.direction != GraphDirection::LR
+        || ir
+            .graph
+            .subgraphs
+            .iter()
+            .any(|subgraph| !subgraph.members.is_empty())
         || node_count == 0
         || edge_count.checked_add(1) != Some(node_count)
         || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
@@ -6264,7 +6321,14 @@ pub fn try_relayout_directed_path_suffix(
     prefix: &DirectedPathLayoutPrefix,
 ) -> bool {
     let suffix_node_count = ir.nodes.len().saturating_sub(prefix.node_count);
+    // A new nonempty subgraph reserves a compound frame and can move the existing path.
+    // Reject it before mutation instead of reusing the flat path's fixed spacing cursor.
     if ir.direction != GraphDirection::LR
+        || ir
+            .graph
+            .subgraphs
+            .iter()
+            .any(|subgraph| !subgraph.members.is_empty())
         || prefix.node_count == 0
         || prefix.edge_count.checked_add(1) != Some(prefix.node_count)
         || prefix.node_count > ir.nodes.len()
@@ -7062,8 +7126,15 @@ pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_sequence_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+}
+
+fn layout_diagram_sequence_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut node_sizes = compute_node_sizes(ir, metrics);
     // An `actor` is drawn as a stick figure with its name beneath: it needs a taller header.
     for (size, node) in node_sizes.iter_mut().zip(&ir.nodes) {
         if node
@@ -7150,10 +7221,22 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let first_message_y =
         header_y + node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max) + message_gap;
 
+    // Wrap before assigning rows: every message and fragment below a note must reserve the
+    // height of the lines that both renderers will actually draw.
+    let mut sequence_notes =
+        build_sequence_note_geometry(ir, &participant_x_centers, &node_sizes, metrics);
+
     // With notes or fragments, the source-order timeline gives each its own rows; without them
     // (or for a hand-built IR) every message gets one row, as it always has.
     let timeline_rows = ir.sequence_meta.as_ref().and_then(|meta| {
-        sequence_timeline_rows(ir, meta, first_message_y - message_gap, message_gap)
+        sequence_timeline_rows(
+            ir,
+            meta,
+            first_message_y - message_gap,
+            message_gap,
+            &sequence_notes,
+            metrics.font_size(),
+        )
     });
     let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
         (rows.message_y.clone(), rows.end)
@@ -7491,15 +7574,24 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .unwrap_or_default();
 
-    let sequence_notes = build_sequence_note_geometry(
-        ir,
-        &participant_x_centers,
-        &node_sizes,
-        &message_y_positions,
-        first_message_y,
-        message_gap,
-        timeline_rows.as_ref().map(|rows| rows.note_top.as_slice()),
-    );
+    if let Some(meta) = &ir.sequence_meta {
+        for (index, (note, authored)) in sequence_notes.iter_mut().zip(&meta.notes).enumerate() {
+            // Its own row on the timeline; hand-built IR falls back to the referenced message.
+            note.bounds.y = timeline_rows
+                .as_ref()
+                .and_then(|rows| rows.note_top.get(index))
+                .copied()
+                .unwrap_or_else(|| {
+                    message_y_positions
+                        .get(authored.after_edge)
+                        .copied()
+                        .unwrap_or(
+                            (authored.after_edge as f32).mul_add(message_gap, first_message_y),
+                        )
+                        - note.bounds.height / 2.0
+                });
+        }
+    }
     let sequence_fragments = build_sequence_fragment_geometry(
         ir,
         &participant_x_centers,
@@ -7773,13 +7865,14 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by
     }
 }
 
-/// A sequence note's height: its lines plus a 10px margin above and below, as mermaid sizes it.
-/// One line used to fill 0.7 of a message row whatever it said — a 40px-high box of text in a
-/// 60-80px frame.
-fn sequence_note_height(text: &str) -> f32 {
+/// Reserve the actual note font's line pitch and the inset used by SVG and Canvas.
+fn sequence_note_height(line_count: usize, metrics: &fm_core::FontMetrics) -> f32 {
     #[allow(clippy::cast_precision_loss)]
-    let line_count = text.lines().count().max(1) as f32;
-    line_count.mul_add(19.0, 20.0)
+    let line_count = line_count.max(1) as f32;
+    line_count.mul_add(
+        metrics.line_height_px() * LayoutSequenceNote::FONT_SCALE,
+        2.0 * LayoutSequenceNote::PADDING_Y,
+    )
 }
 
 /// Where the sequence timeline puts each message, note and fragment.
@@ -7804,6 +7897,8 @@ fn sequence_timeline_rows(
     meta: &fm_core::IrSequenceMeta,
     header_bottom: f32,
     message_gap: f32,
+    notes: &[LayoutSequenceNote],
+    font: f32,
 ) -> Option<SequenceTimelineRows> {
     use fm_core::IrSequenceStep as Step;
     let timeline = &meta.timeline;
@@ -7836,8 +7931,6 @@ fn sequence_timeline_rows(
         }
     }
 
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let font = metrics.font_size();
     let lead = |after_message: bool| message_gap * if after_message { 0.25 } else { 0.1 };
     let mut rows = SequenceTimelineRows {
         message_y: Vec::with_capacity(ir.edges.len()),
@@ -7869,9 +7962,9 @@ fn sequence_timeline_rows(
             }
             Step::Note => {
                 let top = floor + lead(after_message);
-                let text = &meta.notes[rows.note_top.len()].text;
+                let note = &notes[rows.note_top.len()];
                 rows.note_top.push(top);
-                floor = top + sequence_note_height(text);
+                floor = top + note.bounds.height;
             }
             Step::Open => {
                 let fragment = open_fragment
@@ -7920,49 +8013,28 @@ fn is_self_message(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> bool {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_sequence_note_geometry(
     ir: &MermaidDiagramIr,
     participant_x_centers: &[f32],
     node_sizes: &[(f32, f32)],
-    message_y_positions: &[f32],
-    first_message_y: f32,
-    message_gap: f32,
-    timeline_tops: Option<&[f32]>,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutSequenceNote> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
     };
-    let default_note_width = 120.0_f32;
-    // Average character width estimate for note sizing (matches FontMetrics default sans-serif).
-    let avg_char_w = 8.25_f32;
+    // The deterministic estimate runs narrower than browser text. Match state notes' 15%
+    // allowance when wrapping, so the inset remains available in an actual system font.
+    let width_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: metrics.font_size() * LayoutSequenceNote::FONT_SCALE * 1.15,
+        ..metrics.config().clone()
+    });
 
     meta.notes
         .iter()
-        .enumerate()
-        .map(|(note_index, note)| {
-            let note_height = sequence_note_height(&note.text);
-            // Adaptive note width from content: use the widest line + padding.
-            let max_line_chars = note
-                .text
-                .lines()
-                .map(|line| line.chars().count())
-                .max()
-                .unwrap_or(0);
-            let note_width = (max_line_chars as f32)
-                .mul_add(avg_char_w, 24.0)
-                .clamp(80.0, default_note_width * 2.5);
-
-            // Its own row on the timeline; else centred on the message after which it appears.
-            let top =
-                timeline_tops
-                    .and_then(|tops| tops.get(note_index))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        message_y_positions.get(note.after_edge).copied().unwrap_or(
-                            (note.after_edge as f32).mul_add(message_gap, first_message_y),
-                        ) - note_height / 2.0
-                    });
+        .map(|note| {
+            let note_width = (width_metrics.estimate_multiline_width(&note.text)
+                + 2.0 * LayoutSequenceNote::PADDING_X)
+                .clamp(80.0, 300.0);
 
             // Determine x position based on participants and note position.
             let first_pid = note.participants.first().map_or(0, |p| p.0);
@@ -7974,33 +8046,39 @@ fn build_sequence_note_geometry(
                 .unwrap_or(first_cx);
             let first_half_w = node_sizes.get(first_pid).map_or(50.0, |(w, _)| w / 2.0);
 
-            let x = match note.position {
-                fm_core::NotePosition::LeftOf => first_cx - first_half_w - note_width - 10.0,
-                fm_core::NotePosition::RightOf => {
-                    let last_half_w = node_sizes.get(last_pid).map_or(50.0, |(w, _)| w / 2.0);
-                    last_cx + last_half_w + 10.0
-                }
-                fm_core::NotePosition::Over => {
-                    let span_width = (last_cx - first_cx).abs() + note_width;
-                    let center = f32::midpoint(first_cx, last_cx);
-                    center - span_width / 2.0
-                }
-            };
-
-            let w = match note.position {
+            let width = match note.position {
                 fm_core::NotePosition::Over if first_pid != last_pid => {
                     (last_cx - first_cx).abs() + note_width
                 }
                 _ => note_width,
             };
+            let lines = width_metrics
+                .wrap_to_width(&note.text, width - 2.0 * LayoutSequenceNote::PADDING_X);
+            let note_height = sequence_note_height(lines.len(), metrics);
+            let text = lines.join("\n");
+            // One unbreakable glyph at an unusually large font size still needs its full box.
+            let width = width.max(
+                width_metrics.estimate_multiline_width(&text) + 2.0 * LayoutSequenceNote::PADDING_X,
+            );
+            let x = match note.position {
+                fm_core::NotePosition::LeftOf => first_cx - first_half_w - width - 10.0,
+                fm_core::NotePosition::RightOf => {
+                    let last_half_w = node_sizes.get(last_pid).map_or(50.0, |(w, _)| w / 2.0);
+                    last_cx + last_half_w + 10.0
+                }
+                fm_core::NotePosition::Over => {
+                    let center = f32::midpoint(first_cx, last_cx);
+                    center - width / 2.0
+                }
+            };
 
             LayoutSequenceNote {
                 position: note.position,
-                text: note.text.clone(),
+                text,
                 bounds: LayoutRect {
                     x,
-                    y: top,
-                    width: w,
+                    y: 0.0,
+                    width,
                     height: note_height,
                 },
             }
@@ -19457,7 +19535,14 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                 for &index in &group[start..end] {
                     // A genuine fan-in stays shared. Otherwise every bus belongs to one source:
                     // pairwise source/target exemptions could join several fans into a false bus.
-                    buses[index] = (component, if same_target { target } else { runs[index].from });
+                    buses[index] = (
+                        component,
+                        if same_target {
+                            target
+                        } else {
+                            runs[index].from
+                        },
+                    );
                 }
                 component += 1;
                 start = end;
@@ -19502,7 +19587,10 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                 let before = across(points[run.start - 1]) - line;
                 let room = room_for(run, edges);
                 let blocked = |candidate: f32| {
-                    for members in occupied.range(nearby(candidate)).map(|(_, members)| members) {
+                    for members in occupied
+                        .range(nearby(candidate))
+                        .map(|(_, members)| members)
+                    {
                         for &other in members {
                             let neighbor = runs[other];
                             if neighbor.path == run.path
@@ -19522,10 +19610,9 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                     }
                     // A displaced bend also changes two perpendicular stubs. Do not turn a
                     // corner contact into an overlapping stub, or join another nearby path.
-                    for (fixed_index, bend_index) in [
-                        (run.start - 1, run.start),
-                        (run.start + 2, run.start + 1),
-                    ] {
+                    for (fixed_index, bend_index) in
+                        [(run.start - 1, run.start), (run.start + 2, run.start + 1)]
+                    {
                         let fixed = points[fixed_index];
                         let bend = points[bend_index];
                         let stub_line = along(bend);
@@ -19549,9 +19636,7 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                                 // Coincident endpoint stubs already form a genuine bus. Extending
                                 // that shared prefix is safe; interior stubs and other ports still
                                 // undergo the overlap-growth check below.
-                                let shared_port = if fixed_index == 0
-                                    && i == 0
-                                    && run.from == from
+                                let shared_port = if fixed_index == 0 && i == 0 && run.from == from
                                 {
                                     Some(a)
                                 } else if fixed_index + 1 == points.len()
@@ -19908,6 +19993,41 @@ fn extend_bounds_for_state_notes(layout: &mut DiagramLayout) {
     layout.bounds.height = max_y - min_y;
 }
 
+/// The frame used both when reserving a compound slot and when drawing its final cluster.
+fn cluster_bounds_for_content(
+    content: LayoutRect,
+    children: impl Iterator<Item = LayoutRect>,
+    title: Option<&str>,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> LayoutRect {
+    const HEADER_CLEARANCE: f32 = 28.0;
+    const NESTING_INSET: f32 = 16.0;
+
+    let mut min_x = content.x;
+    let mut min_y = content.y;
+    let mut max_x = content.x + content.width;
+    let mut max_y = content.y + content.height;
+    for child in children {
+        min_x = min_x.min(child.x - NESTING_INSET + spacing.cluster_padding);
+        max_x = max_x.max(child.x + child.width + NESTING_INSET - spacing.cluster_padding);
+        min_y = min_y.min(child.y - HEADER_CLEARANCE - NESTING_INSET + spacing.cluster_padding);
+        max_y = max_y.max(child.y + child.height + NESTING_INSET - spacing.cluster_padding);
+    }
+
+    let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
+    let title_width = title.map_or(0.0, |text| cluster_title_width(text, metrics));
+    let width = contents_width.max(title_width);
+    LayoutRect {
+        // Widen around the contents: extending only the right border would move a title-wide
+        // frame out of the slot the parent reserved for it and into the next node or cluster.
+        x: min_x - spacing.cluster_padding - (width - contents_width) * 0.5,
+        y: min_y - spacing.cluster_padding,
+        width,
+        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
+    }
+}
+
 fn build_cluster_boxes(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -19988,67 +20108,48 @@ fn build_cluster_boxes(
     // Sort by depth descending (deepest / innermost children first)
     depths.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    const HEADER_CLEARANCE: f32 = 28.0;
-    const NESTING_INSET: f32 = 16.0;
-
     let mut final_boxes: Vec<Option<LayoutClusterBox>> = vec![None; ir.clusters.len()];
 
     for &(_depth, cluster_index) in &depths {
         let Some(cluster) = ir.clusters.get(cluster_index) else {
             continue;
         };
-        let Some((mut min_x, mut min_y, mut max_x, mut max_y)) = cluster_bounds[cluster_index]
-        else {
+        let Some((min_x, min_y, max_x, max_y)) = cluster_bounds[cluster_index] else {
             continue;
         };
-
-        // If this cluster has children subgraphs, expand its bounds to enclose all child cluster boxes
-        if let Some(sg_id) = cluster_to_subgraph[cluster_index]
-            && let Some(sg) = ir.graph.subgraph(sg_id)
-        {
-            for &child_sg_id in &sg.children {
-                if let Some(child_sg) = ir.graph.subgraph(child_sg_id)
-                    && let Some(child_c_id) = child_sg.cluster
-                    && let Some(Some(child_box)) = final_boxes.get(child_c_id.0)
-                {
-                    min_x = min_x.min(child_box.bounds.x - NESTING_INSET + spacing.cluster_padding);
-                    max_x = max_x.max(
-                        child_box.bounds.x + child_box.bounds.width + NESTING_INSET
-                            - spacing.cluster_padding,
-                    );
-                    min_y = min_y.min(
-                        child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
-                            + spacing.cluster_padding,
-                    );
-                    max_y = max_y.max(
-                        child_box.bounds.y + child_box.bounds.height + NESTING_INSET
-                            - spacing.cluster_padding,
-                    );
-                }
-            }
-        }
 
         let title = cluster
             .title
             .and_then(|label_id| ir.labels.get(label_id.0))
             .map(|label| label.text.clone());
 
-        let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-        let title_width = title
-            .as_deref()
-            .map_or(0.0, |text| cluster_title_width(text, metrics));
+        let children = cluster_to_subgraph[cluster_index]
+            .and_then(|id| ir.graph.subgraph(id))
+            .into_iter()
+            .flat_map(|subgraph| subgraph.children.iter())
+            .filter_map(|id| ir.graph.subgraph(*id))
+            .filter_map(|subgraph| subgraph.cluster)
+            .filter_map(|id| final_boxes.get(id.0).and_then(Option::as_ref))
+            .map(|cluster| cluster.bounds);
+        let bounds = cluster_bounds_for_content(
+            LayoutRect {
+                x: min_x,
+                y: min_y,
+                width: max_x - min_x,
+                height: max_y - min_y,
+            },
+            children,
+            title.as_deref(),
+            spacing,
+            metrics,
+        );
 
         let box_obj = LayoutClusterBox {
             cluster_index,
             span: cluster.span,
             title,
             color: None,
-            bounds: LayoutRect {
-                x: min_x - spacing.cluster_padding,
-                y: min_y - spacing.cluster_padding,
-                width: contents_width.max(title_width),
-                height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
-            },
+            bounds,
         };
         final_boxes[cluster_index] = Some(box_obj);
     }
@@ -20072,7 +20173,10 @@ fn cluster_title_width(title: &str, metrics: &fm_core::FontMetrics) -> f32 {
         .strip_prefix("swimlane:")
         .or_else(|| title.strip_prefix("section "))
         .unwrap_or(title);
-    let text_width = metrics.estimate_dimensions(displayed).0 * CLUSTER_FONT_SCALE;
+    // The default heading is semibold. The character-class estimator has no font-weight input
+    // and underestimates a long 13.5px system-font heading by about 30% in the browser; retain a
+    // small margin beyond that measured difference so the complete heading stays inside its frame.
+    let text_width = metrics.estimate_dimensions(displayed).0 * CLUSTER_FONT_SCALE * 1.35;
     16.0 + text_width
 }
 
@@ -27925,6 +28029,100 @@ mod tests {
         assert!(note.y + note.height < two, "and ends above `two`");
     }
 
+    #[test]
+    fn long_sequence_notes_wrap_and_reserve_their_full_rows() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant Customer\n  participant Store\n  \
+             Note left of Customer: Customer checks the current account balance before approving a payment\n  \
+             Customer->>Store: Review account\n  \
+             Note right of Store: Persist the verification audit record and notification status\n  \
+             Store-->>Customer: Complete\n",
+        )
+        .ir;
+        let authored = &ir.sequence_meta.as_ref().unwrap().notes;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 12.0,
+            ..Default::default()
+        });
+        for (index, note) in layout.extensions.sequence_notes.iter().enumerate() {
+            assert!(
+                note.text.lines().count() > 1,
+                "the overflowing source must wrap"
+            );
+            assert_eq!(
+                note.text.split_whitespace().collect::<Vec<_>>(),
+                authored[index].text.split_whitespace().collect::<Vec<_>>()
+            );
+            assert!(note.bounds.width <= 300.01);
+            for line in note.text.lines() {
+                assert!(
+                    metrics.estimate_width(line) * 1.15 <= note.bounds.width - 24.0 + 0.01,
+                    "{line:?} exceeds its note's text area"
+                );
+            }
+            assert!(note.bounds.height >= note.text.lines().count() as f32 * 18.0 + 20.0 - 0.01);
+            assert!(
+                note.bounds.y + note.bounds.height < layout.edges[index].points[0].y,
+                "the next message must clear every wrapped line"
+            );
+        }
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_notes_use_configured_typography_and_authored_blank_lines() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant A as Customer database\n  participant B\n  \
+             Note left of A: First<br/><br/>PreserveAllCharactersInThisUnbrokenIdentifier<br/>Last\n  \
+             A->>B: Continue\n",
+        )
+        .ir;
+        let text = "First\n\nPreserveAllCharactersInThisUnbrokenIdentifier\nLast";
+        assert_eq!(ir.sequence_meta.as_ref().unwrap().notes[0].text, text);
+        let base = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            preset: fm_core::FontPreset::Monospace,
+            font_size: 30.0,
+            line_height: 2.0,
+            ..Default::default()
+        });
+        let layout = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                font_metrics: Some(metrics),
+                ..Default::default()
+            },
+        );
+        let note = &layout.extensions.sequence_notes[0];
+        assert!(note.text.starts_with("First\n\n"));
+        assert!(note.text.ends_with("\nLast"));
+        assert_eq!(note.text.replace('\n', ""), text.replace('\n', ""));
+        let expected_height = note.text.split('\n').count() as f32 * 48.0 + 20.0;
+        assert!((note.bounds.height - expected_height).abs() < 0.01);
+        assert!(note.bounds.height > base.extensions.sequence_notes[0].bounds.height);
+        assert!(layout.nodes[0].bounds.height > base.nodes[0].bounds.height);
+        assert!(note.bounds.y + note.bounds.height < layout.edges[0].points[0].y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn spanning_sequence_notes_wrap_to_the_full_participant_span() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  participant A\n  participant B\n  \
+             Note left of A: Keep this complete annotation across both participant columns\n  \
+             Note over A,B: Keep this complete annotation across both participant columns\n  \
+             A->>B: Continue\n",
+        );
+        let notes = &layout.extensions.sequence_notes;
+        assert_eq!(notes.len(), 2);
+        assert!(notes[1].bounds.width > notes[0].bounds.width);
+        assert!(notes[1].text.lines().count() < notes[0].text.lines().count());
+        assert!(notes[0].bounds.y + notes[0].bounds.height < notes[1].bounds.y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
     /// A `rect` holding only a note still encloses it (its message span was EMPTY, which placed
     /// the band on the next fragment's row), and a following fragment starts below it.
     #[test]
@@ -28086,6 +28284,256 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn grouped_tree_layout_reserves_disjoint_subgraph_frames() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let input = format!(
+                "flowchart {direction}\n  subgraph First[\"Service A\"]\n    a1[a] --> a2[a] --> a3[a] --> a4[a] --> a5[a]\n  end\n  subgraph Second[\"Service B\"]\n    b1[b] --> b2[b] --> b3[b] --> b4[b] --> b5[b]\n  end\n  root[r] --> a1\n  root --> b1\n"
+            );
+            let ir = fm_parser::parse(&input).ir;
+            assert_eq!(
+                ir.nodes.len(),
+                11,
+                "the fixture exercises Auto's tree selection"
+            );
+            assert_eq!(ir.edges.len(), 10);
+            for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+                let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                assert!(
+                    traced
+                        .trace
+                        .snapshots
+                        .iter()
+                        .any(|stage| stage.stage == "compound_placement")
+                );
+                let layout = &traced.layout;
+                assert_eq!(layout.nodes.len(), 11);
+                assert_eq!(layout.clusters.len(), 2);
+                let gap = LayoutSpacing::default().node_spacing / 2.0;
+                let first = layout.clusters[0].bounds;
+                let grown = LayoutRect {
+                    x: first.x - gap,
+                    y: first.y - gap,
+                    width: first.width + gap * 2.0,
+                    height: first.height + gap * 2.0,
+                };
+                assert!(
+                    !rects_overlap(grown, layout.clusters[1].bounds),
+                    "{algorithm:?}/{direction}: sibling frames need a visible gap"
+                );
+                for cluster in &layout.clusters {
+                    let members = &ir.clusters[cluster.cluster_index].members;
+                    assert_eq!(members.len(), 5);
+                    for node in &layout.nodes {
+                        if !members.contains(&IrNodeId(node.node_index)) {
+                            assert!(
+                                !rects_overlap(cluster.bounds, node.bounds),
+                                "{algorithm:?}/{direction}: {} lies inside another group",
+                                node.node_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_title_frames_match_reserved_slots_in_all_directions() {
+        const TITLE: &str =
+            "A deliberately long subgraph title that is much wider than its single child node";
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for nested in [false, true] {
+                let members = if nested {
+                    format!("  subgraph Inner[\"{TITLE}\"]\n    A[x]\n  end\n")
+                } else {
+                    "  A[x]\n".to_string()
+                };
+                let input = format!(
+                    "flowchart {direction}\nsubgraph Outer[\"{TITLE}\"]\n{members}end\nA --> B[y]\n"
+                );
+                let ir = fm_parser::parse(&input).ir;
+                assert_eq!(ir.nodes.len(), 2);
+                for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+                    let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    assert_eq!(
+                        traced.trace.dispatch.selected,
+                        if algorithm == LayoutAlgorithm::Auto {
+                            LayoutAlgorithm::Sugiyama
+                        } else {
+                            LayoutAlgorithm::Tree
+                        }
+                    );
+                    let layout = &traced.layout;
+                    assert_eq!(layout.clusters.len(), if nested { 2 } else { 1 });
+                    let node = |id: &str| {
+                        layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_id == id)
+                            .unwrap()
+                            .bounds
+                    };
+                    let (inside, outside) = (node("A"), node("B"));
+                    let outer_id = ir
+                        .graph
+                        .subgraphs
+                        .iter()
+                        .find(|subgraph| subgraph.key == "Outer")
+                        .unwrap()
+                        .cluster
+                        .unwrap()
+                        .0;
+                    let outer = layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.cluster_index == outer_id)
+                        .unwrap()
+                        .bounds;
+                    let inner = if nested {
+                        let inner_id = ir
+                            .graph
+                            .subgraphs
+                            .iter()
+                            .find(|subgraph| subgraph.key == "Inner")
+                            .unwrap()
+                            .cluster
+                            .unwrap()
+                            .0;
+                        layout
+                            .clusters
+                            .iter()
+                            .find(|cluster| cluster.cluster_index == inner_id)
+                            .unwrap()
+                            .bounds
+                    } else {
+                        outer
+                    };
+                    assert!(
+                        inner.width > inside.width + 2.0 * LayoutSpacing::default().cluster_padding
+                    );
+                    assert!(
+                        ((inner.x + inner.width / 2.0) - (inside.x + inside.width / 2.0)).abs()
+                            < 0.05,
+                        "{algorithm:?}/{direction}: title-wide frames stay centered around their contents"
+                    );
+                    for cluster in &layout.clusters {
+                        assert!(
+                            !rects_overlap(cluster.bounds, outside),
+                            "{algorithm:?}/{direction}: the title-wide frame overlaps the next node"
+                        );
+                    }
+                    let gap = match direction {
+                        "LR" => outside.x - (outer.x + outer.width),
+                        "RL" => outer.x - (outside.x + outside.width),
+                        "TB" => outside.y - (outer.y + outer.height),
+                        "BT" => outer.y - (outside.y + outside.height),
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        (gap - LayoutSpacing::default().rank_spacing).abs() < 0.05,
+                        "{algorithm:?}/{direction}, nested={nested}: drawn frame must occupy its reserved slot, gap={gap}"
+                    );
+                    if nested {
+                        assert!(inner.x - outer.x >= 16.0 - 0.05);
+                        assert!(inner.y - outer.y >= 44.0 - 0.05);
+                        assert!(outer.x + outer.width - inner.x - inner.width >= 16.0 - 0.05);
+                        assert!(outer.y + outer.height - inner.y - inner.height >= 16.0 - 0.05);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cluster_heading_width_fits_measured_default_semibold_text() {
+        let title =
+            "A deliberately long subgraph title that is much wider than its single child node";
+        let width = super::cluster_title_width(title, &fm_core::FontMetrics::default_metrics());
+        // Chromium measured this complete default 13.5px, weight-600 heading at 601.78125px.
+        // Leave the same 8px inset on each side as the renderer; the old estimate was 477.09px.
+        assert!(
+            width >= 601.78125 + 16.0,
+            "the full heading must fit: {width}"
+        );
+    }
+
+    #[test]
+    fn grouped_tree_respects_local_subgraph_direction() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let local = if matches!(direction, "TB" | "BT") {
+                "LR"
+            } else {
+                "TB"
+            };
+            let input = format!(
+                "flowchart {direction}\n subgraph G[Service]\n direction {local}\n A[x] --> B[y] --> C[z]\n end\n C --> D[Done]\n"
+            );
+            let ir = fm_parser::parse(&input).ir;
+            let layout = layout_diagram_tree(&ir);
+            assert_eq!(layout.clusters.len(), 1);
+            let node = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == id)
+                    .unwrap()
+                    .bounds
+            };
+            for (from, to) in [("A", "B"), ("B", "C")] {
+                let (from, to) = (node(from), node(to));
+                let (gap, span_delta) = if local == "LR" {
+                    (to.x - from.x - from.width, to.y - from.y)
+                } else {
+                    (to.y - from.y - from.height, to.x - from.x)
+                };
+                assert!(gap >= LayoutSpacing::default().rank_spacing - 0.05);
+                assert!(
+                    span_delta.abs() < 0.05,
+                    "local {local} direction must survive Tree placement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directed_path_suffix_falls_back_for_new_subgraph_before_mutation() {
+        let base_source = "flowchart LR\n A[a] --> B[b] --> C[c]\n";
+        let base = fm_parser::parse(base_source).ir;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2)
+            .expect("an ungrouped path supports reuse");
+        let next = fm_parser::parse(&format!(
+            "{base_source} subgraph New[New service]\n D[d]\n end\n C --> D\n"
+        ))
+        .ir;
+        let mut cached = before.clone();
+        assert!(!try_relayout_directed_path_suffix(
+            &next,
+            &mut cached,
+            &prefix
+        ));
+        assert_eq!(
+            cached, before,
+            "grouped fallback must leave the cached path untouched"
+        );
+
+        let full = layout_diagram_tree(&next);
+        assert_eq!(full.clusters.len(), 1);
+        assert!(certify_directed_path_layout_prefix(&next, &full, 3, 2).is_none());
+        let previous = full
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "C")
+            .unwrap()
+            .bounds;
+        let group = full.clusters[0].bounds;
+        assert!(
+            group.x - previous.x - previous.width >= LayoutSpacing::default().rank_spacing - 0.05
+        );
     }
 
     /// A few disconnected flows run as parallel lanes sharing their ranks, as in mermaid, rather
@@ -28341,9 +28789,7 @@ mod tests {
                 let to = endpoint_node_index(ir, edge.to).expect("target node");
                 for pair in path.points.windows(2) {
                     let (a, b) = (pair[0], pair[1]);
-                    if (across(a) - across(b)).abs() <= 0.01
-                        && (along(a) - along(b)).abs() > 0.01
-                    {
+                    if (across(a) - across(b)).abs() <= 0.01 && (along(a) - along(b)).abs() > 0.01 {
                         runs.push((
                             across(a),
                             along(a).min(along(b)),
@@ -28457,7 +28903,10 @@ mod tests {
                     .collect();
                 let mut after = before.clone();
                 separate_shared_channels(&ir, &mut after);
-                assert_eq!(after, before, "a genuine bus should retain its original route");
+                assert_eq!(
+                    after, before,
+                    "a genuine bus should retain its original route"
+                );
                 assert!(!shared_channel_has_false_junction(&ir, &after));
             }
         }
@@ -28715,8 +29164,7 @@ mod tests {
 
     #[test]
     fn shared_channels_do_not_extend_through_a_straight_peers_far_port() {
-        let ir =
-            fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n F-->G\n H-->I\n").ir;
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n F-->G\n H-->I\n").ir;
         for transpose in [false, true] {
             let before = vec![
                 shared_channel_test_path(
@@ -28893,35 +29341,41 @@ mod tests {
             "stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    [*] --> Validating\n    Validating --> Computing\n    Computing --> [*]\n  }\n  Idle --> Processing : start\n  Processing --> Error : fail\n  Idle --> Other\n  Other --> Done\n  Error --> [*]\n",
         )
         .ir;
-        let layout = layout_diagram(&ir);
-        let index = |id: &str| ir.nodes.iter().position(|n| n.id == id).expect(id);
-        let composite = layout.nodes[index("Processing")].bounds;
-        for inner in ["Validating", "Computing"] {
-            let b = layout.nodes[index(inner)].bounds;
+        for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+            let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+            if algorithm == LayoutAlgorithm::Tree {
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+            }
+            let layout = traced.layout;
+            let index = |id: &str| ir.nodes.iter().position(|n| n.id == id).expect(id);
+            let composite = layout.nodes[index("Processing")].bounds;
+            for inner in ["Validating", "Computing"] {
+                let b = layout.nodes[index(inner)].bounds;
+                assert!(
+                    b.x >= composite.x
+                        && b.y >= composite.y
+                        && b.x + b.width <= composite.x + composite.width
+                        && b.y + b.height <= composite.y + composite.height,
+                    "{algorithm:?}: {inner} {b:?} is outside Processing {composite:?}"
+                );
+            }
+            for outer in ["Idle", "Other", "Done", "Error"] {
+                assert!(
+                    !rects_overlap(layout.nodes[index(outer)].bounds, composite),
+                    "{algorithm:?}: {outer} overlaps Processing"
+                );
+            }
+            let idle = layout.nodes[index("Idle")].bounds;
+            let error = layout.nodes[index("Error")].bounds;
             assert!(
-                b.x >= composite.x
-                    && b.y >= composite.y
-                    && b.x + b.width <= composite.x + composite.width
-                    && b.y + b.height <= composite.y + composite.height,
-                "{inner} {b:?} is outside Processing {composite:?}"
+                idle.y + idle.height <= composite.y,
+                "{algorithm:?}: Idle is above Processing"
+            );
+            assert!(
+                composite.y + composite.height <= error.y,
+                "{algorithm:?}: Error {error:?} is below Processing {composite:?}"
             );
         }
-        for outer in ["Idle", "Other", "Done", "Error"] {
-            assert!(
-                !rects_overlap(layout.nodes[index(outer)].bounds, composite),
-                "{outer} overlaps Processing"
-            );
-        }
-        let idle = layout.nodes[index("Idle")].bounds;
-        let error = layout.nodes[index("Error")].bounds;
-        assert!(
-            idle.y + idle.height <= composite.y,
-            "Idle is above Processing"
-        );
-        assert!(
-            composite.y + composite.height <= error.y,
-            "Error {error:?} is below Processing {composite:?}"
-        );
     }
 
     /// Nodes of different sizes connected in a chain share a centre line, so the edge between
@@ -34166,7 +34620,9 @@ mod tests {
 
         let metrics = fm_core::FontMetrics::default();
         let (width, _) = compute_node_size(&ir, node, &metrics);
-        let header_width = metrics.estimate_dimensions("Repository<EntityIdentifier>").0;
+        let header_width = metrics
+            .estimate_dimensions("Repository<EntityIdentifier>")
+            .0;
         assert!(
             width >= header_width + 16.0,
             "class width {width} must contain the full generic header ({header_width}) and padding"
