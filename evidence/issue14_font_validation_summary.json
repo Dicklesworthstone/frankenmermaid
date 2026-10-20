@@ -1,0 +1,3478 @@
+{
+  "recorded_date": "2026-10-20",
+  "issue": "https://github.com/Dicklesworthstone/frankenmermaid/issues/14",
+  "base_commit": "41afadc7a021ab6e75e5d4ec25656f6ec5696449",
+  "original_input": {
+    "path": "crates/fm-render-svg/tests/fixtures/issue14_omnichannel.mmd",
+    "sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+    "lines": 76,
+    "nodes": 24,
+    "edges": 43,
+    "labeled_edges": 24,
+    "titled_subgraphs": 2,
+    "captured_svg_url": "https://github.com/user-attachments/files/33593339/frankenmermaid-observed.svg.txt",
+    "captured_svg_sha256": "ccec4cd4463d1e0504131147d5ba01ef056a2d9c61eaef89bfcc16826c5dd446",
+    "captured_svg_bytes": 45144
+  },
+  "package": {
+    "sha256": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813",
+    "raw_bytes": 2006518,
+    "canonical_gzip_bytes": 803604,
+    "gzip_ceiling_bytes": 803840,
+    "gzip_headroom_bytes": 236,
+    "source_fingerprint": "3620b40964bf0201ef579aa3e3aa9999cd1e36e15f3c23175bf2362aa7456d59",
+    "artifact_fnv1a": "0x5b05c0d4c6024321",
+    "artifact_sha256": {
+      "pkg/frankenmermaid_bg.wasm": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813",
+      "pkg/frankenmermaid.js": "0c5f169d3690e7b525f4a3f7eb739adfbd04ab7872592b52952977e46d0dcec9",
+      "pkg/frankenmermaid.d.ts": "11b5b50e46df17674335a82ff24b02eb2262a0f3b8a1787942e4fca99027025f",
+      "pkg/frankenmermaid_bg.wasm.d.ts": "091c1a7e75178fae01d0494cb7733ea223980df66829395542311e94c276b1cc",
+      "pkg/package.json": "11725d8dedfb98f1364cf0c0af22be713d6bc9363bc8acdcfda52002eeef84d6"
+    }
+  },
+  "source_sha256": {
+    "build-wasm.sh": "ed8f0d406f0c63b824de45865297995052c622e60fa3aa21cc42a59dfe281543",
+    "crates/fm-layout/src/lib.rs": "dfed4a824739f5a6784cbb2b5620d395e0ea52180be2257fa3dc4b10aa7ff498",
+    "crates/fm-layout/src/compound.rs": "4f6e62ed0dfc8ab9f2cc4ebccb746647e4aac1ad68856b84c50dadc760c48b91",
+    "crates/fm-render-svg/src/lib.rs": "60c4a5af36c3a78c6bc33f81c6bc51129715bd7896d32ec86b2ead841676dc94",
+    "crates/fm-render-term/src/renderer.rs": "162cf10fbbe0e9494f6a2176fe96617ffd3cd39a7ede30135837faba1d5777ea",
+    "crates/fm-wasm/src/lib.rs": "75cea4db61d41db7b31f8d5362c4e5502c6b9564accd60911b200e8e9926f923",
+    "crates/fm-wasm/src/canvas_selection.rs": "4fd3017a1c9d30bde2cb6e2c8c26e1c67f10ce694a1ba941c4280c78a3581596",
+    "scripts/issue14_wasm_regression.mjs": "57e027a1791f7aca87ba5d2c0337a94b953d174208210e2d8d91d76d52e35779",
+    "scripts/playground_explorer_test.py": "b3a14018c90525f5b1e7b070efb9dd06cc25ea8380d912d9612ccc5cfc97f445"
+  },
+  "size_attribution": {
+    "previous_package_gzip_bytes": 794414,
+    "fresh_unchanged_main_gzip_bytes": 802138,
+    "fresh_unchanged_main_sha256": "85af6ff9a368335f5a7e96fff78d2016f7cbbdea30ea4a92666035e17794dbed",
+    "prior_source_growth_gzip_bytes": 7724,
+    "this_change_gzip_bytes": 1466,
+    "old_ceiling_bytes": 794624,
+    "unchanged_main_exceeded_old_ceiling_bytes": 7514,
+    "custom_sections_in_both_baselines": 0,
+    "imports_in_both_baselines": 89,
+    "exports_in_both_baselines": 50,
+    "baseline_code_section_growth_raw_bytes": 22017,
+    "baseline_data_section_change_raw_bytes": -2306
+  },
+  "browser": {
+    "checks": 110,
+    "failed": [],
+    "raw_report_sha256": "bc038c7c8e21c8e6fa1a39415365e83d82174b7066883ef43134f4c78b1bcdce",
+    "wasm_sha256": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813",
+    "showcase_sha256": "e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26",
+    "tailwind_sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+    "resource_cache": {
+      "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap": {
+        "content_type": "text/css; charset=utf-8",
+        "sha256": "450d41b4d43c418e22a76f7b2f17d7ec84b835681d7e90d61496958a633d1027"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuBWYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "5b717029a2c4cfca2167e97be1157edb24151591e5ec96eb484745c392817a7a"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuDyYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "eec66af7f2337bd34fe6e801cf92ededcb57a20c0d7bc40a61d4eefcbe3dd40c"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuFuYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "b37284b5701b6b168dfc770aa1a4ac492106422fd3ba76bc7641e37434e8019c"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "e7a1aaf7eda9f2fad4131725fa556265ec75ca7b2d756260173a040363e8d4f7"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuI6fMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "8c883f63b2c4157d997319f2c8bc6995ed4357ef371940d31ca159004a4aae63"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "1b08e7fc267a5c7e1d614100f604b83e7e8a0be241f0f288faa2b3ac93a683ba"
+      },
+      "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuOKfMZg.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "d0f4bc7faca468376e3db9b5e57afcdc2192134c9ac82a9511f32767b56853a4"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8L6tjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "a1d92abc6b02a87faed23d98067ab1027e8e95242fd7c9978a072ea383b89d1a"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8SKtjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "bc31e0b0583e8530795907883e768597bf7bdb4e47a65861dc393b4411439e22"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3"
+      },
+      "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDba2o-flEEny0FZhsfKu5WU4xD-IQ-PuZJJXxfpAO-LflOQ.ttf": {
+        "content_type": "font/ttf",
+        "sha256": "f3ad0f703a734b38b49b3ee2d8121ef2718fba185198c3482e81a618272cb4af"
+      }
+    },
+    "chromium_version": "141.0.7390.37",
+    "playwright_version": "1.56.0",
+    "results": [
+      {
+        "scenario_id": "index.html/production-fonts",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/fit-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-31-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-31-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-95-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/zoom-95-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/svg-export-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/restore",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-22-default",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-22-default-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-30-default",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-30-default-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-22-rich",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-22-rich-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-30-rich",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-font-30-rich-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-11",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-11-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-15",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-15-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-22",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-22-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-22",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-22-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-cluster-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-cluster-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-cluster-font-60",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/api-cluster-font-60-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "index.html/uncaught-errors",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/production-fonts",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-controls",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/svg-export-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-fit-bounds",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor-return-labels",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/restore",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-30",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-30-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-60",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-cluster-font-60-export",
+        "passed": true,
+        "errors": []
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/uncaught-errors",
+        "passed": true,
+        "errors": []
+      }
+    ],
+    "measurements": {
+      "index.html/api-cluster-font-30": {
+        "config": {
+          "fontSize": 30,
+          "detailTier": "rich",
+          "pressure": {
+            "frameBudgetMs": 16,
+            "frameTimeMs": 0,
+            "eventLoopLagMs": 0,
+            "workerSaturationPermille": 0
+          }
+        },
+        "actual_fonts": [
+          {
+            "familyName": "DejaVu Sans",
+            "postScriptName": "DejaVuSans-Bold",
+            "isCustomFont": false,
+            "glyphCount": 15
+          }
+        ],
+        "geometry": {
+          "frame": {
+            "left": 0,
+            "top": 0,
+            "right": 396.69000244140625,
+            "bottom": 322.1000061035156
+          },
+          "nodes": [
+            {
+              "id": "A",
+              "owner": {
+                "left": 126.04000091552734,
+                "top": 121.09999847412132,
+                "right": 270.64000701904297,
+                "bottom": 210.09999847412132
+              },
+              "labels": [
+                {
+                  "left": 155.69375610351562,
+                  "top": 148.60000610351585,
+                  "right": 241.00625610351562,
+                  "bottom": 183.60000610351585
+                }
+              ],
+              "diamondTextInside": null
+            }
+          ],
+          "edges": [],
+          "clusters": [
+            {
+              "id": "fm-cluster-0",
+              "owner": {
+                "left": 76,
+                "top": 76.00000000000023,
+                "right": 320.69000244140625,
+                "bottom": 246.10000610351585
+              },
+              "labels": [
+                {
+                  "left": 84,
+                  "top": 81.00000000000023,
+                  "right": 300.4375,
+                  "bottom": 112.00000000000023
+                }
+              ]
+            }
+          ],
+          "edgeNodeOverlaps": [],
+          "edgeBackgroundOverlaps": [],
+          "edgeLabelOverlaps": []
+        }
+      },
+      "index.html/api-cluster-font-60": {
+        "config": {
+          "fontSize": 60,
+          "detailTier": "rich",
+          "pressure": {
+            "frameBudgetMs": 16,
+            "frameTimeMs": 0,
+            "eventLoopLagMs": 0,
+            "workerSaturationPermille": 0
+          }
+        },
+        "actual_fonts": [
+          {
+            "familyName": "DejaVu Sans",
+            "postScriptName": "DejaVuSans-Bold",
+            "isCustomFont": false,
+            "glyphCount": 15
+          }
+        ],
+        "geometry": {
+          "frame": {
+            "left": 0,
+            "top": 0,
+            "right": 625.3800048828125,
+            "bottom": 402.20001220703125
+          },
+          "nodes": [
+            {
+              "id": "A",
+              "owner": {
+                "left": 204.08999633789085,
+                "top": 156.19999694824241,
+                "right": 421.28999328613304,
+                "bottom": 290.1999969482424
+              },
+              "labels": [
+                {
+                  "left": 227.38531494140648,
+                  "top": 188.19999694824241,
+                  "right": 397.9946899414065,
+                  "bottom": 258.2000122070315
+                }
+              ],
+              "diamondTextInside": null
+            }
+          ],
+          "edges": [],
+          "clusters": [
+            {
+              "id": "fm-cluster-0",
+              "owner": {
+                "left": 76.00000000000023,
+                "top": 76.00000000000023,
+                "right": 549.3800048828127,
+                "bottom": 326.1999969482424
+              },
+              "labels": [
+                {
+                  "left": 84.00000000000023,
+                  "top": 82.00000000000023,
+                  "right": 516.8750000000002,
+                  "bottom": 145.00000000000023
+                }
+              ]
+            }
+          ],
+          "edgeNodeOverlaps": [],
+          "edgeBackgroundOverlaps": [],
+          "edgeLabelOverlaps": []
+        }
+      },
+      "index.html/api-wide-20-font-30": {
+        "config": {
+          "fontSize": 30,
+          "detailTier": "rich",
+          "pressure": {
+            "frameBudgetMs": 16,
+            "frameTimeMs": 0,
+            "eventLoopLagMs": 0,
+            "workerSaturationPermille": 0
+          }
+        },
+        "actual_fonts": [
+          {
+            "familyName": "DejaVu Sans",
+            "postScriptName": "DejaVuSans",
+            "isCustomFont": false,
+            "glyphCount": 20
+          }
+        ],
+        "geometry": {
+          "frame": {
+            "left": 0,
+            "top": 0,
+            "right": 1269.9000244140625,
+            "bottom": 241
+          },
+          "nodes": [
+            {
+              "id": "A",
+              "owner": {
+                "left": 76,
+                "top": 76,
+                "right": 240.39999389648438,
+                "bottom": 165
+              },
+              "labels": [
+                {
+                  "left": 106.67654418945312,
+                  "top": 103.5,
+                  "right": 209.72341918945312,
+                  "bottom": 138.5
+                }
+              ],
+              "diamondTextInside": null
+            },
+            {
+              "id": "B",
+              "owner": {
+                "left": 973.4000244140625,
+                "top": 76,
+                "right": 1193.9000244140625,
+                "bottom": 165
+              },
+              "labels": [
+                {
+                  "left": 997.5718994140625,
+                  "top": 103.5,
+                  "right": 1169.7281494140625,
+                  "bottom": 138.5
+                }
+              ],
+              "diamondTextInside": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "0",
+              "owner": {
+                "left": 255.39999389648438,
+                "top": 100.75,
+                "right": 958.3999938964844,
+                "bottom": 140.25
+              },
+              "labels": [
+                {
+                  "left": 354.7593994140625,
+                  "top": 105.5,
+                  "right": 859.0406494140625,
+                  "bottom": 135.5
+                }
+              ]
+            }
+          ],
+          "clusters": [],
+          "edgeNodeOverlaps": [],
+          "edgeBackgroundOverlaps": [],
+          "edgeLabelOverlaps": []
+        }
+      },
+      "index.html/api-wide-80-font-30": {
+        "config": {
+          "fontSize": 30,
+          "detailTier": "rich",
+          "pressure": {
+            "frameBudgetMs": 16,
+            "frameTimeMs": 0,
+            "eventLoopLagMs": 0,
+            "workerSaturationPermille": 0
+          }
+        },
+        "actual_fonts": [
+          {
+            "familyName": "DejaVu Sans",
+            "postScriptName": "DejaVuSans",
+            "isCustomFont": false,
+            "glyphCount": 80
+          }
+        ],
+        "geometry": {
+          "frame": {
+            "left": 0,
+            "top": 0,
+            "right": 3348.89990234375,
+            "bottom": 241
+          },
+          "nodes": [
+            {
+              "id": "A",
+              "owner": {
+                "left": 75.99999999999999,
+                "top": 75.99999999999999,
+                "right": 240.39999389648435,
+                "bottom": 164.99999999999997
+              },
+              "labels": [
+                {
+                  "left": 106.67654418945311,
+                  "top": 103.49999999999999,
+                  "right": 209.7234191894531,
+                  "bottom": 138.49999999999997
+                }
+              ],
+              "diamondTextInside": null
+            },
+            {
+              "id": "B",
+              "owner": {
+                "left": 3052.3999023437495,
+                "top": 75.99999999999999,
+                "right": 3272.8999023437495,
+                "bottom": 164.99999999999997
+              },
+              "labels": [
+                {
+                  "left": 3076.5717773437495,
+                  "top": 103.49999999999999,
+                  "right": 3248.7280273437495,
+                  "bottom": 138.49999999999997
+                }
+              ],
+              "diamondTextInside": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "0",
+              "owner": {
+                "left": 282.3999938964843,
+                "top": 100.74999999999999,
+                "right": 3010.399993896484,
+                "bottom": 140.24999999999997
+              },
+              "labels": [
+                {
+                  "left": 637.8532714843749,
+                  "top": 105.49999999999999,
+                  "right": 2654.9470214843745,
+                  "bottom": 135.49999999999997
+                }
+              ]
+            }
+          ],
+          "clusters": [],
+          "edgeNodeOverlaps": [],
+          "edgeBackgroundOverlaps": [],
+          "edgeLabelOverlaps": []
+        }
+      }
+    },
+    "viewport_measurements": {
+      "index.html/maximized-1466x904": {
+        "viewport": {
+          "width": 1466,
+          "height": 904
+        },
+        "editor": null,
+        "maximized": true,
+        "pressed": "true",
+        "boxes": {
+          "#pg-root": {
+            "left": 0,
+            "top": 0,
+            "right": 1466,
+            "bottom": 904,
+            "width": 1466,
+            "height": 904
+          },
+          "#pg-shell": {
+            "left": 0,
+            "top": 0,
+            "right": 1466,
+            "bottom": 904,
+            "width": 1466,
+            "height": 904
+          },
+          ".pg-panes": {
+            "left": 0,
+            "top": 124,
+            "right": 1466,
+            "bottom": 799.5,
+            "width": 1466,
+            "height": 675.5
+          },
+          "#studio-theme-strip": {
+            "left": 0,
+            "top": 799.5,
+            "right": 1466,
+            "bottom": 862.5,
+            "width": 1466,
+            "height": 63
+          },
+          ".pane-visualizer": {
+            "left": 610.828125,
+            "top": 124,
+            "right": 1465.984375,
+            "bottom": 799.5,
+            "width": 855.15625,
+            "height": 675.5
+          },
+          "#view-svg-container": {
+            "left": 610.828125,
+            "top": 164.5,
+            "right": 1465.984375,
+            "bottom": 799.5,
+            "width": 855.15625,
+            "height": 635
+          },
+          "#studio-pan-container": {
+            "left": 610.828125,
+            "top": 164.5,
+            "right": 1465.984375,
+            "bottom": 799.5,
+            "width": 855.15625,
+            "height": 635
+          }
+        },
+        "controls": {
+          "#pg-maximize": {
+            "left": 1337.140625,
+            "top": 16,
+            "right": 1434,
+            "bottom": 45,
+            "width": 96.859375,
+            "height": 29,
+            "reachable": true
+          },
+          "#studio-zoom-in": {
+            "left": 1278.796875,
+            "top": 748.90625,
+            "right": 1306.796875,
+            "bottom": 776.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-zoom-out": {
+            "left": 1345.796875,
+            "top": 748.90625,
+            "right": 1373.796875,
+            "bottom": 776.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-zoom-reset": {
+            "left": 1379.390625,
+            "top": 748.90625,
+            "right": 1407.390625,
+            "bottom": 776.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-fullscreen-btn": {
+            "left": 1412.984375,
+            "top": 748.90625,
+            "right": 1440.984375,
+            "bottom": 776.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          }
+        }
+      },
+      "index.html/maximized-1100x650": {
+        "viewport": {
+          "width": 1100,
+          "height": 650
+        },
+        "editor": null,
+        "maximized": true,
+        "pressed": "true",
+        "boxes": {
+          "#pg-root": {
+            "left": 0,
+            "top": 0,
+            "right": 1100,
+            "bottom": 650,
+            "width": 1100,
+            "height": 650
+          },
+          "#pg-shell": {
+            "left": 0,
+            "top": 0,
+            "right": 1100,
+            "bottom": 650,
+            "width": 1100,
+            "height": 650
+          },
+          ".pg-panes": {
+            "left": 0,
+            "top": 88,
+            "right": 1100,
+            "bottom": 577.5,
+            "width": 1100,
+            "height": 489.5
+          },
+          "#studio-theme-strip": {
+            "left": 0,
+            "top": 577.5,
+            "right": 1100,
+            "bottom": 624.5,
+            "width": 1100,
+            "height": 47
+          },
+          ".pane-visualizer": {
+            "left": 458.328125,
+            "top": 88,
+            "right": 1099.984375,
+            "bottom": 577.5,
+            "width": 641.65625,
+            "height": 489.5
+          },
+          "#view-svg-container": {
+            "left": 458.328125,
+            "top": 116.5,
+            "right": 1099.984375,
+            "bottom": 577.5,
+            "width": 641.65625,
+            "height": 461
+          },
+          "#studio-pan-container": {
+            "left": 458.328125,
+            "top": 116.5,
+            "right": 1099.984375,
+            "bottom": 577.5,
+            "width": 641.65625,
+            "height": 461
+          }
+        },
+        "controls": {
+          "#pg-maximize": {
+            "left": 971.140625,
+            "top": 4,
+            "right": 1068,
+            "bottom": 33,
+            "width": 96.859375,
+            "height": 29,
+            "reachable": true
+          },
+          "#studio-zoom-in": {
+            "left": 920.796875,
+            "top": 534.90625,
+            "right": 948.796875,
+            "bottom": 562.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-zoom-out": {
+            "left": 987.796875,
+            "top": 534.90625,
+            "right": 1015.796875,
+            "bottom": 562.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-zoom-reset": {
+            "left": 1021.390625,
+            "top": 534.90625,
+            "right": 1049.390625,
+            "bottom": 562.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          },
+          "#studio-fullscreen-btn": {
+            "left": 1054.984375,
+            "top": 534.90625,
+            "right": 1082.984375,
+            "bottom": 562.90625,
+            "width": 28,
+            "height": 28,
+            "reachable": true
+          }
+        }
+      },
+      "index.html/maximized-390x844": {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "editor": null,
+        "maximized": true,
+        "pressed": "true",
+        "boxes": {
+          "#pg-root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 844,
+            "width": 390,
+            "height": 844
+          },
+          "#pg-shell": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 844,
+            "width": 390,
+            "height": 844
+          },
+          ".pg-panes": {
+            "left": 0,
+            "top": 261,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 410
+          },
+          "#studio-theme-strip": {
+            "left": 0,
+            "top": 671,
+            "right": 390,
+            "bottom": 770,
+            "width": 390,
+            "height": 99
+          },
+          ".pane-visualizer": {
+            "left": 0,
+            "top": 261,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 410
+          },
+          "#view-svg-container": {
+            "left": 0,
+            "top": 301.5,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 369.5
+          },
+          "#studio-pan-container": {
+            "left": 0,
+            "top": 301.5,
+            "right": 390,
+            "bottom": 671,
+            "width": 390,
+            "height": 369.5
+          }
+        },
+        "controls": {
+          "#pg-maximize": {
+            "left": 140,
+            "top": 43,
+            "right": 236.859375,
+            "bottom": 72,
+            "width": 96.859375,
+            "height": 29,
+            "reachable": true
+          },
+          "#studio-zoom-in": {
+            "left": 154.8125,
+            "top": 608.40625,
+            "right": 194.8125,
+            "bottom": 648.40625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-out": {
+            "left": 233.8125,
+            "top": 608.40625,
+            "right": 273.8125,
+            "bottom": 648.40625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-reset": {
+            "left": 279.40625,
+            "top": 608.40625,
+            "right": 319.40625,
+            "bottom": 648.40625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-fullscreen-btn": {
+            "left": 325,
+            "top": 608.40625,
+            "right": 365,
+            "bottom": 648.40625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#mobile-tab-editor": {
+            "left": 15,
+            "top": 209,
+            "right": 192,
+            "bottom": 245,
+            "width": 177,
+            "height": 36,
+            "reachable": true
+          },
+          "#mobile-tab-preview": {
+            "left": 198,
+            "top": 209,
+            "right": 375,
+            "bottom": 245,
+            "width": 177,
+            "height": 36,
+            "reachable": true
+          }
+        }
+      },
+      "index.html/maximized-390x650": {
+        "viewport": {
+          "width": 390,
+          "height": 650
+        },
+        "editor": null,
+        "maximized": true,
+        "pressed": "true",
+        "boxes": {
+          "#pg-root": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 650,
+            "width": 390,
+            "height": 650
+          },
+          "#pg-shell": {
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 650,
+            "width": 390,
+            "height": 650
+          },
+          ".pg-panes": {
+            "left": 0,
+            "top": 160,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 415.5
+          },
+          "#studio-theme-strip": {
+            "left": 0,
+            "top": 575.5,
+            "right": 390,
+            "bottom": 624.5,
+            "width": 390,
+            "height": 49
+          },
+          ".pane-visualizer": {
+            "left": 0,
+            "top": 160,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 415.5
+          },
+          "#view-svg-container": {
+            "left": 0,
+            "top": 188.5,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 387
+          },
+          "#studio-pan-container": {
+            "left": 0,
+            "top": 188.5,
+            "right": 390,
+            "bottom": 575.5,
+            "width": 390,
+            "height": 387
+          }
+        },
+        "controls": {
+          "#pg-maximize": {
+            "left": 140,
+            "top": 25,
+            "right": 236.859375,
+            "bottom": 54,
+            "width": 96.859375,
+            "height": 29,
+            "reachable": true
+          },
+          "#studio-zoom-in": {
+            "left": 162.8125,
+            "top": 520.90625,
+            "right": 202.8125,
+            "bottom": 560.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-out": {
+            "left": 241.8125,
+            "top": 520.90625,
+            "right": 281.8125,
+            "bottom": 560.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-reset": {
+            "left": 287.40625,
+            "top": 520.90625,
+            "right": 327.40625,
+            "bottom": 560.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-fullscreen-btn": {
+            "left": 333,
+            "top": 520.90625,
+            "right": 373,
+            "bottom": 560.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#mobile-tab-editor": {
+            "left": 11,
+            "top": 116,
+            "right": 192,
+            "bottom": 152,
+            "width": 181,
+            "height": 36,
+            "reachable": true
+          },
+          "#mobile-tab-preview": {
+            "left": 198,
+            "top": 116,
+            "right": 379,
+            "bottom": 152,
+            "width": 181,
+            "height": 36,
+            "reachable": true
+          }
+        }
+      },
+      "index.html/maximized-844x390": {
+        "viewport": {
+          "width": 844,
+          "height": 390
+        },
+        "editor": null,
+        "maximized": true,
+        "pressed": "true",
+        "boxes": {
+          "#pg-root": {
+            "left": 0,
+            "top": 0,
+            "right": 844,
+            "bottom": 390,
+            "width": 844,
+            "height": 390
+          },
+          "#pg-shell": {
+            "left": 0,
+            "top": 0,
+            "right": 844,
+            "bottom": 390,
+            "width": 844,
+            "height": 390
+          },
+          ".pg-panes": {
+            "left": 0,
+            "top": 123,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 210.5
+          },
+          "#studio-theme-strip": {
+            "left": 0,
+            "top": 333.5,
+            "right": 844,
+            "bottom": 372.5,
+            "width": 844,
+            "height": 39
+          },
+          ".pane-visualizer": {
+            "left": 0,
+            "top": 123,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 210.5
+          },
+          "#view-svg-container": {
+            "left": 0,
+            "top": 151.5,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 182
+          },
+          "#studio-pan-container": {
+            "left": 0,
+            "top": 151.5,
+            "right": 844,
+            "bottom": 333.5,
+            "width": 844,
+            "height": 182
+          }
+        },
+        "controls": {
+          "#pg-maximize": {
+            "left": 715.140625,
+            "top": 0,
+            "right": 812,
+            "bottom": 29,
+            "width": 96.859375,
+            "height": 29,
+            "reachable": true
+          },
+          "#studio-zoom-in": {
+            "left": 623.421875,
+            "top": 278.90625,
+            "right": 663.421875,
+            "bottom": 318.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-out": {
+            "left": 695.8125,
+            "top": 278.90625,
+            "right": 735.8125,
+            "bottom": 318.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-zoom-reset": {
+            "left": 741.40625,
+            "top": 278.90625,
+            "right": 781.40625,
+            "bottom": 318.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#studio-fullscreen-btn": {
+            "left": 787,
+            "top": 278.90625,
+            "right": 827,
+            "bottom": 318.90625,
+            "width": 40,
+            "height": 40,
+            "reachable": true
+          },
+          "#mobile-tab-editor": {
+            "left": 11,
+            "top": 79,
+            "right": 419,
+            "bottom": 115,
+            "width": 408,
+            "height": 36,
+            "reachable": true
+          },
+          "#mobile-tab-preview": {
+            "left": 425,
+            "top": 79,
+            "right": 833,
+            "bottom": 115,
+            "width": 408,
+            "height": 36,
+            "reachable": true
+          }
+        }
+      }
+    },
+    "zoom_measurements": {
+      "index.html/zoom-31-labels": {
+        "tier": "compact",
+        "labelDetail": "full",
+        "zoom": 0.306302,
+        "zoomLabel": "31%",
+        "edgeCount": 43,
+        "declaredNodes": 24,
+        "declaredEdges": 43
+      },
+      "index.html/zoom-95-labels": {
+        "tier": "compact",
+        "labelDetail": "full",
+        "zoom": 0.95,
+        "zoomLabel": "95%",
+        "edgeCount": 43,
+        "declaredNodes": 24,
+        "declaredEdges": 43
+      },
+      "frankenmermaid_demo_showcase.html/zoom-31-labels": {
+        "tier": "compact",
+        "labelDetail": "full",
+        "zoom": 0.306302,
+        "zoomLabel": "31%",
+        "edgeCount": 43,
+        "declaredNodes": 24,
+        "declaredEdges": 43
+      },
+      "frankenmermaid_demo_showcase.html/zoom-95-labels": {
+        "tier": "compact",
+        "labelDetail": "full",
+        "zoom": 0.95,
+        "zoomLabel": "95%",
+        "edgeCount": 43,
+        "declaredNodes": 24,
+        "declaredEdges": 43
+      }
+    },
+    "title_oracle_controls_passed": 10
+  },
+  "negative_control": {
+    "checks": 102,
+    "passed": 62,
+    "failed": [
+      "index.html/api-font-22-default",
+      "index.html/api-font-22-default-export",
+      "index.html/api-font-30-default",
+      "index.html/api-font-30-default-export",
+      "index.html/api-font-22-rich",
+      "index.html/api-font-22-rich-export",
+      "index.html/api-font-30-rich",
+      "index.html/api-font-30-rich-export",
+      "index.html/api-wide-20-font-11",
+      "index.html/api-wide-20-font-11-export",
+      "index.html/api-wide-20-font-15",
+      "index.html/api-wide-20-font-15-export",
+      "index.html/api-wide-20-font-22",
+      "index.html/api-wide-20-font-22-export",
+      "index.html/api-wide-20-font-30",
+      "index.html/api-wide-20-font-30-export",
+      "index.html/api-wide-80-font-22",
+      "index.html/api-wide-80-font-22-export",
+      "index.html/api-wide-80-font-30",
+      "index.html/api-wide-80-font-30-export",
+      "frankenmermaid_demo_showcase.html/api-font-22-default",
+      "frankenmermaid_demo_showcase.html/api-font-22-default-export",
+      "frankenmermaid_demo_showcase.html/api-font-30-default",
+      "frankenmermaid_demo_showcase.html/api-font-30-default-export",
+      "frankenmermaid_demo_showcase.html/api-font-22-rich",
+      "frankenmermaid_demo_showcase.html/api-font-22-rich-export",
+      "frankenmermaid_demo_showcase.html/api-font-30-rich",
+      "frankenmermaid_demo_showcase.html/api-font-30-rich-export",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-11",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-11-export",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-15",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-15-export",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-22",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-22-export",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-30",
+      "frankenmermaid_demo_showcase.html/api-wide-20-font-30-export",
+      "frankenmermaid_demo_showcase.html/api-wide-80-font-22",
+      "frankenmermaid_demo_showcase.html/api-wide-80-font-22-export",
+      "frankenmermaid_demo_showcase.html/api-wide-80-font-30",
+      "frankenmermaid_demo_showcase.html/api-wide-80-font-30-export"
+    ],
+    "raw_report_sha256": "cfa470936a04daeefcce03dad61352fc5b0063a011fafbff77bd3625b65d9ec5",
+    "wasm_sha256": "85af6ff9a368335f5a7e96fff78d2016f7cbbdea30ea4a92666035e17794dbed",
+    "results": [
+      {
+        "scenario_id": "index.html/production-fonts",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/fit-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/zoom-31-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/zoom-31-controls",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/zoom-95-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/zoom-95-controls",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/svg-export-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1466x904-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-1100x650-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x844-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-390x650-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/maximized-844x390-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/restore",
+        "passed": true
+      },
+      {
+        "scenario_id": "index.html/api-font-22-default",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-22-default-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-30-default",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-30-default-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-22-rich",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-22-rich-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-30-rich",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-font-30-rich-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-11",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-11-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-15",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-15-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-22",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-22-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-30",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-20-font-30-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-22",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-22-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-30",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/api-wide-80-font-30-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "index.html/uncaught-errors",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/production-fonts",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-31-controls",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/zoom-95-controls",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/svg-export-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1466x904-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-1100x650-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x844-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-390x650-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-fit-bounds",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/maximized-844x390-editor-return-labels",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/restore",
+        "passed": true
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-default-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-default-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-22-rich-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-font-30-rich-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-11-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-15-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-22-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-20-font-30-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-22-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/api-wide-80-font-30-export",
+        "passed": false
+      },
+      {
+        "scenario_id": "frankenmermaid_demo_showcase.html/uncaught-errors",
+        "passed": true
+      }
+    ]
+  },
+  "api": {
+    "source_sha256": "3258bf1dd770ee1d7c9715069f4dc463bcd64faa119646645afe2792ee177b4c",
+    "wasm_sha256": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813",
+    "checks": 71,
+    "results": [
+      {
+        "name": "renderSvg/default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/auto",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/normal",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/rich",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/critical",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/critical-rich-request",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderSvg/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "084e436e6013b564ae296be0859e084b78bd039ddb0c0eb4c9ec509da9c492e7"
+      },
+      {
+        "name": "renderSvg/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "renderSvg/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.3
+        },
+        "sha256": "3c9c03099b1d971324159a1f3c96727e31f73dfa7b37a726d41336435af4ae55"
+      },
+      {
+        "name": "renderSvg/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "cb90d68493d53ad6c5acd3a4a921f9d19e51c5918529706ea70c3fe510df23a8"
+      },
+      {
+        "name": "renderSvg/font-11-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderSvg/font-22-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderSvg/font-30-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "renderSvg/nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderSvg/font-30-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 25.5
+        },
+        "sha256": "d35e30d24610b6a2d6d4853a39f8312a7956d6e82c25b5f345e4ab577d881ac7"
+      },
+      {
+        "name": "renderDeck/default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/auto",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/normal",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/rich",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/critical",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/critical-rich-request",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "d21afe7abaa4365853f640d5648c5a56d1a32618fd9c902c9ed3df3da9b14de6"
+      },
+      {
+        "name": "renderDeck/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "084e436e6013b564ae296be0859e084b78bd039ddb0c0eb4c9ec509da9c492e7"
+      },
+      {
+        "name": "renderDeck/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "renderDeck/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.3
+        },
+        "sha256": "3c9c03099b1d971324159a1f3c96727e31f73dfa7b37a726d41336435af4ae55"
+      },
+      {
+        "name": "renderDeck/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "cb90d68493d53ad6c5acd3a4a921f9d19e51c5918529706ea70c3fe510df23a8"
+      },
+      {
+        "name": "renderDeck/font-11-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderDeck/font-22-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderDeck/font-30-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "renderDeck/nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderDeck/font-30-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 25.5
+        },
+        "sha256": "d35e30d24610b6a2d6d4853a39f8312a7956d6e82c25b5f345e4ab577d881ac7"
+      },
+      {
+        "name": "worker/default",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "2383edfebbe0604e6f7ee071913396ed5eed5a3185384a549282f7e3d4060b41"
+      },
+      {
+        "name": "worker/auto",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "2383edfebbe0604e6f7ee071913396ed5eed5a3185384a549282f7e3d4060b41"
+      },
+      {
+        "name": "worker/compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "worker/normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.3
+        },
+        "sha256": "16df2a81205f8330daf3dddbcaf10c0f0e95757cfe76da9670d7136598598134"
+      },
+      {
+        "name": "worker/rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "2383edfebbe0604e6f7ee071913396ed5eed5a3185384a549282f7e3d4060b41"
+      },
+      {
+        "name": "worker/critical",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "2383edfebbe0604e6f7ee071913396ed5eed5a3185384a549282f7e3d4060b41"
+      },
+      {
+        "name": "worker/critical-rich-request",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "2383edfebbe0604e6f7ee071913396ed5eed5a3185384a549282f7e3d4060b41"
+      },
+      {
+        "name": "worker/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "worker/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "2dca922c9218681ae2563f6e85c9b03ea9e727d2a6af58ad1022ad0bb3941421"
+      },
+      {
+        "name": "worker/nominal-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "worker/nominal-normal",
+        "tier": "normal",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.3
+        },
+        "sha256": "3c9c03099b1d971324159a1f3c96727e31f73dfa7b37a726d41336435af4ae55"
+      },
+      {
+        "name": "worker/nominal-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 12.75
+        },
+        "sha256": "cb90d68493d53ad6c5acd3a4a921f9d19e51c5918529706ea70c3fe510df23a8"
+      },
+      {
+        "name": "worker/font-11-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "worker/font-22-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "worker/font-30-compact",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "worker/nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "worker/font-30-rich",
+        "tier": "rich",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 25.5
+        },
+        "sha256": "d35e30d24610b6a2d6d4853a39f8312a7956d6e82c25b5f345e4ab577d881ac7"
+      },
+      {
+        "name": "init/nested-preservation-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "init/explicit-overview",
+        "tier": "compact",
+        "full": false,
+        "textCount": 24,
+        "edgeLabels": 0,
+        "clusterLabels": 0,
+        "sha256": "2dca922c9218681ae2563f6e85c9b03ea9e727d2a6af58ad1022ad0bb3941421"
+      },
+      {
+        "name": "renderSvg/init-font-30",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "renderDeck/init-font-30",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "worker/init-font-30",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 633.48,
+          "fontSize": 22.2
+        },
+        "sha256": "d3a13e231d746b784e3bc20fe2e226e860fa3687f4869df4ef7a5408a6f0e62d"
+      },
+      {
+        "name": "renderSvg/init-font-11",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderDeck/init-font-11",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "worker/init-font-11",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderSvg/init-font-15",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "renderDeck/init-font-15",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "worker/init-font-15",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 330.74,
+          "fontSize": 11.1
+        },
+        "sha256": "41229fe660ac3662cdaf2fc8739c8ed9eee0349afc5150205f96e16d078f00ab"
+      },
+      {
+        "name": "renderSvg/init-nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderDeck/init-nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "worker/init-nested-font-size-wins",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderSvg/font-override-after-init",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderDeck/font-override-after-init",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "worker/font-override-after-init",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 250.01,
+          "fontSize": 8.14
+        },
+        "sha256": "bdf0ee1c238be32b6c8338ba9e20f39c2b35d5a1476b24bab95b1f3fbe211e74"
+      },
+      {
+        "name": "renderSvg/font-override-keeps-runtime-default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "renderDeck/font-override-keeps-runtime-default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      },
+      {
+        "name": "worker/font-override-keeps-runtime-default",
+        "tier": "compact",
+        "full": true,
+        "textCount": 50,
+        "edgeLabels": 24,
+        "clusterLabels": 2,
+        "longEdge": {
+          "width": 472.02,
+          "fontSize": 16.28
+        },
+        "sha256": "5ec41e4dfe6ceacdf77fa2124ccabf967309df86482b56c3e385c8662e9c0bc5"
+      }
+    ]
+  },
+  "cross_target": {
+    "native_comparison_passed": true,
+    "digests": {
+      "flowchart": "0xafe8712eaa94163c",
+      "sequence": "0x312f713e23dd8c2b",
+      "class": "0x86fb0b6a73147bb7",
+      "state": "0xd5c3891b75b12cd9"
+    },
+    "svg_outputs": [
+      {
+        "name": "flowchart",
+        "bytes": 8352,
+        "sha256": "f7516fe6023f81b714592d86eaf23315a54ddf0a597d6bbea9adc2c9f6b389f7"
+      },
+      {
+        "name": "sequence",
+        "bytes": 7472,
+        "sha256": "e7fa59cbba3c2551639fd02e065cf2e3732bb01233b3320cfe6d5c0a1c104cab"
+      },
+      {
+        "name": "class",
+        "bytes": 6112,
+        "sha256": "457113370a82d0283f7a2bfa6b054ae160b5336d168dd2ef3949e7af04e8223f"
+      },
+      {
+        "name": "state",
+        "bytes": 7877,
+        "sha256": "c8ec5a17e8e8bf231fda9a8335067f9f93aa58e96c568a0c326b72c0124a8b7b"
+      }
+    ],
+    "audit_against_fresh_main": [
+      {
+        "name": "flowchart",
+        "byte_identical": true,
+        "all_text_and_structure_identical": true,
+        "attribute_changes": []
+      },
+      {
+        "name": "sequence",
+        "byte_identical": false,
+        "all_text_and_structure_identical": true,
+        "attribute_changes": [
+          {
+            "element_index": 17,
+            "tag": "rect",
+            "before": {
+              "width": "65.50",
+              "x": "175.25"
+            },
+            "after": {
+              "width": "63.27",
+              "x": "176.37"
+            }
+          },
+          {
+            "element_index": 22,
+            "tag": "rect",
+            "before": {
+              "width": "65.50",
+              "x": "175.25"
+            },
+            "after": {
+              "width": "65.12",
+              "x": "175.44"
+            }
+          }
+        ]
+      },
+      {
+        "name": "class",
+        "byte_identical": true,
+        "all_text_and_structure_identical": true,
+        "attribute_changes": []
+      },
+      {
+        "name": "state",
+        "byte_identical": false,
+        "all_text_and_structure_identical": true,
+        "attribute_changes": [
+          {
+            "element_index": 18,
+            "tag": "rect",
+            "before": {
+              "width": "65.50",
+              "x": "58.81"
+            },
+            "after": {
+              "width": "63.27",
+              "x": "59.92"
+            }
+          },
+          {
+            "element_index": 23,
+            "tag": "rect",
+            "before": {
+              "width": "58",
+              "x": "137.60"
+            },
+            "after": {
+              "width": "65.12",
+              "x": "134.04"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "native": {
+    "gates": [
+      {
+        "gate": "svg-layout-final1",
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fm-render-svg",
+          "-p",
+          "fm-layout",
+          "--lib"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 167.33,
+        "source_unchanged": true,
+        "log_sha256": "225dd9d0ca86abe0d04b0a55138161aa0ac4831bf0207dda65b35a1bcb1a8301",
+        "metadata_sha256": "6f644aa0b0659bc97cc3fa6a48d106b185669d584b379aeb4fa00d23f7af8468",
+        "reason": null
+      },
+      {
+        "gate": "check-final2",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 112.95,
+        "source_unchanged": true,
+        "log_sha256": "448f4ce37d69dda8b65618dc02bef371a0abc00172a1d1d26a471c5b820d7f23",
+        "metadata_sha256": "9f64cddeac662705b149e13a56e8095b8a9762aac4006fd164e55155c93a2e87",
+        "reason": null
+      },
+      {
+        "gate": "clippy-final2",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 76.74,
+        "source_unchanged": true,
+        "log_sha256": "9d67977c00ea5dc215fe63a3d7d655923d0b08d57bfa855478681fc2e637e4e9",
+        "metadata_sha256": "dc35c2627b3a3eb32818c48244d2b373082d4357b4cda93fb3026db6df1970a6",
+        "reason": null
+      },
+      {
+        "gate": "wasm-final2",
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fm-wasm",
+          "--lib"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 4.85,
+        "source_unchanged": true,
+        "log_sha256": "c6ce6e4e1d2015eb772604a5e9654191f2a35538ec21525865a06c16438e9de4",
+        "metadata_sha256": "9153c81bd3057591d5f1cfd369351e405e36f972526459d30e5de07d5eef3ecc",
+        "reason": null
+      }
+    ],
+    "tests": {
+      "layout": {
+        "passed": 621,
+        "failed": 0,
+        "ignored": 1
+      },
+      "svg": {
+        "passed": 353,
+        "failed": 0,
+        "ignored": 2
+      },
+      "wasm": {
+        "passed": 67,
+        "failed": 0,
+        "ignored": 1
+      }
+    },
+    "ignored_layout_gate": {
+      "name": "routed_edges_do_not_run_through_unrelated_nodes",
+      "bead": "bd-h2ze",
+      "reason": "preexisting live routing acceptance gap"
+    },
+    "other_ignored_tests": "two SVG and one WASM existing manual performance probes",
+    "formatting": {
+      "exit_code": 1,
+      "preexisting_hunks": 90,
+      "files": 9,
+      "new_hunks": 0,
+      "one_existing_lasso_hunk_resolved": true,
+      "log_sha256": "b3c9ce44b7e70b8d67cc899a6da547e68aec05a2067e3796e0ad28f4906456ee"
+    },
+    "freshness_smoke_checks": {
+      "passed": 4,
+      "failed": 0
+    }
+  },
+  "deployment": {
+    "stage": {
+      "action": "stage-bundle",
+      "bundle_root": "/dev/shm/frankenmermaid-issue14-site-final",
+      "canonical_host": "frankenmermaid.com",
+      "hosting_plan_gate": {
+        "surface": "cloudflare-hosting-plan",
+        "static_headers": "web/_headers",
+        "react_headers": "web_react/_headers",
+        "static_contract": "evidence/contracts/showcase_static_entrypoint_contract.md",
+        "react_contract": "evidence/contracts/showcase_react_embedding_contract.md",
+        "strategy_doc": "evidence/demo_strategy.md",
+        "static_headers_hash": "sha256:bd9c9b2512c69d080110d1bbb52444d3aa3f5bef912653604c03af2153ba27e3",
+        "react_headers_hash": "sha256:70eb738920c0b1f0c30f39a151f40cc38f112f2a3a7f056c72ab2ec7ce971190",
+        "static_contract_hash": "sha256:654409ceae4251b238bf4df0737b5b9d5938a60964bdb6450ce0ba3f2d4200cc",
+        "react_contract_hash": "sha256:2c64b80062f6001f0ff04c0ee0af25a62eb21433153fd62586b3f1ec6df8130a",
+        "strategy_doc_hash": "sha256:573e86eb692b5b0a2a1d0fd075dae773f3f020b7f44b94b20fdafb19ec9d082d",
+        "checks": [
+          {
+            "name": "shared pkg cache rule",
+            "ok": true,
+            "detail": "both showcase hosts keep stable /pkg/* runtime assets revalidating until versioned paths exist"
+          },
+          {
+            "name": "shared evidence cache rule",
+            "ok": true,
+            "detail": "both showcase hosts publish the same review-friendly cache policy for evidence artifacts"
+          },
+          {
+            "name": "static route rules",
+            "ok": true,
+            "detail": "static host publishes explicit revalidating cache rules for /web and /web/*"
+          },
+          {
+            "name": "react route rules",
+            "ok": true,
+            "detail": "react host publishes explicit revalidating cache rules for /web_react and /web_react/*"
+          },
+          {
+            "name": "static contract route matrix",
+            "ok": true,
+            "detail": "static contract captures the current cache matrix, the future immutable-versioned path plan, and the Functions exclusion plan"
+          },
+          {
+            "name": "react contract alignment",
+            "ok": true,
+            "detail": "react contract acknowledges the shared Pages route/cache matrix and the future versioned-asset handoff"
+          },
+          {
+            "name": "strategy trace",
+            "ok": true,
+            "detail": "demo strategy points deployment work at the checked-in hosting-plan validator"
+          }
+        ]
+      },
+      "copied_files": [
+        {
+          "source": "evidence/capability_scenario_matrix.json",
+          "destination": "evidence/capability_scenario_matrix.json",
+          "sha256": "sha256:a107363525302e3f67e069baba2aca12c17e62067b6fe60675ec3996c9ff5116"
+        },
+        {
+          "source": "frankenmermaid_demo_showcase.html",
+          "destination": "frankenmermaid_demo_showcase.html",
+          "sha256": "sha256:e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26"
+        },
+        {
+          "source": "frankenmermaid_illustration.webp",
+          "destination": "frankenmermaid_illustration.webp",
+          "sha256": "sha256:a5f1795dbc8d6338322f8b0f5976205c842b950bf1f5b5cb9fc0e578f6d740ed"
+        },
+        {
+          "source": "gh_og_share_image.png",
+          "destination": "gh_og_share_image.png",
+          "sha256": "sha256:5d6d69cab83e8b335aef2aa230dd4d6b427f3ee410c98dd1ae4cb94ad388e940"
+        },
+        {
+          "source": "index.html",
+          "destination": "index.html",
+          "sha256": "sha256:e4e8f92489b7ab2fcdb22b655c08db2c1cf597416b14920e4ce4b4727c615f26"
+        },
+        {
+          "source": "pkg/LICENSE",
+          "destination": "pkg/LICENSE",
+          "sha256": "sha256:32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509"
+        },
+        {
+          "source": "pkg/README.md",
+          "destination": "pkg/README.md",
+          "sha256": "sha256:b2cd79916d9f49d1404eb5a89efa767e1efb2a9b98ea2f74ac9e4884791ac73f"
+        },
+        {
+          "source": "pkg/frankenmermaid.d.ts",
+          "destination": "pkg/frankenmermaid.d.ts",
+          "sha256": "sha256:11b5b50e46df17674335a82ff24b02eb2262a0f3b8a1787942e4fca99027025f"
+        },
+        {
+          "source": "pkg/frankenmermaid.js",
+          "destination": "pkg/frankenmermaid.js",
+          "sha256": "sha256:0c5f169d3690e7b525f4a3f7eb739adfbd04ab7872592b52952977e46d0dcec9"
+        },
+        {
+          "source": "pkg/frankenmermaid_bg.wasm",
+          "destination": "pkg/frankenmermaid_bg.wasm",
+          "sha256": "sha256:e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813"
+        },
+        {
+          "source": "pkg/frankenmermaid_bg.wasm.d.ts",
+          "destination": "pkg/frankenmermaid_bg.wasm.d.ts",
+          "sha256": "sha256:091c1a7e75178fae01d0494cb7733ea223980df66829395542311e94c276b1cc"
+        },
+        {
+          "source": "pkg/package.json",
+          "destination": "pkg/package.json",
+          "sha256": "sha256:11725d8dedfb98f1364cf0c0af22be713d6bc9363bc8acdcfda52002eeef84d6"
+        },
+        {
+          "source": "web/fm-config-editor.js",
+          "destination": "web/fm-config-editor.js",
+          "sha256": "sha256:07dc4eca47d7c5e399bfa93784ba42b5fd4abbe1ccdaab253ae982aab4c37e20"
+        },
+        {
+          "source": "web/fm-deck-editor.js",
+          "destination": "web/fm-deck-editor.js",
+          "sha256": "sha256:2466af21ba42972d7aa56cef214b366a35ede0719953f5cacadfca88efce4043"
+        },
+        {
+          "source": "crates/fm-cli/src/deck_runtime.js",
+          "destination": "web/fm-deck-runtime.js",
+          "sha256": "sha256:c057d936af2ee38274b475dd7dacd6e9a64f938cc12f688e7a9ec19124610fdc"
+        },
+        {
+          "source": "crates/fm-cli/src/deck_template.html",
+          "destination": "web/fm-deck-template.html",
+          "sha256": "sha256:f20323fb330e164a43ebdf352681ff6ac2458500ae64e03454cde4eb684ebd42"
+        },
+        {
+          "source": "web/fm-document.js",
+          "destination": "web/fm-document.js",
+          "sha256": "sha256:9ad4e5d855226b0f2c8f69f6b061b33dc02b0a0a89907c00f1d46f4f94d57222"
+        },
+        {
+          "source": "web/fm-image-export.js",
+          "destination": "web/fm-image-export.js",
+          "sha256": "sha256:7034aff1beb2bbbce337cb1ca5097d18ba3919410d01f22d34ced597a9aa3692"
+        },
+        {
+          "source": "web/fm-render.worker.js",
+          "destination": "web/fm-render.worker.js",
+          "sha256": "sha256:e2d52c39253fc2984898ede881a56cb3d393485e592a8adf81300fdf9ca464a1"
+        },
+        {
+          "source": "web/fm-share.js",
+          "destination": "web/fm-share.js",
+          "sha256": "sha256:0440fadb18b24acb26d6d9e5c19f620a3c031da73cd57844e4f9045982b3a8dc"
+        },
+        {
+          "source": "web/fm-source-editor.js",
+          "destination": "web/fm-source-editor.js",
+          "sha256": "sha256:f90f07588af77cc24b1507bd60f6250bdcb27e7bf77ac8bbc3e0d0dc220b3b11"
+        },
+        {
+          "source": "web/index.html",
+          "destination": "web/index.html",
+          "sha256": "sha256:085aff6da751982bdf9c73859bc1bc09e929e145259e4a7ce7dbb54501edb1f1"
+        },
+        {
+          "source": "web/mermaid-compat.mjs",
+          "destination": "web/mermaid-compat.mjs",
+          "sha256": "sha256:b4c8a829aeeef006ae88e8c922a25dc12fcdddae2cc153a5b10572842f8c13af"
+        },
+        {
+          "source": "web/mermaid-svg.mjs",
+          "destination": "web/mermaid-svg.mjs",
+          "sha256": "sha256:b8b100644ae7fbb46b6c3ece990b81c93f5a5366f9504b505cd81b5e5f37f3c6"
+        },
+        {
+          "source": "web/mermaid.mjs",
+          "destination": "web/mermaid.mjs",
+          "sha256": "sha256:7c735bdda5ba4d00a4224fb7ae47d22fd1795edaa4333b209be19fb7426fc182"
+        },
+        {
+          "source": "web/playground.html",
+          "destination": "web/playground.html",
+          "sha256": "sha256:9a2bf72c9dfd82494a563bd7b89c32ad22fc2734f39bf2806cce16d60039496c"
+        },
+        {
+          "source": "web_react/index.html",
+          "destination": "web_react/index.html",
+          "sha256": "sha256:6b7e4352306f628a5145b32ec16b8ce0c6a4b5e753c6987821450d3c4fdc8774"
+        }
+      ],
+      "generated_files": [
+        {
+          "path": "_headers",
+          "sha256": "sha256:71d4d41089665e27397240181b3eea307ab05e4ced24c7593e3dd833070eb9c8"
+        }
+      ],
+      "redirect_strategy": {
+        "kind": "cloudflare-redirect-rules",
+        "rules": [
+          {
+            "description": "Canonicalize /web/ to /web while preserving the query string.",
+            "source_path": "/web/",
+            "target_url": "https://frankenmermaid.com/web",
+            "status_code": 301,
+            "preserve_query_string": true
+          },
+          {
+            "description": "Canonicalize /web_react/ to /web_react while preserving the query string.",
+            "source_path": "/web_react/",
+            "target_url": "https://frankenmermaid.com/web_react",
+            "status_code": 301,
+            "preserve_query_string": true
+          }
+        ],
+        "reason": "Pages `_redirects` does not expose a preserve-query-string control, so canonical trailing-slash redirects for `/web/` and `/web_react/` are modeled as zone-level Redirect Rules or Bulk Redirects."
+      }
+    },
+    "staged_wasm_sha256": "e71fff0f745d3eac55e07ae57408ae9856c3505c0265375466292020f2380813",
+    "production_deployed": false,
+    "blocker": "Wrangler executable and Cloudflare credentials are unavailable",
+    "pull_request_created": false
+  }
+}

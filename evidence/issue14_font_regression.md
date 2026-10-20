@@ -20,16 +20,27 @@ An execution-host outage interrupted delivery. Automated workspace maintenance
 subsequently removed the memory-backed checkout, build caches, and browser-report
 directory. The source survived in GitHub objects, and the candidate WASM package
 and detailed validation JSON survived in a partial checkpoint with matching
-SHA-256 hashes. Execution access has returned; tooling and the merged checkout
-are being restored.
+SHA-256 hashes. Execution access, the pinned toolchain, and the merged checkout
+have been restored. The recovered detailed results are retained in
+[issue14_font_validation_summary.json](issue14_font_validation_summary.json),
+SHA-256 `f8013b4736641f5bad7306948ac5ef9e0ef2a7cfbfc103ea9d971af38e15ca75`.
 
-**Integrated-tree validation and its matching package remain pending at this
-integration checkpoint.** The measurements and digest pins below identify the
+**Integrated-tree validation and its matching package remain pending in this
+source commit.** The measurements and digest pins below identify the
 pre-integration candidate. Rebuild the combined source, audit its size and
 native/WASM output, and rerun browser/native gates before updating the generated
-package and reviewed pins. The previous package remains in this checkpoint;
-deployment is not claimed. Two positive path-reuse test fixtures must also use
-flat IR prefixes now that grouped paths correctly reject transplantation.
+package and reviewed pins. The previous package remains in this source commit;
+deployment is not claimed.
+
+Both positive path-reuse fixtures now use independently parsed flat prefixes,
+because grouped paths correctly reject transplantation. The test helper checks
+complete prefix node/edge objects, referenced labels and markup, direction,
+styles, and the absence of groups, clusters, and ports before constructing its
+certificate. Fresh-render equality, eligibility, changing label placement, and
+the original reuse-count assertions remain. Scoped formatting and whitespace
+checks pass; the focused native compilation is in progress. Canonical WASM
+compilation is resuming from preserved dependencies after the shared-host
+memory guard stopped two attempts. These pending runs are not counted as passes.
 
 ## Original report and reproduction
 

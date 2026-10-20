@@ -17389,18 +17389,57 @@ mod tests {
         assert!(snapshot.fragments.reused_edges >= 2);
     }
 
+    fn checked_flat_test_prefix(
+        source: &str,
+        diagrams: &[MermaidDiagramIr],
+    ) -> CertifiedSvgBatchPrefix {
+        // The parser's batch plan certifies closed subgraphs, while the tree transplant now
+        // deliberately rejects populated groups. These renderer tests certify a flat prefix
+        // only after checking its complete node/edge objects and referenced label contents.
+        let prefix = fm_parser::parse(source).ir;
+        assert!(!prefix.nodes.is_empty());
+        assert!(!diagrams.is_empty());
+        for ir in std::iter::once(&prefix).chain(diagrams) {
+            assert_eq!(ir.diagram_type, prefix.diagram_type);
+            assert_eq!(ir.direction, prefix.direction);
+            assert!(ir.graph.subgraphs.is_empty());
+            assert!(ir.clusters.is_empty());
+            assert!(ir.ports.is_empty());
+            assert_eq!(ir.constraints, prefix.constraints);
+            assert_eq!(ir.style_refs, prefix.style_refs);
+            assert_eq!(ir.style_defs, prefix.style_defs);
+            assert_eq!(
+                ir.nodes.get(..prefix.nodes.len()),
+                Some(prefix.nodes.as_slice())
+            );
+            assert_eq!(
+                ir.edges.get(..prefix.edges.len()),
+                Some(prefix.edges.as_slice())
+            );
+            for label in prefix
+                .nodes
+                .iter()
+                .filter_map(|node| node.label)
+                .chain(prefix.edges.iter().filter_map(|edge| edge.label))
+            {
+                assert_eq!(ir.labels.get(label.0), prefix.labels.get(label.0));
+                assert_eq!(ir.label_markup.get(&label), prefix.label_markup.get(&label));
+            }
+        }
+        CertifiedSvgBatchPrefix::new(Arc::from(source), prefix.nodes.len(), prefix.edges.len())
+    }
+
     #[test]
     fn borrowed_batch_renderer_transplants_certified_path_geometry() {
+        let mut prefix_source = String::from("flowchart LR\n");
+        for index in 0..48 {
+            prefix_source.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
+        }
+        for index in 0..47 {
+            prefix_source.push_str(&format!("    S{index}-->S{}\n", index + 1));
+        }
         let make_input = |tail_labels: &[&str]| {
-            let mut input =
-                String::from("flowchart LR\n  subgraph Shared[\"Shared ingestion platform\"]\n");
-            for index in 0..48 {
-                input.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
-            }
-            for index in 0..47 {
-                input.push_str(&format!("    S{index}-->S{}\n", index + 1));
-            }
-            input.push_str("  end\n");
+            let mut input = prefix_source.clone();
             for (index, label) in tail_labels.iter().enumerate() {
                 input.push_str(&format!("  D{index}[\"{label}\"]\n"));
             }
@@ -17434,32 +17473,20 @@ mod tests {
                 "Session Store",
             ]),
         ];
-        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
-        let plan = fm_parser::FlowchartBatchParsePlan::new(
-            &inputs,
-            fm_core::MermaidParseMode::Compat,
-            &fm_parser::ParserConfig::default(),
-        );
+        let diagrams = owned_inputs
+            .iter()
+            .map(|input| fm_parser::parse(input).ir)
+            .collect::<Vec<_>>();
+        let prefix = checked_flat_test_prefix(&prefix_source, &diagrams);
+        assert_eq!((prefix.node_count, prefix.edge_count), (48, 47));
         let config = SvgRenderConfig::default();
-        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
         let mut renderer = SvgBatchRenderer::default();
 
-        for (index, input) in inputs.iter().enumerate() {
-            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
-                let prefix = parsed.reusable_prefix.expect("certified prefix");
-                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
-                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
-                let actual = renderer.layout_and_render_borrowed(
-                    parsed.ir,
-                    &config,
-                    Some(CertifiedSvgBatchPrefix::new(
-                        Arc::clone(&prefix.identity),
-                        prefix.node_count,
-                        prefix.edge_count,
-                    )),
-                );
-                assert_eq!(actual, expected);
-            });
+        for ir in &diagrams {
+            let expected_layout = fm_layout::layout_diagram_traced(ir).layout;
+            let expected = render_svg_with_layout(ir, &expected_layout, &config);
+            let actual = renderer.layout_and_render_borrowed(ir, &config, Some(prefix.clone()));
+            assert_eq!(actual, expected);
         }
 
         let snapshot = renderer.previous.as_ref().expect("batch snapshot");
@@ -18005,17 +18032,16 @@ mod tests {
 
     #[test]
     fn transplanted_path_labels_revalidate_the_previous_placement() {
+        let prefix_source = concat!(
+            "flowchart LR\n",
+            "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
+            "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
+            "C[Short]\nA-->B\n",
+            "B-->|WW|C\n",
+        );
         let make_input = |tail: &str| {
-            let mut input = concat!(
-                "flowchart LR\n",
-                "subgraph Shared[\"Shared prefix\"]\n",
-                "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
-                "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
-                "C[Short]\nA-->B\n",
-                "B-->|WW|C\n",
-                "end\nC-->D",
-            )
-            .to_string();
+            let mut input = prefix_source.to_string();
+            input.push_str("C-->D");
             input.push_str(tail);
             input.push_str("\nD-->E0");
             // A long path selects the same tree specialization as the optimized batch workload.
@@ -18028,12 +18054,12 @@ mod tests {
             make_input("[\"Short\"]"),
             make_input("[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5\"]"),
         ];
-        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
-        let plan = fm_parser::FlowchartBatchParsePlan::new(
-            &inputs,
-            fm_core::MermaidParseMode::Compat,
-            &fm_parser::ParserConfig::default(),
-        );
+        let diagrams = owned_inputs
+            .iter()
+            .map(|input| fm_parser::parse(input).ir)
+            .collect::<Vec<_>>();
+        let prefix = checked_flat_test_prefix(prefix_source, &diagrams);
+        assert_eq!((prefix.node_count, prefix.edge_count), (3, 2));
         let config = SvgRenderConfig {
             detail_tier: MermaidTier::Rich,
             preserve_labels: true,
@@ -18043,50 +18069,37 @@ mod tests {
             avg_char_width: 160.0,
             ..Default::default()
         };
-        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
         let mut renderer = SvgBatchRenderer::default();
         let mut previous_label = None;
-        for (index, input) in inputs.iter().enumerate() {
-            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
-                let prefix = parsed.reusable_prefix.expect("certified prefix");
-                assert_eq!((prefix.node_count, prefix.edge_count), (3, 2));
-                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
-                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
-                let label = expected
-                    .split_once("id=\"fm-edge-1\"")
-                    .expect("edge group")
-                    .1
-                    .split_once("</g>")
-                    .expect("edge end")
-                    .0
-                    .to_string();
-                if let Some(previous_label) = previous_label.as_ref() {
-                    assert_ne!(
-                        previous_label, &label,
-                        "the growing suffix moves the prefix label"
-                    );
-                }
-                previous_label = Some(label);
-                let actual = renderer.layout_and_render_borrowed(
-                    parsed.ir,
-                    &config,
-                    Some(CertifiedSvgBatchPrefix::new(
-                        Arc::clone(&prefix.identity),
-                        prefix.node_count,
-                        prefix.edge_count,
-                    )),
+        for (index, ir) in diagrams.iter().enumerate() {
+            let expected_layout = fm_layout::layout_diagram_traced(ir).layout;
+            let expected = render_svg_with_layout(ir, &expected_layout, &config);
+            let label = expected
+                .split_once("id=\"fm-edge-1\"")
+                .expect("edge group")
+                .1
+                .split_once("</g>")
+                .expect("edge end")
+                .0
+                .to_string();
+            if let Some(previous_label) = previous_label.as_ref() {
+                assert_ne!(
+                    previous_label, &label,
+                    "the growing suffix moves the prefix label"
                 );
-                assert_eq!(actual, expected);
-                let snapshot = renderer.previous.as_ref().expect("batch snapshot");
-                assert!(
-                    snapshot.layout_prefix.is_some(),
-                    "tree transplant remains eligible"
-                );
-                if index > 0 {
-                    assert_eq!(snapshot.fragments.reused_nodes, 3);
-                    assert_eq!(snapshot.fragments.reused_edges, 1);
-                }
-            });
+            }
+            previous_label = Some(label);
+            let actual = renderer.layout_and_render_borrowed(ir, &config, Some(prefix.clone()));
+            assert_eq!(actual, expected);
+            let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+            assert!(
+                snapshot.layout_prefix.is_some(),
+                "tree transplant remains eligible"
+            );
+            if index > 0 {
+                assert_eq!(snapshot.fragments.reused_nodes, 3);
+                assert_eq!(snapshot.fragments.reused_edges, 1);
+            }
         }
     }
 
