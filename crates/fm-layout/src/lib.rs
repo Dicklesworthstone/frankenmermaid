@@ -2873,11 +2873,14 @@ impl DiagramLayout {
         let positions = self
             .nodes
             .iter()
-            .map(|node| fm_core::constraints::ConstraintExamplePosition {
-                node_id: node.node_id.clone(),
-                x: node.bounds.x + node.bounds.width * 0.5,
-                y: node.bounds.y + node.bounds.height * 0.5,
-                rank: Some(node.rank),
+            .map(|node| {
+                (
+                    node.node_id.clone(),
+                    fm_core::constraints::ConstraintExamplePosition {
+                        x: node.bounds.x + node.bounds.width * 0.5,
+                        y: node.bounds.y + node.bounds.height * 0.5,
+                    },
+                )
             })
             .collect();
         fm_core::constraints::ConstraintExample { positions }
@@ -2895,6 +2898,52 @@ impl DiagramLayout {
             .map(|layout| layout.to_constraint_example())
             .collect();
         fm_core::constraints::synthesize_order_constraints(&examples)
+    }
+
+    /// Analyze the directed topology (SCCs, WCCs, directed cycles, reachability) of `ir` (`bd-l93qp`).
+    #[inline]
+    #[must_use]
+    pub fn directed_topology(ir: &MermaidDiagramIr) -> fnx_directed::DirectedTopologySummary {
+        fnx_directed::analyze_directed_topology(ir)
+    }
+
+    /// Compute the p-Wasserstein distance between this layout's persistence diagram and `other`'s (`bd-uag49`).
+    #[inline]
+    #[must_use]
+    pub fn wasserstein_distance_to(&self, other: &Self, max_scale: Option<f64>, p: f64) -> f64 {
+        let d1 = self.persistence_diagram(max_scale);
+        let d2 = other.persistence_diagram(max_scale);
+        persistence::wasserstein_distance(&d1, &d2, p)
+    }
+
+    /// Extract all finite persistence points from this layout's Vietoris-Rips filtration (`bd-uag49`).
+    #[inline]
+    #[must_use]
+    pub fn finite_persistence_points(
+        &self,
+        max_scale: Option<f64>,
+    ) -> Vec<persistence::PersistencePoint> {
+        self.persistence_diagram(max_scale).finite_points()
+    }
+
+    /// Extract topological persistence features whose lifetime exceeds `min_persistence` (`bd-uag49`).
+    #[inline]
+    #[must_use]
+    pub fn stable_persistence_features(
+        &self,
+        max_scale: Option<f64>,
+        min_persistence: f64,
+    ) -> Vec<persistence::PersistencePoint> {
+        self.persistence_diagram(max_scale)
+            .stable_features(min_persistence)
+    }
+
+    /// Perform whole-graph spectral bisection on `ir` using the Fiedler vector (`bd-uag49`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    #[must_use]
+    pub fn bisect_diagram_spectrally(ir: &MermaidDiagramIr) -> spectral::SpectralPartitionResult {
+        spectral::spectral_bisect_graph(ir)
     }
 }
 
@@ -4531,6 +4580,20 @@ impl IncrementalLayoutEngine {
     #[must_use]
     pub fn work_class(&self) -> fm_core::reuse_proof::WorkClass {
         self.reuse_proof().work_class()
+    }
+
+    /// Whether the engine's cumulative work history admits a full-computation throughput claim (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn admits_throughput_claim(&self) -> bool {
+        self.reuse_proof().admits_throughput_claim()
+    }
+
+    /// Fraction of layout requests on this engine that were computed from scratch rather than reused (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn computed_work_fraction(&self) -> Option<f64> {
+        self.reuse_proof().computed_fraction()
     }
 
     /// Compare the engine's currently cached layout against `after` using topological persistence
@@ -32593,7 +32656,9 @@ mod tests {
             LayoutConfig::default(),
             LayoutGuardrails::default(),
         );
-        engine.sync_dcg_phases(&ir, &MermaidConfig::default());
+        assert!(engine.admits_throughput_claim());
+        assert_eq!(engine.computed_work_fraction(), Some(1.0));
+        engine.sync_dcg_phases(&ir, &fm_core::MermaidConfig::default());
         assert!(!engine.dcg_any_dirty());
         assert!(engine.dcg_fully_cached());
         assert_eq!(engine.dcg_dirty_summary(), "clean");
@@ -32604,16 +32669,22 @@ mod tests {
         );
         assert!(engine.dcg().get_orderings().is_some());
         assert!(engine.dcg().get_layout().is_some());
+        assert!(!engine.admits_throughput_claim());
+        assert!(
+            engine
+                .computed_work_fraction()
+                .is_some_and(|f| f > 0.0 && f < 1.0)
+        );
 
         let example = traced.layout.to_constraint_example();
         assert_eq!(example.positions.len(), 4);
         let synth = DiagramLayout::synthesize_constraints_from_layouts(&[&traced.layout]);
-        assert!(synth.is_consistent());
+        assert!(synth.counterexamples.is_empty());
         assert!(!synth.constraints.is_empty());
 
         #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
         {
-            let mut cache = AnalysisCache::default();
+            let mut cache = crate::AnalysisCache::default();
             let proj_cfg = crate::fnx_adapter::ProjectionConfig::default();
             let diag1 =
                 crate::fnx_diagnostics::analyze_structure_cached(&ir, &proj_cfg, &mut cache);
@@ -32631,6 +32702,38 @@ mod tests {
             );
             assert_eq!(crit1.scores.len(), crit2.scores.len());
             assert_eq!(cache.stats().hits, 2);
+
+            let ranked = crate::fnx_cycle_scorer::rank_edges_by_criticality(&ir, &score_cfg);
+            assert_eq!(ranked.len(), ir.edges.len());
+        }
+
+        // Wave 8: directed topology, persistence helpers, spectral bisection
+        let topo = DiagramLayout::directed_topology(&ir);
+        assert_eq!(topo.scc.components.len(), 4);
+        assert!(topo.wcc.is_connected);
+        assert!(!topo.cycles.has_cycles);
+        assert!(topo.reachability.sources.contains(&0));
+        assert!(topo.reachability.sinks.contains(&3));
+
+        assert_eq!(
+            traced
+                .layout
+                .wasserstein_distance_to(&traced.layout, None, 2.0),
+            0.0
+        );
+        assert!(!traced.layout.finite_persistence_points(None).is_empty());
+        assert!(
+            !traced
+                .layout
+                .stable_persistence_features(None, 1.0)
+                .is_empty()
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let spectral_part = DiagramLayout::bisect_diagram_spectrally(&ir);
+            assert_eq!(spectral_part.partitions.len(), 2);
+            assert!(spectral_part.cut_edges >= 1);
         }
     }
 

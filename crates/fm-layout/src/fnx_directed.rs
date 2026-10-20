@@ -606,6 +606,31 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
     }
 }
 
+/// Complete directed topology summary combining SCC, WCC, directed cycle detection,
+/// and reachability analysis (`bd-l93qp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectedTopologySummary {
+    /// Strongly connected components (Tarjan's algorithm).
+    pub scc: SccResult,
+    /// Weakly connected components (undirected BFS).
+    pub wcc: WccResult,
+    /// Detected directed cycles and participating nodes/edges.
+    pub cycles: DirectedCycleResult,
+    /// Forward/backward reachability sets and source/sink nodes.
+    pub reachability: ReachabilityResult,
+}
+
+/// Compute a complete [`DirectedTopologySummary`] for a diagram (`bd-l93qp`).
+#[must_use]
+pub fn analyze_directed_topology(ir: &MermaidDiagramIr) -> DirectedTopologySummary {
+    DirectedTopologySummary {
+        scc: compute_scc(ir),
+        wcc: compute_wcc(ir),
+        cycles: detect_directed_cycles(ir),
+        reachability: compute_reachability(ir),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

@@ -234,6 +234,55 @@ pub fn render_term_with_minimap(
     main_result
 }
 
+/// Return `(has_changes, total_changes)` for the structural and semantic diff between `old` and `new` (`bd-q255e`).
+#[inline]
+#[must_use]
+pub fn diff_change_counts(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> (bool, usize) {
+    let diff = diff_diagrams(old, new);
+    (diff.has_changes(), diff.total_changes())
+}
+
+/// Resolve the effective terminal tier, 4-level fidelity, and sub-cell render mode for a layout (`bd-q255e`).
+#[inline]
+#[must_use]
+pub fn resolve_term_tier_and_fidelity(
+    config: &TermRenderConfig,
+    layout: &DiagramLayout,
+    cols: usize,
+    rows: usize,
+) -> (
+    fm_core::MermaidTier,
+    fm_core::MermaidFidelity,
+    fm_core::MermaidRenderMode,
+) {
+    let tier = config.effective_tier(cols, rows);
+    let mode = config.effective_render_mode(tier);
+    let w = layout.bounds.width.max(1.0);
+    let h = layout.bounds.height.max(1.0);
+    let scale_x = cols as f32 / w;
+    let scale_y = rows as f32 / h;
+    let node_area: f32 = layout
+        .nodes
+        .iter()
+        .map(|n| n.bounds.width * n.bounds.height)
+        .sum();
+    let density = (node_area / (w * h)).clamp(0.0, 1.0);
+    let fidelity =
+        config.effective_fidelity(scale_x, scale_y, density, layout.nodes.len(), cols, rows);
+    (tier, fidelity, mode)
+}
+
+/// Advance or rewind interactive terminal node selection in index order (`bd-q255e`).
+#[inline]
+pub fn step_term_selection(selection: &mut SelectionState, ir: &MermaidDiagramIr, forward: bool) {
+    let adj = build_adjacency(ir);
+    if forward {
+        selection.select_next(ir.nodes.len(), &adj);
+    } else {
+        selection.select_prev(ir.nodes.len(), &adj);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +434,26 @@ mod tests {
             40,
         );
         assert!(!with_minimap.output.is_empty());
+
+        assert!(!transform.is_pure_rotor());
+        assert!(
+            (transform.rotor_part().to_affine_matrix().a - transform.uniform_scale()).abs() < 1e-6
+        );
+
+        let (tier, fidelity, mode) = resolve_term_tier_and_fidelity(&config, &layout, 120, 40);
+        assert_eq!(tier, fm_core::MermaidTier::Rich);
+        assert_eq!(fidelity, fm_core::MermaidFidelity::Rich);
+        assert_eq!(mode, fm_core::MermaidRenderMode::Braille);
+
+        let mut sel = SelectionState::default();
+        step_term_selection(&mut sel, &ir, true);
+        assert_eq!(sel.selected_node, Some(0));
+        step_term_selection(&mut sel, &ir, false);
+        assert_eq!(sel.selected_node, Some(1));
+
+        let (has_changes, total_changes) = diff_change_counts(&ir, &linear_ir(3));
+        assert!(has_changes);
+        assert!(total_changes > 0);
     }
 
     proptest! {

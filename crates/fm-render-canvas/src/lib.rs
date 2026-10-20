@@ -241,6 +241,22 @@ pub fn render_scene_to_canvas<C: Canvas2dContext>(
     renderer.render_scene(scene, context)
 }
 
+/// Create a high-DPI [`Viewport`] zoomed around `(center_x, center_y)` (`bd-2lcxg`).
+#[inline]
+#[must_use]
+pub fn zoomed_hi_dpi_viewport(
+    width: f64,
+    height: f64,
+    dpr: f64,
+    zoom_factor: f64,
+    center_x: f64,
+    center_y: f64,
+) -> Viewport {
+    let mut viewport = Viewport::new(width, height).with_dpr(dpr);
+    viewport.zoom_at(zoom_factor, center_x, center_y);
+    viewport
+}
+
 /// Legacy function for backwards compatibility.
 #[must_use]
 pub fn render_canvas(ir: &MermaidDiagramIr) -> CanvasRenderResult {
@@ -619,5 +635,33 @@ mod tests {
         assert_eq!(region.tooltip.as_deref(), Some("Read Alpha"));
         assert_eq!(region.link_target.as_deref(), Some("_self"));
         assert_eq!(region.bounds, layout.nodes[0].bounds);
+
+        // Exercise CanvasSession::set_selection_style, last_result, hit_test_interaction, and zoomed_hi_dpi_viewport (bd-2lcxg)
+        let mut session = CanvasSession::default();
+        session.set_selection_style(CanvasSelectionStyle {
+            stroke: String::from("#10b981"),
+            ..CanvasSelectionStyle::default()
+        });
+        session.set_diagram(
+            ir,
+            std::sync::Arc::new(layout),
+            CanvasRenderConfig {
+                auto_fit: false,
+                padding: 10.0,
+                ..CanvasRenderConfig::default()
+            },
+        );
+        let mut session_ctx = MockCanvas2dContext::new(300.0, 200.0);
+        let drawn = session.redraw(&mut session_ctx).expect("session redraw");
+        let (cx, cy) = drawn.viewport.diagram_to_canvas(-60.0, -5.0);
+        assert!(session.last_result([300.0, 200.0]).is_some());
+        let hit = session
+            .hit_test_interaction(cx, cy, [300.0, 200.0])
+            .expect("hit interaction on A");
+        assert_eq!(hit.href.as_deref(), Some("https://example.com/alpha"));
+
+        let vp = zoomed_hi_dpi_viewport(800.0, 600.0, 2.0, 1.5, 400.0, 300.0);
+        assert_eq!(vp.device_pixel_ratio, 2.0);
+        assert!((vp.zoom - 1.5).abs() < 1e-6);
     }
 }

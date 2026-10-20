@@ -459,6 +459,17 @@ impl<V> StringArt<V> {
             .filter_map(|(k, v)| String::from_utf8(k).ok().map(|s| (s, v)))
             .collect()
     }
+
+    /// Collect all string key-value pairs in lexicographical order (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn to_sorted_vec(&self) -> Vec<(String, &V)> {
+        self.inner
+            .to_sorted_vec()
+            .into_iter()
+            .filter_map(|(k, v)| String::from_utf8(k).ok().map(|s| (s, v)))
+            .collect()
+    }
 }
 
 #[cfg(test)]

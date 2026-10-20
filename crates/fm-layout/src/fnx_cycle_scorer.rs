@@ -146,6 +146,20 @@ pub fn compute_criticality_scores_cached(
     results
 }
 
+/// Rank all scored edges in ascending criticality order `(edge_index, score)` (`bd-l93qp`).
+#[must_use]
+pub fn rank_edges_by_criticality(
+    ir: &MermaidDiagramIr,
+    config: &CriticalityScoringConfig,
+) -> Vec<(usize, f64)> {
+    let results = compute_criticality_scores(ir, config);
+    results
+        .edges_by_criticality_ascending()
+        .into_iter()
+        .map(|edge_idx| (edge_idx, results.get_score(edge_idx)))
+        .collect()
+}
+
 /// Compute edge criticality scores under an explicit [`AnalysisBudget`].
 #[must_use]
 pub fn compute_criticality_scores_with_budget(

@@ -23250,8 +23250,8 @@ marker#arrow-open path {
         let cfg = SvgRenderConfig::default();
         let vars = cfg.theme_css_vars();
         assert!(vars.contains("--fm-bg:"));
-        assert!(vars.contains("--fm-primary-fill:"));
-        assert!(vars.contains("--fm-line:"));
+        assert!(vars.contains("--fm-node-fill:"));
+        assert!(vars.contains("--fm-edge-color:"));
         let dark_vars = render_theme_css_vars(ThemePreset::Dark);
         assert_ne!(vars, dark_vars);
     }

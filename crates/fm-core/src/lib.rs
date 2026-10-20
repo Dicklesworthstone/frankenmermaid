@@ -8405,14 +8405,16 @@ impl MermaidDiagramIr {
         bv
     }
 
-    /// Count duplicate parallel edges `(from, to, arrow)` using a [`crate::quotient_filter::QuotientFilter`]
-    /// fast path backed by exact verification on probable hits.
+    /// Build a [`crate::quotient_filter::QuotientFilter`] over `(from, to, arrow)` edge keys and
+    /// return `(filter, exact_duplicate_count)` (`bd-jh9zp`).
+    #[inline]
     #[must_use]
-    pub fn duplicate_edge_count(&self) -> usize {
-        if self.edges.len() < 2 {
-            return 0;
+    pub fn edge_quotient_filter(&self) -> (crate::quotient_filter::QuotientFilter, usize) {
+        let mut filter =
+            crate::quotient_filter::QuotientFilter::with_capacity(self.edges.len().max(1));
+        if self.edges.is_empty() {
+            return (filter, 0);
         }
-        let mut filter = crate::quotient_filter::QuotientFilter::with_capacity(self.edges.len());
         let mut exact_seen = FxHashSet::default();
         let mut duplicates = 0;
         for edge in &self.edges {
@@ -8430,7 +8432,33 @@ impl MermaidDiagramIr {
                 exact_seen.insert(key);
             }
         }
-        duplicates
+        (filter, duplicates)
+    }
+
+    /// Count duplicate parallel edges `(from, to, arrow)` using a [`crate::quotient_filter::QuotientFilter`]
+    /// fast path backed by exact verification on probable hits.
+    #[must_use]
+    pub fn duplicate_edge_count(&self) -> usize {
+        if self.edges.len() < 2 {
+            return 0;
+        }
+        self.edge_quotient_filter().1
+    }
+
+    /// Return edge quotient filter telemetry `(duplicate_count, load_factor, false_positive_rate,
+    /// quotient_bits, remainder_bits, table_size)` (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn edge_filter_metrics(&self) -> (usize, f64, f64, u32, u32, usize) {
+        let (filter, duplicates) = self.edge_quotient_filter();
+        (
+            duplicates,
+            filter.load_factor(),
+            filter.false_positive_rate(),
+            filter.quotient_bits(),
+            filter.remainder_bits(),
+            filter.table_size(),
+        )
     }
 
     /// Build a string-keyed Adaptive Radix Tree ([`crate::art::StringArt`]) indexing all node IDs.
@@ -8443,6 +8471,25 @@ impl MermaidDiagramIr {
             }
         }
         index
+    }
+
+    /// Exact node lookup by identifier using [`Self::node_prefix_index`] (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn lookup_node_by_id_art(&self, id: &str) -> Option<IrNodeId> {
+        self.node_prefix_index().get(id).copied()
+    }
+
+    /// Return all `(node_id, IrNodeId)` pairs in lexicographical order using
+    /// [`crate::art::StringArt::to_sorted_vec`] (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn sorted_node_ids_art(&self) -> Vec<(String, IrNodeId)> {
+        self.node_prefix_index()
+            .to_sorted_vec()
+            .into_iter()
+            .map(|(k, &v)| (k, v))
+            .collect()
     }
 
     /// Return all [`IrNodeId`]s whose identifier starts with `prefix`, ordered by node index,
@@ -8511,7 +8558,11 @@ impl MermaidDiagramIr {
     #[inline]
     #[must_use]
     pub fn alignment_constraints(&self) -> Vec<crate::constraints::AlignConstraint> {
-        self.constraint_set().alignments().into_iter().cloned().collect()
+        self.constraint_set()
+            .alignments()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Return the succinct CSR edge count (directed or undirected) for this diagram (`bd-5ben5`).
