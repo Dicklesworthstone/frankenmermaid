@@ -12615,8 +12615,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
 /// diagonal approach to the rectangle leaves the endpoint floating outside the drawn shape — by up
 /// to a factor of sqrt(2) for a circle, which reads as an arrowhead detached from its node.
 ///
-/// Only the force-directed path needs this. `edge_anchors`, used by the Sugiyama route, attaches
-/// at side midpoints, which is exactly where an inscribed circle or diamond meets its box.
+/// The force-directed path approaches at arbitrary angles. The ranked router uses side midpoints
+/// of the same drawn outline, including when supplied circular geometry has non-square bounds.
 fn clip_to_shape_border(
     from: LayoutPoint,
     to: LayoutPoint,
@@ -12625,6 +12625,13 @@ fn clip_to_shape_border(
 ) -> LayoutPoint {
     use fm_core::NodeShape;
 
+    let rect = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => shapes::circle_bounds(*rect),
+        _ => *rect,
+    };
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
     let dx = to.x - from.x;
@@ -12639,8 +12646,11 @@ fn clip_to_shape_border(
 
     // Parameter along (dx, dy) at which the ray leaves the shape, measured from the centre.
     let t = match shape {
-        // Inscribed ellipse: |(t*dx/half_w, t*dy/half_h)| = 1.
-        NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+        // SVG and Canvas draw a circle with radius min(width, height) / 2, not an ellipse.
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => {
             let nx = dx / half_w.max(f32::EPSILON);
             let ny = dy / half_h.max(f32::EPSILON);
             let norm = nx.hypot(ny);
@@ -12763,32 +12773,27 @@ fn compute_node_size(
     let text = display_node_label_ref(ir, node);
 
     match node.shape {
-        // ⚠️ ASYMMETRIC SIBLINGS. `DoubleCircle` below already sizes to its text when it has any,
-        // and `FilledCircle` was pinned at 20x20 unconditionally — fine while both shapes only ever
-        // appeared as label-less state pseudo-states, wrong the moment gitGraph's `type: REVERSE`
-        // commits started displaying their ids (bd-3cj8v). The dot stayed 20px and the id was
-        // elided to `th…` INSIDE it. Same branch as the sibling, same reason.
-        fm_core::NodeShape::FilledCircle => {
-            if text.is_empty() {
-                (20.0, 20.0)
+        fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
+        fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::FilledCircle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => {
+            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let (icon_width, icon_height) = icon_dimensions(node, metrics);
+            let content_width = label_width
+                .max(icon_width)
+                .max(icon_width.mul_add(0.85, label_width));
+            // A circle must contain the corners of the padded text block, not merely its width.
+            // Equal extents also put ranked ports on the circle SVG and Canvas actually draw.
+            let diameter = (content_width + 32.0).hypot(label_height + icon_height + 32.0);
+            let ring_gap = if node.shape == fm_core::NodeShape::DoubleCircle {
+                8.0
             } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(text);
-                (
-                    (label_width + 52.0).max(42.0),
-                    (label_height + 30.0).max(42.0),
-                )
-            }
-        }
-        fm_core::NodeShape::DoubleCircle => {
-            if text.is_empty() {
-                (24.0, 24.0)
-            } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(text);
-                (
-                    (label_width + 52.0).max(42.0),
-                    (label_height + 30.0).max(42.0),
-                )
-            }
+                0.0
+            };
+            let diameter = (diameter + ring_gap).max(64.0);
+            (diameter, diameter)
         }
         fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
         // A state `<<choice>>`, the one diamond with no text: mermaid's is a 28px mark. Sized
@@ -12807,11 +12812,12 @@ fn compute_node_size(
             let (label_width, label_height) =
                 metrics.estimate_dimensions(class_header.as_deref().unwrap_or(text));
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
-            let width = label_width
+            let content_width = label_width
                 .max(icon_width)
-                .max(icon_width.mul_add(0.85, label_width))
-                + 72.0;
-            let height = label_height + icon_height + 44.0;
+                .max(icon_width.mul_add(0.85, label_width));
+            let content_height = label_height + icon_height;
+            let width = content_width + 72.0;
+            let height = content_height + 44.0;
             let (width, height) = (width.max(100.0), height.max(52.0));
             // A class node's box must also hold its compartment stack. The SVG renderer walks the
             // member rows against the node's own height and `break`s on the first row that would
@@ -12856,9 +12862,18 @@ fn compute_node_size(
             // so whether a row escaped depended on how long the declared `risk:`/`verifymethod:`
             // strings happened to be — golden/requirement_basic's LoginReq measured 163.37 in a
             // 133.05-wide box, spilling 15.16 past each side (bd-jnc1).
-            match requirement_row_dimensions(node, metrics) {
+            let (width, height) = match requirement_row_dimensions(node, metrics) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
+            };
+            if node.shape == fm_core::NodeShape::Diamond {
+                // A rectangle that fits the bounds can still cross a diamond's sloping sides.
+                // At each padded content corner, |x|/(w/2) + |y|/(h/2) must be at most one.
+                let scale =
+                    ((content_width + 24.0) / width + (content_height + 24.0) / height).max(1.0);
+                (width * scale, height * scale)
+            } else {
+                (width, height)
             }
         }
     }
@@ -18849,25 +18864,34 @@ fn edge_anchors(
     source_shape: fm_core::NodeShape,
     target_shape: fm_core::NodeShape,
 ) -> (LayoutPoint, LayoutPoint) {
-    let source_center = source_box.bounds.center();
-    let target_center = target_box.bounds.center();
+    let outline_bounds = |bounds, shape| match shape {
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::FilledCircle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => shapes::circle_bounds(bounds),
+        _ => bounds,
+    };
+    let source_bounds = outline_bounds(source_box.bounds, source_shape);
+    let target_bounds = outline_bounds(target_box.bounds, target_shape);
+    let source_center = source_bounds.center();
+    let target_center = target_bounds.center();
 
     if horizontal_ranks {
         // Slanted shapes pull away from their box between the horizontal edges, so the side
         // midpoint is not on the drawn outline. Anchoring at the box there leaves the arrowhead
         // floating beside the node — a triangle is a quarter of its own width adrift.
-        let source_inset = source_box.bounds.width * source_shape.horizontal_outline_inset_ratio();
-        let target_inset = target_box.bounds.width * target_shape.horizontal_outline_inset_ratio();
+        let source_inset = source_bounds.width * source_shape.horizontal_outline_inset_ratio();
+        let target_inset = target_bounds.width * target_shape.horizontal_outline_inset_ratio();
 
         let (source_x, target_x) = if target_center.x >= source_center.x {
             (
-                source_box.bounds.x + source_box.bounds.width - source_inset,
-                target_box.bounds.x + target_inset,
+                source_bounds.x + source_bounds.width - source_inset,
+                target_bounds.x + target_inset,
             )
         } else {
             (
-                source_box.bounds.x + source_inset,
-                target_box.bounds.x + target_box.bounds.width - target_inset,
+                source_bounds.x + source_inset,
+                target_bounds.x + target_bounds.width - target_inset,
             )
         };
         (
@@ -18882,15 +18906,9 @@ fn edge_anchors(
         )
     } else {
         let (source_y, target_y) = if target_center.y >= source_center.y {
-            (
-                source_box.bounds.y + source_box.bounds.height,
-                target_box.bounds.y,
-            )
+            (source_bounds.y + source_bounds.height, target_bounds.y)
         } else {
-            (
-                source_box.bounds.y,
-                target_box.bounds.y + target_box.bounds.height,
-            )
+            (source_bounds.y, target_bounds.y + target_bounds.height)
         };
         (
             LayoutPoint {
@@ -21817,7 +21835,6 @@ mod tests {
         for shape in [
             fm_core::NodeShape::Rect,
             fm_core::NodeShape::Rounded,
-            fm_core::NodeShape::Circle,
             fm_core::NodeShape::Diamond,
             fm_core::NodeShape::Hexagon,
             fm_core::NodeShape::Stadium,
@@ -29894,6 +29911,163 @@ mod tests {
                 node.node_id,
                 node.bounds.y
             );
+        }
+    }
+
+    #[test]
+    fn circular_labels_fit_inside_the_drawn_circle() {
+        for text in [
+            "Customer authentication",
+            "Customer authentication\nPermission granted",
+            "注文を確認して承認する",
+        ] {
+            for metrics in [
+                fm_core::FontMetrics::default_metrics(),
+                fm_core::FontMetrics::monospace(28.0),
+            ] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::GitGraph);
+                ir.labels.push(IrLabel {
+                    text: text.to_string(),
+                    span: Span::default(),
+                });
+                for shape in [
+                    NodeShape::Circle,
+                    NodeShape::FilledCircle,
+                    NodeShape::DoubleCircle,
+                    NodeShape::CrossedCircle,
+                ] {
+                    let node = IrNode {
+                        id: "A".to_string(),
+                        label: Some(IrLabelId(0)),
+                        shape,
+                        ..IrNode::default()
+                    };
+                    let (width, height) = compute_node_size(&ir, &node, &metrics);
+                    assert_eq!(width, height, "{shape:?}: bounds must match the circle");
+                    let radius = width / 2.0
+                        - if shape == NodeShape::DoubleCircle {
+                            4.0
+                        } else {
+                            0.0
+                        };
+                    let (text_width, text_height) = metrics.estimate_dimensions(text);
+                    let corner_radius = (text_width / 2.0).hypot(text_height / 2.0);
+                    assert!(
+                        corner_radius + 12.0 <= radius,
+                        "{shape:?}: {text:?} escapes its circle ({corner_radius} vs {radius})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decision_labels_fit_between_the_sloping_sides() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for text in [
+            "Ready?",
+            "Does this customer have permission to approve this transaction?",
+            "Does this customer have permission\nto approve this transaction?",
+            "First decision condition\nSecond decision condition\nFinal condition",
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.labels.push(IrLabel {
+                text: text.to_string(),
+                span: Span::default(),
+            });
+            let node = IrNode {
+                id: "A".to_string(),
+                label: Some(IrLabelId(0)),
+                shape: NodeShape::Diamond,
+                ..IrNode::default()
+            };
+            let (width, height) = compute_node_size(&ir, &node, &metrics);
+            let (text_width, text_height) = metrics.estimate_dimensions(text);
+            let padded_corner = (text_width + 16.0) / width + (text_height + 16.0) / height;
+            assert!(
+                padded_corner < 1.0,
+                "{text:?}: label crosses the diamond outline ({padded_corner})"
+            );
+        }
+    }
+
+    #[test]
+    fn ranked_circle_ports_touch_the_drawn_outline_in_every_direction() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let ir = parse(&format!(
+                "flowchart {direction}\n A((Customer authentication)) --> B(((Permission granted)))\n"
+            ))
+            .ir;
+            for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                let layout = layout_diagram_traced_with_algorithm(&ir, algorithm).layout;
+                let edge = layout.edges.first().expect("connected circles");
+                for (node_id, endpoint) in [
+                    ("A", edge.points.first().expect("source port")),
+                    ("B", edge.points.last().expect("target port")),
+                ] {
+                    let node = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == node_id)
+                        .unwrap();
+                    let center = node.bounds.center();
+                    let radius = node.bounds.width.min(node.bounds.height) / 2.0;
+                    let distance = (endpoint.x - center.x).hypot(endpoint.y - center.y);
+                    assert!(
+                        (distance - radius).abs() < 0.01,
+                        "{direction}/{algorithm:?}/{node_id}: port is {distance} from center, radius {radius}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn circular_ports_use_the_drawn_radius_with_non_square_supplied_bounds() {
+        for (width, height) in [(180.0, 60.0), (60.0, 180.0)] {
+            let source = LayoutNodeBox {
+                node_index: 0,
+                node_id: "A".to_string(),
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width,
+                    height,
+                },
+                rank: 0,
+                order: 0,
+            };
+            let mut target = source.clone();
+            target.bounds.x += 400.0;
+            target.bounds.y += 400.0;
+            let center = source.bounds.center();
+            for shape in [
+                NodeShape::Circle,
+                NodeShape::FilledCircle,
+                NodeShape::DoubleCircle,
+                NodeShape::CrossedCircle,
+            ] {
+                for horizontal in [true, false] {
+                    let (from, to) =
+                        crate::edge_anchors(&source, &target, horizontal, shape, shape);
+                    for (bounds, port) in [(source.bounds, from), (target.bounds, to)] {
+                        let center = bounds.center();
+                        assert!(
+                            ((port.x - center.x).hypot(port.y - center.y) - 30.0).abs() < 0.001
+                        );
+                    }
+                }
+                let diagonal = crate::clip_to_shape_border(
+                    center,
+                    target.bounds.center(),
+                    &source.bounds,
+                    shape,
+                );
+                assert!(
+                    ((diagonal.x - center.x).hypot(diagonal.y - center.y) - 30.0).abs() < 0.001
+                );
+            }
         }
     }
 
