@@ -224,7 +224,20 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # every noncustom section stayed byte-identical; a separate strip-only pass grew gzip by 3012.
 # Existing -Oz --converge, LTO, one codegen unit and immediate-abort std remain in force.
 # This is the smallest whole-KiB ceiling that fits the measured artifact: headroom 210 bytes.
-MAX_GZIP_BYTES=$((776 * 1024))
+# Raised 776K -> 785K on 2026-10-19 after measuring current main and GH#14 font geometry:
+#   794414 gzip  committed c2ba665b package from f85cf30d
+#   802138 gzip  unchanged main 41afadc rebuilt with the same canonical flags (+7724)
+#   803604 gzip  calibrated font overrides, font-aware tree/rank spacing, glyph/diamond
+#                  fitting, clear label placement, export bounds and title-sized cluster
+#                  headers/compound frames (+1466 over fresh main)
+# The first delta belongs to eight already-landed layout/style/class/routing changes. Both
+# baseline modules have zero custom sections and the same 89 imports / 50 exports; their code
+# section grew 22017 raw bytes while data shrank 2306. No metadata remains to strip. Keep the
+# existing -Oz --converge, LTO, one codegen unit and immediate-abort std; the additional optimizer
+# replays rejected above are not a size reduction. This smallest whole-KiB ceiling leaves 236
+# bytes. Browser/API correctness and artifact/source freshness gates remain unchanged.
+# See evidence/issue14_font_regression.md for before/after rendering and size evidence.
+MAX_GZIP_BYTES=$((785 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

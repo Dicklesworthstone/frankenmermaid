@@ -3941,7 +3941,12 @@ fn compute_traced_layout_with_config_and_guardrails(
             layout_diagram_sugiyama_traced_with_config(ir, config)
         }
         LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
-        LayoutAlgorithm::Tree => layout_diagram_tree_traced(ir),
+        LayoutAlgorithm::Tree => {
+            let metrics = config
+                .font_metrics
+                .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+            layout_diagram_tree_traced_with_metrics(ir, &metrics)
+        }
         LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
@@ -5588,7 +5593,11 @@ pub(crate) fn flat_placement(
         crossing_count,
     );
 
-    let nodes = coordinate_assignment(ir, node_sizes, &ranks, &ordering_by_rank, spacing);
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let nodes = coordinate_assignment(ir, node_sizes, &ranks, &ordering_by_rank, spacing, &metrics);
     (crossing_count_before, crossing_count, nodes)
 }
 
@@ -5885,9 +5894,16 @@ pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out using the tree algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_tree_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+}
+
+fn layout_diagram_tree_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let node_sizes = compute_node_sizes(ir, metrics);
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -5912,7 +5928,9 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     if let Some(path_order) = directed_path_order(ir) {
-        return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
+        return layout_directed_path_tree_traced(
+            ir, path_order, node_sizes, spacing, metrics, trace,
+        );
     }
 
     let tree = build_tree_layout_structure(ir);
@@ -5965,6 +5983,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         &tree.depth,
         spacing.rank_spacing,
         tree.reverse_depth_axis,
+        metrics,
     );
 
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
@@ -5987,11 +6006,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .unwrap_or_else(|| {
                 build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default())
             });
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -6039,6 +6054,7 @@ fn layout_directed_path_tree_traced(
     path_order: Vec<usize>,
     node_sizes: Vec<(f32, f32)>,
     spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
     mut trace: LayoutTrace,
 ) -> TracedLayout {
     let node_count = ir.nodes.len();
@@ -6087,6 +6103,7 @@ fn layout_directed_path_tree_traced(
         &depth,
         spacing.rank_spacing,
         reverse_depth_axis,
+        metrics,
     );
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
@@ -6110,11 +6127,7 @@ fn layout_directed_path_tree_traced(
         EdgeRouting::default(),
     )
     .expect("validated directed path endpoints");
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -11646,6 +11659,7 @@ fn depth_level_centers(
     node_depths: &[usize],
     gap: f32,
     reverse: bool,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<f32> {
     // Tree ranks need the same label clearance as Sugiyama. Avoid additional allocations for
     // unlabelled trees, and enlarge only the logical gap containing a label.
@@ -11658,6 +11672,7 @@ fn depth_level_centers(
             &ranks,
             &rank_to_index,
             matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
+            metrics,
         )
     } else {
         BTreeMap::new()
@@ -15567,16 +15582,17 @@ fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) 
 /// between them. The gap was the fixed `rank_spacing` however long the label, so in a left-to-right
 /// diagram a label wider than the gap was drawn under the two nodes it connects and read as
 /// `y long label on this`. The floor is the label's extent along the rank axis plus room for an
-/// arrowhead at each end.
+/// arrowhead at each end. Use the same configured metrics as node sizing; a font-size override
+/// must enlarge both the glyphs and the space reserved for them.
 fn edge_label_rank_gaps(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     rank_to_index: &BTreeMap<usize, usize>,
     horizontal_ranks: bool,
+    metrics: &fm_core::FontMetrics,
 ) -> BTreeMap<usize, f32> {
     const END_ROOM: f32 = 40.0;
     let mut gaps = BTreeMap::new();
-    let metrics = fm_core::FontMetrics::default_metrics();
     for edge in &ir.edges {
         let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
             continue;
@@ -15611,6 +15627,7 @@ fn coordinate_assignment(
     ranks: &BTreeMap<usize, usize>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutNodeBox> {
     let fallback_nodes_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
@@ -15648,7 +15665,7 @@ fn coordinate_assignment(
     } else {
         (0..ordered_ranks.len()).collect()
     };
-    let label_gaps = edge_label_rank_gaps(ir, ranks, &rank_to_index, horizontal_ranks);
+    let label_gaps = edge_label_rank_gaps(ir, ranks, &rank_to_index, horizontal_ranks, metrics);
     for (position, &rank_index) in iter_order.iter().enumerate() {
         primary_offsets[rank_index] = primary_cursor;
         let label_gap = iter_order
@@ -19970,17 +19987,13 @@ fn build_cluster_boxes(
     // Sort by depth descending (deepest / innermost children first)
     depths.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    const HEADER_CLEARANCE: f32 = 28.0;
-    const NESTING_INSET: f32 = 16.0;
-
     let mut final_boxes: Vec<Option<LayoutClusterBox>> = vec![None; ir.clusters.len()];
 
     for &(_depth, cluster_index) in &depths {
         let Some(cluster) = ir.clusters.get(cluster_index) else {
             continue;
         };
-        let Some((mut min_x, mut min_y, mut max_x, mut max_y)) = cluster_bounds[cluster_index]
-        else {
+        let Some(mut bounds) = cluster_bounds[cluster_index] else {
             continue;
         };
 
@@ -19993,18 +20006,10 @@ fn build_cluster_boxes(
                     && let Some(child_c_id) = child_sg.cluster
                     && let Some(Some(child_box)) = final_boxes.get(child_c_id.0)
                 {
-                    min_x = min_x.min(child_box.bounds.x - NESTING_INSET + spacing.cluster_padding);
-                    max_x = max_x.max(
-                        child_box.bounds.x + child_box.bounds.width + NESTING_INSET
-                            - spacing.cluster_padding,
-                    );
-                    min_y = min_y.min(
-                        child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
-                            + spacing.cluster_padding,
-                    );
-                    max_y = max_y.max(
-                        child_box.bounds.y + child_box.bounds.height + NESTING_INSET
-                            - spacing.cluster_padding,
+                    extend_cluster_bounds_for_child(
+                        &mut bounds,
+                        child_box.bounds,
+                        spacing.cluster_padding,
                     );
                 }
             }
@@ -20015,27 +20020,61 @@ fn build_cluster_boxes(
             .and_then(|label_id| ir.labels.get(label_id.0))
             .map(|label| label.text.clone());
 
-        let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-        let title_width = title
-            .as_deref()
-            .map_or(0.0, |text| cluster_title_width(text, metrics));
+        let bounds = cluster_bounds_with_title(bounds, title.as_deref(), spacing, metrics);
 
         let box_obj = LayoutClusterBox {
             cluster_index,
             span: cluster.span,
             title,
             color: None,
-            bounds: LayoutRect {
-                x: min_x - spacing.cluster_padding,
-                y: min_y - spacing.cluster_padding,
-                width: contents_width.max(title_width),
-                height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
-            },
+            bounds,
         };
         final_boxes[cluster_index] = Some(box_obj);
     }
 
     final_boxes.into_iter().flatten().collect()
+}
+
+/// Include a nested frame using the same insets during compound allocation and reconstruction.
+fn extend_cluster_bounds_for_child(
+    bounds: &mut (f32, f32, f32, f32),
+    child: LayoutRect,
+    padding: f32,
+) {
+    const HEADER_CLEARANCE: f32 = 28.0;
+    const NESTING_INSET: f32 = 16.0;
+    bounds.0 = bounds.0.min(child.x - NESTING_INSET + padding);
+    bounds.2 = bounds
+        .2
+        .max(child.x + child.width + NESTING_INSET - padding);
+    bounds.1 = bounds
+        .1
+        .min(child.y - HEADER_CLEARANCE - NESTING_INSET + padding);
+    bounds.3 = bounds
+        .3
+        .max(child.y + child.height + NESTING_INSET - padding);
+}
+
+fn cluster_bounds_with_title(
+    (min_x, min_y, max_x, max_y): (f32, f32, f32, f32),
+    title: Option<&str>,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> LayoutRect {
+    let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
+    let title_width = title.map_or(0.0, |text| cluster_title_width(text, metrics));
+    let extra_header = title.map_or(0.0, |text| {
+        cluster_title_extra_header(text, spacing.cluster_padding, metrics)
+    });
+    let width = contents_width.max(title_width);
+    LayoutRect {
+        // Compound placement centres content in its title-sized slot. Expand equally here
+        // so the reconstructed box stays inside that same slot.
+        x: min_x - spacing.cluster_padding - (width - contents_width) / 2.0,
+        y: min_y - spacing.cluster_padding - extra_header,
+        width,
+        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y) + extra_header,
+    }
 }
 
 /// Width a cluster box needs so its title fits inside it (bd-tm5p).
@@ -20044,18 +20083,57 @@ fn build_cluster_boxes(
 /// 8px is mirrored on the right. The label renders at `detail.cluster_font_size`, which is
 /// `config.font_size * 0.9` at full detail and `* 0.86` at reduced detail — NOT the node font size —
 /// so the estimate is scaled to the larger of those, because under-sizing is what lets the title
-/// escape while over-sizing only adds padding.
+/// escape while over-sizing only adds padding. Semibold titles need more room than the plain
+/// preset: the browser's 54px "Very long title" measures 432.875px against its 326.7px estimate.
 fn cluster_title_width(title: &str, metrics: &fm_core::FontMetrics) -> f32 {
     if title.trim().is_empty() {
         return 0.0;
     }
     // Swimlane/section clusters render with their prefix stripped, so measure the displayed text.
-    let displayed = title
+    let displayed = displayed_cluster_title(title);
+    let font_size = metrics.font_size();
+    let average = metrics.avg_char_width();
+    let text_width = displayed
+        .lines()
+        .map(|line| {
+            let measured = metrics.estimate_width(line);
+            // Match SVG's preserved wide-glyph allowance, including narrow presets and m/w.
+            let wide_allowance: f32 = line
+                .chars()
+                .map(
+                    |character| match fm_core::CharWidthClass::classify(character) {
+                        fm_core::CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
+                        fm_core::CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
+                        _ => 0.0,
+                    },
+                )
+                .sum();
+            (measured * 1.4).max((measured + wide_allowance) * 1.125)
+        })
+        .fold(0.0_f32, f32::max)
+        * ((font_size * CLUSTER_FONT_SCALE).max(10.0) / font_size);
+    16.0 + text_width
+}
+
+fn displayed_cluster_title(title: &str) -> &str {
+    title
         .strip_prefix("swimlane:")
         .or_else(|| title.strip_prefix("section "))
-        .unwrap_or(title);
-    let text_width = metrics.estimate_dimensions(displayed).0 * CLUSTER_FONT_SCALE;
-    16.0 + text_width
+        .unwrap_or(title)
+}
+
+/// Extra space above the contents when a title outgrows the existing cluster padding.
+/// SVG uses this baseline and TextBuilder's 1.4 line spacing; the remaining allowance keeps
+/// descenders and the first node's opaque fill apart. Ordinary one-line defaults add nothing.
+fn cluster_title_extra_header(title: &str, padding: f32, metrics: &fm_core::FontMetrics) -> f32 {
+    let displayed = displayed_cluster_title(title);
+    if displayed.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = (metrics.font_size() * CLUSTER_FONT_SCALE).max(10.0);
+    let baseline = (font_size + 2.0).max(16.0);
+    let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
+    (baseline + additional_lines * font_size * 1.4 + font_size * 0.3 + 8.0 - padding).max(0.0)
 }
 
 /// The larger of the renderer's two `cluster_font_size` factors (`0.9` full detail, `0.86` reduced).
@@ -26291,6 +26369,107 @@ mod tests {
         }
     }
 
+    fn assert_rank_gaps_follow_configured_font_metrics(algorithm: LayoutAlgorithm) {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let doubled_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: metrics.font_size() * 2.0,
+            ..metrics.config().clone()
+        });
+        for direction in [
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::TB,
+            GraphDirection::BT,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let reverse = matches!(direction, GraphDirection::RL | GraphDirection::BT);
+            let text = if horizontal {
+                "W".repeat(80)
+            } else {
+                "Validate request\nAuthorize changes\nCheck ownership\nCheck version\nApply update\nConfirm result".to_string()
+            };
+            for branching in [false, true] {
+                let branch = if branching { "\n  A --> D[Side]" } else { "" };
+                let mut ir = parse(&format!(
+                    "flowchart LR\n  A[Source operation] -->|label| B[Next operation]\n  B --> C[Final operation]{branch}\n"
+                ))
+                .ir;
+                ir.direction = direction;
+                let label_id = ir.edges[0].label.expect("labelled first edge");
+                ir.labels[label_id.0].text.clone_from(&text);
+                let placed = |font_metrics| {
+                    let traced = layout_diagram_traced_with_config_and_guardrails(
+                        &ir,
+                        algorithm,
+                        LayoutConfig {
+                            font_metrics,
+                            fnx_enabled: false,
+                            constraint_solver: ConstraintSolverMode::Disabled,
+                            ..Default::default()
+                        },
+                        LayoutGuardrails::default(),
+                    );
+                    assert_eq!(traced.trace.dispatch.selected, algorithm);
+                    traced.layout
+                };
+                let default = placed(None);
+                let explicit_default = placed(Some(metrics.clone()));
+                assert_eq!(
+                    default, explicit_default,
+                    "explicit default metrics preserve complete layout output"
+                );
+                let doubled = placed(Some(doubled_metrics.clone()));
+                let bounds = |layout: &DiagramLayout, id: &str| {
+                    layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == id)
+                        .expect("placed node")
+                        .bounds
+                };
+                let clearance = |layout: &DiagramLayout, from: &str, to: &str| {
+                    let (a, b) = (bounds(layout, from), bounds(layout, to));
+                    match (horizontal, reverse) {
+                        (true, false) => b.x - (a.x + a.width),
+                        (true, true) => a.x - (b.x + b.width),
+                        (false, false) => b.y - (a.y + a.height),
+                        (false, true) => a.y - (b.y + b.height),
+                    }
+                };
+                let default_gap = clearance(&default, "A", "B");
+                let doubled_gap = clearance(&doubled, "A", "B");
+                assert!(
+                    (doubled_gap - 40.0) + 0.01 >= 2.0 * (default_gap - 40.0),
+                    "doubling font metrics must double label clearance excluding arrow room: \
+                     {default_gap} -> {doubled_gap}, {algorithm:?}, {direction:?}, branching={branching}"
+                );
+                let (width, height) = doubled_metrics.estimate_dimensions(&text);
+                let full_label_extent = if horizontal { width * 1.4 } else { height };
+                assert!(doubled_gap + 0.01 >= full_label_extent + 40.0);
+                assert!(bounds(&doubled, "A").width > bounds(&default, "A").width);
+                for layout in [&default, &doubled] {
+                    let plain_gap = clearance(layout, "B", "C");
+                    assert!(
+                        (plain_gap - LayoutSpacing::default().rank_spacing).abs() < 0.01,
+                        "font scaling must not expand an unlabelled rank gap: {plain_gap}"
+                    );
+                    assert_eq!(layout.edges.len(), ir.edges.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sugiyama_rank_gaps_follow_configured_font_metrics() {
+        assert_rank_gaps_follow_configured_font_metrics(LayoutAlgorithm::Sugiyama);
+    }
+
+    #[test]
+    fn tree_rank_gaps_follow_configured_font_metrics() {
+        // Exercise both the directed-path specialization and the general branching tree.
+        assert_rank_gaps_follow_configured_font_metrics(LayoutAlgorithm::Tree);
+    }
+
     #[test]
     fn tree_layout_top_down_places_children_below_parents() {
         let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
@@ -31741,18 +31920,20 @@ mod tests {
 
     #[test]
     fn directed_path_suffix_with_edge_labels_falls_back_without_mutation() {
-        let mut base = graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]);
+        // The path specialization deliberately excludes graphs with fewer than three nodes.
+        // Start with an eligible prefix so the assertions below reach suffix-label rejection.
+        let mut base = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2)]);
         base.direction = GraphDirection::LR;
         let before = layout_diagram_tree(&base);
-        let prefix = certify_directed_path_layout_prefix(&base, &before, 2, 1)
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2)
             .expect("unlabelled sequential LR path should certify");
         let text = "Confirm available inventory and reserve every requested item before continuing";
         let (text_width, _) = fm_core::FontMetrics::default_metrics().estimate_dimensions(text);
         let needed_gap = text_width.mul_add(1.4, 40.0);
 
         // A label on the boundary edge or a later appended edge requires the full layout.
-        for edge_index in [1, 2] {
-            let mut next = graph_ir(DiagramType::Flowchart, 4, &[(0, 1), (1, 2), (2, 3)]);
+        for edge_index in [2, 3] {
+            let mut next = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
             next.direction = GraphDirection::LR;
             let label_index = next.labels.len();
             next.labels.push(IrLabel {

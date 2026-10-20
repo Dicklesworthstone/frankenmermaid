@@ -26,6 +26,21 @@ const wasm = await import(pathToFileURL(join(packageDir, 'frankenmermaid.js')).h
 await wasm.default({ module_or_path: wasmBytes });
 const results = [];
 
+function longEdgeDimensions(svg) {
+  const label = 'Souběžně, nikoli jako podmínka hovoru';
+  const groups = [...svg.matchAll(/<g\b[^>]*class="fm-edge-labeled"[^>]*>([\s\S]*?)<\/g>/g)];
+  const group = groups.find(match => {
+    const text = match[1].match(/<text\b[^>]*>([\s\S]*?)<\/text>/)?.[1];
+    return text !== undefined && normalize(text.replace(/<[^>]*>/g, ' ')) === label;
+  });
+  assert.ok(group, 'the reported long edge label must be drawn');
+  const width = Number(group[1].match(/<rect\b[^>]*\swidth="([^"]+)"/)?.[1]);
+  const fontSize = Number(group[1].match(/<text\b[^>]*\sfont-size="([^"]+)"/)?.[1]);
+  assert.ok(Number.isFinite(width) && width > 0, 'long edge backing width');
+  assert.ok(Number.isFinite(fontSize) && fontSize > 0, 'long edge font size');
+  return { width, fontSize };
+}
+
 function verify(name, svg, config, full = true) {
   assert.equal(typeof svg, 'string', `${name}: SVG response`);
   // Full labels already existed in the broken artifact's accessibility metadata.
@@ -67,9 +82,13 @@ function verify(name, svg, config, full = true) {
   if (config?.pressure?.frameTimeMs === 0 && config?.detailTier) {
     assert.equal(tier, config.detailTier, `${name}: requested tier with nominal telemetry`);
   }
-  const result = { name, tier, full, textCount: text.length, edgeLabels, clusterLabels, sha256: sha256(svg) };
+  const result = {
+    name, tier, full, textCount: text.length, edgeLabels, clusterLabels,
+    ...(full ? { longEdge: longEdgeDimensions(svg) } : {}), sha256: sha256(svg),
+  };
   results.push(result);
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  return result;
 }
 
 const critical = { frameBudgetMs: 16, frameTimeMs: 64, workerSaturationPermille: 1000 };
@@ -87,6 +106,11 @@ const cases = [
   ['nominal-compact', { pressure: nominal, detailTier: 'compact' }],
   ['nominal-normal', { pressure: nominal, detailTier: 'normal' }],
   ['nominal-rich', { pressure: nominal, detailTier: 'rich' }],
+  ['font-11-compact', { fontSize: 11, pressure: nominal, detailTier: 'compact' }],
+  ['font-22-compact', { fontSize: 22, pressure: nominal, detailTier: 'compact' }],
+  ['font-30-compact', { fontSize: 30, pressure: nominal, detailTier: 'compact' }],
+  ['nested-font-size-wins', { fontSize: 11, svg: { fontSize: 22 }, pressure: nominal, detailTier: 'compact' }],
+  ['font-30-rich', { fontSize: 30, pressure: nominal, detailTier: 'rich' }],
 ];
 
 for (const path of ['renderSvg', 'renderDeck']) {
@@ -115,8 +139,45 @@ wasm.init({ preserveLabels: false, detailTier: 'rich', svg: { preserveLabels: tr
 verify('init/nested-preservation-wins', workerSvg(), { detailTier: 'compact' });
 wasm.init({ detailTier: 'compact', preserveLabels: false });
 verify('init/explicit-overview', workerSvg(), { detailTier: 'compact' }, false);
-wasm.init({ detailTier: 'auto', preserveLabels: true });
-assert.equal(results.length, 38);
+
+const apiPaths = ['renderSvg', 'renderDeck', 'worker'];
+const resultFor = name => {
+  const result = results.find(row => row.name === name);
+  assert.ok(result, `missing API result: ${name}`);
+  return result;
+};
+for (const path of apiPaths) {
+  const small = resultFor(`${path}/font-11-compact`).longEdge;
+  const large = resultFor(`${path}/font-22-compact`).longEdge;
+  assert.ok(Math.abs(large.fontSize - 2 * small.fontSize) < 0.02, `${path}: font override reaches the glyphs`);
+  // The broken package already passed all 50 text-count checks at both sizes. Its backing
+  // width stayed constant while the text doubled, so count-only font tests cannot catch it.
+  assert.ok(large.width > 1.5 * small.width, `${path}: long-label backing must grow with its text`);
+  assert.equal(resultFor(`${path}/nested-font-size-wins`).sha256,
+    resultFor(`${path}/font-22-compact`).sha256, `${path}: nested font override wins once`);
+}
+
+function verifyInitialized(name, config, expectedCase) {
+  for (const path of apiPaths) {
+    const output = path === 'worker' ? workerSvg(config) : wasm[path](source, config);
+    const svg = path === 'renderDeck' ? output.svg : output;
+    const result = verify(`${path}/${name}`, svg, { detailTier: 'compact', ...config });
+    assert.equal(result.sha256, resultFor(`${path}/${expectedCase}`).sha256,
+      `${path}/${name}: initialized and per-call typography must agree`);
+  }
+}
+
+for (const fontSize of [30, 11, 15]) {
+  wasm.init({ fontSize, detailTier: 'compact', preserveLabels: true, pressure: nominal });
+  verifyInitialized(`init-font-${fontSize}`, undefined,
+    fontSize === 15 ? 'nominal-compact' : `font-${fontSize}-compact`);
+}
+wasm.init({ fontSize: 11, svg: { fontSize: 22 } });
+verifyInitialized('init-nested-font-size-wins', undefined, 'font-22-compact');
+verifyInitialized('font-override-after-init', { fontSize: 11 }, 'font-11-compact');
+verifyInitialized('font-override-keeps-runtime-default', undefined, 'font-22-compact');
+wasm.init({ fontSize: 15, detailTier: 'auto', preserveLabels: true });
+assert.equal(results.length, 71);
 const report = { source_sha256: sha256(source), wasm_sha256: sha256(wasmBytes), checks: results.length, results };
 if (outputPath) await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
 process.stdout.write(`PASS: ${results.length} actual WASM API checks${outputPath ? `; evidence ${outputPath}` : ''}\n`);

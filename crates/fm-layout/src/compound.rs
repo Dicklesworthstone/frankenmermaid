@@ -98,8 +98,8 @@ struct PlacedCluster {
     /// `ir` node index of each node in `boxes`, in the same order.
     members: Vec<usize>,
     boxes: Vec<LayoutNodeBox>,
-    /// The extent of the contents, nested cluster boxes included.
-    content: LayoutRect,
+    /// The complete cluster rectangle, including nested frames, padding and its title.
+    bounds: LayoutRect,
     /// The size the cluster occupies in its parent: the content plus the cluster's padding.
     size: (f32, f32),
 }
@@ -137,24 +137,30 @@ fn place(
             let sub_sizes: Vec<(f32, f32)> =
                 members.iter().map(|&member| node_sizes[member]).collect();
             let boxes = place(&sub, &sub_sizes, config, spacing, metrics);
-            let mut content = bounding_box(boxes.iter().map(|node| node.bounds));
+            let content = bounding_box(boxes.iter().map(|node| node.bounds));
+            let mut bounds = (
+                content.x,
+                content.y,
+                content.x + content.width,
+                content.y + content.height,
+            );
             for nested in build_cluster_boxes(&sub, &boxes, spacing, metrics) {
-                content = union(content, nested.bounds);
+                crate::extend_cluster_bounds_for_child(
+                    &mut bounds,
+                    nested.bounds,
+                    spacing.cluster_padding,
+                );
             }
-            let title_width = subgraph
+            let title = subgraph
                 .title
                 .and_then(|label| ir.labels.get(label.0))
-                .map_or(0.0, |label| {
-                    crate::cluster_title_width(&label.text, metrics)
-                });
-            let size = (
-                (2.0f32.mul_add(spacing.cluster_padding, content.width)).max(title_width),
-                2.0f32.mul_add(spacing.cluster_padding, content.height),
-            );
+                .map(|label| label.text.as_str());
+            let bounds = crate::cluster_bounds_with_title(bounds, title, spacing, metrics);
+            let size = (bounds.width, bounds.height);
             PlacedCluster {
                 members,
                 boxes,
-                content,
+                bounds,
                 size,
             }
         })
@@ -191,11 +197,10 @@ fn place(
     }
     for (top, cluster) in placed.iter().enumerate() {
         let slot = &parent_boxes[parent.stand_in[top]];
-        // Centre the contents in the slot: the slot may be wider than the contents for a title.
-        let dx = (slot.bounds.width - cluster.content.width)
-            .mul_add(0.5, slot.bounds.x - cluster.content.x);
-        let dy = (slot.bounds.height - cluster.content.height)
-            .mul_add(0.5, slot.bounds.y - cluster.content.y);
+        // Allocate and reconstruct the same rectangle, including title-dominated widths and
+        // asymmetric header space. Centring raw contents would spend half the header below them.
+        let dx = slot.bounds.x - cluster.bounds.x;
+        let dy = slot.bounds.y - cluster.bounds.y;
         for (member, member_box) in cluster.members.iter().zip(&cluster.boxes) {
             let mut node_box = member_box.clone();
             node_box.node_index = *member;
@@ -526,5 +531,184 @@ fn union(a: LayoutRect, b: LayoutRect) -> LayoutRect {
         y,
         width: (a.x + a.width).max(b.x + b.width) - x,
         height: (a.y + a.height).max(b.y + b.height) - y,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Source, compound_node_boxes, flat_boxes, parent_ir, top_level_clusters};
+    use crate::{LayoutAlgorithm, LayoutConfig, LayoutRect, LayoutSpacing, build_cluster_boxes};
+    use fm_core::{FontMetrics, FontMetricsConfig};
+
+    #[test]
+    fn cluster_titles_reserve_scaled_header_and_semibold_width() {
+        for font_size in [15.0_f32, 30.0, 60.0] {
+            for lines in [1, 2] {
+                let mut ir = fm_parser::parse(
+                    "flowchart TD\nsubgraph X[\"Very long title\"]\nA[Alpha]\nend",
+                )
+                .ir;
+                let title_id = ir.clusters[0].title.expect("cluster title");
+                if lines == 2 {
+                    ir.labels[title_id.0].text.push_str("\nVery long title");
+                }
+                let metrics = FontMetrics::new(FontMetricsConfig {
+                    font_size,
+                    ..Default::default()
+                });
+                let traced = crate::layout_diagram_traced_with_config(
+                    &ir,
+                    LayoutAlgorithm::Sugiyama,
+                    LayoutConfig {
+                        font_metrics: Some(metrics),
+                        fnx_enabled: false,
+                        ..Default::default()
+                    },
+                );
+                let cluster = &traced.layout.clusters[0];
+                let node = &traced.layout.nodes[0];
+                assert_eq!(
+                    cluster.title.as_deref(),
+                    Some(ir.labels[title_id.0].text.as_str())
+                );
+                // Independent browser measurement: at a 54px semibold title font, this exact
+                // string draws 432.875px wide. The old layout reserved only 326.7px plus padding.
+                let drawn_width = 432.875 * (font_size / 60.0);
+                assert!(
+                    cluster.bounds.width + 0.01 >= drawn_width + 16.0,
+                    "title needs {drawn_width}px at font {font_size}: {:?}",
+                    cluster.bounds
+                );
+                let title_font = font_size * 0.9;
+                let last_baseline =
+                    (title_font + 2.0).max(16.0) + (lines - 1) as f32 * title_font * 1.4;
+                let header = node.bounds.y - cluster.bounds.y;
+                assert!(
+                    header + 0.01 >= last_baseline + title_font * 0.3 + 8.0,
+                    "the title descenders must clear the node fill: header={header}, font={font_size}"
+                );
+                assert!(
+                    (node.bounds.center().x - cluster.bounds.center().x).abs() < 0.01,
+                    "title-dominated width must stay centred on its contents"
+                );
+                let bottom_padding =
+                    cluster.bounds.y + cluster.bounds.height - node.bounds.y - node.bounds.height;
+                assert!((bottom_padding - LayoutSpacing::default().cluster_padding).abs() < 0.01);
+                if font_size == 15.0 && lines == 1 {
+                    let padding = LayoutSpacing::default().cluster_padding;
+                    assert_eq!(header, padding);
+                    assert_eq!(cluster.bounds.width, node.bounds.width + 2.0 * padding);
+                    assert_eq!(cluster.bounds.height, node.bounds.height + 2.0 * padding);
+                }
+            }
+        }
+    }
+
+    fn assert_same_rect(actual: LayoutRect, expected: LayoutRect) {
+        assert!(
+            (actual.x - expected.x).abs() < 0.01
+                && (actual.y - expected.y).abs() < 0.01
+                && (actual.width - expected.width).abs() < 0.01
+                && (actual.height - expected.height).abs() < 0.01,
+            "reconstructed cluster {actual:?} must match its allocated slot {expected:?}"
+        );
+    }
+
+    #[test]
+    fn title_dominated_and_nested_clusters_match_parent_slots() {
+        for font_size in [15.0, 60.0] {
+            for direction in ["LR", "RL", "TD", "BT"] {
+                for nested in [false, true] {
+                    let inside = if nested {
+                        "subgraph Inner[\"Nested title\"]\nA[Alpha]\nend"
+                    } else {
+                        "A[Alpha]"
+                    };
+                    let title = "Wm".repeat(20);
+                    let ir = fm_parser::parse(&format!(
+                        "flowchart {direction}\nsubgraph X[\"{title}\"]\n{inside}\nend\n\
+                         subgraph Y[\"Another very long title\"]\nB[Beta]\nend\nA-->B"
+                    ))
+                    .ir;
+                    let metrics = FontMetrics::new(FontMetricsConfig {
+                        font_size,
+                        ..Default::default()
+                    });
+                    let config = LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        fnx_enabled: false,
+                        ..Default::default()
+                    };
+                    let spacing = LayoutSpacing::default();
+                    let node_sizes = crate::compute_node_sizes(&ir, &metrics);
+                    let nodes = compound_node_boxes(&ir, &node_sizes, &config, spacing, &metrics)
+                        .expect("compound placement");
+                    let clusters = build_cluster_boxes(&ir, &nodes, spacing, &metrics);
+                    assert_eq!(clusters.len(), if nested { 3 } else { 2 });
+                    let tops = top_level_clusters(&ir);
+                    let mut owner = vec![None; ir.nodes.len()];
+                    for (index, top) in tops.iter().enumerate() {
+                        for member in ir.graph.subgraph_members_recursive(top.id) {
+                            owner[member.0] = Some(index);
+                        }
+                    }
+                    // Re-layout the top-level graph using the actual reconstructed frame sizes.
+                    // If allocation and reconstruction disagree, the original boxes escape these
+                    // slots even though their contents may still be inside their own rectangles.
+                    let parent = parent_ir(&ir, &owner, &tops, &vec![None; tops.len()]);
+                    let cluster_bounds = |top: usize| {
+                        let index = tops[top].cluster.expect("cluster id").0;
+                        clusters
+                            .iter()
+                            .find(|cluster| cluster.cluster_index == index)
+                            .unwrap()
+                            .bounds
+                    };
+                    let sizes: Vec<_> = parent
+                        .source
+                        .iter()
+                        .map(|source| match *source {
+                            Source::Node(index) => node_sizes[index],
+                            Source::Cluster(top) => {
+                                let bounds = cluster_bounds(top);
+                                (bounds.width, bounds.height)
+                            }
+                        })
+                        .collect();
+                    let slots = flat_boxes(&parent.ir, &sizes, &config, spacing);
+                    for (top, &stand_in) in parent.stand_in.iter().enumerate() {
+                        assert_same_rect(cluster_bounds(top), slots[stand_in].bounds);
+                    }
+                    if nested {
+                        let outer = clusters
+                            .iter()
+                            .find(|cluster| cluster.title.as_deref() == Some(title.as_str()))
+                            .unwrap();
+                        let inner = clusters
+                            .iter()
+                            .find(|cluster| cluster.title.as_deref() == Some("Nested title"))
+                            .unwrap();
+                        assert!(inner.bounds.x >= outer.bounds.x + 15.99);
+                        assert!(
+                            inner.bounds.x + inner.bounds.width
+                                <= outer.bounds.x + outer.bounds.width - 15.99
+                        );
+                        let title_font = font_size * 0.9;
+                        assert!(
+                            inner.bounds.y
+                                >= outer.bounds.y
+                                    + (title_font + 2.0).max(16.0)
+                                    + title_font * 0.3
+                                    + 8.0
+                                    - 0.01
+                        );
+                        assert!(
+                            inner.bounds.y + inner.bounds.height
+                                <= outer.bounds.y + outer.bounds.height - 15.99
+                        );
+                    }
+                }
+            }
+        }
     }
 }
