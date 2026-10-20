@@ -87,18 +87,18 @@ impl From<NodeShape> for GpuNodeShape {
 
 /// Theme fill used when the author declared none.
 ///
-/// Mirrors `CanvasRenderConfig::default().node_fill` (`#ffffff`). Kept as a constant rather than
+/// Mirrors `CanvasRenderConfig::default().node_fill` (`#f8fafc`). Kept as a constant rather than
 /// read from the config so this module does not depend on a renderer instance — and pinned by
 /// `gpu_theme_defaults_match_the_canvas_config`, because a GPU pass that quietly disagreed with the
 /// raster pass about the DEFAULT colour would repaint every unstyled diagram.
-pub const DEFAULT_NODE_FILL_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+pub const DEFAULT_NODE_FILL_RGBA: [f32; 4] = [248.0 / 255.0, 250.0 / 255.0, 252.0 / 255.0, 1.0];
 /// Subgraph container fill when the author declared none (bd-dh6cy).
 ///
-/// The linear-RGBA form of `CanvasRenderConfig::cluster_fill` (`rgba(226,232,240,0.44)`), so an
-/// undeclared subgraph is the same translucent slate on both surfaces. Taken from the raster
+/// The RGBA form of `CanvasRenderConfig::cluster_fill` (`#f1f5f9`), so an
+/// undeclared subgraph is the same opaque slate on both surfaces. Taken from the raster
 /// default rather than invented, because two renderers disagreeing about an UNDECLARED colour is
 /// the same defect class as disagreeing about a declared one -- it just has nobody to report it.
-pub const DEFAULT_CLUSTER_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.44];
+pub const DEFAULT_CLUSTER_FILL_RGBA: [f32; 4] = [241.0 / 255.0, 245.0 / 255.0, 249.0 / 255.0, 1.0];
 
 /// Theme stroke used when the author declared none: `#94a3b8`.
 pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 1.0];
@@ -164,11 +164,10 @@ pub const QUADRANT_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
 
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
-/// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
-/// RGB, DIFFERENT ALPHA -- and the cluster instances fell back to the node stroke, so the plan drew
-/// subgraph borders fully opaque where the canvas draws them at 78%. Identical RGB is exactly why
-/// that went unnoticed: every channel a reader would spot-check matched.
-pub const DEFAULT_CLUSTER_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 0.78];
+/// Clusters use the lighter `#cbd5e1` border; ordinary nodes use `#94a3b8`.
+/// Keep the fallback distinct so a group does not acquire a node's heavier outline.
+pub const DEFAULT_CLUSTER_STROKE_RGBA: [f32; 4] =
+    [203.0 / 255.0, 213.0 / 255.0, 225.0 / 255.0, 1.0];
 
 /// Dash pattern of a subgraph divider, in layout units.
 pub const CLUSTER_DIVIDER_DASH: [f32; 2] = [6.0, 4.0];
@@ -463,18 +462,18 @@ pub struct GpuPieWedge {
     pub slice_index: u32,
 }
 
-/// Theme edge stroke used when no `linkStyle` applies: `#475569`, mirroring
+/// Theme edge stroke used when no `linkStyle` applies: `#64748b`, mirroring
 /// `CanvasRenderConfig::default().edge_stroke`. Pinned by
 /// `gpu_theme_defaults_match_the_canvas_config`.
-pub const DEFAULT_EDGE_STROKE_RGBA: [f32; 4] = [0.278_431_4, 0.333_333_34, 0.411_764_7, 1.0];
+pub const DEFAULT_EDGE_STROKE_RGBA: [f32; 4] = [100.0 / 255.0, 116.0 / 255.0, 139.0 / 255.0, 1.0];
 
-/// Theme label colour used for text quads: `#0f172a`, mirroring
+/// Theme label colour used for text quads: `#1e293b`, mirroring
 /// `CanvasRenderConfig::default().label_color`. Pinned by
 /// `gpu_theme_defaults_match_the_canvas_config`.
-pub const DEFAULT_LABEL_RGBA: [f32; 4] = [0.058_823_53, 0.090_196_08, 0.164_705_88, 1.0];
+pub const DEFAULT_LABEL_RGBA: [f32; 4] = [30.0 / 255.0, 41.0 / 255.0, 59.0 / 255.0, 1.0];
 
 /// Label font size in layout units, mirroring `CanvasRenderConfig::default().font_size`.
-pub const DEFAULT_FONT_SIZE_PX: f32 = 14.0;
+pub const DEFAULT_FONT_SIZE_PX: f32 = 15.0;
 
 /// Advance width as a fraction of font size.
 ///
@@ -5293,13 +5292,10 @@ mod tests {
     /// A dashed LINE is expressible where a dashed BORDER is not, so a divider carries a real dash
     /// pattern rather than being deferred to bd-l3nsf with the fragment boxes.
     ///
-    /// The alpha assertion is here because it caught a live defect. `config.cluster_stroke` is
-    /// `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8` -- SAME RGB, different alpha
-    /// -- and the cluster instances fell back to the node stroke, so the plan drew subgraph borders
-    /// fully opaque against the canvas's 78%. Identical RGB is why it survived: every channel a
-    /// reader would spot-check agreed.
+    /// Compare the complete planned border with the Canvas theme. Cluster instances previously
+    /// fell back to the node stroke, losing the cluster's distinct treatment.
     #[test]
-    fn subgraph_dividers_are_dashed_and_the_cluster_border_keeps_its_alpha() {
+    fn subgraph_dividers_are_dashed_and_the_cluster_border_keeps_its_theme() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let mut layout = test_layout();
         layout.extensions.cluster_dividers = vec![fm_layout::LayoutClusterDivider {
@@ -5337,22 +5333,16 @@ mod tests {
             "fixture produced no cluster, so the border assertion below proves nothing"
         );
         let cluster_plan = super::GpuRenderPlan::from_layout(&cluster_ir, &cluster_layout, 1.0);
-        assert!(
-            (cluster_plan.cluster_instances[0].stroke[3] - 0.78).abs() < 1e-6,
-            "an undeclared subgraph border must keep the cluster alpha 0.78, not the node \
-             stroke's 1.0; got {:?}",
-            cluster_plan.cluster_instances[0].stroke
+        let canvas = crate::CanvasRenderConfig::default();
+        let expected = super::parse_paint_rgba(&canvas.cluster_stroke).unwrap();
+        assert_eq!(
+            cluster_plan.cluster_instances[0].stroke, expected,
+            "a planned cluster must use the raster theme's complete border color"
         );
-
-        assert!(
-            (super::DEFAULT_CLUSTER_STROKE_RGBA[3] - 0.78).abs() < 1e-6,
-            "the cluster stroke is rgba(148,163,184,0.78)"
-        );
-        assert!(
-            (super::DEFAULT_NODE_STROKE_RGBA[3] - 1.0).abs() < 1e-6
-                && super::DEFAULT_CLUSTER_STROKE_RGBA[..3] == super::DEFAULT_NODE_STROKE_RGBA[..3],
-            "same RGB, different alpha -- if that ever stops being true this test is checking \
-             nothing and the two constants should be merged deliberately"
+        assert_ne!(
+            expected,
+            super::parse_paint_rgba(&canvas.node_stroke).unwrap(),
+            "the fixture must distinguish the cluster border from the node border"
         );
     }
 

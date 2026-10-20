@@ -101,7 +101,9 @@ fn an_unstyled_diagram_keeps_the_theme_colours() {
         "an unstyled diagram acquired a colour from nowhere: {fills:?}"
     );
     assert!(
-        fills.iter().any(|f| f == "#ffffff"),
+        fills
+            .iter()
+            .any(|f| f == &CanvasRenderConfig::default().node_fill),
         "the default node fill is missing: {fills:?}"
     );
 }
@@ -120,7 +122,8 @@ fn styling_applies_only_to_the_named_node() {
         .iter()
         .filter(|f| f.to_lowercase().contains("ff0000"))
         .count();
-    let default = fills.iter().filter(|f| f.as_str() == "#ffffff").count();
+    let theme_fill = CanvasRenderConfig::default().node_fill;
+    let default = fills.iter().filter(|f| **f == theme_fill).count();
 
     assert!(styled >= 1, "the styled node lost its colour: {fills:?}");
     assert!(
@@ -215,7 +218,8 @@ fn an_indexed_linkstyle_does_not_leak_to_other_edges() {
         .iter()
         .filter(|s| s.to_lowercase().contains("ff0000"))
         .count();
-    let themed = strokes.iter().filter(|s| s.as_str() == "#475569").count();
+    let theme_stroke = CanvasRenderConfig::default().edge_stroke;
+    let themed = strokes.iter().filter(|s| **s == theme_stroke).count();
 
     assert!(styled >= 1, "the styled edge lost its colour: {strokes:?}");
     assert!(
@@ -238,7 +242,9 @@ fn an_unstyled_edge_keeps_the_theme_stroke() {
         "nothing was stroked, so this control proves nothing"
     );
     assert!(
-        strokes.iter().any(|s| s.as_str() == "#475569"),
+        strokes
+            .iter()
+            .any(|s| s == &CanvasRenderConfig::default().edge_stroke),
         "the default edge stroke is missing: {strokes:?}"
     );
     assert!(

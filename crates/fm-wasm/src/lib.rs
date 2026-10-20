@@ -387,7 +387,10 @@ impl Default for RuntimeConfig {
             preserve_labels: true,
             ..Default::default()
         };
-        let canvas = align_canvas_typography_with_svg(CanvasRenderConfig::default(), &svg);
+        let canvas = align_canvas_typography_with_svg(
+            apply_canvas_theme_preset(CanvasRenderConfig::default(), svg.theme),
+            &svg,
+        );
         Self {
             renderer: WebRendererKind::Canvas2d,
             svg,
@@ -1264,6 +1267,7 @@ fn align_canvas_typography_with_svg(
 ) -> CanvasRenderConfig {
     canvas.font_family.clone_from(&svg.font_family);
     canvas.font_size = f64::from(svg.font_size);
+    canvas.line_height = f64::from(svg.line_height);
     // The gantt today date rides along with the typography rather than being plumbed separately,
     // because the requirement is the same one: the two backends must not disagree. A canvas preview
     // that drew a today line on a different day from the SVG export -- or drew none while the export
@@ -2484,7 +2488,12 @@ impl Diagram {
         let canvas_width = canvas.width();
         let canvas_height = canvas.height();
         Self::from_canvas_context(
-            Some(canvas), None, canvas_width, canvas_height, context, config,
+            Some(canvas),
+            None,
+            canvas_width,
+            canvas_height,
+            context,
+            config,
         )
     }
 
@@ -2509,7 +2518,12 @@ impl Diagram {
             .ok_or_else(|| js_error("offscreen canvas 2d context is unavailable"))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>();
         Self::from_canvas_context(
-            None, Some(canvas), canvas_width, canvas_height, context, config,
+            None,
+            Some(canvas),
+            canvas_width,
+            canvas_height,
+            context,
+            config,
         )
     }
 
@@ -2517,7 +2531,9 @@ impl Diagram {
         self.ensure_alive()?;
         self.sync_canvas_size();
         if self.canvas_width == 0 || self.canvas_height == 0 {
-            return Err(js_error("canvas backing store must have nonzero dimensions"));
+            return Err(js_error(
+                "canvas backing store must have nonzero dimensions",
+            ));
         }
 
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
@@ -2598,9 +2614,8 @@ impl Diagram {
                     Arc::clone(&traced_layout.layout),
                     next_canvas.clone(),
                 );
-                self.redraw_canvas().ok_or_else(|| {
-                    js_error("canvas backing store must have nonzero dimensions")
-                })?
+                self.redraw_canvas()
+                    .ok_or_else(|| js_error("canvas backing store must have nonzero dimensions"))?
             }
             WebRendererKind::WebGpu => {
                 return Err(js_error(
@@ -3793,6 +3808,32 @@ mod tests {
         let runtime = RuntimeConfig::default();
         assert_eq!(runtime.canvas.font_family, runtime.svg.font_family);
         assert_eq!(runtime.canvas.font_size, f64::from(runtime.svg.font_size));
+        assert_eq!(
+            runtime.canvas.line_height,
+            f64::from(runtime.svg.line_height)
+        );
+        assert_eq!(
+            runtime
+                .canvas
+                .font_metrics()
+                .estimate_dimensions("First\nSecond"),
+            runtime
+                .svg
+                .font_metrics()
+                .estimate_dimensions("First\nSecond")
+        );
+    }
+
+    #[test]
+    fn runtime_default_canvas_colors_match_an_explicit_default_theme() {
+        let runtime = RuntimeConfig::default();
+        let explicit = apply_canvas_theme_preset(runtime.canvas.clone(), ThemePreset::Default);
+        assert_eq!(runtime.canvas.node_fill, explicit.node_fill);
+        assert_eq!(runtime.canvas.node_stroke, explicit.node_stroke);
+        assert_eq!(runtime.canvas.edge_stroke, explicit.edge_stroke);
+        assert_eq!(runtime.canvas.cluster_fill, explicit.cluster_fill);
+        assert_eq!(runtime.canvas.cluster_stroke, explicit.cluster_stroke);
+        assert_eq!(runtime.canvas.label_color, explicit.label_color);
     }
 
     #[test]
@@ -3801,11 +3842,13 @@ mod tests {
             padding: 12.0,
             node_fill: "#123456".to_string(),
             edge_stroke_width: 3.0,
+            line_height: 1.0,
             ..CanvasRenderConfig::default()
         };
         let svg = SvgRenderConfig {
             font_family: "Test Font".to_string(),
             font_size: 22.0,
+            line_height: 2.0,
             ..SvgRenderConfig::default()
         };
 
@@ -3813,6 +3856,7 @@ mod tests {
 
         assert_eq!(aligned.font_family, "Test Font");
         assert_eq!(aligned.font_size, 22.0);
+        assert_eq!(aligned.line_height, 2.0);
         assert_eq!(aligned.padding, 12.0);
         assert_eq!(aligned.node_fill, "#123456");
         assert_eq!(aligned.edge_stroke_width, 3.0);

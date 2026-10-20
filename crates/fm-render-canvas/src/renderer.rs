@@ -23,6 +23,8 @@ pub struct CanvasRenderConfig {
     pub font_family: String,
     /// Font size in pixels.
     pub font_size: f64,
+    /// Line height for node labels and layout measurement, as a multiple of the font size.
+    pub line_height: f64,
     /// Padding around the diagram.
     pub padding: f64,
     /// Node fill color.
@@ -59,7 +61,7 @@ impl CanvasRenderConfig {
         fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
             preset: fm_core::FontPreset::from_family(&self.font_family),
             font_size: self.font_size as f32,
-            line_height: 1.4, // Matches CanvasRenderConfig default implicitly
+            line_height: self.resolved_line_height(),
             fallback_chain: vec![
                 fm_core::FontPreset::SansSerif,
                 fm_core::FontPreset::Monospace,
@@ -67,24 +69,34 @@ impl CanvasRenderConfig {
             trace_fallbacks: false,
         })
     }
+
+    fn resolved_line_height(&self) -> f32 {
+        let line_height = self.line_height as f32;
+        if line_height.is_finite() && line_height > 0.0 {
+            line_height
+        } else {
+            1.5
+        }
+    }
 }
 
 impl Default for CanvasRenderConfig {
     fn default() -> Self {
         Self {
             font_family: String::from(
-                "'Inter', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif",
+                "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
             ),
-            font_size: 14.0,
+            font_size: 15.0,
+            line_height: 1.5,
             padding: 28.0,
-            node_fill: String::from("#ffffff"),
+            node_fill: String::from("#f8fafc"),
             node_stroke: String::from("#94a3b8"),
             node_stroke_width: 1.5,
-            edge_stroke: String::from("#475569"),
+            edge_stroke: String::from("#64748b"),
             edge_stroke_width: 1.5,
-            cluster_fill: String::from("rgba(226,232,240,0.44)"),
-            cluster_stroke: String::from("rgba(148,163,184,0.78)"),
-            label_color: String::from("#0f172a"),
+            cluster_fill: String::from("#f1f5f9"),
+            cluster_stroke: String::from("#cbd5e1"),
+            label_color: String::from("#1e293b"),
             auto_fit: true,
             gantt_today: None,
         }
@@ -2910,12 +2922,9 @@ impl Canvas2dRenderer {
                 }
             } else {
                 // Standard single-label rendering.
-                let label_text = ir_node
-                    .and_then(|n| n.label)
-                    .and_then(|lid| ir.labels.get(lid.0))
-                    .map(|l| l.text.as_str())
-                    .or_else(|| ir_node.map(|n| n.id.as_str()))
-                    .unwrap_or("");
+                // Layout and SVG use the same rule: state ornaments and junctions draw no text,
+                // while gitGraph commits keep their labels even when they use those shapes.
+                let label_text = ir_node.map(|node| ir.node_display_text(node)).unwrap_or("");
 
                 if !label_text.is_empty() {
                     // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
@@ -2988,7 +2997,8 @@ impl Canvas2dRenderer {
                         *labels_drawn += 1;
                     } else {
                         let lines: Vec<&str> = label_text.lines().collect();
-                        let line_height = self.config.font_size * 1.2;
+                        let line_height = declared_parts.size.unwrap_or(self.config.font_size)
+                            * f64::from(self.config.resolved_line_height());
                         let total_height = lines.len() as f64 * line_height;
                         let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
 
@@ -4651,7 +4661,172 @@ mod tests {
         let config = CanvasRenderConfig::default();
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
+        assert!(config.line_height >= 1.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn default_canvas_palette_and_typography_match_svg() {
+        let canvas = CanvasRenderConfig::default();
+        let svg = fm_render_svg::SvgRenderConfig::default();
+        let colors = fm_render_svg::ThemeColors::default();
+        assert_eq!(canvas.font_family, svg.font_family);
+        assert_eq!(canvas.font_size, f64::from(svg.font_size));
+        assert_eq!(canvas.line_height, f64::from(svg.line_height));
+        assert_eq!(canvas.node_fill, colors.node_fill);
+        assert_eq!(canvas.node_stroke, colors.node_stroke);
+        assert_eq!(canvas.edge_stroke, colors.edge);
+        assert_eq!(canvas.cluster_fill, colors.cluster_fill);
+        assert_eq!(canvas.cluster_stroke, colors.cluster_stroke);
+        assert_eq!(canvas.label_color, colors.text);
+        assert_eq!(
+            canvas.font_metrics().estimate_dimensions("First\nSecond"),
+            svg.font_metrics().estimate_dimensions("First\nSecond")
+        );
+    }
+
+    #[test]
+    fn canvas_ornaments_do_not_draw_internal_ids() {
+        for (source, minimum_ornaments, visible_labels) in [
+            (
+                "stateDiagram-v2\n  [*] --> Idle\n  state fork_point <<fork>>\n  \
+                 state join_point <<join>>\n  state decision <<choice>>\n  \
+                 Idle --> fork_point\n  fork_point --> Working\n  Working --> join_point\n  \
+                 join_point --> decision\n  decision --> Done\n  Done --> [*]\n",
+                5,
+                ["Idle", "Working", "Done"].as_slice(),
+            ),
+            (
+                "flowchart LR\n  A[Receive] --> J@{ shape: f-circ, label: \"Junction plumbing\" }\n  \
+                 J --> B[Continue]\n",
+                1,
+                ["Receive", "Continue"].as_slice(),
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let ornaments: Vec<_> = ir
+                .nodes
+                .iter()
+                .filter(|node| ir.is_textless_ornament_node(node))
+                .collect();
+            assert!(
+                ornaments.len() >= minimum_ornaments,
+                "the fixture must contain the ornament shapes being tested"
+            );
+
+            let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+            let result = crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+            assert_eq!(result.nodes_drawn, ir.nodes.len());
+            let texts: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for label in visible_labels {
+                assert!(texts.contains(label), "visible label {label:?} was lost");
+            }
+            for node in ornaments {
+                assert!(
+                    !texts.contains(&node.id.as_str()),
+                    "ornament id {:?} was drawn over its glyph",
+                    node.id
+                );
+                if let Some(label) = node.label.and_then(|id| ir.labels.get(id.0)) {
+                    assert!(
+                        !texts.contains(&label.text.as_str()),
+                        "an ornament label was drawn despite the shared display rule"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_keeps_labels_on_reversed_and_highlighted_git_commits() {
+        let ir = fm_parser::parse(
+            "gitGraph\n  commit id: \"reverted\" type: REVERSE\n  \
+             commit id: \"highlighted\" type: HIGHLIGHT\n",
+        )
+        .ir;
+        assert!(
+            ir.nodes
+                .iter()
+                .any(|node| node.shape == NodeShape::FilledCircle)
+        );
+        assert!(
+            ir.nodes
+                .iter()
+                .any(|node| node.shape == NodeShape::DoubleCircle)
+        );
+
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+        for label in ["reverted", "highlighted"] {
+            assert!(ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::FillText(text, _, _) if text == label)
+            }));
+        }
+    }
+
+    #[test]
+    fn multiline_node_labels_use_the_resolved_font_and_keep_their_center() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  A[\"First<br/>Second\"] --> B[\"Other<br/>Lines\"]\n  \
+             style A font-size:32px\n",
+        )
+        .ir;
+        assert!(ir.labels.iter().any(|label| label.text == "First\nSecond"));
+        assert!(ir.labels.iter().any(|label| label.text == "Other\nLines"));
+        let config = CanvasRenderConfig {
+            font_size: 18.0,
+            line_height: 1.75,
+            padding: 12.0,
+            auto_fit: false,
+            ..CanvasRenderConfig::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+        let mut font = String::new();
+        let mut text_runs = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::FillText(text, _, y) => {
+                    text_runs.push((text.as_str(), *y, font.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        for (node_id, first, second, font_size) in [
+            ("A", "First", "Second", 32.0),
+            ("B", "Other", "Lines", 18.0),
+        ] {
+            let first = text_runs.iter().find(|run| run.0 == first).unwrap();
+            let second = text_runs.iter().find(|run| run.0 == second).unwrap();
+            assert!(first.2.starts_with(&format!("{font_size}px ")));
+            assert_eq!(first.2, second.2);
+            assert!((second.1 - first.1 - font_size * config.line_height).abs() < 1e-6);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .unwrap();
+            let center = config.padding - f64::from(layout.bounds.y)
+                + f64::from(node.bounds.y)
+                + f64::from(node.bounds.height) * 0.5;
+            assert!(((first.1 + second.1) * 0.5 - center).abs() < 1e-6);
+        }
     }
 
     #[test]
