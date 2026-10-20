@@ -2643,11 +2643,11 @@ impl IrEntityAttribute {
     }
 }
 
-/// One space-ish gutter between attribute columns, matching the single space the fused row carried.
+/// Visible separation between attribute columns, including at compact font sizes.
 /// Layout and every cell-drawing renderer must pass this same value into [`er_cell_columns`].
 #[must_use]
 pub fn er_cell_gutter(attr_font_size: f32) -> f32 {
-    attr_font_size * 0.5
+    (attr_font_size * 0.9).max(10.0)
 }
 
 /// Column geometry for one entity's attribute cells: the x offset of each of the four columns
@@ -2674,6 +2674,18 @@ pub fn er_cell_columns(
 ) -> ([f32; 4], f32) {
     let mut widths = [0.0_f32; 4];
     for attr in members {
+        // The deterministic metrics approximate unweighted glyph advances. Browser system fonts
+        // need some slack, and SVG emphasizes every cell of a key row in bold. Measured at the
+        // default 12px size, `string` occupied 34.45px normally and 40.05px in bold against a
+        // 30.36px estimate; the old 6px gutter was entirely consumed before the next column.
+        // Fixed-width fonts retain their exact advances, including when drawn in bold.
+        let width_allowance = if metrics.config().preset == FontPreset::Monospace {
+            1.0
+        } else if attr.keys.is_empty() {
+            1.15
+        } else {
+            1.15 * 1.18
+        };
         let key = attr.key_cell();
         let cells: [&str; 4] = [
             attr.data_type.as_str(),
@@ -2683,7 +2695,8 @@ pub fn er_cell_columns(
         ];
         for (index, cell) in cells.iter().enumerate() {
             if !cell.is_empty() {
-                widths[index] = widths[index].max(metrics.estimate_width(cell) * scale);
+                widths[index] =
+                    widths[index].max(metrics.estimate_width(cell) * scale * width_allowance);
             }
         }
     }
@@ -13583,6 +13596,71 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize large ir");
         assert_eq!(decoded.nodes.len(), 1_000);
         assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn er_columns_leave_space_for_measured_default_key_rows() {
+        let members = vec![
+            IrEntityAttribute {
+                data_type: "string".to_string(),
+                name: "customer_id".to_string(),
+                keys: vec![IrAttributeKey::Pk],
+                comment: None,
+            },
+            IrEntityAttribute {
+                data_type: "string".to_string(),
+                name: "display_name".to_string(),
+                ..Default::default()
+            },
+        ];
+        let metrics = super::FontMetrics::default_metrics();
+        let (columns, right_edge) = super::er_cell_columns(
+            &members,
+            &metrics,
+            12.0 / metrics.font_size(),
+            super::er_cell_gutter(12.0),
+        );
+        // Chromium system-ui glyph bounds from the actual default SVG, independent of the
+        // estimator being tested. Type/name/key must remain distinct readable cells.
+        assert!(columns[1] - columns[0] - 40.046_875 >= 8.0);
+        assert!(columns[2] - columns[1] - 82.640_625 >= 8.0);
+        assert!(right_edge + 8.0 - columns[2] >= 18.794_922);
+        let mut reversed = members.clone();
+        reversed.reverse();
+        assert_eq!(
+            (columns, right_edge),
+            super::er_cell_columns(
+                &reversed,
+                &metrics,
+                12.0 / metrics.font_size(),
+                super::er_cell_gutter(12.0),
+            ),
+            "column widths come from every row, independent of attribute order"
+        );
+    }
+
+    #[test]
+    fn er_columns_keep_exact_monospace_advances_and_skip_empty_columns() {
+        let metrics = super::FontMetrics::monospace(12.0);
+        let gutter = super::er_cell_gutter(12.0);
+        let mut members = vec![IrEntityAttribute {
+            data_type: "int".to_string(),
+            name: "customer_id".to_string(),
+            ..Default::default()
+        }];
+        let (plain, right_edge) = super::er_cell_columns(&members, &metrics, 1.0, gutter);
+        assert_eq!(plain[1], metrics.estimate_width("int") + gutter);
+        assert_eq!(right_edge, plain[1] + metrics.estimate_width("customer_id"));
+        assert_eq!(plain[2], plain[3], "absent keys do not allocate a column");
+
+        members[0].keys = vec![IrAttributeKey::Pk, IrAttributeKey::Fk];
+        let (keyed, _) = super::er_cell_columns(&members, &metrics, 1.0, gutter);
+        assert_eq!(plain[1], keyed[1], "monospace bold does not widen glyphs");
+        assert_eq!(plain[2], keyed[2]);
+        assert!(
+            keyed[3] > keyed[2],
+            "composite keys reserve one complete cell"
+        );
     }
 
     #[test]
