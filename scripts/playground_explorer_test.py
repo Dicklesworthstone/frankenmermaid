@@ -427,6 +427,195 @@ def issue14_maximized_errors(snapshot):
     return errors
 
 
+def issue14_load_label_fonts(page):
+    page.evaluate('''async () => {
+      await Promise.all([...document.querySelectorAll('#fm-svg svg text')].map(text => {
+        const css = getComputedStyle(text);
+        return document.fonts.load(`${css.fontStyle} ${css.fontWeight} ${css.fontSize} ${css.fontFamily}`, text.textContent);
+      }));
+      await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }''')
+
+
+def issue14_title_occlusion_errors(page):
+    """A painted title can still be hidden by a later edge plate or node fill."""
+    return page.evaluate(r'''() => {
+      const svg = document.querySelector('#fm-svg svg');
+      const fromSvg = svg.getScreenCTM().inverse();
+      const box = (element, bounds = element.getBBox()) => {
+        const matrix = fromSvg.multiply(element.getScreenCTM());
+        const corners = [[bounds.x, bounds.y], [bounds.x + bounds.width, bounds.y],
+          [bounds.x, bounds.y + bounds.height], [bounds.x + bounds.width, bounds.y + bounds.height]]
+          .map(([x, y]) => new DOMPoint(x, y).matrixTransform(matrix));
+        return {left: Math.min(...corners.map(p => p.x)), top: Math.min(...corners.map(p => p.y)),
+          right: Math.max(...corners.map(p => p.x)), bottom: Math.max(...corners.map(p => p.y))};
+      };
+      const intersection = (a, b) => ({left: Math.max(a.left, b.left), top: Math.max(a.top, b.top),
+        right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom)});
+      const area = bounds => bounds.right - bounds.left > 0.5 && bounds.bottom - bounds.top > 0.5;
+      const errors = [];
+      const occluders = [
+        ...[...svg.querySelectorAll('.fm-edge-labeled > rect')].map(shape => ({shape,
+          name: `edge ${shape.parentElement.dataset.fmEdgeId} label background`})),
+        ...[...svg.querySelectorAll('.fm-node[data-id]')].map(node => ({
+          shape: node.querySelector('rect, path, polygon, circle, ellipse'), name: `node ${node.dataset.id} fill`}))
+      ].filter(item => item.shape);
+      for (const title of svg.querySelectorAll('text.fm-cluster-label, text.fm-diagram-title')) {
+        for (const {shape, name} of occluders) {
+          if (!(title.compareDocumentPosition(shape) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+          const css = getComputedStyle(shape);
+          if (['none', 'transparent', 'rgba(0, 0, 0, 0)'].includes(css.fill)
+              || Number(css.fillOpacity) === 0 || Number(css.opacity) === 0) continue;
+          const shapeBox = box(shape);
+          if (!area(intersection(box(title), shapeBox))) continue;
+          const intoShape = shape.getScreenCTM().inverse().multiply(svg.getScreenCTM());
+          const covered = [];
+          for (let character = 0; character < title.getNumberOfChars(); character++) {
+            if (/\s/.test(title.textContent[character])) continue;
+            const overlap = intersection(box(title, title.getExtentOfChar(character)), shapeBox);
+            if (!area(overlap)) continue;
+            const xs = [overlap.left + 0.25, (overlap.left + overlap.right) / 2, overlap.right - 0.25];
+            const ys = [overlap.top + 0.25, (overlap.top + overlap.bottom) / 2, overlap.bottom - 0.25];
+            if (xs.some(x => ys.some(y => shape.isPointInFill(new DOMPoint(x, y).matrixTransform(intoShape))))) {
+              covered.push(title.textContent[character]);
+            }
+          }
+          if (covered.length) errors.push(`title ${JSON.stringify(title.textContent)} characters ${JSON.stringify(covered.join(''))} are obscured by ${name}`);
+        }
+      }
+      return errors;
+    }''')
+
+
+def issue14_api_geometry_checks(page, route, source, expected, record, output_dir, cached_resources):
+    """Exercise custom sizes through the real WASM API, independently of studio controls.
+
+    The showcase reads an 11–22px font setting, while the public API accepts larger
+    positive sizes. Keeping the default report green does not prove these paths:
+    stale character-width calibration previously left 178px edge plates unchanged
+    while a 20-W label grew to more than 500px and disappeared under its nodes.
+    Long wide labels also prevent fixed padding from hiding a width-estimate error.
+    A minimal titled cluster checks that enlarged captions have their own room,
+    including clear space above the later-painted child node.
+    """
+    nominal = {'frameBudgetMs': 16, 'frameTimeMs': 0, 'eventLoopLagMs': 0, 'workerSaturationPermille': 0}
+    cases = [
+        ('api-font-22-default', source, {'fontSize': 22}, expected),
+        ('api-font-30-default', source, {'fontSize': 30}, expected),
+        ('api-font-22-rich', source, {'fontSize': 22, 'detailTier': 'rich', 'pressure': nominal}, expected),
+        ('api-font-30-rich', source, {'fontSize': 30, 'detailTier': 'rich', 'pressure': nominal}, expected),
+    ]
+    for count, sizes in ((20, (11, 15, 22, 30)), (80, (22, 30))):
+        label = 'W' * count
+        fixture = f'flowchart LR\nA[Source] -->|{label}| B[Destination]'
+        labels = {'nodes': {'A': 'Source', 'B': 'Destination'}, 'edges': [label], 'clusters': [], 'edge_count': 1}
+        for size in sizes:
+            cases.append((f'api-wide-{count}-font-{size}', fixture,
+                {'fontSize': size, 'detailTier': 'rich', 'pressure': nominal}, labels))
+    cluster_fixture = 'flowchart TD\nsubgraph X["Very long title"]\nA[Alpha]\nend'
+    cluster_labels = {'nodes': {'A': 'Alpha'}, 'edges': [], 'clusters': ['Very long title'], 'edge_count': 0}
+    for size in (30, 60):
+        cases.append((f'api-cluster-font-{size}', cluster_fixture,
+            {'fontSize': size, 'detailTier': 'rich', 'pressure': nominal}, cluster_labels))
+
+    export_page = page.context.browser.new_page(viewport={'width': 1466, 'height': 904},
+        user_agent='frankenmermaid-agent (+https://github.com/Dicklesworthstone/frankenmermaid)')
+    export_errors = []
+    export_page.on('pageerror', lambda error: export_errors.append(str(error)))
+    if cached_resources:
+        def fulfill_cached(request):
+            resource = cached_resources[request.request.url]
+            request.fulfill(body=resource['body'], content_type=resource['content_type'],
+                headers={'Access-Control-Allow-Origin': '*'})
+        export_page.route(re.compile('^(?:' + '|'.join(re.escape(url) for url in cached_resources) + ')$'), fulfill_cached)
+    cdp = page.context.new_cdp_session(page)
+    cdp.send('DOM.enable')
+    cdp.send('CSS.enable')
+    try:
+        page.set_viewport_size({'width': 1466, 'height': 904})
+        page.wait_for_timeout(350)
+        for name, fixture, config, labels in cases:
+            # Use the exported API and its generated SVG. No engine stub, private
+            # layout hook, changed font rule, or reconstructed backing rectangle.
+            page.evaluate('''({fixture, config}) => {
+              const svgCode = window.frankenRuntime.renderSvg(fixture, config);
+              document.querySelector('#fm-svg').innerHTML = svgCode;
+              const svg = document.querySelector('#fm-svg svg');
+              svg.style.width = `${svg.viewBox.baseVal.width}px`;
+              svg.style.height = `${svg.viewBox.baseVal.height}px`;
+              svg.style.maxWidth = 'none';
+              document.querySelector('#studio-viewport').style.transform = 'translate(0px,0px) scale(1)';
+            }''', {'fixture': fixture, 'config': config})
+            issue14_load_label_fonts(page)
+            svg = page.locator('#fm-svg svg').evaluate('(element) => element.outerHTML')
+            errors = issue14_export_errors(svg, labels)
+            snapshot = page.evaluate(ISSUE14_SNAPSHOT)
+            if fixture == source:
+                errors += issue14_label_errors(snapshot, expected, source)
+            elif fixture == cluster_fixture:
+                if (snapshot['declaredNodes'], snapshot['declaredEdges'], snapshot['edgeCount'], len(snapshot['clusters'])) != (1, 0, 0, 1):
+                    errors.append('minimal cluster probe changed its one node, zero edges, or one title')
+                for kind in ('nodes', 'edges', 'clusters'):
+                    if any(not item['painted'] for item in snapshot[kind]):
+                        errors.append(f'minimal cluster probe has unpainted {kind}')
+            else:
+                if (snapshot['declaredNodes'], snapshot['declaredEdges'], snapshot['edgeCount']) != (2, 1, 1):
+                    errors.append('wide-label probe changed its two nodes or one edge')
+                for kind in ('nodes', 'edges', 'clusters'):
+                    if any(not item['painted'] for item in snapshot[kind]):
+                        errors.append(f'wide-label probe has unpainted {kind}')
+            if config.get('detailTier') and snapshot['tier'] != config['detailTier']:
+                errors.append(f"requested {config['detailTier']} with nominal pressure; received {snapshot['tier']}")
+            geometries = []
+            # Native input already covers these zooms above. Here the same generated
+            # SVG must retain correct glyph bounds under each CSS scale, including
+            # font sizes that previously exceeded their plates or diamond shapes.
+            for scale in (1, 0.31, 0.95):
+                page.evaluate('''scale => {
+                  document.querySelector('#studio-viewport').style.transform = `translate(0px,0px) scale(${scale})`;
+                  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                }''', scale)
+                geometry = page.evaluate(ISSUE14_LABEL_GEOMETRY)
+                errors += [f'at scale {scale}: {error}' for error in issue14_geometry_errors(geometry)]
+                errors += [f'at scale {scale}: {error}' for error in issue14_title_occlusion_errors(page)]
+                geometries.append({'scale': scale, 'geometry': geometry})
+            document = cdp.send('DOM.getDocument')
+            selector = '#fm-svg .fm-cluster-label' if fixture == cluster_fixture else '#fm-svg .edge-label'
+            label_node = cdp.send('DOM.querySelector', {'nodeId': document['root']['nodeId'], 'selector': selector})
+            fonts = cdp.send('CSS.getPlatformFontsForNode', {'nodeId': label_node['nodeId']})['fonts']
+            if not fonts or not any(font['glyphCount'] > 0 for font in fonts):
+                errors.append('browser did not report a font drawing the cluster title' if fixture == cluster_fixture
+                    else 'browser did not report a font drawing the edge label')
+            record(f'{route}/{name}', errors, config=config, snapshot=snapshot, scales=geometries, actual_fonts=fonts)
+            if output_dir:
+                (output_dir / f'{route}-{name}.svg').write_text(svg, encoding='utf-8')
+
+            # The actual download is loaded into an independent document. Host page
+            # typography must not be necessary for exported labels to fit their own
+            # shapes or stay clear of later opaque labels and nodes.
+            with page.expect_download() as download_info:
+                page.click('#btn-export-svg')
+            exported = Path(download_info.value.path()).read_text(encoding='utf-8')
+            export_page.set_content(f'<!DOCTYPE html><html><body><div id="fm-svg">{exported}</div></body></html>')
+            export_page.evaluate('''() => {
+              const svg = document.querySelector('#fm-svg svg');
+              svg.style.width = `${svg.viewBox.baseVal.width}px`;
+              svg.style.height = `${svg.viewBox.baseVal.height}px`;
+              svg.style.maxWidth = 'none';
+            }''')
+            issue14_load_label_fonts(export_page)
+            geometry = export_page.evaluate(ISSUE14_LABEL_GEOMETRY)
+            errors = issue14_export_errors(exported, labels) + issue14_geometry_errors(geometry) + export_errors
+            errors += issue14_title_occlusion_errors(export_page)
+            record(f'{route}/{name}-export', errors, config=config, geometry=geometry)
+            if output_dir:
+                (output_dir / f'{route}-{name}-export.svg').write_text(exported, encoding='utf-8')
+    finally:
+        cdp.detach()
+        export_page.close()
+
+
 def run_showcase_issue14(serve_root, output_dir=None, tailwind_script=None, resource_cache=None):
     source_bytes = ISSUE14_FIXTURE.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
@@ -515,6 +704,7 @@ def run_showcase_issue14(serve_root, output_dir=None, tailwind_script=None, reso
                         snapshot = page.evaluate(ISSUE14_SNAPSHOT)
                         geometry = page.evaluate(ISSUE14_LABEL_GEOMETRY)
                         errors = issue14_label_errors(snapshot, expected, source) + issue14_geometry_errors(geometry)
+                        errors += issue14_title_occlusion_errors(page)
                         record(f'{route}/{name}', errors, snapshot=snapshot, geometry=geometry)
                         if output_dir:
                             (output_dir / f'{route}-{name}.svg').write_text(page.locator('#fm-svg svg').evaluate('(element) => element.outerHTML'), encoding='utf-8')
@@ -595,6 +785,8 @@ def run_showcase_issue14(serve_root, output_dir=None, tailwind_script=None, reso
                     if page.get_attribute('#pg-maximize', 'aria-pressed') != 'false':
                         restore_errors.append('Escape did not restore aria-pressed=false')
                     record(f'{route}/restore', restore_errors)
+                    phase = 'exercise real WASM typography and independent exports'
+                    issue14_api_geometry_checks(page, route, source, expected, record, output_dir, cached_resources)
                 except Exception as error:
                     state = page.evaluate('''() => ({runtime: !!window.frankenRuntime,
                       grid: getComputedStyle(document.querySelector('.pg-panes')).display,

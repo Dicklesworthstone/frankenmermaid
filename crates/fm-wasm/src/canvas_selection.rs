@@ -95,7 +95,8 @@ fn lasso_points(values: &[f64]) -> Result<Vec<(f64, f64)>, &'static str> {
         return Err("lasso coordinates must be finite with magnitude at most 1e100");
     }
     // No polygon interpretation here: repeated points, closure and even-odd fill are native.
-    Ok(values.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect())
+    let (points, _) = values.as_chunks::<2>();
+    Ok(points.iter().map(|&[x, y]| (x, y)).collect())
 }
 
 #[cfg(target_arch = "wasm32")]

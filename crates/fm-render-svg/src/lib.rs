@@ -45,7 +45,7 @@ use std::{
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
-    MermaidLinkMode, MermaidSanitizeMode, MermaidTier, Span, is_safe_link_target,
+    MermaidLinkMode, MermaidSanitizeMode, MermaidTier, NodeShape, Span, is_safe_link_target,
     mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_node_element_id,
     mermaid_node_element_id_with_variant,
 };
@@ -4084,6 +4084,23 @@ pub(crate) fn svg_frame(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
 ) -> SvgFrame {
+    svg_geometry(ir, layout, config).frame
+}
+
+struct SvgGeometry {
+    frame: SvgFrame,
+    detail: RenderDetailProfile,
+    label_positions: Option<Vec<Option<fm_layout::LayoutPoint>>>,
+}
+
+/// Resolve label placement before the document frame is fixed. An unusually wide label, or a
+/// crowded layout with no internal space, must extend the exported frame rather than disappear
+/// beyond it. Deck manifests use the same frame through `svg_frame`.
+fn svg_geometry(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+) -> SvgGeometry {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
@@ -4094,11 +4111,49 @@ pub(crate) fn svg_frame(
         config.font_size + 22.0
     };
 
-    SvgFrame {
+    let mut frame = SvgFrame {
         viewbox_width: (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
         viewbox_height: layout.bounds.height + padding * 2.0 + legend_height + title_height,
         offset_x: padding - layout.bounds.x,
         offset_y: padding - layout.bounds.y + title_height,
+    };
+    // The tier describes the layout's decoration budget; expanding a frame to retain text must
+    // not feed back into tier selection or change the font used to measure that same text.
+    let detail = resolve_detail_profile(frame.viewbox_width, frame.viewbox_height, config);
+    let label_positions = resolve_preserved_edge_label_positions(ir, layout, config, detail);
+    if let Some(positions) = &label_positions {
+        let (mut left, mut top) = (0.0_f32, 0.0_f32);
+        let (mut right, mut bottom) = (frame.viewbox_width, frame.viewbox_height);
+        for (index, position) in positions.iter().enumerate() {
+            let Some(position) = position else { continue };
+            let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+                continue;
+            };
+            let (width, height, _) =
+                edge_label_dimensions(&label.text, detail.edge_font_size, config);
+            let x = position.x + frame.offset_x;
+            let y = position.y + frame.offset_y;
+            left = left.min(x - width / 2.0 - 2.0);
+            // A flowchart title stays in its own fixed header band. Expanding only against SVG
+            // y=0 could place a clear but upward-displaced plate over that title.
+            let header_bottom = if title_height > 0.0 {
+                padding + title_height
+            } else {
+                0.0
+            };
+            top = top.min(y - height / 2.0 - 2.0 - header_bottom);
+            right = right.max(x + width / 2.0 + 2.0);
+            bottom = bottom.max(y + height / 2.0 + 2.0);
+        }
+        frame.viewbox_width = right - left;
+        frame.viewbox_height = bottom - top;
+        frame.offset_x -= left;
+        frame.offset_y -= top;
+    }
+    SvgGeometry {
+        frame,
+        detail,
+        label_positions,
     }
 }
 
@@ -4145,14 +4200,17 @@ fn render_layout_to_svg(
     cache_direct_minified_css: bool,
     mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
-    let frame = svg_frame(ir, layout, config);
+    let SvgGeometry {
+        frame,
+        detail,
+        label_positions: preserved_label_positions,
+    } = svg_geometry(ir, layout, config);
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
     let generic_title = generic_title_for(ir);
     let width = frame.viewbox_width;
     let height = frame.viewbox_height;
-    let detail = resolve_detail_profile(width, height, config);
 
     let mut doc = SvgDocument::new()
         .viewbox(0.0, 0.0, width, height)
@@ -5122,7 +5180,7 @@ fn render_layout_to_svg(
             if !display_title.is_empty() {
                 let text = TextBuilder::new(&display_title)
                     .x(cluster.bounds.x + offset_x + 8.0)
-                    .y(cluster.bounds.y + offset_y + 16.0)
+                    .y(cluster.bounds.y + offset_y + (detail.cluster_font_size + 2.0).max(16.0))
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(detail.cluster_font_size)
                     .fill(&label_color)
@@ -5161,7 +5219,10 @@ fn render_layout_to_svg(
         {
             let text = TextBuilder::new(&format!("[{boundary_type}]"))
                 .x(cluster.bounds.x + offset_x + 8.0)
-                .y(cluster.bounds.y + offset_y + 16.0 + detail.cluster_font_size * 1.25)
+                .y(cluster.bounds.y
+                    + offset_y
+                    + (detail.cluster_font_size + 2.0).max(16.0)
+                    + detail.cluster_font_size * 1.25)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(detail.cluster_font_size)
                 .fill(&label_color)
@@ -5267,8 +5328,6 @@ fn render_layout_to_svg(
         .map(|nc| (nc.node_index, nc.tier))
         .collect();
 
-    let preserved_label_positions =
-        resolve_preserved_edge_label_positions(ir, layout, config, detail);
     let edge_context = EdgeRenderContext {
         ir,
         offset_x,
@@ -10498,12 +10557,8 @@ fn render_node_into(
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
-    let label_may_overflow = label_text.lines().any(|line| {
-        line.chars().count() as f32
-            * config.avg_char_width
-            * (node_font_size / config.font_size.max(1.0))
-            > (w - 16.0).max(node_font_size)
-    });
+    let label_may_overflow =
+        node_label_may_overflow(shape, w, h, &label_text, node_font_size, config);
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -11088,12 +11143,8 @@ fn render_node(
             available
         }
     };
-    let label_may_overflow = label_text.lines().any(|line| {
-        line.chars().count() as f32
-            * config.avg_char_width
-            * (node_font_size / config.font_size.max(1.0))
-            > (w - 16.0).max(node_font_size)
-    });
+    let label_may_overflow =
+        node_label_may_overflow(shape, w, h, &label_text, node_font_size, config);
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -12841,6 +12892,14 @@ fn render_node(
             let content_width = (w - icon_reserved_width).max(node_font_size);
             let content_top = y + icon_reserved_height;
             let content_height = (h - icon_reserved_height).max(node_font_size);
+            let (label_width, label_height) = node_label_fit_dimensions(
+                shape,
+                (w, h),
+                (content_width, content_height),
+                &label_text,
+                node_font_size,
+                config,
+            );
             let start_y = content_top + (content_height / 2.0) - (total_text_height / 2.0)
                 + (node_font_size / 3.0);
 
@@ -12851,8 +12910,8 @@ fn render_node(
                 content_left + (content_width / 2.0),
                 start_y,
                 node_font_size,
-                fit_width((content_width - 16.0).max(node_font_size)),
-                (content_height - 16.0).max(node_font_size),
+                fit_width(label_width),
+                label_height,
                 config,
                 colors,
                 text_style.as_deref(),
@@ -14102,6 +14161,119 @@ fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<St
     lines
 }
 
+/// Conservative proportional measurement for text that must remain visible. Keep a caller's
+/// larger calibration, but do not let a small average erase the font preset's glyph widths.
+/// Wide Latin glyphs need an additional advance allowance: the preset's average-based W/M
+/// estimate is narrower than the actual system and web fonts used by the playground.
+fn preserved_label_width(
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    let scale = font_size / config.font_size.max(1.0);
+    let average = config.avg_char_width.max(metrics.avg_char_width()) * scale;
+    label
+        .lines()
+        .map(|line| {
+            let wide_allowance: f32 = line
+                .chars()
+                .map(
+                    |character| match fm_core::CharWidthClass::classify(character) {
+                        fm_core::CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
+                        fm_core::CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
+                        _ => 0.0,
+                    },
+                )
+                .sum();
+            // These presets estimate advances rather than loading the browser's actual face.
+            // Reserve one eighth for font/weight variation; DejaVu Sans at 30px exceeds the
+            // unguarded estimate for the report's long Czech node by almost ten percent.
+            (metrics.estimate_width(line) * (average / metrics.avg_char_width()) + wide_allowance)
+                * 1.125
+        })
+        .fold(0.0, f32::max)
+}
+
+/// A diamond's enclosing rectangle is not its usable text area. Choose an inscribed rectangle
+/// with the label's aspect ratio, including the displacement caused by an icon. The width and
+/// height therefore consume a shared slope budget instead of each independently reaching an
+/// outer edge. Ordinary shapes retain their existing rectangular inset.
+fn node_label_fit_dimensions(
+    shape: NodeShape,
+    shape_size: (f32, f32),
+    content_size: (f32, f32),
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> (f32, f32) {
+    let (content_width, content_height) = content_size;
+    if shape != NodeShape::Diamond || label.is_empty() {
+        return (
+            (content_width - 16.0).max(font_size),
+            (content_height - 16.0).max(font_size),
+        );
+    }
+    let (width, height) = shape_size;
+    let metrics = config.font_metrics();
+    let text_width = if config.preserve_labels {
+        preserved_label_width(label, font_size, config, &metrics)
+    } else {
+        metrics.estimate_multiline_width(label)
+            * (font_size / config.font_size.max(1.0))
+            * (config.avg_char_width / metrics.avg_char_width())
+    };
+    // SVG glyph bounds include ascenders and descenders, while the fitting routine's line box
+    // starts at one em. Reserve that extra height before computing the diamond's slope budget.
+    let text_height = font_size * 1.2
+        + label.lines().count().saturating_sub(1) as f32 * font_size * config.line_height.max(1.0);
+    let budget =
+        ((content_width - 16.0) / width.max(1.0) + (content_height - 16.0) / height.max(1.0) - 1.0)
+            .max(0.0);
+    let scale = (budget
+        / (text_width / width.max(1.0) + text_height / height.max(1.0)).max(f32::EPSILON))
+    .min(1.0);
+    (
+        (text_width * scale).max(1.0),
+        (text_height * scale).max(1.0),
+    )
+}
+
+fn node_label_may_overflow(
+    shape: NodeShape,
+    width: f32,
+    height: f32,
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> bool {
+    let (max_width, max_height) = node_label_fit_dimensions(
+        shape,
+        (width, height),
+        (width, height),
+        label,
+        font_size,
+        config,
+    );
+    let text_width = if config.preserve_labels {
+        preserved_label_width(label, font_size, config, &config.font_metrics())
+    } else {
+        label
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as f32
+            * config.avg_char_width
+            * (font_size / config.font_size.max(1.0))
+    };
+    text_width > max_width
+        || font_size
+            + label.lines().count().saturating_sub(1) as f32
+                * font_size
+                * config.line_height.max(1.0)
+            > max_height
+}
+
 #[derive(Debug)]
 struct FittedNodeLabel<'a> {
     text: Cow<'a, str>,
@@ -14140,6 +14312,9 @@ fn fit_node_label_text<'a>(
     let metrics = config.font_metrics();
     let reference_size = config.font_size.max(1.0);
     let calibrated_width = |text: &str, size: f32| {
+        if config.preserve_labels {
+            return preserved_label_width(text, size, config, &metrics);
+        }
         text.lines()
             .map(|line| {
                 metrics.estimate_width(line)
@@ -14160,6 +14335,22 @@ fn fit_node_label_text<'a>(
             font_size,
             changed: false,
         };
+    }
+
+    // An explicit multiline block already carries the author's grouping. If scaling that block
+    // fits at a readable size, keep its exact line breaks before trying additional word wrapping.
+    // In GH#14, wrapping the original three-line node at 30px added an unnecessary fourth line.
+    if config.preserve_labels && label_has_line_break(label) {
+        let width_scale = max_width / calibrated_width(label, font_size).max(f32::EPSILON);
+        let height_scale = max_height / text_height(label.lines().count().max(1), font_size);
+        let fitted_size = font_size * width_scale.min(height_scale).min(1.0);
+        if fitted_size >= config.min_font_size.max(10.0).min(font_size) {
+            return FittedNodeLabel {
+                text: Cow::Borrowed(label),
+                font_size: fitted_size,
+                changed: fitted_size != font_size,
+            };
+        }
     }
 
     let fits = |lines: &[String], size: f32| {
@@ -15242,21 +15433,25 @@ fn compute_edge_label<'a>(
     }
 }
 
-fn edge_label_dimensions(
-    label: &str,
-    font_size: f32,
-    avg_char_width: f32,
-    line_height: f32,
-) -> (f32, f32, f32) {
+fn edge_label_dimensions(label: &str, font_size: f32, config: &SvgRenderConfig) -> (f32, f32, f32) {
     let line_count = label.lines().count().max(1) as f32;
     let max_chars = label
         .lines()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(0);
-    let text_height = (line_count - 1.0) * font_size * line_height;
+    let legacy_width = max_chars as f32 * config.avg_char_width;
+    // Reserve at the base font size, which also leaves room for the smaller tier-specific edge
+    // face. Counting characters alone gives WWW the same width as iii and leaves wide glyphs
+    // outside both their opaque plate and the collision solver's idea of that plate.
+    let text_width = if config.preserve_labels {
+        preserved_label_width(label, config.font_size, config, &config.font_metrics())
+    } else {
+        legacy_width
+    };
+    let text_height = (line_count - 1.0) * font_size * config.line_height;
     (
-        (max_chars as f32 * avg_char_width) + 8.0 + 20.0,
+        text_width + 8.0 + 20.0,
         text_height + font_size + 14.0,
         text_height,
     )
@@ -15288,12 +15483,7 @@ fn resolve_preserved_edge_label_positions(
         let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
             continue;
         };
-        let (width, height, _) = edge_label_dimensions(
-            &label.text,
-            detail.edge_font_size,
-            config.avg_char_width,
-            config.line_height,
-        );
+        let (width, height, _) = edge_label_dimensions(&label.text, detail.edge_font_size, config);
         let position = clear_edge_label_position(
             fm_layout::edge_label_position(path),
             width,
@@ -15336,8 +15526,9 @@ fn edge_label_exclusion_interval(mut intervals: Vec<(f32, f32)>, position: f32) 
 }
 
 /// Keep the padded label box clear of nodes and earlier plates, starting at the routed midpoint.
-/// Only a colliding label allocates interval lists. There are exactly four candidate moves (nearest free +/- X/Y),
-/// with a deterministic tie order; candidates outside the existing padded SVG frame are rejected.
+/// Project into the frame before testing collisions, including for an otherwise clear label.
+/// Prefer the nearest free +/- X/Y position inside that frame. If none fits, retain the nearest
+/// clear outside position; `svg_geometry` includes it in the exported frame.
 fn clear_edge_label_position(
     anchor: fm_layout::LayoutPoint,
     width: f32,
@@ -15348,6 +15539,22 @@ fn clear_edge_label_position(
 ) -> fm_layout::LayoutPoint {
     let half_width = width / 2.0;
     let half_height = height / 2.0;
+    let min_x = layout.bounds.x - padding + half_width + 2.0;
+    let max_x = layout.bounds.x + layout.bounds.width + padding - half_width - 2.0;
+    let min_y = layout.bounds.y - padding + half_height + 2.0;
+    let max_y = layout.bounds.y + layout.bounds.height + padding - half_height - 2.0;
+    let routed_anchor = anchor;
+    let project = |value: f32, low: f32, high: f32| {
+        if low <= high {
+            value.clamp(low, high)
+        } else {
+            (low + high) / 2.0
+        }
+    };
+    let anchor = fm_layout::LayoutPoint {
+        x: project(anchor.x, min_x, max_x),
+        y: project(anchor.y, min_y, max_y),
+    };
     // Includes the backing-plate stroke and a visible gap to the node's stroke.
     let clearance_x = half_width + 2.0;
     let clearance_y = half_height + 2.0;
@@ -15385,6 +15592,8 @@ fn clear_edge_label_position(
     }
     let (left, right) = edge_label_exclusion_interval(x_intervals, anchor.x);
     let (top, bottom) = edge_label_exclusion_interval(y_intervals, anchor.y);
+    let mut closest_inside = None;
+    let mut inside_distance = f32::INFINITY;
     let mut closest = anchor;
     let mut distance = f32::INFINITY;
     for (x, y) in [
@@ -15393,20 +15602,22 @@ fn clear_edge_label_position(
         (right, anchor.y),
         (left, anchor.y),
     ] {
-        if x - half_width < layout.bounds.x - padding
-            || x + half_width > layout.bounds.x + layout.bounds.width + padding
-            || y - half_height < layout.bounds.y - padding
-            || y + half_height > layout.bounds.y + layout.bounds.height + padding
-        {
-            continue;
-        }
-        let candidate_distance = (x - anchor.x).abs() + (y - anchor.y).abs();
+        let candidate_distance = (x - routed_anchor.x).abs() + (y - routed_anchor.y).abs();
         if candidate_distance < distance {
             closest = fm_layout::LayoutPoint { x, y };
             distance = candidate_distance;
         }
+        if x >= min_x
+            && x <= max_x
+            && y >= min_y
+            && y <= max_y
+            && candidate_distance < inside_distance
+        {
+            closest_inside = Some(fm_layout::LayoutPoint { x, y });
+            inside_distance = candidate_distance;
+        }
     }
-    closest
+    closest_inside.unwrap_or(closest)
 }
 
 /// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
@@ -15437,7 +15648,7 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     lx: f32,
     ly: f32,
     label_font_size: f32,
-    avg_char_width: f32,
+    config: &SvgRenderConfig,
     centered: bool,
     from_label: Option<&str>,
     to_label: Option<&str>,
@@ -15446,8 +15657,7 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     use crate::attributes::{
         AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
     };
-    let (label_width, label_height, _) =
-        edge_label_dimensions(label_str, label_font_size, avg_char_width, 1.0);
+    let (label_width, label_height, _) = edge_label_dimensions(label_str, label_font_size, config);
     let start_y = if centered {
         ly
     } else {
@@ -15948,7 +16158,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 *lx,
                 *ly,
                 label_font_size,
-                config.avg_char_width,
+                config,
                 preserved_label_positions.is_some(),
                 from_label,
                 to_label,
@@ -16067,12 +16277,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         // Add background rect for label
         let label_text = label_text.as_ref();
         let label_font_size = detail.edge_font_size;
-        let (label_width, label_height, total_text_height) = edge_label_dimensions(
-            label_text,
-            label_font_size,
-            config.avg_char_width,
-            config.line_height,
-        );
+        let (label_width, label_height, total_text_height) =
+            edge_label_dimensions(label_text, label_font_size, config);
         let centered = preserved_label_positions.is_some();
         let start_y =
             ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
@@ -16395,7 +16601,7 @@ fn render_edge_body_into(
                     lx,
                     ly,
                     detail.edge_font_size,
-                    config.avg_char_width,
+                    config,
                     preserved_label_positions.is_some(),
                     from_label,
                     to_label,
@@ -16415,7 +16621,7 @@ fn render_edge_body_into(
                     lx,
                     ly,
                     detail.edge_font_size,
-                    config.avg_char_width,
+                    config,
                     preserved_label_positions.is_some(),
                     None,
                     None,
@@ -17428,18 +17634,140 @@ mod tests {
         );
         assert!(clear.y + 10.0 <= layout.bounds.height);
 
-        // No free axis candidate fits a completely occupied frame. Retain the routed anchor
-        // instead of hiding the label outside the exported viewBox or iterating without a bound.
+        // A completely occupied frame requires a clear position outside it. The document frame
+        // grows around this position instead of leaving the label underneath an opaque node.
         layout.nodes[0].bounds.height = 100.0;
         assert_eq!(
             clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
-            anchor
+            fm_layout::LayoutPoint { x: 50.0, y: 112.0 }
         );
         layout.nodes.clear();
         assert_eq!(
             clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
             anchor
         );
+    }
+
+    #[test]
+    fn otherwise_clear_edge_labels_are_projected_inside_the_frame() {
+        let layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        for (anchor, expected) in [
+            ((98.0, 50.0), (78.0, 50.0)),
+            ((2.0, 50.0), (22.0, 50.0)),
+            ((50.0, 99.0), (50.0, 88.0)),
+            ((50.0, 1.0), (50.0, 12.0)),
+        ] {
+            assert_eq!(
+                clear_edge_label_position(
+                    fm_layout::LayoutPoint {
+                        x: anchor.0,
+                        y: anchor.1
+                    },
+                    40.0,
+                    20.0,
+                    &layout,
+                    0.0,
+                    &[],
+                ),
+                fm_layout::LayoutPoint {
+                    x: expected.0,
+                    y: expected.1
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_edge_frame_contains_oversized_text_and_its_clear_plate() {
+        let (mut ir, layout) = edge_label_test_scene();
+        let label_id = ir.edges[1].label.unwrap();
+        ir.labels[label_id.0].text = "W".repeat(80);
+        let config = SvgRenderConfig {
+            font_size: 30.0,
+            avg_char_width: 15.0,
+            preserve_labels: true,
+            detail_tier: MermaidTier::Rich,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let position = geometry.label_positions.as_ref().unwrap()[1].unwrap();
+        let (width, height, _) = edge_label_dimensions(
+            &ir.labels[label_id.0].text,
+            geometry.detail.edge_font_size,
+            &config,
+        );
+        assert!(width >= 80.0 * config.font_size + 28.0 - 0.01);
+        assert!(geometry.frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
+        let x = position.x + geometry.frame.offset_x;
+        let y = position.y + geometry.frame.offset_y;
+        assert!(x - width / 2.0 >= 1.99);
+        assert!(x + width / 2.0 <= geometry.frame.viewbox_width - 1.99);
+        assert!(y - height / 2.0 >= 1.99);
+        assert!(y + height / 2.0 <= geometry.frame.viewbox_height - 1.99);
+        for node in &layout.nodes {
+            assert!(
+                position.x + width / 2.0 <= node.bounds.x
+                    || position.x - width / 2.0 >= node.bounds.x + node.bounds.width
+                    || position.y + height / 2.0 <= node.bounds.y
+                    || position.y - height / 2.0 >= node.bounds.y + node.bounds.height
+            );
+        }
+        assert_eq!(svg_frame(&ir, &layout, &config), geometry.frame);
+    }
+
+    #[test]
+    fn preserved_edge_metrics_distinguish_wide_glyphs_and_scale_with_font() {
+        let mut config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let (wide, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 12.75, &config);
+        let (narrow, _, _) = edge_label_dimensions("iiiiiiiiiiiiiiiiiiii", 12.75, &config);
+        assert!(wide > narrow * 1.5);
+        config.font_size = 30.0;
+        config.avg_char_width = 15.0;
+        let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config);
+        assert!((doubled - 28.0 - (wide - 28.0) * 2.0).abs() < 0.01);
+        assert_eq!(
+            edge_label_dimensions("e\u{301}", 25.5, &config),
+            edge_label_dimensions("é", 25.5, &config),
+            "a combining accent must not reserve another glyph advance"
+        );
+    }
+
+    #[test]
+    fn displaced_edge_plates_leave_the_flowchart_title_band_clear() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        ir.meta.title = Some("Diagram heading".to_string());
+        ir.meta.title_from_front_matter = true;
+        assert!(generic_title_for(&ir).is_some());
+        layout.bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        layout.nodes = vec![edge_label_test_node(0, 0.0, 0.0, 100.0, 100.0)];
+        layout.edges[1].points = [
+            fm_layout::LayoutPoint { x: 40.0, y: 4.0 },
+            fm_layout::LayoutPoint { x: 60.0, y: 4.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let position = geometry.label_positions.as_ref().unwrap()[1].unwrap();
+        assert!(
+            position.y < 0.0,
+            "the nearest clear placement is above the layout"
+        );
+        let label = &ir.labels[ir.edges[1].label.unwrap().0].text;
+        let (_, height, _) = edge_label_dimensions(label, geometry.detail.edge_font_size, &config);
+        let plate_top = position.y + geometry.frame.offset_y - height / 2.0;
+        assert!(plate_top >= config.padding + config.font_size + 22.0);
     }
 
     #[test]
@@ -17480,12 +17808,8 @@ mod tests {
                         };
                         let edge = &layout.edges[1];
                         let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
-                        let (_, height, _) = edge_label_dimensions(
-                            label,
-                            detail.edge_font_size,
-                            config.avg_char_width,
-                            config.line_height,
-                        );
+                        let (_, height, _) =
+                            edge_label_dimensions(label, detail.edge_font_size, &config);
                         assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
                         assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
                         let mut streamed = String::new();
@@ -17688,9 +18012,10 @@ mod tests {
                 "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
                 "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
                 "C[Short]\nA-->B\n",
-                "B-->|A preserved prefix label that is long enough to reach the next variable suffix node|C\n",
+                "B-->|WW|C\n",
                 "end\nC-->D",
-            ).to_string();
+            )
+            .to_string();
             input.push_str(tail);
             input.push_str("\nD-->E0");
             // A long path selects the same tree specialization as the optimized batch workload.
@@ -17712,6 +18037,10 @@ mod tests {
         let config = SvgRenderConfig {
             detail_tier: MermaidTier::Rich,
             preserve_labels: true,
+            // The short IR label keeps the tree's fixed 80px rank gaps certifiable. Supply a
+            // deliberately wider SVG calibration so its plate still reaches the changing
+            // suffix; reuse must revalidate rendered label geometry, not only the IR prefix.
+            avg_char_width: 160.0,
             ..Default::default()
         };
         let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
@@ -18956,12 +19285,117 @@ mod tests {
     }
 
     #[test]
+    fn issue14_decision_labels_fit_the_slopes_in_both_svg_writers() {
+        let ir = fm_parser::parse(include_str!("../tests/fixtures/issue14_omnichannel.mmd")).ir;
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::Diamond)
+                .count(),
+            2
+        );
+        for font_size in [11.0, 15.0, 22.0, 30.0] {
+            let config = SvgRenderConfig {
+                font_size,
+                avg_char_width: font_size / 2.0,
+                preserve_labels: true,
+                detail_tier: MermaidTier::Rich,
+                ..Default::default()
+            };
+            for (index, node) in ir
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.shape == NodeShape::Diamond)
+            {
+                let label = ir.node_display_text(node);
+                let (width, height) = (360.0, 100.0);
+                let (max_width, max_height) = node_label_fit_dimensions(
+                    node.shape,
+                    (width, height),
+                    (width, height),
+                    label,
+                    font_size,
+                    &config,
+                );
+                let fitted = fit_node_label_text(label, max_width, max_height, font_size, &config);
+                assert_eq!(
+                    fitted.text.split_whitespace().collect::<Vec<_>>(),
+                    label.split_whitespace().collect::<Vec<_>>()
+                );
+                let text_width = preserved_label_width(
+                    &fitted.text,
+                    fitted.font_size,
+                    &config,
+                    &config.font_metrics(),
+                );
+                let text_height = fitted.font_size * 1.2
+                    + fitted.text.lines().count().saturating_sub(1) as f32
+                        * fitted.font_size
+                        * config.line_height;
+                assert!(
+                    text_width / width + text_height / height < 1.0,
+                    "{} at {font_size}px crosses a diamond slope",
+                    node.id
+                );
+                let node_box = edge_label_test_node(index, 0.0, 0.0, width, height);
+                let detail = resolve_detail_profile(width, height, &config);
+                let colors = ThemeColors::default();
+                let centrality = HashMap::new();
+                let mut streamed = String::new();
+                render_node_into(
+                    &mut streamed,
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                );
+                let slow = render_node(
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                    false,
+                )
+                .render();
+                assert_eq!(streamed, slow, "{} at {font_size}px", node.id);
+            }
+        }
+    }
+
+    #[test]
     fn node_label_fitting_wraps_at_full_size_when_two_lines_fit() {
         let config = SvgRenderConfig::default();
         let fitted = fit_node_label_text("alpha beta", 48.0, 48.0, 15.0, &config);
 
         assert_eq!(fitted.font_size, 15.0);
         assert_eq!(fitted.text.as_ref(), "alpha\nbeta");
+    }
+
+    #[test]
+    fn preserved_multiline_fitting_keeps_authored_breaks_before_wrapping() {
+        let config = SvgRenderConfig {
+            font_size: 30.0,
+            avg_char_width: 15.0,
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let label = "A deliberately long first line\nSecond authored line\nThird authored line";
+        let fitted = fit_node_label_text(label, 360.0, 160.0, 30.0, &config);
+        assert_eq!(fitted.text, label);
+        assert_eq!(fitted.text.lines().count(), 3);
+        assert!(fitted.font_size >= 10.0 && fitted.font_size < 30.0);
+        assert!(fitted.changed);
     }
 
     #[test]

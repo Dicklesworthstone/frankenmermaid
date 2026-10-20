@@ -1170,7 +1170,15 @@ fn merge_svg_config(
         && value.is_finite()
         && value > 0.0
     {
-        merged.font_size = value;
+        // Resize the existing calibration with the glyphs. Layout already measures at the new
+        // font size; leaving this width unchanged undersizes label plates and their clearance.
+        // Use a wider intermediate so a large change of scale cannot overflow the ratio alone.
+        let avg_char_width = (f64::from(merged.avg_char_width) * f64::from(value)
+            / f64::from(merged.font_size)) as f32;
+        if avg_char_width.is_finite() && avg_char_width > 0.0 {
+            merged.avg_char_width = avg_char_width;
+            merged.font_size = value;
+        }
     }
     if let Some(value) = overrides.padding
         && value.is_finite()
@@ -3275,18 +3283,79 @@ mod tests {
     #[test]
     fn merge_svg_config_rejects_invalid_numeric_overrides_by_ignoring_them() {
         let base = SvgRenderConfig::default();
-        let overrides = SvgConfigOverrides {
-            font_size: Some(f32::NAN),
-            padding: Some(-1.0),
-            rounded_corners: Some(f32::INFINITY),
-            ..SvgConfigOverrides::default()
+        for font_size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                padding: Some(-1.0),
+                rounded_corners: Some(f32::INFINITY),
+                ..SvgConfigOverrides::default()
+            };
+
+            let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
+
+            assert_eq!(merged, base, "invalid font size {font_size}");
+        }
+    }
+
+    #[test]
+    fn merge_svg_config_preserves_font_calibration_across_resizes() {
+        let mut base = SvgRenderConfig::default();
+        for (font_size, expected_width) in [(30.0, 15.0), (11.0, 5.5), (22.0, 11.0), (15.0, 7.5)] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid font size");
+            assert_eq!(merged.font_size, font_size);
+            assert_eq!(merged.avg_char_width, expected_width);
+            base = merged;
+        }
+        assert_eq!(
+            merge_svg_config(&base, &SvgConfigOverrides::default(), None).unwrap(),
+            base,
+            "omitting a font override must preserve the existing calibration"
+        );
+    }
+
+    #[test]
+    fn merge_svg_config_preserves_custom_font_calibration() {
+        let mut base = SvgRenderConfig {
+            font_size: 28.0,
+            avg_char_width: 18.0,
+            ..Default::default()
         };
+        for (font_size, expected_width) in [(28.0, 18.0), (14.0, 9.0), (42.0, 27.0), (28.0, 18.0)] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid font size");
+            assert_eq!(merged.font_size, font_size);
+            assert_eq!(merged.avg_char_width, expected_width);
+            base = merged;
+        }
+    }
 
-        let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
-
-        assert_eq!(merged.font_size, base.font_size);
-        assert_eq!(merged.padding, base.padding);
-        assert_eq!(merged.rounded_corners, base.rounded_corners);
+    #[test]
+    fn merge_svg_config_ignores_font_sizes_with_unrepresentable_metrics() {
+        for (base, font_size) in [
+            (
+                SvgRenderConfig {
+                    font_size: 1.0,
+                    avg_char_width: 2.0,
+                    ..Default::default()
+                },
+                f32::MAX,
+            ),
+            (SvgRenderConfig::default(), f32::from_bits(1)),
+        ] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
+            assert_eq!(merged, base, "font metrics must remain finite and positive");
+        }
     }
 
     #[test]
@@ -3389,6 +3458,10 @@ mod tests {
         assert_eq!(effective.shadows, Some(false));
         assert_eq!(effective.detail_tier.as_deref(), Some("compact"));
         assert_eq!(effective.preserve_labels, Some(true));
+        let merged = merge_svg_config(&SvgRenderConfig::default(), &effective, None)
+            .expect("nested SVG options should merge");
+        assert_eq!(merged.font_size, 21.0);
+        assert_eq!(merged.avg_char_width, 10.5);
     }
 
     #[test]
@@ -4004,6 +4077,35 @@ mod tests {
                 assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Critical);
                 assert!(!direct.contains("<filter id=\"drop-shadow\""));
             }
+        }
+    }
+
+    #[test]
+    fn issue14_worker_font_overrides_keep_all_drawn_text() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        write_runtime_config(RuntimeConfig::default());
+        for config in [
+            r#"{"fontSize":11,"detailTier":"compact"}"#,
+            r#"{"fontSize":22,"detailTier":"compact"}"#,
+            r#"{"fontSize":30,"detailTier":"compact"}"#,
+            r#"{"fontSize":11,"svg":{"fontSize":22},"detailTier":"compact"}"#,
+        ] {
+            let response = render_worker_request(&WorkerRenderRequest {
+                request_id: 14,
+                input: ISSUE14_SOURCE.to_string(),
+                config_json: Some(config.to_string()),
+            });
+            let WorkerRenderResponse::Completed { svg, .. } = response else {
+                panic!("font override failed: {config}: {response:?}");
+            };
+            assert_issue14_visible_labels(&svg);
         }
     }
 
@@ -4790,7 +4892,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x044c_7024_58aa_f4e4;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x5b05_c0d4_c602_4321;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4818,22 +4920,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x4628_cd9c_352e_b4d7,
+                0xafe8_712e_aa94_163c,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xd3bc_ce11_232c_5c5e,
+                0x312f_713e_23dd_8c2b,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0xae81_b7ad_5f77_5612,
+                0x86fb_0b6a_7314_7bb7,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x753b_6364_3e69_e453,
+                0xd5c3_891b_75b1_2cd9,
             ),
         ];
 
