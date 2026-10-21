@@ -4276,7 +4276,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     #[test]
     fn capability_matrix_js_returns_matrix_payload() {
-        let value = capability_matrix_js().expect("capability matrix should serialize");
+        let value = super::capability_matrix_js().expect("capability matrix should serialize");
         let json = value
             .as_string()
             .expect("wasm tests should receive stringifiable payload");
@@ -4897,7 +4897,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x6999_f28e_7ea6_6697;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x35e2_76d2_2992_e16b;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4925,22 +4925,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0xafe8_712e_aa94_163c,
+                0x4d34_bd9f_f56f_e3d2,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x312f_713e_23dd_8c2b,
+                0xa2ba_2daf_063a_b7d1,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x86fb_0b6a_7314_7bb7,
+                0x0167_f23e_f809_bb61,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xd5c3_891b_75b1_2cd9,
+                0xf434_bccb_f68c_db2f,
             ),
         ];
 

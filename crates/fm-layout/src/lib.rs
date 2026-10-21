@@ -6672,11 +6672,7 @@ fn size_radial_rings(
     }
     let gap = (spacing.node_spacing * 0.35).max(8.0);
     for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
-        nodes.sort_by(|left, right| {
-            angles[*left]
-                .total_cmp(&angles[*right])
-                .then_with(|| left.cmp(right))
-        });
+        sort_radial_ring(nodes, angles);
         // A very narrow subtree can exhaust f32 angular precision. Preserve cyclic order while
         // spreading that level instead of dividing by a zero chord or stacking its labels.
         if nodes.len() > 1 && radial_min_angle_gap(nodes, angles) < 0.000_001 {
@@ -6754,11 +6750,7 @@ fn size_radial_rings(
     for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
         // atan2 can move a direction across the +/-PI seam; the clearance bound needs the
         // candidate's own cyclic ordering, not the old ordering with a negative wraparound gap.
-        nodes.sort_by(|left, right| {
-            candidate_angles[*left]
-                .total_cmp(&candidate_angles[*right])
-                .then_with(|| left.cmp(right))
-        });
+        sort_radial_ring(nodes, &candidate_angles);
         if nodes.len() > 1 && radial_min_angle_gap(nodes, &candidate_angles) < 0.000_001 {
             // Never redistribute only one candidate level: that would cease to be a shared
             // monotone map and could pull children outside their parent's original sector.
@@ -6816,6 +6808,14 @@ fn radial_footprint_area(
         max_y = max_y.max(y + half_height);
     }
     (max_x - min_x) * (max_y - min_y)
+}
+
+fn sort_radial_ring(nodes: &mut [usize], angles: &[f32]) {
+    nodes.sort_by(|left, right| {
+        angles[*left]
+            .total_cmp(&angles[*right])
+            .then_with(|| left.cmp(right))
+    });
 }
 
 fn radial_min_angle_gap(nodes: &[usize], angles: &[f32]) -> f32 {
@@ -31801,7 +31801,7 @@ mod tests {
                 })
                 .collect();
                 let notes =
-                    build_state_note_geometry(&ir, &nodes, &fm_core::FontMetrics::default());
+                    super::build_state_note_geometry(&ir, &nodes, &fm_core::FontMetrics::default());
                 assert_eq!(notes.len(), 2);
                 assert!(notes[0].bounds.y + notes[0].bounds.height < nodes[1].bounds.y);
                 assert!(notes[1].bounds.y >= nodes[2].bounds.y + nodes[2].bounds.height);

@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-21",
+  "scope": "Browser-package evidence for collision-safe compact radial mindmaps, branch styling, inline author classes, and state/class note placement.",
+  "baseline": {
+    "commit": "db9d0299c3cd4916a012293c7f9b8356fa222938",
+    "fresh_independent_target": true,
+    "same_tools_and_flags": true,
+    "five_package_artifacts_byte_identical_to_committed": true,
+    "four_svg_fixtures_byte_identical_to_committed": true,
+    "raw_wasm_bytes": 2010209,
+    "gzip_wasm_bytes": 805290,
+    "wasm_sha256": "512402ad4a81cb05d06bb8bf5dec831ea7f315aeb781c39bab047a627a538aa1",
+    "source_sha256": "8ca904f5f1ed92114f5021c83d8953f9159604721743a6968cd3ada0d1b019b5",
+    "package_artifact_fnv64": "0x6999f28e7ea66697"
+  },
+  "shipping_package": {
+    "raw_wasm_bytes": 2026292,
+    "gzip_wasm_bytes": 810333,
+    "wasm_sha256": "64601d3bd2df1de16ab7300ca7df156558acd8b529902409b11c3192958d5c09",
+    "wasm_git_blob_sha1": "4b261145de7b097c26a1bdc97a8346943d01e269",
+    "source_sha256": "0da651f2a3350e674c56833d514f5d1d37415b0efd981ee4f6bf7c1d213cc29f",
+    "package_artifact_fnv64": "0x35e276d22992e16b",
+    "source_fresh": true,
+    "within_documented_budget": true
+  },
+  "build": {
+    "command": "bash build-wasm.sh",
+    "rustc": "1.100.0-nightly (908501772 2026-08-30)",
+    "wasm_pack": "0.15.0",
+    "wasm_bindgen": "0.2.129",
+    "wasm_opt": "125",
+    "optimization": "Canonical opt-z, LTO, one codegen unit, immediate-abort build-std, wasm-opt -Oz --converge --strip-producers with six explicit target features.",
+    "gzip_measurement": "gzip -c pkg/frankenmermaid_bg.wasm | wc -c"
+  },
+  "size_ratchet": {
+    "previous_ceiling_bytes": 805888,
+    "new_ceiling_bytes": 811008,
+    "new_ceiling_kib": 792,
+    "headroom_bytes": 675,
+    "smallest_whole_kib_ceiling": true,
+    "net_raw_growth_bytes": 16083,
+    "net_gzip_growth_bytes": 5043,
+    "net_section_growth_bytes": {
+      "code": 15420,
+      "data": 601,
+      "types": 30,
+      "functions": 32
+    },
+    "old_and_new_imports": 89,
+    "old_and_new_exports": 50,
+    "old_and_new_custom_sections": 0,
+    "shrink_attempts": [
+      {
+        "change": "Share the radial angle comparator",
+        "retained": true,
+        "raw_before": 2030215,
+        "raw_after": 2026292,
+        "gzip_before": 810695,
+        "gzip_after": 810333,
+        "all_26_svg_outputs_byte_identical": true,
+        "exact_helper_equivalence_tests_passed": 3
+      },
+      {
+        "change": "Cast final blended color channels to u8 before hex formatting",
+        "retained": false,
+        "raw_bytes": 2026382,
+        "gzip_bytes": 810389,
+        "reason": "Increased output by 90 raw / 56 gzip bytes versus shared comparator."
+      }
+    ]
+  },
+  "validation": {
+    "final_canonical_build": {
+      "exit_code": 0,
+      "freshness_checks_passed": 4,
+      "all_26_render_geometry_note_checks_passed": true,
+      "all_26_svg_outputs_identical_to_validated_development": true
+    },
+    "actual_wasm_render_cases": 26,
+    "fixture_groups": [
+      {
+        "scope": "branch styles: 17 nodes, 16 edges",
+        "cases": 12
+      },
+      {
+        "scope": "wide map: root plus 24 children",
+        "cases": 2
+      },
+      {
+        "scope": "nested map: 61 nodes, 60 edges",
+        "cases": 2
+      },
+      {
+        "scope": "flowchart control: 4 nodes, 3 edges",
+        "cases": 2
+      },
+      {
+        "scope": "state notes on same/different nodes",
+        "cases": 4
+      },
+      {
+        "scope": "deep fork: 21 nodes, 20 edges",
+        "cases": 1
+      },
+      {
+        "scope": "recovered roots: 192 nodes, no edges",
+        "cases": 1
+      },
+      {
+        "scope": "mixed labels: 21 nodes, 20 edges",
+        "cases": 1
+      },
+      {
+        "scope": "mixed labels at font size 24",
+        "cases": 1
+      }
+    ],
+    "themes": [
+      "default",
+      "dark",
+      "neutral",
+      "monochrome",
+      "mermaid",
+      "pastel"
+    ],
+    "render_modes": [
+      "embedded CSS",
+      "inline paints"
+    ],
+    "render_checks": [
+      "Expected parsed node/edge populations",
+      "Deterministic repeat output",
+      "Finite SVG geometry and node bounds within viewBox",
+      "Node-box overlaps",
+      "State note clearance and connected leaders"
+    ],
+    "overlap_comparison_baseline": "Original committed db9d0299 package",
+    "overlap_measurements": [
+      {
+        "fixture": "mindmap-wide24-default-inline",
+        "nodes": 25,
+        "old_node_box_overlap_pairs": 32,
+        "new_node_box_overlap_pairs": 0,
+        "new_viewbox": [
+          0.0,
+          0.0,
+          1844.9778,
+          1541.5574
+        ]
+      },
+      {
+        "fixture": "mindmap-cross-ring-default-inline",
+        "nodes": 61,
+        "old_node_box_overlap_pairs": 58,
+        "new_node_box_overlap_pairs": 0,
+        "new_viewbox": [
+          0.0,
+          0.0,
+          3294.9897,
+          2984.2263
+        ]
+      }
+    ],
+    "nested_compaction": {
+      "comparison_baseline": "First collision-free implementation from this session, not the original overlapping package",
+      "before_viewbox": [
+        0.0,
+        0.0,
+        6365.444,
+        6079.444
+      ],
+      "after_viewbox": [
+        0.0,
+        0.0,
+        3294.9897,
+        2984.2263
+      ],
+      "area_reduction_percent": 74.59066783108774,
+      "new_node_box_overlap_pairs": 0,
+      "unchanged_other_svg_outputs": 20,
+      "compared_outputs": 22
+    },
+    "state_notes": {
+      "old_adjacent_long_note_overlap_px": 85.5,
+      "new_adjacent_long_note_gap_px": 8.0,
+      "old_stacked_note_leader_end_y": 109.25,
+      "new_stacked_note_leader_end_y": 151.25,
+      "stacked_note_midpoint_y": 151.25
+    },
+    "styling": {
+      "minimum_measured_root_text_contrast_ratio": 5.276748541631663,
+      "root_font_weight": 600,
+      "author_class_rules_and_inline_paints_checked": true
+    },
+    "four_other_diagram_fixtures": {
+      "names": [
+        "flowchart",
+        "sequence",
+        "class",
+        "state"
+      ],
+      "svg_bytes_outside_style_block_unchanged": true,
+      "new_svg_bytes_reduction_each": 72,
+      "actual_wasm_fnv64": {
+        "flowchart": "0x4d34bd9ff56fe3d2",
+        "sequence": "0xa2ba2daf063ab7d1",
+        "class": "0x0167f23ef809bb61",
+        "state": "0xf434bccbf68cdb2f"
+      }
+    },
+    "fm_wasm_test_target_typecheck": {
+      "command": "cargo check --tests -p fm-wasm --target wasm32-unknown-unknown --locked",
+      "exit_code": 0,
+      "scope": "Type-checks fm-wasm test module and production dependencies; does not execute tests or check dependency-crate test modules.",
+      "test_only_resolution_fix": "Qualify capability_matrix_js with super::; production prefix is unchanged."
+    }
+  },
+  "limits": [
+    "Full native workspace tests and native/WASM byte-equality test were not executed.",
+    "Actual package was loaded in Node; no browser automation or browser-computed custom-paint verification was performed.",
+    "Geometric overlap counts cover node-shape axis-aligned bounds, not text glyph extents, shadows, or edge intersections.",
+    "The 26 render checks are correctness observations, not a performance benchmark.",
+    "No live site deployment is claimed."
+  ]
+}

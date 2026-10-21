@@ -248,7 +248,18 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # 787K is the smallest whole-KiB ceiling that fits this measured output, with 598 bytes
 # of headroom. Browser/API correctness and source-freshness gates remain unchanged.
 # See evidence/issue14_font_regression.md for the independent size and runtime evidence.
-MAX_GZIP_BYTES=$((787 * 1024))
+# Raised 787K -> 792K on 2026-10-21 for compact collision-safe mindmaps, branch/root
+# styling, inline mindmap classes, and State/Class note clearance. A same-tools build
+# of unchanged db9d0299 in an empty isolated target reproduced all five committed
+# package artifacts exactly: 2010209 raw / 805290 gzip bytes. The feature build measured
+# 810695 gzip; sharing the radial comparator reduced it to 810333 (-362 gzip / -3923 raw).
+# A u8 channel formatter grew gzip by 56 bytes and was rejected. Net feature growth is
+# 16083 raw / 5043 gzip: code +15420, data +601, types +30, function section +32.
+# Both modules retain 89 imports, 50 exports, and zero custom sections. Keep canonical
+# -Oz --converge, LTO, one codegen unit, and immediate-abort std. 792K is the smallest
+# whole-KiB ceiling fitting this output, with 675 bytes headroom. Correctness and
+# artifact/source freshness gates remain unchanged. See evidence/mindmap_browser_validation.json.
+MAX_GZIP_BYTES=$((792 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
