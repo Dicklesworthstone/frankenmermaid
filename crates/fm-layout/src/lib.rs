@@ -6692,8 +6692,8 @@ fn size_radial_rings(
 
         // Flat, broad mindmaps benefit from more labels beside the root and fewer above it.
         // Weight the polar angle by the measured label aspect ratio, then accept this candidate
-        // only when its exact rectangle clearance needs a smaller radius. Deep trees retain
-        // their leaf-weighted wedges; the bounded candidate never adds a quadratic large-ring pass.
+        // only when its exact rectangle clearance needs a smaller radius. Multilevel trees use
+        // a single shared remap below; remapping each ring independently would split subtrees.
         if tree.roots.len() == 1 && tree.max_depth == 1 && (8..=64).contains(&nodes.len()) {
             let width = nodes
                 .iter()
@@ -6720,6 +6720,102 @@ fn size_radial_rings(
         // Leave a subpixel rounding cushion for the later f32 coordinate normalization.
         radii[level] = radius.mul_add(1.001, 1.0);
     }
+
+    if tree.roots.len() != 1 || tree.max_depth < 2 {
+        return;
+    }
+
+    // Wide labels near the top and bottom can otherwise force every outer ring to an enormous
+    // radius. One monotone circle map gives those labels more angular space while preserving
+    // the cyclic order of every subtree, including the directions of its intermediate parents.
+    // The root stays at radius zero. There is only one candidate and one extra bounded sizing
+    // pass, rather than an angle-vector clone or an optimization search for every level.
+    let (width, height) =
+        levels
+            .iter()
+            .skip(1)
+            .flatten()
+            .fold((1.0_f32, 1.0_f32), |(width, height), node| {
+                (
+                    width.max(node_sizes[*node].0),
+                    height.max(node_sizes[*node].1),
+                )
+            });
+    let aspect = ((width + gap) / (height + gap)).max(1.0).sqrt();
+    if aspect <= 1.0 || !aspect.is_finite() {
+        return;
+    }
+    let candidate_angles: Vec<f32> = angles
+        .iter()
+        .map(|angle| (angle.sin() / aspect).atan2(angle.cos()))
+        .collect();
+    let mut candidate_radii = vec![0.0_f32; radii.len()];
+    candidate_radii[0] = radii[0];
+    for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
+        // atan2 can move a direction across the +/-PI seam; the clearance bound needs the
+        // candidate's own cyclic ordering, not the old ordering with a negative wraparound gap.
+        nodes.sort_by(|left, right| {
+            candidate_angles[*left]
+                .total_cmp(&candidate_angles[*right])
+                .then_with(|| left.cmp(right))
+        });
+        if nodes.len() > 1 && radial_min_angle_gap(nodes, &candidate_angles) < 0.000_001 {
+            // Never redistribute only one candidate level: that would cease to be a shared
+            // monotone map and could pull children outside their parent's original sector.
+            return;
+        }
+        let inner = candidate_radii[level - 1]
+            + diameters[level - 1] * 0.5
+            + spacing.rank_spacing.max(0.0)
+            + diameters[level] * 0.5;
+        candidate_radii[level] = inner
+            .max(radial_ring_radius(
+                nodes,
+                node_sizes,
+                &candidate_angles,
+                gap,
+            ))
+            .mul_add(1.001, 1.0);
+    }
+    let candidate_area = radial_footprint_area(
+        tree,
+        node_sizes,
+        depth_offset,
+        &candidate_angles,
+        &candidate_radii,
+    );
+    if candidate_area.is_finite()
+        && candidate_radii.last() < radii.last()
+        && candidate_area < radial_footprint_area(tree, node_sizes, depth_offset, angles, radii)
+    {
+        angles.copy_from_slice(&candidate_angles);
+        radii.copy_from_slice(&candidate_radii);
+    }
+}
+
+fn radial_footprint_area(
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    depth_offset: usize,
+    angles: &[f32],
+    radii: &[f32],
+) -> f64 {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (node, &(width, height)) in node_sizes.iter().enumerate() {
+        let radius = radii[tree.depth[node] + depth_offset];
+        let x = f64::from(radius * angles[node].cos());
+        let y = f64::from(radius * angles[node].sin());
+        let half_width = f64::from(width) * 0.5;
+        let half_height = f64::from(height) * 0.5;
+        min_x = min_x.min(x - half_width);
+        min_y = min_y.min(y - half_height);
+        max_x = max_x.max(x + half_width);
+        max_y = max_y.max(y + half_height);
+    }
+    (max_x - min_x) * (max_y - min_y)
 }
 
 fn radial_min_angle_gap(nodes: &[usize], angles: &[f32]) -> f32 {
@@ -26860,6 +26956,23 @@ mod tests {
         let layout = layout_diagram_radial(&ir);
         assert_eq!(layout.nodes.len(), 61);
         assert_radial_labels_are_separate(&layout);
+        assert_eq!(layout, layout_diagram_radial(&ir));
+        // A collision-free 61-node map used to exceed 6000px in both dimensions. A shared
+        // remap must improve the complete multilevel footprint, not just an inner ring.
+        assert!(layout.bounds.width < 3500.0, "{:?}", layout.bounds);
+        assert!(layout.bounds.height < 3200.0, "{:?}", layout.bounds);
+        let root = layout.nodes[0].bounds.center();
+        let angle = |id: &str| {
+            let node = layout.nodes.iter().find(|node| node.node_id == id).unwrap();
+            let center = node.bounds.center();
+            (center.y - root.y).atan2(center.x - root.x)
+        };
+        for branch in 0..12 {
+            let parent_angle = angle(&format!("branch{branch}"));
+            let first_child = angle(&format!("child{branch}_0"));
+            let last_child = angle(&format!("child{branch}_3"));
+            assert!(first_child < parent_angle && parent_angle < last_child);
+        }
 
         // Exercises the scalable ring bound and multiple roots, without a parser-induced tree.
         let forest = graph_ir(DiagramType::Mindmap, 192, &[]);

@@ -3406,7 +3406,7 @@ mod tests {
         assert_eq!(themed.label_color, "#f8fafc");
         assert_eq!(
             themed.accents,
-            ThemeColors::from_preset(ThemePreset::Dark).accents
+            fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).accents
         );
     }
 
