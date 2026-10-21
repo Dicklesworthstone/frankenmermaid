@@ -19933,7 +19933,7 @@ const STATE_NOTE_GAP: f32 = 32.0;
 const STATE_NOTE_PAD_X: f32 = 10.0;
 /// Vertical padding inside a state note box, per side.
 const STATE_NOTE_PAD_Y: f32 = 8.0;
-/// Vertical gap between two notes stacked on the same side of the same state.
+/// Vertical gap when a note must move below another note or node.
 const STATE_NOTE_STACK_GAP: f32 = 8.0;
 /// The renderer draws note text at `config.font_size * 0.8`, matching sequence notes, so the layout
 /// estimate is scaled by the same factor — `metrics` measures at its own base size.
@@ -19949,7 +19949,8 @@ const STATE_NOTE_FONT_SCALE: f32 = 0.8;
 /// attaching `note right of Typo` to whichever state happened to be first would be a worse failure
 /// than not drawing it, because it invents a claim the source never made.
 ///
-/// Several notes on the same side of the same state stack downward instead of coinciding.
+/// Notes stack downward when necessary to clear other notes and nodes, including notes belonging
+/// to different targets. Their leaders attach to the final position of each note.
 fn build_state_note_geometry(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -20044,6 +20045,31 @@ fn build_state_note_geometry(
             }
         }
 
+        // Stacking can enter another state's row, and notes belonging to different states can
+        // overlap too. Keep the chosen side and move below every intersecting obstacle. Recheck
+        // the new row: clearing one obstacle can encounter another. Each move passes at least
+        // one obstacle's bottom, so this terminates after at most nodes.len() + placed.len() moves.
+        loop {
+            let next_y = nodes
+                .iter()
+                .map(|node| node.bounds)
+                .chain(placed.iter().map(|note| note.bounds))
+                .filter(|obstacle| {
+                    x < obstacle.x + obstacle.width
+                        && obstacle.x < x + width
+                        && y < obstacle.y + obstacle.height
+                        && obstacle.y < y + height
+                })
+                .fold(y, |clear_y, obstacle| {
+                    clear_y.max(obstacle.y + obstacle.height + STATE_NOTE_STACK_GAP)
+                });
+            if next_y > y {
+                y = next_y;
+            } else {
+                break;
+            }
+        }
+
         let leader_y = target.bounds.center().y;
         let (leader_start_x, leader_end_x) = match side {
             StateNoteSide::Right => (target.bounds.x + target.bounds.width, x),
@@ -20066,7 +20092,7 @@ fn build_state_note_geometry(
             },
             leader_end: LayoutPoint {
                 x: leader_end_x,
-                y: leader_y,
+                y: y + height / 2.0,
             },
         });
     }
@@ -31569,6 +31595,118 @@ mod tests {
             first.bounds.height,
             second.bounds.y
         );
+        assert_eq!(
+            second.leader_end.y,
+            second.bounds.center().y,
+            "the displaced note's leader must reach its own box"
+        );
+        assert_ne!(first.leader_end, second.leader_end);
+    }
+
+    #[test]
+    fn multiline_notes_on_adjacent_states_do_not_cover_each_other() {
+        let lines = (1..=12)
+            .map(|line| format!("    Detail {line}\n"))
+            .collect::<String>();
+        for side in ["left", "right"] {
+            let source = format!(
+                "stateDiagram-v2\n  A --> B\n  note {side} of A\n{lines}  end note\n  note {side} of B\n{lines}  end note\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            let notes = &layout.extensions.state_notes;
+            assert_eq!(notes.len(), 2);
+            assert!(
+                !rects_overlap(notes[0].bounds, notes[1].bounds),
+                "{side}: notes on adjacent states overlap"
+            );
+            for note in notes {
+                assert_eq!(note.leader_end.y, note.bounds.center().y);
+                for node in &layout.nodes {
+                    assert!(!rects_overlap(note.bounds, node.bounds));
+                }
+                assert!(note.bounds.x.is_finite() && note.bounds.y.is_finite());
+                assert!(note.bounds.y >= layout.bounds.y);
+                assert!(
+                    note.bounds.y + note.bounds.height
+                        <= layout.bounds.y + layout.bounds.height + 0.5
+                );
+            }
+            assert_eq!(
+                *notes,
+                layout_diagram(&ir).extensions.state_notes,
+                "placement must be deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn stacked_state_and_class_notes_clear_nodes_in_their_new_rows() {
+        for diagram_type in [DiagramType::State, DiagramType::Class] {
+            for side in ["left", "right"] {
+                let mut ir = graph_ir(diagram_type, 3, &[(0, 1), (1, 2)]);
+                for text in ["first note", "second note"] {
+                    ir.state_notes.push(fm_core::IrStateNote {
+                        target: "N0".to_string(),
+                        position: side.to_string(),
+                        text: text.to_string(),
+                        span: Span::default(),
+                    });
+                }
+                // The initial row is clear. Stacking the second note enters the first lower
+                // node; clearing that node enters the next one, requiring another clearance pass.
+                let obstacle_x = if side == "left" { -200.0 } else { 112.0 };
+                let nodes: Vec<_> = [
+                    LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                    LayoutRect {
+                        x: obstacle_x,
+                        y: 45.0,
+                        width: 168.0,
+                        height: 60.0,
+                    },
+                    LayoutRect {
+                        x: obstacle_x,
+                        y: 110.0,
+                        width: 168.0,
+                        height: 30.0,
+                    },
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, bounds)| LayoutNodeBox {
+                    node_index: index,
+                    node_id: format!("N{index}"),
+                    rank: index,
+                    order: 0,
+                    span: Span::default(),
+                    bounds,
+                })
+                .collect();
+                let notes =
+                    build_state_note_geometry(&ir, &nodes, &fm_core::FontMetrics::default());
+                assert_eq!(notes.len(), 2);
+                assert!(notes[0].bounds.y + notes[0].bounds.height < nodes[1].bounds.y);
+                assert!(notes[1].bounds.y >= nodes[2].bounds.y + nodes[2].bounds.height);
+                assert!(!rects_overlap(notes[0].bounds, notes[1].bounds));
+                for note in &notes {
+                    for node in &nodes {
+                        assert!(!rects_overlap(note.bounds, node.bounds));
+                    }
+                    let edge_x = match note.side {
+                        StateNoteSide::Left => note.bounds.x + note.bounds.width,
+                        StateNoteSide::Right => note.bounds.x,
+                    };
+                    assert_eq!(note.leader_end.x, edge_x);
+                    assert_eq!(note.leader_end.y, note.bounds.center().y);
+                    assert_eq!(note.leader_start.y, nodes[0].bounds.center().y);
+                }
+            }
+        }
     }
 
     /// Edge list of `golden/cycle_ladder.mmd`, the fixture with the most measured crossings.
