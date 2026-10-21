@@ -3957,7 +3957,7 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .unwrap_or_else(fm_core::FontMetrics::default_metrics);
             layout_diagram_tree_traced_with_metrics(ir, &metrics)
         }
-        LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
+        LayoutAlgorithm::Radial => layout_diagram_radial_traced_with_config(ir, config),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
@@ -6479,9 +6479,19 @@ pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out using the radial tree algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_radial_traced_with_config(ir, LayoutConfig::default())
+}
+
+fn layout_diagram_radial_traced_with_config(
+    ir: &MermaidDiagramIr,
+    config: LayoutConfig,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let spacing = config.spacing;
+    let metrics = config
+        .font_metrics
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let node_sizes = compute_node_sizes(ir, &metrics);
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -6520,7 +6530,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut ring_level_sizes = vec![0.0_f32; effective_max_depth + 1];
     for (node_index, (width, height)) in node_sizes.iter().copied().enumerate() {
         let level = tree.depth[node_index] + depth_offset;
-        ring_level_sizes[level] = ring_level_sizes[level].max(width.max(height));
+        ring_level_sizes[level] = ring_level_sizes[level].max(width.hypot(height));
     }
 
     let mut radii = vec![0.0_f32; effective_max_depth + 1];
@@ -6579,6 +6589,16 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         }
     }
 
+    size_radial_rings(
+        &tree,
+        &node_sizes,
+        depth_offset,
+        spacing,
+        &ring_level_sizes,
+        &mut angles,
+        &mut radii,
+    );
+
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let level = tree.depth[node_index] + depth_offset;
@@ -6591,10 +6611,6 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
     let edges = force_build_edge_paths(ir, &nodes);
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -6636,6 +6652,110 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         }),
         trace,
     }
+}
+
+/// Separate nodes within each ring as well as across rings. Angular allocation alone cannot
+/// prevent wide siblings from overlapping when their requested spans exceed the available arc.
+#[allow(clippy::too_many_arguments)]
+fn size_radial_rings(
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    depth_offset: usize,
+    spacing: LayoutSpacing,
+    diameters: &[f32],
+    angles: &mut [f32],
+    radii: &mut [f32],
+) {
+    let mut levels = vec![Vec::new(); radii.len()];
+    for (node, depth) in tree.depth.iter().copied().enumerate() {
+        levels[depth + depth_offset].push(node);
+    }
+    let gap = (spacing.node_spacing * 0.35).max(8.0);
+    for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
+        nodes.sort_by(|left, right| {
+            angles[*left]
+                .total_cmp(&angles[*right])
+                .then_with(|| left.cmp(right))
+        });
+        // A very narrow subtree can exhaust f32 angular precision. Preserve cyclic order while
+        // spreading that level instead of dividing by a zero chord or stacking its labels.
+        if nodes.len() > 1 && radial_min_angle_gap(nodes, angles) < 0.000_001 {
+            for (index, node) in nodes.iter().copied().enumerate() {
+                angles[node] = -PI + 2.0 * PI * (index as f32 + 0.5) / nodes.len() as f32;
+            }
+        }
+        let inner = radii[level - 1]
+            + diameters[level - 1] * 0.5
+            + spacing.rank_spacing.max(0.0)
+            + diameters[level] * 0.5;
+        let mut radius = inner.max(radial_ring_radius(nodes, node_sizes, angles, gap));
+
+        // Flat, broad mindmaps benefit from more labels beside the root and fewer above it.
+        // Weight the polar angle by the measured label aspect ratio, then accept this candidate
+        // only when its exact rectangle clearance needs a smaller radius. Deep trees retain
+        // their leaf-weighted wedges; the bounded candidate never adds a quadratic large-ring pass.
+        if tree.roots.len() == 1 && tree.max_depth == 1 && (8..=64).contains(&nodes.len()) {
+            let width = nodes
+                .iter()
+                .map(|node| node_sizes[*node].0)
+                .fold(1.0, f32::max);
+            let height = nodes
+                .iter()
+                .map(|node| node_sizes[*node].1)
+                .fold(1.0, f32::max);
+            let aspect = ((width + gap) / (height + gap)).max(1.0).sqrt();
+            let mut candidate = angles.to_vec();
+            for node in nodes.iter().copied() {
+                candidate[node] = (angles[node].sin() / aspect).atan2(angles[node].cos());
+            }
+            let candidate_radius =
+                inner.max(radial_ring_radius(nodes, node_sizes, &candidate, gap));
+            if candidate_radius < radius {
+                radius = candidate_radius;
+                for node in nodes.iter().copied() {
+                    angles[node] = candidate[node];
+                }
+            }
+        }
+        // Leave a subpixel rounding cushion for the later f32 coordinate normalization.
+        radii[level] = radius.mul_add(1.001, 1.0);
+    }
+}
+
+fn radial_min_angle_gap(nodes: &[usize], angles: &[f32]) -> f32 {
+    let first = angles[nodes[0]];
+    let last = angles[*nodes.last().expect("a ring has nodes")];
+    nodes
+        .windows(2)
+        .map(|pair| angles[pair[1]] - angles[pair[0]])
+        .fold(2.0 * PI - last + first, f32::min)
+}
+
+fn radial_ring_radius(nodes: &[usize], node_sizes: &[(f32, f32)], angles: &[f32], gap: f32) -> f32 {
+    if nodes.len() < 2 {
+        return 0.0;
+    }
+    if nodes.len() > 128 {
+        // A common enclosing-circle diameter and the smallest cyclic gap bound every pair.
+        // Sorting is O(n log n); unlike pairwise collision repair this stays practical for large maps.
+        let diameter = nodes
+            .iter()
+            .map(|node| node_sizes[*node].0.hypot(node_sizes[*node].1))
+            .fold(0.0, f32::max);
+        return (diameter + gap) / (2.0 * (radial_min_angle_gap(nodes, angles) * 0.5).sin());
+    }
+    let mut radius = 0.0_f32;
+    for (index, left) in nodes.iter().copied().enumerate() {
+        for right in nodes[index + 1..].iter().copied() {
+            let dx = (angles[left].cos() - angles[right].cos()).abs();
+            let dy = (angles[left].sin() - angles[right].sin()).abs();
+            // Separating either axis is sufficient for two axis-aligned label rectangles.
+            let horizontal = ((node_sizes[left].0 + node_sizes[right].0) * 0.5 + gap) / dx;
+            let vertical = ((node_sizes[left].1 + node_sizes[right].1) * 0.5 + gap) / dy;
+            radius = radius.max(horizontal.min(vertical));
+        }
+    }
+    radius
 }
 
 fn mindmap_subtree_heights(
@@ -12672,13 +12792,14 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             }
             // `false` for `horizontal_ranks`: force layout has no rank orientation, and this is the
             // same convention the self-loop branch above already uses.
-            let mut points = route_edge_points_with_obstacle_index(
-                from_pt,
-                to_pt,
-                false,
-                &obstacle_bounds,
-                None,
-            );
+            let mut points = if ir.diagram_type == DiagramType::Mindmap
+                && parallel_offset.abs() <= 0.01
+                && !cga_routing::segment_intersects_obstacles(from_pt, to_pt, &obstacle_bounds, 8.0)
+            {
+                smallvec![from_pt, to_pt]
+            } else {
+                route_edge_points_with_obstacle_index(from_pt, to_pt, false, &obstacle_bounds, None)
+            };
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(from_idx), saved_from) {
                 *slot = saved;
             }
@@ -26659,6 +26780,140 @@ mod tests {
         let first = layout_diagram_radial(&ir);
         let second = layout_diagram_radial(&ir);
         assert_eq!(first, second, "radial layout must be deterministic");
+    }
+
+    fn assert_radial_labels_are_separate(layout: &DiagramLayout) {
+        for (index, left) in layout.nodes.iter().enumerate() {
+            for right in &layout.nodes[index + 1..] {
+                let a = left.bounds;
+                let b = right.bounds;
+                assert!(
+                    a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y,
+                    "labels {} and {} overlap: {a:?}, {b:?}",
+                    left.node_id,
+                    right.node_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn radial_wide_mindmap_keeps_labels_readable_and_spokes_direct() {
+        let branches: String = (0..24)
+            .map(|index| {
+                format!("    branch{index}[Platform engineering and operations {index}]\n")
+            })
+            .collect();
+        let ir = parse(&format!("mindmap\n  root((Delivery planning))\n{branches}")).ir;
+        let layout = layout_diagram_radial(&ir);
+        assert_eq!(layout.nodes.len(), 25);
+        assert_eq!(layout.edges.len(), 24);
+        assert_eq!(layout, layout_diagram_radial(&ir));
+        assert_radial_labels_are_separate(&layout);
+        // Avoid solving collisions by making an ordinary planning map unreadably large when fit
+        // into a desktop viewport. This is a usable-size bound, not a snapshot of exact coordinates.
+        assert!(layout.bounds.width < 1800.0, "{:?}", layout.bounds);
+        assert!(layout.bounds.height < 1600.0, "{:?}", layout.bounds);
+        assert!(layout.edges.iter().all(|edge| edge.points.len() == 2));
+    }
+
+    #[test]
+    fn radial_labels_do_not_overlap_across_rings_or_recovered_roots() {
+        let branches: String = (0..12)
+            .map(|branch| {
+                let children: String = (0..4)
+                    .map(|child| format!("      child{branch}_{child}[Detailed implementation and validation {branch}-{child}]\n"))
+                    .collect();
+                format!("    branch{branch}[Engineering workstream {branch}]\n{children}")
+            })
+            .collect();
+        let ir = parse(&format!("mindmap\n  root((Programme))\n{branches}")).ir;
+        let layout = layout_diagram_radial(&ir);
+        assert_eq!(layout.nodes.len(), 61);
+        assert_radial_labels_are_separate(&layout);
+
+        // Exercises the scalable ring bound and multiple roots, without a parser-induced tree.
+        let forest = graph_ir(DiagramType::Mindmap, 192, &[]);
+        let layout = layout_diagram_radial(&forest);
+        assert_eq!(layout.nodes.len(), 192);
+        assert_radial_labels_are_separate(&layout);
+        assert!(layout.bounds.width.is_finite() && layout.bounds.height.is_finite());
+    }
+
+    #[test]
+    fn radial_dispatch_honors_font_metrics_and_rank_spacing() {
+        let ir = parse("mindmap\n  root((Planning))\n    team[Engineering operations]\n    release[Release coordination]").ir;
+        let baseline = layout_diagram_radial(&ir);
+        let metrics = fm_core::FontMetrics::monospace(30.0);
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            spacing: LayoutSpacing {
+                rank_spacing: 400.0,
+                ..LayoutSpacing::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let traced = layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+        let expected = super::compute_node_sizes(&ir, &metrics);
+        for (index, node) in traced.layout.nodes.iter().enumerate() {
+            assert_eq!((node.bounds.width, node.bounds.height), expected[index]);
+            assert!(node.bounds.width > baseline.nodes[index].bounds.width);
+        }
+        let root = traced.layout.nodes[0].bounds.center();
+        let child = traced.layout.nodes[1].bounds.center();
+        assert!((child.x - root.x).hypot(child.y - root.y) > 400.0);
+        assert_radial_labels_are_separate(&traced.layout);
+    }
+
+    #[test]
+    fn radial_direct_spokes_still_detour_around_unrelated_nodes() {
+        let ir = graph_ir(DiagramType::Mindmap, 3, &[(0, 2)]);
+        let mut boxes: Vec<LayoutNodeBox> = (0..3)
+            .map(|index| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: index as f32 * 200.0,
+                    y: index as f32 * 200.0,
+                    width: 100.0,
+                    height: 60.0,
+                },
+            })
+            .collect();
+        assert!(super::cga_routing::segment_intersects_obstacles(
+            boxes[0].bounds.center(),
+            boxes[2].bounds.center(),
+            &[boxes[1].bounds],
+            0.0,
+        ));
+        let obstructed = super::force_build_edge_paths(&ir, &boxes);
+        assert_eq!(obstructed.len(), 1);
+        assert!(obstructed[0].points.len() > 2);
+        for pair in obstructed[0].points.windows(2) {
+            assert!(!super::cga_routing::segment_intersects_obstacles(
+                pair[0],
+                pair[1],
+                &[boxes[1].bounds],
+                0.0,
+            ));
+        }
+        boxes[1].bounds.x = 2000.0;
+        let clear = super::force_build_edge_paths(&ir, &boxes);
+        assert_eq!(clear[0].points.len(), 2);
+        assert_eq!(clear[0].points.first(), obstructed[0].points.first());
+        assert_eq!(clear[0].points.last(), obstructed[0].points.last());
     }
 
     #[test]
