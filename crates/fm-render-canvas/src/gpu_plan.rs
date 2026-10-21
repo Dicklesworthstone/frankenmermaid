@@ -1865,6 +1865,8 @@ impl GpuRenderPlan {
         }
 
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
+        let mindmap_defaults = (ir.diagram_type == fm_core::DiagramType::Mindmap)
+            .then(crate::renderer::CanvasRenderConfig::default);
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
         // them, so this costs an unused Vec and no allocation.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
@@ -1877,8 +1879,12 @@ impl GpuRenderPlan {
             // render of the same document cannot disagree about what the author asked for. An
             // undeclared or unparsable colour falls back to the theme constant rather than to
             // whatever happens to be in the instance buffer.
-            let (declared_fill, declared_stroke) =
-                crate::renderer::resolve_node_colors(ir, node.node_index);
+            let (declared_fill, declared_stroke) = mindmap_defaults.as_ref().map_or_else(
+                || crate::renderer::resolve_node_colors(ir, node.node_index),
+                |config| {
+                    crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config)
+                },
+            );
             let fill = declared_fill
                 .as_deref()
                 .and_then(parse_paint_rgba)

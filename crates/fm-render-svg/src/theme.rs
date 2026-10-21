@@ -132,16 +132,7 @@ impl ThemeColors {
                 edge: "#64748b".into(),
                 cluster_fill: "#f1f5f9".into(),
                 cluster_stroke: "#cbd5e1".into(),
-                accents: [
-                    "#4f46e5".into(), // Indigo - primary
-                    "#0284c7".into(), // Sky
-                    "#0d9488".into(), // Teal
-                    "#7c3aed".into(), // Violet
-                    "#d97706".into(), // Amber
-                    "#db2777".into(), // Pink
-                    "#059669".into(), // Emerald
-                    "#e11d48".into(), // Rose
-                ],
+                accents: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from),
             },
 
             ThemePreset::Mermaid => Self {
@@ -562,7 +553,7 @@ impl Theme {
 svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
 .fm-node{{isolation:isolate;--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}
 .fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{fill:var(--fm-node-fill);stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}
-.fm-node.fm-node-user-mindmap-no-border rect,.fm-node.fm-node-user-mindmap-no-border path,.fm-node.fm-node-user-mindmap-no-border polygon{{stroke:none}}
+.fm-node.fm-node-user-mindmap-no-border :where(rect,path,polygon){{stroke:none}}
 .fm-node line{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke}}
 .fm-node text{{text-rendering:optimizeLegibility;font-kerning:normal}}
 .fm-node:hover rect,.fm-node:hover path,.fm-node:hover circle,.fm-node:hover ellipse,.fm-node:hover polygon{{stroke:var(--fm-node-hover-accent);{hover_shadow_filter}}}
@@ -578,10 +569,26 @@ svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
                 ".fm-node-accent-{index}{{--fm-node-hover-accent:var(--fm-accent-{index})}}"
             );
         }
+        // A mindmap branch is a semantic group: descendants inherit the first-level branch's
+        // palette. Set local theme variables so author classDef and inline paints still win.
+        for (branch, accent) in self.colors.accents.iter().enumerate() {
+            let fill = fm_core::mindmap::branch_fill(&self.colors.node_fill, accent, false);
+            let index = branch + 1;
+            let _ = write!(
+                css,
+                ".fm-node-user-mindmap-branch-{branch}{{--fm-node-fill:{fill};--fm-mindmap-fill:{fill};--fm-node-accent:var(--fm-accent-{index});--fm-node-hover-accent:var(--fm-accent-{index})}}"
+            );
+        }
+        let root_fill =
+            fm_core::mindmap::branch_fill(&self.colors.node_fill, &self.colors.accents[0], true);
+        let _ = write!(
+            css,
+            ".fm-node-user-mindmap-root{{--fm-node-fill:{root_fill};--fm-mindmap-fill:{root_fill}}}.fm-node-user-mindmap-root text{{font-weight:600}}"
+        );
         css.push_str(
-            r".fm-node.fm-node-shape-note path,.fm-node.fm-node-shape-note rect{fill:var(--fm-node-fill);fill:color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill))}
-.fm-node.fm-node-shape-cloud path{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-2) 15%,var(--fm-node-fill))}
-.fm-node.fm-node-shape-cylinder path{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-1) 12%,var(--fm-node-fill))}
+            r".fm-node.fm-node-shape-note :where(path,rect){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill)))}
+.fm-node.fm-node-shape-cloud :where(path){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,var(--fm-accent-2) 15%,var(--fm-node-fill)))}
+.fm-node.fm-node-shape-cylinder :where(path){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,var(--fm-accent-1) 12%,var(--fm-node-fill)))}
 .fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{stroke-width:1.8}
 .fm-edge{fill:none;stroke:var(--fm-edge-color);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}
 .fm-edge:hover{stroke:var(--fm-accent-1);stroke-width:2.25;opacity:1}
@@ -833,6 +840,32 @@ mod tests {
                 assert!(!rule.contains("--fm-node-accent:"));
             }
             assert!(css.contains(".fm-node.fm-node-shape-cylinder"));
+        }
+    }
+
+    #[test]
+    fn mindmap_tints_keep_labels_readable_in_light_and_dark_presets() {
+        for preset in [
+            ThemePreset::Default,
+            ThemePreset::Mermaid,
+            ThemePreset::Dark,
+            ThemePreset::Pastel,
+            ThemePreset::Monochrome,
+        ] {
+            let colors = ThemeColors::from_preset(preset);
+            for accent in &colors.accents {
+                for is_root in [false, true] {
+                    let fill = fm_core::mindmap::branch_fill(&colors.node_fill, accent, is_root);
+                    let (foreground, background) = (luminance(&colors.text), luminance(&fill));
+                    let contrast =
+                        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                    assert!(
+                        contrast >= 4.5,
+                        "{preset:?}: {fill} against {}",
+                        colors.text
+                    );
+                }
+            }
         }
     }
 

@@ -1816,6 +1816,13 @@ fn strip_css_range(css: &mut String, start: &str, end: &str) {
 /// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
+    if !ir.is_some_and(|ir| ir.diagram_type == DiagramType::Mindmap) {
+        strip_css_range(
+            css,
+            ".fm-node-user-mindmap-branch-0{",
+            ".fm-node.fm-node-shape-note ",
+        );
+    }
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
         strip_css_range(css, ".fm-cluster{", ".fm-label{");
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
@@ -1835,7 +1842,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_special_shapes {
-        strip_css_range(css, ".fm-node.fm-node-shape-note path,", ".fm-edge{");
+        strip_css_range(css, ".fm-node.fm-node-shape-note ", ".fm-edge{");
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -11093,6 +11100,27 @@ fn render_node(
 ) -> Element {
     use fm_core::NodeShape;
 
+    // Portable, attribute-driven exports need the same semantic paints as the theme CSS.
+    // Resolve them before building the shape so composite shapes inherit the palette too.
+    let mindmap_role = fm_core::mindmap::node_role(ir, node_box.node_index);
+    let mindmap_colors = mindmap_role
+        .filter(|_| !config.embed_theme_css)
+        .map(|role| {
+            let mut semantic = colors.clone();
+            semantic.node_fill = fm_core::mindmap::branch_fill(
+                &colors.node_fill,
+                &colors.accents[role.branch],
+                role.is_root,
+            );
+            semantic.node_stroke = if role.borderless {
+                String::from("none")
+            } else {
+                colors.accents[role.branch].clone()
+            };
+            semantic
+        });
+    let colors = mindmap_colors.as_ref().unwrap_or(colors);
+
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
@@ -11254,6 +11282,10 @@ fn render_node(
         .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
         .data("id", node_id);
+    if !config.embed_theme_css && mindmap_role.is_some_and(|role| role.is_root) {
+        // Inheritance lets author class/inline font weights override the root's emphasis.
+        group = group.attr("font-weight", "600");
+    }
     // Add centrality tier class if available (FNX semantic styling)
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
         group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());
@@ -11642,7 +11674,7 @@ fn render_node(
                     .y(y)
                     .width(w)
                     .height(h)
-                    .fill(if config.node_gradients {
+                    .fill(if config.node_gradients && mindmap_role.is_none() {
                         "url(#fm-node-gradient)"
                     } else {
                         colors.node_fill.as_str()
@@ -11889,7 +11921,7 @@ fn render_node(
                     .cx(cx)
                     .cy(cy)
                     .r(r)
-                    .fill(if config.node_gradients {
+                    .fill(if config.node_gradients && mindmap_role.is_none() {
                         "url(#fm-node-gradient)"
                     } else {
                         colors.node_fill.as_str()
@@ -12503,6 +12535,7 @@ fn render_node(
     let shape_elem = maybe_add_class(shape_elem, "fm-node-shape", emit_classdef_classes);
 
     let shape_elem = if config.node_gradients
+        && mindmap_role.is_none()
         && !matches!(
             shape,
             NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar

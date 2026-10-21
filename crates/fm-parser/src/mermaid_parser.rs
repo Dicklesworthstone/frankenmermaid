@@ -6761,6 +6761,16 @@ fn mindmap_token_is_default_shaped(trimmed: &str) -> bool {
 }
 
 fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+    let mut token = parse_mindmap_node_token_core(raw, config)?;
+    // Every shape matcher consumes only the core token. Preserve the suffix in one place,
+    // just as the flowchart wrapper does, so a classDef can override the branch defaults.
+    if token.classes.is_empty() {
+        token.classes = inline_class_names(raw);
+    }
+    Some(token)
+}
+
+fn parse_mindmap_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -21985,6 +21995,40 @@ mod tests {
         let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
         assert!(node_a.classes.contains(&"urgent".to_string()));
         assert!(node_a.classes.contains(&"large".to_string()));
+    }
+
+    #[test]
+    fn mindmap_preserves_inline_classes_on_every_shape() {
+        for (token, expected_shape) in [
+            ("A", NodeShape::Rect),
+            ("A[Node A]", NodeShape::Rect),
+            ("A(Node A)", NodeShape::Rounded),
+            ("A((Node A))", NodeShape::Circle),
+            ("A{{Node A}}", NodeShape::Hexagon),
+            ("A)Node A(", NodeShape::Cloud),
+            ("A))Node A((", NodeShape::Asymmetric),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "mindmap\n  root((Root))\n    {token}:::urgent large\n\
+                 classDef urgent fill:#ffcc00,stroke:#b45309\n"
+            ));
+            assert_eq!(parsed.ir.nodes.len(), 2, "{token}");
+            let node = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+            assert_eq!(node.shape, expected_shape, "{token}");
+            assert!(
+                node.classes.iter().any(|class| class == "urgent"),
+                "{token}"
+            );
+            assert!(node.classes.iter().any(|class| class == "large"), "{token}");
+            assert!(node.classes.iter().any(|class| class == "mindmap-branch-1"));
+            assert_eq!(
+                node.classes
+                    .iter()
+                    .any(|class| class == "mindmap-no-border"),
+                token == "A",
+                "inline classes must not change the default-shape discriminator"
+            );
+        }
     }
 
     #[test]

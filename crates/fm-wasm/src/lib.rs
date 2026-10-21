@@ -1266,6 +1266,7 @@ fn apply_canvas_theme_preset(
     canvas.cluster_fill = colors.cluster_fill;
     canvas.cluster_stroke = colors.cluster_stroke;
     canvas.label_color = colors.text;
+    canvas.accents = colors.accents;
     canvas
 }
 
@@ -3403,6 +3404,10 @@ mod tests {
         assert_eq!(themed.node_stroke, "#334155");
         assert_eq!(themed.edge_stroke, "#94a3b8");
         assert_eq!(themed.label_color, "#f8fafc");
+        assert_eq!(
+            themed.accents,
+            ThemeColors::from_preset(ThemePreset::Dark).accents
+        );
     }
 
     #[test]

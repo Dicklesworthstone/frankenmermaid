@@ -10,6 +10,7 @@ mod font_metrics;
 pub mod leapfrog;
 #[cfg(test)]
 mod lens_tests;
+pub mod mindmap;
 pub mod quotient_filter;
 pub mod reuse_proof;
 pub mod succinct;

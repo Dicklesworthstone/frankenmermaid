@@ -43,6 +43,8 @@ pub struct CanvasRenderConfig {
     pub cluster_stroke: String,
     /// Label text color.
     pub label_color: String,
+    /// Semantic branch accents, in the same order as the SVG theme palette.
+    pub accents: [String; 8],
     /// Whether to auto-fit the diagram to the canvas.
     pub auto_fit: bool,
     /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
@@ -97,6 +99,7 @@ impl Default for CanvasRenderConfig {
             cluster_fill: String::from("#f1f5f9"),
             cluster_stroke: String::from("#cbd5e1"),
             label_color: String::from("#1e293b"),
+            accents: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from),
             auto_fit: true,
             gantt_today: None,
         }
@@ -2483,7 +2486,8 @@ impl Canvas2dRenderer {
             // only 3-4 distinct fills for an ENTIRE diagram no matter what the source said. Counted
             // at the time — fm-render-svg reads `inline_style` 30 times, `classes` 19 and
             // `style_refs` 11; this crate read all three ZERO times.
-            let (fill, stroke) = resolve_node_colors(ir, node_box.node_index);
+            let (fill, stroke) =
+                resolve_node_colors_with_defaults(ir, node_box.node_index, &self.config);
             // Resolved ONCE for the whole node: the four label sites below (plain label, class
             // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
             // node, so they must agree about its colour. Resolving per-site would let a later
@@ -3722,6 +3726,37 @@ pub(crate) fn resolve_node_colors(
     (fill, merged.get("stroke").cloned())
 }
 
+/// Semantic mindmap defaults are fallbacks for each paint channel, never author declarations.
+/// A fill-only class must retain its branch border, and a stroke-only class its branch fill.
+pub(crate) fn resolve_node_colors_with_defaults(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    config: &CanvasRenderConfig,
+) -> (Option<String>, Option<String>) {
+    let (fill, stroke) = resolve_node_colors(ir, node_index);
+    let Some(role) = fm_core::mindmap::node_role(ir, node_index) else {
+        return (fill, stroke);
+    };
+    let accent = &config.accents[role.branch];
+    (
+        fill.or_else(|| {
+            Some(fm_core::mindmap::branch_fill(
+                &config.node_fill,
+                accent,
+                role.is_root,
+            ))
+        }),
+        stroke.or_else(|| {
+            Some(if role.borderless {
+                // Canvas rejects CSS `none`; transparent paint removes the border reliably.
+                String::from("transparent")
+            } else {
+                accent.clone()
+            })
+        }),
+    )
+}
+
 /// A `#rgb`/`#rrggbb` (with optional alpha) colour as `rgba()` with `opacity` multiplied into its
 /// alpha; `None` for anything that is not a hex colour, so the caller keeps the declaration as is.
 fn hex_fill_with_opacity(fill: &str, opacity: f64) -> Option<String> {
@@ -4050,7 +4085,12 @@ pub(crate) fn resolve_declared_node_font(
         weight: merged
             .get("font-weight")
             .map(String::as_str)
-            .and_then(sanitize_font_weight),
+            .and_then(sanitize_font_weight)
+            .or_else(|| {
+                fm_core::mindmap::node_role(ir, node_index)
+                    .filter(|role| role.is_root)
+                    .map(|_| "600")
+            }),
         style: merged
             .get("font-style")
             .map(String::as_str)
@@ -4690,9 +4730,75 @@ mod tests {
         assert_eq!(canvas.cluster_fill, colors.cluster_fill);
         assert_eq!(canvas.cluster_stroke, colors.cluster_stroke);
         assert_eq!(canvas.label_color, colors.text);
+        assert_eq!(canvas.accents, colors.accents);
         assert_eq!(
             canvas.font_metrics().estimate_dimensions("First\nSecond"),
             svg.font_metrics().estimate_dimensions("First\nSecond")
+        );
+    }
+
+    #[test]
+    fn mindmap_defaults_follow_branches_and_preserve_author_channels() {
+        let mut ir = fm_parser::parse(
+            "mindmap\n  root((Root))\n    A[Research]\n      Child[Child]\n    B[Design]\n    Plain\n",
+        )
+        .ir;
+        let index = |id: &str| ir.nodes.iter().position(|node| node.id == id).unwrap();
+        let (root, a, child, b, plain) = (
+            index("root"),
+            index("A"),
+            index("Child"),
+            index("B"),
+            index("Plain"),
+        );
+        for preset in [
+            fm_render_svg::ThemePreset::Default,
+            fm_render_svg::ThemePreset::Dark,
+        ] {
+            let colors = fm_render_svg::ThemeColors::from_preset(preset);
+            let config = CanvasRenderConfig {
+                node_fill: colors.node_fill,
+                accents: colors.accents,
+                ..Default::default()
+            };
+            let branch = resolve_node_colors_with_defaults(&ir, a, &config);
+            assert_eq!(
+                branch,
+                resolve_node_colors_with_defaults(&ir, child, &config)
+            );
+            assert_ne!(branch, resolve_node_colors_with_defaults(&ir, b, &config));
+            assert_eq!(branch.1.as_deref(), Some(config.accents[1].as_str()));
+            assert_eq!(resolve_declared_node_font(&ir, root).weight, Some("600"));
+            assert_eq!(resolve_declared_node_font(&ir, a).weight, None);
+            assert_eq!(
+                resolve_node_colors_with_defaults(&ir, plain, &config)
+                    .1
+                    .as_deref(),
+                Some("transparent")
+            );
+            ir.nodes[a].inline_style = Some(Box::new(fm_core::parse_style_string("fill:#ffcc00")));
+            let styled = resolve_node_colors_with_defaults(&ir, a, &config);
+            assert_eq!(styled.0.as_deref(), Some("#ffcc00"));
+            assert_eq!(styled.1, branch.1);
+            ir.nodes[a].inline_style = None;
+        }
+        ir.nodes[root].inline_style =
+            Some(Box::new(fm_core::parse_style_string("font-weight:400")));
+        assert_eq!(resolve_declared_node_font(&ir, root).weight, Some("400"));
+        let styled = fm_parser::parse(
+            "mindmap\n  root((Root))\n    Plain:::custom\nclassDef custom stroke:#b45309\n",
+        )
+        .ir;
+        let plain = styled
+            .nodes
+            .iter()
+            .position(|node| node.id == "Plain")
+            .unwrap();
+        assert_eq!(
+            resolve_node_colors_with_defaults(&styled, plain, &CanvasRenderConfig::default())
+                .1
+                .as_deref(),
+            Some("#b45309")
         );
     }
 
