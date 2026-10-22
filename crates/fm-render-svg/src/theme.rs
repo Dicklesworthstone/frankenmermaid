@@ -551,8 +551,8 @@ impl Theme {
             css,
             r"svg{{--fm-edge-muted:var(--fm-edge-color);--fm-edge-label-bg:var(--fm-bg);--fm-edge-label-border:none;--fm-edge-label-text:var(--fm-text-color);--fm-cluster-label-color:var(--fm-text-color);--fm-cluster-c4-fill:var(--fm-cluster-fill);--fm-cluster-c4-stroke:var(--fm-cluster-stroke);--fm-cluster-swimlane-fill:var(--fm-cluster-fill);--fm-cluster-swimlane-stroke:var(--fm-cluster-stroke);--fm-surface-shadow:rgba(15,23,42,.06)}}
 svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
-.fm-node{{isolation:isolate;--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}
-.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{fill:var(--fm-node-fill);stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}
+.fm-node{{isolation:isolate;fill:var(--fm-node-fill);--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}
+.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}
 .fm-node.fm-node-user-mindmap-no-border :where(rect,path,polygon){{stroke:none}}
 .fm-node line{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke}}
 .fm-node text{{text-rendering:optimizeLegibility;font-kerning:normal}}
@@ -584,6 +584,12 @@ svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
         let _ = write!(
             css,
             ".fm-node-user-mindmap-root{{--fm-node-fill:{root_fill};--fm-mindmap-fill:{root_fill}}}.fm-node-user-mindmap-root text{{font-weight:600}}"
+        );
+        // Mindmap fills encode branches; hollow shape details must remain hollow.
+        // Keep specificity low enough for later author classDef paint rules to win.
+        css.push_str(
+            r#".fm-node:where(.fm-node-user-mindmap-root,[class*="fm-node-user-mindmap-branch-"]) :where(rect,path,circle,ellipse,polygon):not([fill="none"]){fill:var(--fm-mindmap-fill)}
+"#,
         );
         css.push_str(
             r".fm-node.fm-node-shape-note :where(path,rect){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill)))}
@@ -840,6 +846,33 @@ mod tests {
                 assert!(!rule.contains("--fm-node-accent:"));
             }
             assert!(css.contains(".fm-node.fm-node-shape-cylinder"));
+        }
+    }
+
+    #[test]
+    fn theme_preserves_explicit_shape_paints_and_hollow_details() {
+        let shape_selector =
+            ".fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon";
+        let mindmap_selector = concat!(
+            ".fm-node:where(.fm-node-user-mindmap-root,",
+            "[class*=\"fm-node-user-mindmap-branch-\"]) ",
+            ":where(rect,path,circle,ellipse,polygon):not([fill=\"none\"])",
+        );
+
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let css = crate::minify_css(&Theme::from_preset(preset).to_svg_style(false, false));
+            assert!(css_rule(&css, ".fm-node").contains("fill:var(--fm-node-fill)"));
+            assert!(
+                !css_rule(&css, shape_selector)
+                    .split(';')
+                    .any(|declaration| declaration.trim_start().starts_with("fill:")),
+                "generic shape rules must preserve explicit solid, gradient, and hollow paints"
+            );
+            assert_eq!(
+                css_rule(&css, mindmap_selector),
+                "fill:var(--fm-mindmap-fill)",
+                "mindmap branches retain semantic fills without repainting hollow details"
+            );
         }
     }
 
