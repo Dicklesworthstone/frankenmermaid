@@ -173,3 +173,77 @@ fn an_undeclared_field_draws_no_row() {
         "the declared rows vanished too, so this test proves nothing: {drawn:?}"
     );
 }
+
+fn numeric_attr(tag: &str, name: &str) -> f32 {
+    tag.split_once(&format!(" {name}=\""))
+        .unwrap_or_else(|| panic!("missing {name} in {tag}"))
+        .1
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn requirement_rows_stay_separate_and_inside_the_drawn_box_in_both_svg_paths() {
+    let ir = fm_parser::parse(DIAGRAM).ir;
+    for font_size in [15.0, 24.0] {
+        for embed_theme_css in [true, false] {
+            let config = fm_render_svg::SvgRenderConfig {
+                font_size,
+                avg_char_width: font_size / 2.0,
+                preserve_labels: true,
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = fm_render_svg::render_svg_with_config(&ir, &config);
+            for (node, expected_rows) in [("AuthReq", 6), ("LoginModule", 4)] {
+                let group = svg
+                    .split_once(&format!("data-id=\"{node}\""))
+                    .unwrap()
+                    .1
+                    .split_once("</g>")
+                    .unwrap()
+                    .0;
+                let rect = group
+                    .split_once("<rect")
+                    .unwrap()
+                    .1
+                    .split('>')
+                    .next()
+                    .unwrap();
+                let top = numeric_attr(rect, "y");
+                let bottom = top + numeric_attr(rect, "height");
+                let mut previous_bottom = top;
+                let mut rows = 0;
+                for text in group.split("<text ").skip(1) {
+                    let tag = text.split('>').next().unwrap();
+                    let y = numeric_attr(tag, "y");
+                    let size = numeric_attr(tag, "font-size");
+                    // Subtitle coordinates are central; the main name uses an alphabetic baseline.
+                    // Include ascenders and descenders rather than merely checking baseline points.
+                    let (row_top, row_bottom) = if tag.contains("dominant-baseline=\"central\"") {
+                        (y - size * 0.6, y + size * 0.6)
+                    } else {
+                        (y - size * 0.85, y + size * 0.25)
+                    };
+                    assert!(
+                        row_top >= previous_bottom,
+                        "{node}: row overlaps its predecessor at {font_size}px: {tag}"
+                    );
+                    assert!(
+                        row_bottom <= bottom,
+                        "{node}: row escapes the rectangle at {font_size}px: {tag}"
+                    );
+                    previous_bottom = row_bottom;
+                    rows += 1;
+                }
+                assert_eq!(
+                    rows, expected_rows,
+                    "every declared row must be drawn for {node}"
+                );
+            }
+        }
+    }
+}

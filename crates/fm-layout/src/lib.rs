@@ -13177,6 +13177,7 @@ fn compute_node_size(
             // Plain process boxes need less vertical whitespace than shaped or annotated nodes.
             // Retain the horizontal allowance: long labels and wide glyphs need that room at
             // full font size, especially when the SVG renderer preserves every label.
+            let width = (content_width + 72.0).max(100.0);
             let compact_box = node.requirement_meta.is_none()
                 && matches!(
                     node.shape,
@@ -13184,8 +13185,11 @@ fn compute_node_size(
                         | fm_core::NodeShape::Rounded
                         | fm_core::NodeShape::Subroutine
                         | fm_core::NodeShape::TextBlock
-                );
-            let width = (content_width + 72.0).max(100.0);
+                )
+                // A conservative label that needs another line keeps the previous vertical
+                // allowance, so compact defaults do not trade readable type for a shorter box.
+                && metrics.estimate_preserved_width(text, metrics.font_size(), metrics.avg_char_width())
+                    <= (width - 16.0).max(metrics.font_size());
             let height = if compact_box {
                 (content_height + 24.0).max(44.0)
             } else {
@@ -13229,12 +13233,9 @@ fn compute_node_size(
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
-            // A requirement node's box must hold the two rows the renderer draws BESIDE the name:
-            // the `«type»` header and the `Risk: … | Verify: …` row. Nothing sized for them at all,
-            // so whether a row escaped depended on how long the declared `risk:`/`verifymethod:`
-            // strings happened to be — golden/requirement_basic's LoginReq measured 163.37 in a
-            // 133.05-wide box, spilling 15.16 past each side (bd-jnc1).
-            let (width, height) = match requirement_row_dimensions(node, metrics) {
+            // Requirement fields form independent rows, including the element's Type and Doc Ref.
+            // Size the complete stack for both SVG and Canvas before the renderers place its text.
+            let (width, height) = match requirement_row_dimensions(node, text, metrics) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
@@ -13251,86 +13252,120 @@ fn compute_node_size(
     }
 }
 
-/// Size a requirement node's box needs so the rows drawn beside its name stay inside it.
-///
-/// `None` when the node is not a requirement node, or when it declares neither a type nor any
-/// risk/verify metadata — then only the name is drawn and the base sizing already covers it.
-///
-/// Mirrors `fm-render-svg`'s `write_requirement_node_fragment_into`: an optional `«{type}»` row and
-/// an optional `Risk: …[ | Verify: …]` row (or `Verify: …` alone), both centred on `cx` at
-/// `font_size * 0.75`, with the name row between them at full size. Rows advance `font_size * 0.85`
-/// from a first baseline at `y + h * 0.25 + font_size * 0.35`.
-///
-/// Measured at the LAYOUT metrics' font size, which is the full node font; the renderer draws these
-/// rows at its own (smaller) detail-tier size, so this over-estimates rather than under-estimates.
-/// Over-sizing renders as padding; under-sizing is the defect.
-fn requirement_row_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+/// Measure the displayed requirement fields, including their prefixes and type display names.
+/// SVG centers a stack of full-size name lines and smaller subtitle lines; Canvas uses a name,
+/// divider, and left-aligned fields at a larger subtitle size. The box must contain both layouts.
+fn requirement_row_dimensions(
+    node: &IrNode,
+    name: &str,
+    metrics: &fm_core::FontMetrics,
+) -> Option<(f32, f32)> {
     let meta = node.requirement_meta.as_deref()?;
-
     let font_size = metrics.font_size();
     let subtitle_font = (font_size * 0.75).max(REQUIREMENT_FONT_FLOOR);
-    // `estimate_width` measures at `font_size`; these rows are drawn smaller, and width scales with
-    // the em size.
-    let subtitle_scale = subtitle_font / font_size.max(f32::EPSILON);
-    let mut widest = 0.0_f32;
-    let mut rows = 1_usize; // the name row, always drawn
+    // Metadata is emitted as one text run, so embedded line breaks become spaces rather than
+    // separate lines. Only the name uses a multiline text builder.
+    let row_width = |row: &str, size| {
+        if row.contains(['\r', '\n']) {
+            metrics.estimate_preserved_width(
+                &row.replace(['\r', '\n'], " "),
+                size,
+                metrics.avg_char_width(),
+            )
+        } else {
+            metrics.estimate_preserved_width(row, size, metrics.avg_char_width())
+        }
+    };
+    let mut widest = metrics.estimate_preserved_width(name, font_size, metrics.avg_char_width());
+    let mut subtitle_rows = 0_usize;
 
     if let Some(req_type) = meta.requirement_type.as_deref() {
-        // The renderer wraps the type in guillemets, which are two more glyphs to hold.
-        let mut row = String::with_capacity(req_type.len() + 2);
-        row.push('\u{00ab}');
-        row.push_str(req_type);
-        row.push('\u{00bb}');
-        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
-        rows += 1;
+        let row = format!("<<{}>>", fm_core::requirement_type_display(req_type));
+        widest = widest.max(row_width(&row, subtitle_font));
+        subtitle_rows += 1;
     }
 
-    // `ID: …` and `Text: …` rows (bd-f3tc). Widened for, not wrapped: the incumbent's requirement
-    // renderer draws each as one unwrapped label and grows the box to its bbox, so wrapping here
-    // would diverge from it. A long `text:` therefore makes a wide box, exactly as it does there.
-    for (prefix, value) in [
-        ("ID: ", meta.req_id.as_deref()),
-        ("Text: ", meta.text.as_deref()),
+    let mut canvas_rows = 0_usize;
+    for (prefix, canvas_prefix, value, display) in [
+        (
+            "ID: ",
+            "id: ",
+            meta.req_id.as_deref(),
+            meta.req_id.as_deref(),
+        ),
+        (
+            "Text: ",
+            "text: ",
+            meta.text.as_deref(),
+            meta.text.as_deref(),
+        ),
+        (
+            "Risk: ",
+            "risk: ",
+            meta.risk.as_deref(),
+            meta.risk.as_deref().map(fm_core::requirement_risk_display),
+        ),
+        (
+            "Verification: ",
+            "verify: ",
+            meta.verify_method.as_deref(),
+            meta.verify_method
+                .as_deref()
+                .map(fm_core::requirement_verify_method_display),
+        ),
+        (
+            "Type: ",
+            "type: ",
+            meta.element_type.as_deref(),
+            meta.element_type.as_deref(),
+        ),
+        (
+            "Doc Ref: ",
+            "doc: ",
+            meta.doc_ref.as_deref(),
+            meta.doc_ref.as_deref(),
+        ),
     ] {
-        let Some(value) = value else { continue };
-        let mut row = String::with_capacity(prefix.len() + value.len());
-        row.push_str(prefix);
-        row.push_str(value);
-        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
-        rows += 1;
+        let Some(display) = display else { continue };
+        widest = widest.max(row_width(&format!("{prefix}{display}"), subtitle_font));
+        subtitle_rows += 1;
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            widest = widest.max(row_width(
+                &format!("{canvas_prefix}{value}"),
+                font_size * 0.9,
+            ));
+            canvas_rows += 1;
+        }
     }
 
-    let metadata_row = match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
-        (Some(risk), Some(verify)) => Some(format!("Risk: {risk} | Verify: {verify}")),
-        (Some(risk), None) => Some(format!("Risk: {risk}")),
-        (None, Some(verify)) => Some(format!("Verify: {verify}")),
-        (None, None) => None,
-    };
-    if let Some(row) = metadata_row.as_deref() {
-        widest = widest.max(metrics.estimate_width(row) * subtitle_scale);
-        rows += 1;
-    }
-
-    if rows == 1 {
+    if subtitle_rows == 0 {
         return None;
     }
 
-    // Rows are centred on the box's centre, so the box needs the widest row plus a margin on each
-    // side. `REQUIREMENT_ROW_MARGIN` is the total of both sides.
-    let width = widest + REQUIREMENT_ROW_MARGIN;
-    // Vertical: the last row's baseline sits `0.25h + 0.35font + (rows - 1) * 0.85font` below the
-    // box top and needs its descender inside too. Solving `0.75h >= (0.35 + 0.85(rows-1) + 0.3)font`
-    // for `h` gives the floor below.
-    let height = ((rows - 1) as f32).mul_add(0.85, 0.65) * font_size / 0.75;
-    Some((width, height))
+    let svg_height = metrics.estimate_height(name)
+        + subtitle_rows as f32 * subtitle_font * metrics.config().line_height
+        + REQUIREMENT_ROW_MARGIN;
+    // Canvas puts its name at 1.3em, the divider half a name line below, and metadata rows at
+    // 0.9em with 1.2 line spacing. Include the final row's lower half and its 6px inset.
+    let canvas_height = if canvas_rows == 0 {
+        0.0
+    } else {
+        font_size * 1.3 * 1.5
+            + font_size * 0.9
+            + canvas_rows.saturating_sub(1) as f32 * font_size * 0.9 * 1.2
+            + 6.0
+    };
+    Some((
+        widest + REQUIREMENT_ROW_MARGIN,
+        svg_height.max(canvas_height),
+    ))
 }
 
 /// Smallest font the requirement subtitle rows are measured at, mirroring the renderer's
 /// `config.min_font_size` clamp on `font_size * 0.75`.
 const REQUIREMENT_FONT_FLOOR: f32 = 8.0;
 
-/// Horizontal breathing room a requirement box adds around its widest subtitle row, split evenly
-/// between the two sides.
+/// Total content padding around a requirement stack, split evenly between opposite sides.
 const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 
 /// Height a C4 node needs so its wrapped description stays inside the box. `None` when the node has
@@ -13725,19 +13760,21 @@ fn node_size_cache_key(
     if let Some(meta) = node.c4_meta.as_deref() {
         hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
     }
-    // The requirement type / risk / verifymethod strings feed `compute_node_size` through
-    // `requirement_row_dimensions`, so lengthening a `verifymethod:` without touching the node's
-    // label must not serve the pre-edit size and put the row back outside the box (bd-jnc1).
+    // Every requirement field sizes a drawn row. Include presence as well as contents: a declared
+    // empty value still has a prefix in SVG and therefore occupies a row.
     if let Some(meta) = node.requirement_meta.as_deref() {
-        hash_str(
-            &mut hash,
-            meta.requirement_type.as_deref().unwrap_or_default(),
-        );
-        hash_str(&mut hash, meta.risk.as_deref().unwrap_or_default());
-        hash_str(&mut hash, meta.verify_method.as_deref().unwrap_or_default());
-        // `id:` and `text:` became drawn rows in bd-f3tc, so they size the box too.
-        hash_str(&mut hash, meta.req_id.as_deref().unwrap_or_default());
-        hash_str(&mut hash, meta.text.as_deref().unwrap_or_default());
+        for field in [
+            &meta.requirement_type,
+            &meta.risk,
+            &meta.verify_method,
+            &meta.req_id,
+            &meta.text,
+            &meta.element_type,
+            &meta.doc_ref,
+        ] {
+            hash_u64(&mut hash, u64::from(field.is_some()));
+            hash_str(&mut hash, field.as_deref().unwrap_or_default());
+        }
     }
     hash
 }
@@ -36156,15 +36193,16 @@ mod tests {
                 changed.nodes[0].requirement_meta
             );
         }
+
+        // Field text remains a single run even when the IR contains authored line breaks.
+        let text = "Record the completed deployment\nVerify all approval signatures\nRetain the complete audit history";
+        let ir = requirement_ir_full(None, None, None, None, Some(text));
+        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+        let displayed = format!("text: {}", text.replace('\n', " "));
+        assert!(width >= metrics.estimate_width(&displayed) * 0.9);
     }
 
-    /// A requirement box must hold the two rows drawn BESIDE its name — the `«type»` header and the
-    /// `Risk: … | Verify: …` row (bd-jnc1).
-    ///
-    /// Asserted as a property over growing metadata rather than as pinned numbers, because the whole
-    /// defect was that the box did not depend on these strings at all: nothing sized for them, so
-    /// whether a row escaped was decided by how long the author's `verifymethod:` happened to be.
-    /// A box that ignores them fails here at the first string that outgrows the label.
+    /// The display header, risk, and verification are independent rows with their rendered labels.
     #[test]
     fn requirement_box_holds_its_type_and_metadata_rows() {
         let metrics = fm_core::FontMetrics::default_metrics();
@@ -36176,13 +36214,16 @@ mod tests {
             let ir = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some(&verify));
             let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
 
-            let row = format!("Risk: Medium | Verify: {verify}");
-            let row_width = metrics.estimate_width(&row) * subtitle_scale;
-            assert!(
-                width >= row_width,
-                "verify={verify:?}: box width {width} is narrower than its own metadata row \
-                 {row_width}, so the row renders outside the box"
-            );
+            for row in [
+                "Risk: Medium".to_string(),
+                format!("Verification: {verify}"),
+            ] {
+                let row_width = metrics.estimate_width(&row) * subtitle_scale;
+                assert!(
+                    width >= row_width,
+                    "box width {width} is narrower than its metadata row {row:?} ({row_width})"
+                );
+            }
             assert!(
                 width >= previous_width,
                 "box width must not shrink as the metadata row grows ({verify:?})"
@@ -36190,20 +36231,18 @@ mod tests {
             previous_width = width;
         }
 
-        // The `«type»` header is measured too, guillemets included.
+        // The display header includes the same ASCII angle brackets as the SVG renderer.
         let long_type = "aVeryLongRequirementTypeNameIndeedForThisNode";
         let ir = requirement_ir(Some(long_type), None, None);
         let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
-        let header_width =
-            metrics.estimate_width(&format!("\u{00ab}{long_type}\u{00bb}")) * subtitle_scale;
+        let header_width = metrics.estimate_width(&format!("<<{long_type}>>")) * subtitle_scale;
         assert!(
             width >= header_width,
             "box width {width} is narrower than its type header {header_width}"
         );
 
-        // NEGATIVE CASE: a requirement node with neither a type nor any metadata draws only its
-        // name, so it must size exactly like the same plain node — this pass must not widen boxes
-        // that have nothing extra to hold.
+        // No metadata must add no width. Requirement boxes retain their existing vertical
+        // allowance; only unannotated process boxes use the compact default height.
         let bare = requirement_ir(None, None, None);
         let mut plain = MermaidDiagramIr::empty(DiagramType::Flowchart);
         plain.nodes.push(IrNode {
@@ -36212,11 +36251,11 @@ mod tests {
             ..IrNode::default()
         });
         assert_eq!(
-            compute_node_size(&bare, &bare.nodes[0], &metrics),
-            compute_node_size(&plain, &plain.nodes[0], &metrics),
-            "a requirement with no type and no metadata must size like the same plain node"
+            compute_node_size(&bare, &bare.nodes[0], &metrics).0,
+            compute_node_size(&plain, &plain.nodes[0], &metrics).0,
+            "a requirement with no type and no metadata must not gain width"
         );
-        assert!(requirement_row_dimensions(&bare.nodes[0], &metrics).is_none());
+        assert!(requirement_row_dimensions(&bare.nodes[0], "LoginReq", &metrics).is_none());
     }
 
     /// Editing a requirement's metadata must invalidate the cached node size (bd-jnc1).
@@ -36246,6 +36285,37 @@ mod tests {
                 changed.nodes[0].requirement_meta
             );
         }
+
+        for field in ["type", "docref"] {
+            let mut changed = base.clone();
+            let meta = changed.nodes[0].requirement_meta.as_mut().unwrap();
+            let value = "A long element field that must determine the width of its own box";
+            if field == "type" {
+                meta.element_type = Some(value.to_string());
+            } else {
+                meta.doc_ref = Some(value.to_string());
+            }
+            assert_ne!(
+                base_key,
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics)
+            );
+            assert!(
+                compute_node_size(&changed, &changed.nodes[0], &metrics).0
+                    > compute_node_size(&base, &base.nodes[0], &metrics).0,
+                "{field} must contribute to the measured width"
+            );
+        }
+
+        let mut empty_field = base.clone();
+        empty_field.nodes[0]
+            .requirement_meta
+            .as_mut()
+            .unwrap()
+            .doc_ref = Some(String::new());
+        assert_ne!(
+            base_key,
+            node_size_cache_key(&empty_field, &empty_field.nodes[0], &metrics)
+        );
     }
 
     /// One ER entity named `CUSTOMER` carrying `count` attributes.

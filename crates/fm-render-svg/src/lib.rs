@@ -10286,6 +10286,34 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     }
 }
 
+/// Top of the centered requirement text stack. Layout reserves the same full-size name lines and
+/// subtitle line heights; each writer then advances its cursor through the rows it actually draws.
+fn requirement_text_start_y(
+    meta: &fm_core::IrRequirementNodeMeta,
+    label: &str,
+    y: f32,
+    height: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> f32 {
+    let subtitles = usize::from(meta.requirement_type.is_some())
+        + [
+            &meta.req_id,
+            &meta.text,
+            &meta.risk,
+            &meta.verify_method,
+            &meta.element_type,
+            &meta.doc_ref,
+        ]
+        .iter()
+        .filter(|field| field.is_some())
+        .count();
+    let subtitle_font = clamp_font_size(font_size * 0.75, config.min_font_size);
+    let name_height = label.lines().count().max(1) as f32 * font_size * config.line_height;
+    let content_height = name_height + subtitles as f32 * subtitle_font * config.line_height;
+    y + (height - content_height) / 2.0
+}
+
 #[allow(clippy::too_many_arguments)]
 /// `A11Y` selects the accessibility variant at compile time (see `write_class_node_fragment_into`): `true`
 /// emits `role`/`aria-label`/`tabindex` + the trailing `<title>`; `false` (lean) skips exactly those two
@@ -10360,7 +10388,9 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("/>");
 
     let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
-    let mut text_y = y + h * 0.25 + font_size * 0.35;
+    let subtitle_line_height = subtitle_font_size * config.line_height;
+    let name_line_height = font_size * config.line_height;
+    let mut text_y = requirement_text_start_y(meta, label, y, h, font_size, config);
     if let Some(req_type) = meta.requirement_type.as_deref() {
         // ⚠️ `<<Type>>`, NOT `«keyword»`, and both halves changed. mermaid draws
         // `` `<<${n.type}>>` `` with ASCII angles — the same wrapper this renderer already uses for a
@@ -10372,7 +10402,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
         write_req_subtitle_body_into(
             out,
             cx,
-            text_y,
+            text_y + subtitle_line_height / 2.0,
             subtitle_font_size,
             " font-style=\"italic\"",
             "",
@@ -10384,13 +10414,16 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
                 let _ = write_escaped_text(f, ">>");
             },
         );
-        text_y += font_size * 0.85;
+        text_y += subtitle_line_height;
     }
 
     out.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(out, cx);
     out.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(out, text_y);
+    let _ = crate::attributes::write_number_into(
+        out,
+        text_y + name_line_height / 2.0 + font_size / 3.0,
+    );
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, font_size);
     out.push_str("\" fill=\"");
@@ -10398,7 +10431,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text>");
-    text_y += font_size * 0.85;
+    text_y += name_line_height;
 
     // `id:` and `text:` are the requirement's traceability key and the requirement itself — the
     // sentence the diagram exists to record. Both were parsed into the IR, held there, and read by
@@ -10457,7 +10490,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
         write_req_subtitle_body_into(
             out,
             cx,
-            text_y,
+            text_y + subtitle_line_height / 2.0,
             subtitle_font_size,
             "",
             " opacity=\"0.7\"",
@@ -10468,7 +10501,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
                 let _ = write_escaped_text(f, value);
             },
         );
-        text_y += font_size * 0.85;
+        text_y += subtitle_line_height;
     }
 
     if A11Y {
@@ -12679,13 +12712,13 @@ fn render_node(
             );
         } else if let Some(node) = ir_node
             && let Some(ref req_meta) = node.requirement_meta
-            && (req_meta.requirement_type.is_some()
-                || req_meta.risk.is_some()
-                || req_meta.verify_method.is_some())
         {
-            // Requirement node: multi-line content with type, label, metadata.
+            // Requirement node: centered type, name, and field rows with separate line heights.
             let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
-            let mut text_y = y + h * 0.25 + node_font_size * 0.35;
+            let subtitle_line_height = subtitle_font_size * config.line_height;
+            let name_line_height = node_font_size * config.line_height;
+            let mut text_y =
+                requirement_text_start_y(req_meta, &label_text, y, h, node_font_size, config);
 
             // Requirement type header (e.g., "<<requirement>>"). Stream the `<text>` bytes directly under
             // the common themed config (embedded CSS, no per-label style/classdef) instead of building an
@@ -12701,7 +12734,7 @@ fn render_node(
                     write_req_subtitle_into(
                         &mut f,
                         cx,
-                        text_y,
+                        text_y + subtitle_line_height / 2.0,
                         subtitle_font_size,
                         " font-style=\"italic\"",
                         "",
@@ -12713,7 +12746,7 @@ fn render_node(
                 } else {
                     let mut type_elem = Element::text()
                         .x(cx)
-                        .y(text_y)
+                        .y(text_y + subtitle_line_height / 2.0)
                         .content(&type_label)
                         .attr("text-anchor", "middle")
                         .attr("dominant-baseline", "central")
@@ -12731,7 +12764,7 @@ fn render_node(
                     }
                     group = group.child(type_elem);
                 }
-                text_y += node_font_size * 0.85;
+                text_y += subtitle_line_height;
             }
 
             // Main label
@@ -12740,7 +12773,7 @@ fn render_node(
                 label_id,
                 &label_text,
                 cx,
-                text_y,
+                text_y + name_line_height / 2.0 + node_font_size / 3.0,
                 node_font_size,
                 fit_width((w - 20.0).max(node_font_size)),
                 (h - 20.0).max(node_font_size),
@@ -12750,7 +12783,7 @@ fn render_node(
                 emit_classdef_classes,
             );
             group = group.child(text_elem);
-            text_y += node_font_size * 0.85;
+            text_y += name_line_height * label_text.lines().count().max(1) as f32;
 
             // The field rows — see the fast writer's comment for the reference. Kept in lockstep with
             // it: same order, same labels, same classes, same `opacity 0.7`, same cursor advance.
@@ -12795,7 +12828,7 @@ fn render_node(
                     write_req_subtitle_into(
                         &mut f,
                         cx,
-                        text_y,
+                        text_y + subtitle_line_height / 2.0,
                         subtitle_font_size,
                         "",
                         " opacity=\"0.7\"",
@@ -12807,7 +12840,7 @@ fn render_node(
                 } else {
                     let mut row_elem = Element::text()
                         .x(cx)
-                        .y(text_y)
+                        .y(text_y + subtitle_line_height / 2.0)
                         .content(&row)
                         .attr("text-anchor", "middle")
                         .attr("dominant-baseline", "central")
@@ -12825,7 +12858,7 @@ fn render_node(
                     }
                     group = group.child(row_elem);
                 }
-                text_y += node_font_size * 0.85;
+                text_y += subtitle_line_height;
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
@@ -14235,28 +14268,7 @@ fn preserved_label_width(
     config: &SvgRenderConfig,
     metrics: &fm_core::FontMetrics,
 ) -> f32 {
-    let scale = font_size / config.font_size.max(1.0);
-    let average = config.avg_char_width.max(metrics.avg_char_width()) * scale;
-    label
-        .lines()
-        .map(|line| {
-            let wide_allowance: f32 = line
-                .chars()
-                .map(
-                    |character| match fm_core::CharWidthClass::classify(character) {
-                        fm_core::CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
-                        fm_core::CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
-                        _ => 0.0,
-                    },
-                )
-                .sum();
-            // These presets estimate advances rather than loading the browser's actual face.
-            // Reserve one eighth for font/weight variation; DejaVu Sans at 30px exceeds the
-            // unguarded estimate for the report's long Czech node by almost ten percent.
-            (metrics.estimate_width(line) * (average / metrics.avg_char_width()) + wide_allowance)
-                * 1.125
-        })
-        .fold(0.0, f32::max)
+    metrics.estimate_preserved_width(label, font_size, config.avg_char_width)
 }
 
 /// A diamond's enclosing rectangle is not its usable text area. Choose an inscribed rectangle
@@ -19359,6 +19371,52 @@ mod tests {
         assert!(!fitted.changed);
         assert!(matches!(fitted.text, Cow::Borrowed("Short label")));
         assert_eq!(fitted.font_size, 15.0);
+    }
+
+    #[test]
+    fn compact_process_boxes_preserve_full_size_for_long_labels() {
+        let source = r#"flowchart TB
+  A["Review all international shipment documentation before approval"] --> B["Validate the complete delivery address and recipient contact details"]
+  B --> C["Document the decision and notify every participating team"]"#;
+        let ir = fm_parser::parse(source).ir;
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(layout.nodes.len(), 3);
+        for node_box in &layout.nodes {
+            let node = &ir.nodes[node_box.node_index];
+            let label = ir.node_display_text(node);
+            let (width, height) = node_label_fit_dimensions(
+                node.shape,
+                (node_box.bounds.width, node_box.bounds.height),
+                (node_box.bounds.width, node_box.bounds.height),
+                label,
+                config.font_size,
+                &config,
+            );
+            let fitted = fit_node_label_text(label, width, height, config.font_size, &config);
+            assert_eq!(
+                fitted.font_size, config.font_size,
+                "{} lost full-size type",
+                node.id
+            );
+            assert_eq!(
+                fitted.text.split_whitespace().collect::<Vec<_>>(),
+                label.split_whitespace().collect::<Vec<_>>()
+            );
+            assert!(
+                fitted.text.lines().count() > 1,
+                "the long label needs wrapping room"
+            );
+        }
     }
 
     #[test]

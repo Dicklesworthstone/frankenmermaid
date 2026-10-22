@@ -483,6 +483,31 @@ impl FontMetrics {
         max_width
     }
 
+    /// Conservative width for labels whose complete text must remain visible.
+    ///
+    /// `avg_char_width` is the caller's calibration at this metrics instance's base font size.
+    /// Keep a larger calibration, account for wide Latin glyphs, and reserve one eighth for
+    /// differences between the preset and the font face actually used by the renderer.
+    #[must_use]
+    pub fn estimate_preserved_width(&self, text: &str, font_size: f32, avg_char_width: f32) -> f32 {
+        let scale = font_size / self.font_size().max(1.0);
+        let average = avg_char_width.max(self.avg_char_width) * scale;
+        text.lines()
+            .map(|line| {
+                let wide_allowance: f32 = line
+                    .chars()
+                    .map(|character| match CharWidthClass::classify(character) {
+                        CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
+                        CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
+                        _ => 0.0,
+                    })
+                    .sum();
+                (self.estimate_width(line) * (average / self.avg_char_width) + wide_allowance)
+                    * 1.125
+            })
+            .fold(0.0, f32::max)
+    }
+
     /// Get the height of a single line.
     #[must_use]
     pub fn line_height_px(&self) -> f32 {

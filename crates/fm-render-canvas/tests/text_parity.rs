@@ -93,6 +93,76 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+#[test]
+fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation};
+
+    let mut ir = fm_parser::parse("requirementDiagram\n    element Module {\n        type: service\n        docref: spec.md\n    }\n").ir;
+    let meta = ir.nodes[0].requirement_meta.as_mut().unwrap();
+    meta.req_id = Some("REQ-001".to_string());
+    meta.text = Some("Preserve every declared field".to_string());
+    meta.risk = Some("High".to_string());
+    meta.verify_method = Some("Test".to_string());
+    let font_size = 15.0;
+    let layout = fm_layout::layout_diagram_with_config(
+        &ir,
+        fm_layout::LayoutConfig {
+            font_metrics: Some(fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                line_height: 1.0,
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    );
+    let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+        font_size: f64::from(font_size),
+        auto_fit: false,
+        ..Default::default()
+    });
+    let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+    renderer.render(&layout, &ir, &mut context);
+    let operations = context.operations();
+    let (_, top, _, height) = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            DrawOperation::Rect(x, y, width, height)
+            | DrawOperation::StrokeRect(x, y, width, height)
+            | DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
+            _ => None,
+        })
+        .max_by(|left, right| left.2.total_cmp(&right.2))
+        .expect("requirement box must be drawn");
+
+    let mut previous_bottom = top;
+    for expected in [
+        "id: REQ-001",
+        "text: Preserve every declared field",
+        "type: service",
+        "doc: spec.md",
+        "risk: High",
+        "verify: Test",
+    ] {
+        let y = operations
+            .iter()
+            .find_map(|operation| match operation {
+                DrawOperation::FillText(text, _, y) if text == expected => Some(*y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("declared field was dropped: {expected}"));
+        let half_height = f64::from(font_size) * 0.9 / 2.0;
+        assert!(
+            y - half_height >= previous_bottom,
+            "{expected} overlaps the preceding row"
+        );
+        assert!(
+            y + half_height <= top + height,
+            "{expected} extends below its box"
+        );
+        previous_bottom = y + half_height;
+    }
+}
+
 /// Class CARDINALITIES must reach the canvas (bd-rk14).
 ///
 /// They live in `IrEdgeExtras`, not `edge.label`, and the canvas edge path drew the label and
