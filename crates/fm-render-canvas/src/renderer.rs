@@ -2552,9 +2552,15 @@ impl Canvas2dRenderer {
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
             }
+            let is_state_terminal =
+                ir.diagram_type == DiagramType::State && shape == NodeShape::DoubleCircle;
             draw_shape(
                 ctx,
-                shape,
+                if is_state_terminal {
+                    NodeShape::Circle
+                } else {
+                    shape
+                },
                 x,
                 y,
                 w,
@@ -2563,6 +2569,21 @@ impl Canvas2dRenderer {
                 stroke.as_deref().unwrap_or(&self.config.node_stroke),
                 stroke_width,
             );
+            if is_state_terminal {
+                // Draw the solid terminal disc once; ordinary double circles keep a hollow ring.
+                let radius = w.min(h) / 2.0;
+                ctx.set_fill_style(fill.as_deref().unwrap_or(&self.config.edge_stroke));
+                ctx.begin_path();
+                ctx.arc(
+                    x + w / 2.0,
+                    y + h / 2.0,
+                    (radius - 4.0).max(radius * 0.5),
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                ctx.fill();
+                ctx.stroke();
+            }
             if dash.is_some() {
                 ctx.set_line_dash(&[]);
             }
@@ -3735,7 +3756,16 @@ pub(crate) fn resolve_node_colors_with_defaults(
 ) -> (Option<String>, Option<String>) {
     let (fill, stroke) = resolve_node_colors(ir, node_index);
     let Some(role) = fm_core::mindmap::node_role(ir, node_index) else {
-        return (fill, stroke);
+        let solid_marker = ir.nodes.get(node_index).is_some_and(|node| {
+            matches!(
+                node.shape,
+                NodeShape::FilledCircle | NodeShape::HorizontalBar
+            )
+        });
+        return (
+            fill.or_else(|| solid_marker.then(|| config.edge_stroke.clone())),
+            stroke,
+        );
     };
     let accent = &config.accents[role.branch];
     (
@@ -4800,6 +4830,93 @@ mod tests {
                 .as_deref(),
             Some("#b45309")
         );
+    }
+
+    #[test]
+    fn state_markers_have_solid_fills_and_terminal_rings() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  state fork_point <<fork>>\n  [*] --> fork_point\n  fork_point --> [*]\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 3);
+        for preset in [
+            fm_render_svg::ThemePreset::Default,
+            fm_render_svg::ThemePreset::Dark,
+        ] {
+            let colors = fm_render_svg::ThemeColors::from_preset(preset);
+            let config = CanvasRenderConfig {
+                node_fill: colors.node_fill,
+                node_stroke: colors.node_stroke,
+                edge_stroke: colors.edge,
+                ..Default::default()
+            };
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            let result = crate::render_to_canvas(&ir, &mut ctx, &config);
+            assert_eq!(result.nodes_drawn, 3);
+            let mut active_fill = "";
+            let mut curved_path = false;
+            let mut curved_fills = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetFillStyle(fill) => active_fill = fill,
+                    DrawOperation::BeginPath => curved_path = false,
+                    DrawOperation::Arc(..) | DrawOperation::ArcTo(..) => curved_path = true,
+                    DrawOperation::Fill if curved_path => curved_fills.push(active_fill),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                curved_fills
+                    .iter()
+                    .filter(|fill| **fill == config.edge_stroke)
+                    .count(),
+                3,
+                "start, fork, and terminal disc must have contrasting solid fills"
+            );
+            assert_eq!(
+                curved_fills
+                    .iter()
+                    .filter(|fill| **fill == config.node_fill)
+                    .count(),
+                1,
+                "the terminal outer ring must retain its background"
+            );
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                    .count(),
+                3,
+                "the terminal disc must be drawn only once"
+            );
+        }
+    }
+
+    #[test]
+    fn solid_marker_defaults_preserve_class_and_inline_fill_overrides() {
+        for declaration in [
+            "style A fill:#f97316,stroke:#020617",
+            "classDef marker fill:#f97316,stroke:#020617\n  class A marker",
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n  A@{{ shape: f-circ }}\n  {declaration}\n"
+            ))
+            .ir;
+            assert_eq!(ir.nodes.len(), 1);
+            assert_eq!(ir.nodes[0].shape, NodeShape::FilledCircle);
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+            let mut active_fill = "";
+            let mut fills = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetFillStyle(fill) => active_fill = fill,
+                    DrawOperation::Fill => fills.push(active_fill),
+                    _ => {}
+                }
+            }
+            assert_eq!(fills, ["#f97316"]);
+        }
     }
 
     #[test]

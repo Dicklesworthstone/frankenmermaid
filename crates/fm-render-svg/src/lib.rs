@@ -259,7 +259,7 @@ impl Default for SvgRenderConfig {
             font_size: 15.0,
             avg_char_width: 7.5,
             line_height: 1.5,
-            padding: 40.0,
+            padding: 24.0,
             shadows: true,
             shadow_offset_x: 1.5,
             shadow_offset_y: 1.5,
@@ -11573,7 +11573,12 @@ fn render_node(
                 .cy(cy)
                 .r(r)
                 .fill(if shape == NodeShape::FilledCircle {
-                    colors.node_stroke.as_str()
+                    colors.edge.as_str()
+                } else if shape == NodeShape::DoubleCircle
+                    && config.node_gradients
+                    && mindmap_role.is_none()
+                {
+                    "url(#fm-node-gradient)"
                 } else {
                     colors.node_fill.as_str()
                 })
@@ -11605,19 +11610,45 @@ fn render_node(
                 // the end state showed a target symbol where the incumbent shows a bullseye, which was
                 // the surviving half of bd-vfxu.
                 let inner_fill = if ir.diagram_type == fm_core::DiagramType::State {
-                    colors.node_stroke.as_str()
+                    colors.edge.as_str()
                 } else {
                     "none"
                 };
-                Element::group().child(elem).child(
-                    Element::circle()
-                        .cx(cx)
-                        .cy(cy)
-                        .r(inner_r)
-                        .fill(inner_fill)
-                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
-                )
+                let mut outer = elem;
+                let mut inner = Element::circle()
+                    .cx(cx)
+                    .cy(cy)
+                    .r(inner_r)
+                    .fill(inner_fill)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
+                // Paint declarations must reach the primitives rather than inherit through their
+                // explicit fills. Keep opacity and transforms on the composite group so they are
+                // applied once, not again on each ring.
+                let paint_style = shape_style.as_deref().and_then(|style| {
+                    let properties = fm_core::parse_style_string(style)
+                        .properties
+                        .into_iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "fill"
+                                    | "fill-opacity"
+                                    | "stroke"
+                                    | "stroke-width"
+                                    | "stroke-opacity"
+                                    | "stroke-dasharray"
+                                    | "stroke-dashoffset"
+                            )
+                        })
+                        .collect();
+                    style_map_to_css(&properties)
+                });
+                if let Some(style) = paint_style.as_deref() {
+                    outer = outer.attr("style", style);
+                    inner = inner.attr("style", style);
+                }
+                Element::group().child(outer).child(inner)
             }
         }
 
@@ -11626,7 +11657,7 @@ fn render_node(
             .y(y + h * 0.25)
             .width(w)
             .height((h * 0.5).max(8.0))
-            .fill(&colors.node_stroke)
+            .fill(&colors.edge)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0)
             .rx((h * 0.25).max(3.0)),
@@ -22555,9 +22586,10 @@ marker#arrow-open path {
         };
 
         let state = inner_fills("stateDiagram-v2\n  [*] --> Idle\n  Idle --> [*]\n");
-        assert!(
-            state.iter().any(|fill| fill != "none" && !fill.is_empty()),
-            "a state terminal must have a filled inner disc, got {state:?}"
+        assert_eq!(
+            state.last().map(String::as_str),
+            Some(ThemeColors::default().edge.as_str()),
+            "a state terminal must have a contrasting inner disc, got {state:?}"
         );
 
         let flow = inner_fills("flowchart TD\n  A(((Double)))\n");
@@ -22566,10 +22598,30 @@ marker#arrow-open path {
             2,
             "a flowchart double circle must emit two circles, got {flow:?}"
         );
-        assert!(
-            flow.iter().any(|fill| fill == "none"),
-            "a flowchart double circle must keep its inner ring hollow, got {flow:?}"
+        assert_eq!(
+            flow,
+            ["url(#fm-node-gradient)", "none"],
+            "the outer circle carries its gradient and the inner ring stays hollow"
         );
+    }
+
+    #[test]
+    fn double_circle_inline_paints_reach_both_rings_without_repeating_opacity() {
+        let parsed = fm_parser::parse(
+            "flowchart LR\n  A(((Ready)))\n  style A fill:#f97316,stroke:#020617,opacity:0.5\n",
+        );
+        let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        let circles: Vec<_> = svg
+            .split("<circle")
+            .skip(1)
+            .filter_map(|chunk| chunk.split('>').next())
+            .collect();
+        assert_eq!(circles.len(), 2);
+        for circle in circles {
+            assert!(circle.contains("style=\"fill:#f97316; stroke:#020617\""));
+            assert!(!circle.contains("opacity:"));
+        }
+        assert_eq!(svg.matches("opacity:0.5").count(), 1);
     }
 
     /// An `alt` / `opt` / `loop` / `par` frame must be drawn INSIDE the canvas (bd-zwh3).

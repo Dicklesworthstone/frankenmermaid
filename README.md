@@ -1664,18 +1664,23 @@ Greedy word-fit wrapping by default; when a word is wider than the target width 
 
 ```
 node_width  = max(label_width + 72.0, 100.0)
-node_height = max(label_height + 44.0, 52.0)
+node_height = max(label_height + 24.0, 44.0)
 ```
 
-72px horizontal padding (36px per side) and 44px vertical padding (22px per side) give labels breathing room. Minimums (100×52) ensure even empty or single-character nodes are visually meaningful and clickable. Shape does not affect the bounding box; a diamond and a rectangle with the same label get the same allocated space.
+These base dimensions apply to ordinary process boxes. The horizontal allowance protects
+long labels; the shorter height avoids oversized boxes around a single line. Circular and
+diamond shapes grow to contain the text corners. Other shaped nodes and requirement metadata
+retain their larger insets, while icons and class, ER, or C4 content can grow the box further.
 
 ### Spacing constants
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `node_spacing` | 80 px | Horizontal gap between adjacent nodes in the same rank |
-| `rank_spacing` | 120 px | Vertical gap between ranks |
-| `cluster_padding` | 52 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+| `node_spacing` | 40 px | Gap between adjacent nodes in the same rank |
+| `rank_spacing` | 64 px | Gap between ranks, along the diagram's rank direction |
+| `cluster_padding` | 28 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+
+The default SVG canvas adds a 24 px margin.
 
 ## Security model
 
