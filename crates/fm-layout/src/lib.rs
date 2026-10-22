@@ -1260,9 +1260,9 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 56.0,
-            rank_spacing: 80.0,
-            cluster_padding: 36.0,
+            node_spacing: 40.0,
+            rank_spacing: 64.0,
+            cluster_padding: 28.0,
             sequence_participant_gap_extra: 80.0,
             sequence_min_message_gap: 56.0,
             sequence_self_loop_width: 40.0,
@@ -12755,17 +12755,16 @@ fn force_build_node_boxes(
         .collect()
 }
 
-/// Build straight-line edge paths for force-directed layout.
 /// Fan offset per edge index for edges sharing an unordered endpoint pair.
 ///
-/// Same formula the Sugiyama builder uses — a symmetric fan of 12px steps centred on zero — so the
-/// two layouts separate parallel edges by the same amount. Returns an empty `Vec` when no pair
-/// repeats, which is the common case, so callers skip the work entirely.
+/// Use a symmetric fan of up to 12px steps, capped to the smaller endpoint's drawn outline.
+/// Returns an empty `Vec` when no pair repeats, which is the common case. A repeated pair's
+/// middle edge keeps `Some(0.0)` so it uses the same attachment axis as the rest of its fan.
 ///
 /// Without this the Force path gave every edge between one pair identical geometry, so an ER model
 /// with two relationships between the same entities (`A ||--o{ B : owns` and `A ||--o{ B : rents`)
 /// drew one line and silently lost the other.
-fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
+fn force_parallel_edge_offsets(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<Option<f32>> {
     let mut seen: FxHashSet<(usize, usize)> = FxHashSet::default();
     seen.reserve(ir.edges.len());
     // `fm_core::IrEdge` is not in this module's import list (see the `use fm_core::{…}` at the top),
@@ -12793,17 +12792,27 @@ fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
         .map(|(&pair_idx, edge)| {
             let pair_total = count.get(&pair_of(edge)).copied().unwrap_or(1);
             if pair_total > 1 {
-                let offset_step = 12.0_f32;
-                (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
+                let source = nodes.get(endpoint_node_index(ir, edge.from)?);
+                let target = nodes.get(endpoint_node_index(ir, edge.to)?);
+                let offset_step = source.zip(target).map_or(12.0, |(source, target)| {
+                    parallel_port_step(
+                        node_outline_bounds(source.bounds, node_shape_at(ir, source)),
+                        node_outline_bounds(target.bounds, node_shape_at(ir, target)),
+                        force_parallel_axis(source.bounds, target.bounds),
+                        pair_total,
+                        12.0,
+                    )
+                });
+                Some((pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step)
             } else {
-                0.0
+                None
             }
         })
         .collect()
 }
 
 fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<LayoutEdgePath> {
-    let parallel_offsets = force_parallel_edge_offsets(ir);
+    let parallel_offsets = force_parallel_edge_offsets(ir, nodes);
     // Obstacle set for avoidance (bd-h2ze). This builder used to emit a bare `[from, to]` line for
     // every edge, so a node sitting between two connected nodes was simply drawn through -- 30
     // cases across five committed goldens, up to 33.2px into a 66.5px-tall box, i.e. the CENTRE of
@@ -12823,7 +12832,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
         .iter()
         .enumerate()
         .filter_map(|(ei, edge)| {
-            let parallel_offset = parallel_offsets.get(ei).copied().unwrap_or(0.0);
+            let fan_offset = parallel_offsets.get(ei).copied().flatten();
+            let parallel_offset = fan_offset.unwrap_or(0.0);
             let from_idx = endpoint_node_index(ir, edge.from)?;
             let to_idx = endpoint_node_index(ir, edge.to)?;
             if from_idx >= nodes.len() || to_idx >= nodes.len() {
@@ -12863,10 +12873,43 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 .nodes
                 .get(to_idx)
                 .map_or(fm_core::NodeShape::Rect, |node| node.shape);
-            let from_pt =
-                clip_to_shape_border(from_center, to_center, &nodes[from_idx].bounds, from_shape);
-            let to_pt =
-                clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
+            let horizontal_ranks = fan_offset.is_some()
+                && force_parallel_axis(nodes[from_idx].bounds, nodes[to_idx].bounds);
+            let (from_pt, to_pt) = if fan_offset.is_some() {
+                let (from_anchor, to_anchor) = edge_anchors(
+                    &nodes[from_idx],
+                    &nodes[to_idx],
+                    horizontal_ranks,
+                    from_shape,
+                    to_shape,
+                );
+                (
+                    parallel_edge_anchor(
+                        from_anchor,
+                        nodes[from_idx].bounds,
+                        from_shape,
+                        horizontal_ranks,
+                        parallel_offset,
+                    ),
+                    parallel_edge_anchor(
+                        to_anchor,
+                        nodes[to_idx].bounds,
+                        to_shape,
+                        horizontal_ranks,
+                        parallel_offset,
+                    ),
+                )
+            } else {
+                (
+                    clip_to_shape_border(
+                        from_center,
+                        to_center,
+                        &nodes[from_idx].bounds,
+                        from_shape,
+                    ),
+                    clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape),
+                )
+            };
 
             // An edge must not avoid its OWN endpoints, so park those two boxes far away for the
             // duration of this query and restore them afterwards -- the same technique
@@ -12886,26 +12929,27 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             if let Some(slot) = obstacle_bounds.get_mut(to_idx) {
                 *slot = parked;
             }
-            // `false` for `horizontal_ranks`: force layout has no rank orientation, and this is the
-            // same convention the self-loop branch above already uses.
-            let mut points = if ir.diagram_type == DiagramType::Mindmap
+            // Route the final attachment points. Moving a routed path afterwards can detach its
+            // endpoints from curved outlines and move an otherwise clear segment into an obstacle.
+            let points = if ir.diagram_type == DiagramType::Mindmap
                 && parallel_offset.abs() <= 0.01
                 && !cga_routing::segment_intersects_obstacles(from_pt, to_pt, &obstacle_bounds, 8.0)
             {
                 smallvec![from_pt, to_pt]
             } else {
-                route_edge_points_with_obstacle_index(from_pt, to_pt, false, &obstacle_bounds, None)
+                route_edge_points_with_obstacle_index(
+                    from_pt,
+                    to_pt,
+                    horizontal_ranks,
+                    &obstacle_bounds,
+                    None,
+                )
             };
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(from_idx), saved_from) {
                 *slot = saved;
             }
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(to_idx), saved_to) {
                 *slot = saved;
-            }
-            if parallel_offset.abs() > 0.01 {
-                // Same helper and same orientation convention the Sugiyama builder uses, so the two
-                // layouts fan a repeated pair identically instead of one of them stacking the edges.
-                apply_parallel_offset(&mut points, parallel_offset, false);
             }
             Some(LayoutEdgePath {
                 edge_index: ei,
@@ -13130,9 +13174,23 @@ fn compute_node_size(
                 .max(icon_width)
                 .max(icon_width.mul_add(0.85, label_width));
             let content_height = label_height + icon_height;
-            let width = content_width + 72.0;
-            let height = content_height + 44.0;
-            let (width, height) = (width.max(100.0), height.max(52.0));
+            // Plain process boxes need less vertical whitespace than shaped or annotated nodes.
+            // Retain the horizontal allowance: long labels and wide glyphs need that room at
+            // full font size, especially when the SVG renderer preserves every label.
+            let compact_box = node.requirement_meta.is_none()
+                && matches!(
+                    node.shape,
+                    fm_core::NodeShape::Rect
+                        | fm_core::NodeShape::Rounded
+                        | fm_core::NodeShape::Subroutine
+                        | fm_core::NodeShape::TextBlock
+                );
+            let width = (content_width + 72.0).max(100.0);
+            let height = if compact_box {
+                (content_height + 24.0).max(44.0)
+            } else {
+                (content_height + 44.0).max(52.0)
+            };
             // A class node's box must also hold its compartment stack. The SVG renderer walks the
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
@@ -18496,20 +18554,30 @@ fn build_edge_paths_with_orientation(
             break;
         }
     }
-    // Only when parallels exist do we need the per-edge `(pair_total, pair_idx)`. Rebuilt identically
-    // to the original single-pass counts; byte-identical for the routing loop below.
-    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), usize>, Vec<usize>) =
+    // Every edge in a pair must share a step. Choosing a larger step only for labelled edges can
+    // put an inner labelled lane on top of an outer unlabelled lane.
+    #[derive(Default)]
+    struct ParallelPair {
+        count: usize,
+        label_width: Option<f32>,
+    }
+    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), ParallelPair>, Vec<usize>) =
         if any_parallel {
-            let mut count = FxHashMap::default();
+            let mut count: FxHashMap<(usize, usize), ParallelPair> = FxHashMap::default();
             count.reserve(ir.edges.len());
             let mut index = Vec::with_capacity(ir.edges.len());
+            let metrics = fm_core::FontMetrics::default_metrics();
             for edge in &ir.edges {
                 let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
                 let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
                 let key = (source.min(target), source.max(target));
-                let c = count.entry(key).or_insert(0);
-                index.push(*c);
-                *c += 1;
+                let pair = count.entry(key).or_default();
+                index.push(pair.count);
+                pair.count += 1;
+                if let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) {
+                    let width = metrics.estimate_dimensions(&label.text).0;
+                    pair.label_width = Some(pair.label_width.map_or(width, |old| old.max(width)));
+                }
             }
             (count, index)
         } else {
@@ -18590,34 +18658,35 @@ fn build_edge_paths_with_orientation(
                 subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks);
 
             let is_self_loop = source == target;
-            let (pair_total, pair_idx) = if any_parallel {
+            let (pair_total, pair_idx, pair_label_width) = if any_parallel {
                 let key = (source.min(target), source.max(target));
+                let pair = edge_pair_count.get(&key);
                 (
-                    edge_pair_count.get(&key).copied().unwrap_or(1),
+                    pair.map_or(1, |pair| pair.count),
                     edge_pair_index.get(edge_index).copied().unwrap_or(0),
+                    pair.and_then(|pair| pair.label_width),
                 )
             } else {
-                (1, 0)
+                (1, 0, None)
             };
             let parallel_offset = if pair_total > 1 {
                 // A labelled edge's label sits on its midpoint, so two edges of one pair a few
                 // units apart printed their labels over each other. The offset runs ACROSS the
                 // path: a label's height where ranks run left to right, its width (as far as the
-                // nodes leave room) where they run top to bottom. The offset's sign is fixed by the
-                // pair index whatever the step, so mixed steps keep every edge on its own side.
-                let offset_step = match edge.label.and_then(|id| ir.labels.get(id.0)) {
+                // nodes leave room) where they run top to bottom.
+                let requested_step = match pair_label_width {
                     None => 12.0_f32,
                     Some(_) if horizontal_ranks => 26.0,
-                    Some(label) => {
-                        let width = fm_core::FontMetrics::default_metrics()
-                            .estimate_dimensions(&label.text)
-                            .0;
-                        let room = source_box.bounds.width.min(target_box.bounds.width) * 0.8
-                            / (pair_total - 1) as f32;
-                        // The rendered box: the renderer's wider per-character measure plus padding.
-                        width.mul_add(1.4, 30.0).min(room).max(26.0)
-                    }
+                    // The rendered box: the renderer's wider per-character measure plus padding.
+                    Some(width) => width.mul_add(1.4, 30.0).max(26.0),
                 };
+                let offset_step = parallel_port_step(
+                    node_outline_bounds(source_box.bounds, node_shape_at(ir, source_box)),
+                    node_outline_bounds(target_box.bounds, node_shape_at(ir, target_box)),
+                    horizontal_ranks,
+                    pair_total,
+                    requested_step,
+                );
                 (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
             } else {
                 0.0
@@ -18656,13 +18725,29 @@ fn build_edge_paths_with_orientation(
                         shape(&target_end, target_box),
                     ),
                 );
-                let (source_anchor, target_anchor) = edge_anchors(
+                let (mut source_anchor, mut target_anchor) = edge_anchors(
                     source_end.0,
                     target_end.0,
                     horizontal_ranks,
                     source_end.1,
                     target_end.1,
                 );
+                if parallel_offset.abs() > 0.01 {
+                    source_anchor = parallel_edge_anchor(
+                        source_anchor,
+                        source_end.0.bounds,
+                        source_end.1,
+                        horizontal_ranks,
+                        parallel_offset,
+                    );
+                    target_anchor = parallel_edge_anchor(
+                        target_anchor,
+                        target_end.0.bounds,
+                        target_end.1,
+                        horizontal_ranks,
+                        parallel_offset,
+                    );
+                }
                 // Exclude this edge's own endpoints from the shared obstacle set by
                 // parking them far away (the router's AABB reject drops them), then
                 // restore. Far enough that no realistic segment bbox can overlap.
@@ -18723,7 +18808,10 @@ fn build_edge_paths_with_orientation(
                 // Only an aligned detour has six points. It leaves and enters at the faces'
                 // centres, where the edges between neighbouring ranks attach too, so its stubs
                 // ran along theirs; on a flat face it attaches part-way toward its detour instead.
-                if pts.len() == 6 && matches!(edge_routing, EdgeRouting::Orthogonal) {
+                if pair_total == 1
+                    && pts.len() == 6
+                    && matches!(edge_routing, EdgeRouting::Orthogonal)
+                {
                     let across = |p: LayoutPoint| if horizontal_ranks { p.y } else { p.x };
                     let toward = across(pts[2]) - across(pts[0]);
                     for (bends, (end_box, end_shape)) in
@@ -18749,9 +18837,6 @@ fn build_edge_paths_with_orientation(
                             }
                         }
                     }
-                }
-                if parallel_offset.abs() > 0.01 {
-                    apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
                 }
                 pts
             };
@@ -18858,17 +18943,82 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> EdgePoin
     }
 }
 
-/// Apply parallel offset to an edge path to distinguish parallel edges.
-fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ranks: bool) {
-    if points.len() < 2 {
-        return;
+/// Keep a fan's ports inside the central 80% of both endpoint outlines.
+fn parallel_port_step(
+    source: LayoutRect,
+    target: LayoutRect,
+    horizontal_ranks: bool,
+    count: usize,
+    requested: f32,
+) -> f32 {
+    let extent = if horizontal_ranks {
+        source.height.min(target.height)
+    } else {
+        source.width.min(target.width)
+    };
+    requested.min(extent.max(0.0) * 0.8 / count.saturating_sub(1).max(1) as f32)
+}
+
+/// A force-directed pair uses the same attachment axis in both edge directions.
+/// Prefer a separated pair of faces: centre displacement alone can choose overlapping horizontal
+/// faces on wide, vertically separated boxes and route the first segment through its own node.
+fn force_parallel_axis(source: LayoutRect, target: LayoutRect) -> bool {
+    let source_center = source.center();
+    let target_center = target.center();
+    let dx = (target_center.x - source_center.x).abs();
+    let dy = (target_center.y - source_center.y).abs();
+    let separated_x = dx >= (source.width + target.width) / 2.0;
+    let separated_y = dy >= (source.height + target.height) / 2.0;
+    match (separated_x, separated_y) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => dx >= dy,
     }
-    // Offset perpendicular to the main routing direction.
-    for pt in points.iter_mut() {
-        if horizontal_ranks {
-            pt.y += offset;
-        } else {
-            pt.x += offset;
+}
+
+/// Move a port across its attachment side while keeping it on the drawn outline.
+/// The router must receive this final point: translating its output invalidates both attachment
+/// geometry and obstacle avoidance, especially on diamonds and circular nodes.
+fn parallel_edge_anchor(
+    anchor: LayoutPoint,
+    bounds: LayoutRect,
+    shape: fm_core::NodeShape,
+    horizontal_ranks: bool,
+    offset: f32,
+) -> LayoutPoint {
+    use fm_core::NodeShape;
+
+    let bounds = node_outline_bounds(bounds, shape);
+    let center = bounds.center();
+    let (half_along, half_across, original_along) = if horizontal_ranks {
+        (bounds.width / 2.0, bounds.height / 2.0, anchor.x - center.x)
+    } else {
+        (bounds.height / 2.0, bounds.width / 2.0, anchor.y - center.y)
+    };
+    let across = offset.clamp(-half_across, half_across);
+    let along = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => (half_along * half_along - across * across).max(0.0).sqrt(),
+        NodeShape::Diamond => half_along * (1.0 - across.abs() / half_across.max(f32::EPSILON)),
+        NodeShape::Stadium => {
+            let radius = half_along.min(half_across);
+            let cap_offset = (across.abs() - (half_across - radius)).max(0.0);
+            half_along - radius + (radius * radius - cap_offset * cap_offset).max(0.0).sqrt()
+        }
+        _ => original_along.abs(),
+    };
+    let along = if original_along < 0.0 { -along } else { along };
+    if horizontal_ranks {
+        LayoutPoint {
+            x: center.x + along,
+            y: center.y + across,
+        }
+    } else {
+        LayoutPoint {
+            x: center.x + across,
+            y: center.y + along,
         }
     }
 }
@@ -19173,6 +19323,16 @@ fn node_shape_at(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> fm_core::No
         .map_or(fm_core::NodeShape::Rect, |node| node.shape)
 }
 
+fn node_outline_bounds(bounds: LayoutRect, shape: fm_core::NodeShape) -> LayoutRect {
+    match shape {
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::FilledCircle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => shapes::circle_bounds(bounds),
+        _ => bounds,
+    }
+}
+
 fn edge_anchors(
     source_box: &LayoutNodeBox,
     target_box: &LayoutNodeBox,
@@ -19180,15 +19340,8 @@ fn edge_anchors(
     source_shape: fm_core::NodeShape,
     target_shape: fm_core::NodeShape,
 ) -> (LayoutPoint, LayoutPoint) {
-    let outline_bounds = |bounds, shape| match shape {
-        fm_core::NodeShape::Circle
-        | fm_core::NodeShape::FilledCircle
-        | fm_core::NodeShape::DoubleCircle
-        | fm_core::NodeShape::CrossedCircle => shapes::circle_bounds(bounds),
-        _ => bounds,
-    };
-    let source_bounds = outline_bounds(source_box.bounds, source_shape);
-    let target_bounds = outline_bounds(target_box.bounds, target_shape);
+    let source_bounds = node_outline_bounds(source_box.bounds, source_shape);
+    let target_bounds = node_outline_bounds(target_box.bounds, target_shape);
     let source_center = source_bounds.center();
     let target_center = target_bounds.center();
 
@@ -30038,6 +30191,333 @@ mod tests {
             "labels {} apart for words measuring {text}: {anchors:?}",
             (anchors[0].x - anchors[1].x).abs()
         );
+    }
+
+    fn assert_parallel_port_on_outline(shape: NodeShape, bounds: LayoutRect, point: LayoutPoint) {
+        let tolerance = 0.01;
+        assert!(point.x.is_finite() && point.y.is_finite());
+        assert!(
+            point.x >= bounds.x - tolerance
+                && point.x <= bounds.x + bounds.width + tolerance
+                && point.y >= bounds.y - tolerance
+                && point.y <= bounds.y + bounds.height + tolerance,
+            "{shape:?} port {point:?} is outside its node {bounds:?}"
+        );
+        let center = bounds.center();
+        let dx = (point.x - center.x).abs();
+        let dy = (point.y - center.y).abs();
+        let on_outline = match shape {
+            NodeShape::Circle | NodeShape::DoubleCircle => {
+                (dx.hypot(dy) - bounds.width.min(bounds.height) / 2.0).abs() < tolerance
+            }
+            NodeShape::Diamond => {
+                (dx / (bounds.width / 2.0) + dy / (bounds.height / 2.0) - 1.0).abs() < tolerance
+            }
+            NodeShape::Stadium => {
+                let radius = bounds.width.min(bounds.height) / 2.0;
+                let (cap_dx, cap_dy) = if bounds.width >= bounds.height {
+                    ((dx - (bounds.width - bounds.height) / 2.0).max(0.0), dy)
+                } else {
+                    (dx, (dy - (bounds.height - bounds.width) / 2.0).max(0.0))
+                };
+                (cap_dx.hypot(cap_dy) - radius).abs() < tolerance
+            }
+            NodeShape::Rect => {
+                (dx - bounds.width / 2.0).abs() < tolerance
+                    || (dy - bounds.height / 2.0).abs() < tolerance
+            }
+            _ => panic!("unsupported outline assertion for {shape:?}"),
+        };
+        assert!(
+            on_outline,
+            "{shape:?} port {point:?} is detached from its drawn outline {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_edges_attach_to_outlines_in_every_rank_direction() {
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            for shape in [
+                NodeShape::Rect,
+                NodeShape::Diamond,
+                NodeShape::Circle,
+                NodeShape::DoubleCircle,
+                NodeShape::Stadium,
+            ] {
+                for count in [2, 3, 9] {
+                    let pairs: Vec<_> = (0..count)
+                        .map(|index| if index % 2 == 0 { (0, 1) } else { (1, 0) })
+                        .collect();
+                    let mut ir = labeled_graph_ir(2, &pairs);
+                    ir.direction = direction;
+                    for node in &mut ir.nodes {
+                        node.shape = shape;
+                    }
+                    let assert_attached = |layout: &DiagramLayout| {
+                        assert_eq!(layout.edges.len(), count);
+                        let mut ports = Vec::with_capacity(count);
+                        for path in &layout.edges {
+                            let edge = &ir.edges[path.edge_index];
+                            let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                            let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                            let first = *path.points.first().expect("routed source");
+                            let last = *path.points.last().expect("routed target");
+                            assert_parallel_port_on_outline(
+                                shape,
+                                layout.nodes[source].bounds,
+                                first,
+                            );
+                            assert_parallel_port_on_outline(
+                                shape,
+                                layout.nodes[target].bounds,
+                                last,
+                            );
+                            ports.push(if source == 0 { first } else { last });
+                        }
+                        for (index, port) in ports.iter().enumerate() {
+                            for other in &ports[index + 1..] {
+                                assert!(
+                                    (port.x - other.x).hypot(port.y - other.y) > 0.5,
+                                    "{direction:?}, {shape:?}: parallel ports coincide: {ports:?}"
+                                );
+                            }
+                        }
+                    };
+                    for edge_routing in [EdgeRouting::Orthogonal, EdgeRouting::Spline] {
+                        let config = LayoutConfig {
+                            edge_routing,
+                            ..LayoutConfig::default()
+                        };
+                        let layout = layout_diagram_with_config(&ir, config.clone());
+                        assert_eq!(layout, layout_diagram_with_config(&ir, config));
+                        assert_attached(&layout);
+                    }
+                    let force = layout_diagram_force(&ir);
+                    assert_eq!(force, layout_diagram_force(&ir));
+                    assert_attached(&force);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_edges_with_mixed_labels_keep_distinct_ordered_ports() {
+        let mut ir = labeled_graph_ir(2, &[(0, 1), (1, 0), (0, 1), (1, 0), (0, 1)]);
+        ir.labels.push(IrLabel {
+            text: "A longer label on just one lane".to_string(),
+            ..IrLabel::default()
+        });
+        ir.edges[1].label = Some(IrLabelId(ir.labels.len() - 1));
+        let nodes: Vec<_> = [0.0, 280.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, y)| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y,
+                    width: 120.0,
+                    height: 80.0,
+                },
+            })
+            .collect();
+        let paths = super::build_edge_paths_with_orientation(
+            &ir,
+            &nodes,
+            &[],
+            &BTreeSet::new(),
+            false,
+            EdgeRouting::Orthogonal,
+        );
+        assert_eq!(paths.len(), 5);
+        let ports: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let source =
+                    super::endpoint_node_index(&ir, ir.edges[path.edge_index].from).unwrap();
+                if source == 0 {
+                    *path.points.first().unwrap()
+                } else {
+                    *path.points.last().unwrap()
+                }
+            })
+            .collect();
+        for port in &ports {
+            assert_parallel_port_on_outline(NodeShape::Rect, nodes[0].bounds, *port);
+        }
+        assert!(
+            ports.windows(2).all(|pair| pair[1].x > pair[0].x + 1.0),
+            "a label on one edge must not reorder or collapse its neighbours' lanes: {ports:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_lanes_are_checked_against_obstacles_after_port_selection() {
+        let ir = labeled_graph_ir(3, &[(0, 1), (1, 0), (0, 1), (1, 0)]);
+        for horizontal in [true, false] {
+            let nodes: Vec<_> = [
+                LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 60.0,
+                },
+                LayoutRect {
+                    x: 300.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 60.0,
+                },
+                LayoutRect {
+                    x: 150.0,
+                    y: 39.0,
+                    width: 80.0,
+                    height: 20.0,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bounds)| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: if horizontal {
+                    bounds
+                } else {
+                    LayoutRect {
+                        x: bounds.y,
+                        y: bounds.x,
+                        width: bounds.height,
+                        height: bounds.width,
+                    }
+                },
+            })
+            .collect();
+            let ranked = super::build_edge_paths_with_orientation(
+                &ir,
+                &nodes,
+                &[],
+                &BTreeSet::new(),
+                horizontal,
+                EdgeRouting::Orthogonal,
+            );
+            let force = super::force_build_edge_paths(&ir, &nodes);
+            let obstacle = nodes[2].bounds;
+            for paths in [&ranked, &force] {
+                assert_eq!(paths.len(), 4);
+                for path in paths {
+                    let edge = &ir.edges[path.edge_index];
+                    let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                    let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                    assert_parallel_port_on_outline(
+                        NodeShape::Rect,
+                        nodes[source].bounds,
+                        *path.points.first().unwrap(),
+                    );
+                    assert_parallel_port_on_outline(
+                        NodeShape::Rect,
+                        nodes[target].bounds,
+                        *path.points.last().unwrap(),
+                    );
+                    for segment in path.points.windows(2) {
+                        for step in 0..=40 {
+                            let t = step as f32 / 40.0;
+                            let sample = LayoutPoint {
+                                x: segment[0].x + (segment[1].x - segment[0].x) * t,
+                                y: segment[0].y + (segment[1].y - segment[0].y) * t,
+                            };
+                            assert!(
+                                !(sample.x > obstacle.x
+                                    && sample.x < obstacle.x + obstacle.width
+                                    && sample.y > obstacle.y
+                                    && sample.y < obstacle.y + obstacle.height),
+                                "parallel lane crosses unrelated node {obstacle:?}: {:?}",
+                                path.points
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn force_parallel_edges_leave_separated_faces_of_wide_and_tall_nodes() {
+        let ir = labeled_graph_ir(2, &[(0, 1), (1, 0), (0, 1)]);
+        for transpose in [false, true] {
+            let nodes: Vec<_> = [(0.0, 0.0), (140.0, 100.0)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (x, y))| LayoutNodeBox {
+                    node_index: index,
+                    node_id: ir.nodes[index].id.clone(),
+                    rank: 0,
+                    order: index,
+                    span: Span::default(),
+                    bounds: if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: x,
+                            width: 40.0,
+                            height: 240.0,
+                        }
+                    } else {
+                        LayoutRect {
+                            x,
+                            y,
+                            width: 240.0,
+                            height: 40.0,
+                        }
+                    },
+                })
+                .collect();
+            let paths = super::force_build_edge_paths(&ir, &nodes);
+            assert_eq!(paths.len(), 3);
+            for path in paths {
+                let edge = &ir.edges[path.edge_index];
+                let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                assert_parallel_port_on_outline(
+                    NodeShape::Rect,
+                    nodes[source].bounds,
+                    *path.points.first().unwrap(),
+                );
+                assert_parallel_port_on_outline(
+                    NodeShape::Rect,
+                    nodes[target].bounds,
+                    *path.points.last().unwrap(),
+                );
+                for segment in path.points.windows(2) {
+                    for step in 0..=40 {
+                        let t = step as f32 / 40.0;
+                        let x = segment[0].x + (segment[1].x - segment[0].x) * t;
+                        let y = segment[0].y + (segment[1].y - segment[0].y) * t;
+                        for node in &nodes {
+                            let bounds = node.bounds;
+                            assert!(
+                                !(x > bounds.x + 0.01
+                                    && x < bounds.x + bounds.width - 0.01
+                                    && y > bounds.y + 0.01
+                                    && y < bounds.y + bounds.height - 0.01),
+                                "parallel route crosses its endpoint node {bounds:?}: {:?}",
+                                path.points
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A `~~~` link is an ordinary edge to the layout: it is what moves `C` a rank past `A`.
