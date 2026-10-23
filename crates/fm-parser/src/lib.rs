@@ -676,7 +676,21 @@ impl FlowchartParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        validate_flowchart_reemission(updated, edited)
+
+        // Callers edit the visible label text; a single Markdown text run repeats that text in
+        // its formatting metadata. Derive only that redundant payload while retaining every
+        // style flag. Mixed runs and arbitrary caller markup edits remain unsupported.
+        for label_index in &changed_labels {
+            if let Some(markup) = labels_only
+                .label_markup
+                .get_mut(&fm_core::IrLabelId(*label_index))
+                && let [fm_core::IrLabelSegment::Text { text, .. }] = markup.as_mut_slice()
+                && *text == original.labels[*label_index].text
+            {
+                text.clone_from(&edited.labels[*label_index].text);
+            }
+        }
+        validate_flowchart_reemission(updated, &labels_only)
     }
 
     fn put_node_order(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {

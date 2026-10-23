@@ -93,6 +93,75 @@ fn put_changes_one_ir_label_without_reformatting_unrelated_source() {
 }
 
 #[test]
+fn put_changes_a_single_markdown_text_run_without_losing_formatting() {
+    for (markdown, bold, italic) in [
+        ("**Old**", true, false),
+        ("*Old*", false, true),
+        ("Old", false, false),
+    ] {
+        let source = format!(
+            "flowchart LR\r\n  %% preserve formatting\r\n  A[\"`{markdown}`\"] --> B[Keep]\r\n"
+        );
+        let lens = FlowchartParseLens::parse(&source).expect("Markdown flowchart lens");
+        let label = lens.ir().nodes[0].label.expect("A has a label");
+        let mut edited = lens.ir().clone();
+        edited.labels[label.0].text = "New 🦀".to_owned();
+
+        let updated = lens
+            .put(&edited)
+            .expect("a plain rename preserves Markdown");
+        assert_eq!(updated, source.replace("Old", "New 🦀"));
+        let reparsed = parse(&updated).ir;
+        let updated_label = reparsed.nodes[0].label.expect("renamed A has a label");
+        assert_eq!(reparsed.labels[updated_label.0].text, "New 🦀");
+        assert_eq!(
+            reparsed.label_markup[&updated_label],
+            vec![fm_core::IrLabelSegment::Text {
+                text: "New 🦀".to_owned(),
+                bold,
+                italic,
+                code: false,
+                strike: false,
+            }],
+            "the rename must preserve the original formatting flags"
+        );
+        assert_eq!(lens.original_source(), source);
+        assert_eq!(lens.ir().labels[label.0].text, "Old");
+    }
+}
+
+#[test]
+fn put_rejects_markdown_syntax_injection_and_unrequested_style_changes() {
+    let source = "flowchart TB\nA[\"`**Safe**`\"] --> B[Keep]\n";
+    let lens = FlowchartParseLens::parse(source).expect("Markdown flowchart lens");
+    let label = lens.ir().nodes[0].label.expect("A has a label");
+    for replacement in ["Safe**`\"] --> Injected[Bad]\nA[\"`**Safe", "**Changed**"] {
+        let mut edited = lens.ir().clone();
+        edited.labels[label.0].text = replacement.to_owned();
+        assert_eq!(
+            lens.put(&edited),
+            Err(FlowchartParseLensError::UnsupportedIrChange),
+            "derived Markdown text must not bypass semantic validation"
+        );
+    }
+
+    let mut edited = lens.ir().clone();
+    edited.labels[label.0].text = "Renamed".to_owned();
+    let [fm_core::IrLabelSegment::Text { bold, .. }] =
+        edited.label_markup.get_mut(&label).unwrap().as_mut_slice()
+    else {
+        panic!("fixture has a single bold text run");
+    };
+    *bold = false;
+    assert_eq!(
+        lens.put(&edited),
+        Err(FlowchartParseLensError::UnsupportedIrChange),
+        "the caller cannot change formatting metadata with a text-only edit"
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
 fn put_reorders_declarations_and_preserves_the_surrounding_document() {
     let source = concat!(
         "%%{init: {'theme':'forest'}}%%\r\n",
