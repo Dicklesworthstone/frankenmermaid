@@ -111,6 +111,7 @@ Current status in this file is grounded in:
 | Layout constraints (SameRank, MinLength) | Complete | Applied after rank assignment in Sugiyama |
 | accTitle/accDescr directives | Complete | Parsed and propagated to SVG title/desc |
 | Subgraph direction override | Complete | `direction LR` inside subgraph blocks |
+| classDef default | Complete | Base node styles precede named classes and direct styles; SVG, Canvas2D, and GPU node plans share the cascade; edges and subgraph containers remain independently styled |
 | linkStyle default | Complete | Default style for all unindexed edges |
 | Click/callback directives with tooltips | Complete | `click nodeId "url" "tooltip"` plus callback hooks; fixture-backed FrankenTUI conformance coverage exists |
 | ER cardinality labels | Complete | Notation parsed and rendered as endpoint labels |
@@ -134,7 +135,6 @@ Current status in this file is grounded in:
 
 ### Parser-Level
 
-- `classDef default` — neither FrankenTUI nor frankenmermaid supports this
 - The first fixture-backed FrankenTUI conformance slice now exists in
   [`crates/fm-cli/tests/frankentui_conformance_test.rs`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_test.rs)
   and

@@ -4112,10 +4112,11 @@ fn parse_stroke_width(raw: Option<&str>) -> Option<f64> {
 
 /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
 ///
-/// Three channels, merged in the order mermaid applies them — later wins:
-///   1. `classDef` definitions named by the node's `classes`
-///   2. `style <id> ...` directives targeting this node (`ir.style_refs`)
-///   3. the node's own `inline_style`
+/// Four channels, merged in the order mermaid applies them — later wins:
+///   1. the implicit `classDef default`, when defined
+///   2. `classDef` definitions named by the node's `classes`
+///   3. `style <id> ...` directives targeting this node (`ir.style_refs`)
+///   4. the node's own `inline_style`
 ///
 /// fm-render-svg gets `classDef` support for free by emitting a CSS class and letting the BROWSER
 /// cascade it. A canvas has no cascade, so the class must be resolved here — which is why porting
@@ -4138,30 +4139,7 @@ fn merged_node_style(
     ir: &MermaidDiagramIr,
     node_index: usize,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let Some(node) = ir.nodes.get(node_index) else {
-        return merged;
-    };
-
-    for class_name in &node.classes {
-        if let Some(def) = ir.style_defs.iter().find(|d| &d.name == class_name) {
-            merged.extend(def.properties.clone());
-        }
-    }
-
-    for style_ref in &ir.style_refs {
-        if let fm_core::IrStyleTarget::Node(target) = style_ref.target
-            && target == fm_core::IrNodeId(node_index)
-        {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    if let Some(inline) = node.inline_style.as_ref() {
-        merged.extend(inline.properties.clone());
-    }
-
-    merged
+    ir.resolved_node_style(node_index)
 }
 
 pub(crate) fn resolve_node_colors(

@@ -2215,6 +2215,13 @@ fn render_scene_path(
         elem = elem.stroke("none");
     }
 
+    if let Some(ir) = ir
+        && let RenderSource::Node(index) = path.source
+        && let Some(style) = resolve_scene_node_inline_styles(ir, index).0
+    {
+        elem = elem.attr("style", &style);
+    }
+
     if path.marker_start != MarkerKind::None {
         elem = elem.marker_start(map_marker_kind(path.marker_start));
     }
@@ -2450,6 +2457,12 @@ fn render_scene_text(
         .build();
 
     elem = apply_fill_style(elem, &text.fill);
+    if let Some(ir) = ir
+        && let RenderSource::Node(index) = text.source
+        && let Some(style) = resolve_scene_node_inline_styles(ir, index).1
+    {
+        elem = elem.attr("style", &style);
+    }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
 }
 
@@ -3203,26 +3216,72 @@ fn collect_classdef_css(ir: &MermaidDiagramIr) -> String {
         ir.style_defs.clone()
     };
 
-    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    // Default is a base layer for every node, including nodes with explicit classes. Emit it
+    // first even when a named class sorts before "default", so named properties take priority.
+    // With no default definition this preserves the existing alphabetical order exactly.
+    defs.sort_by(|a, b| (a.name != "default", &a.name).cmp(&(b.name != "default", &b.name)));
     for def in &defs {
         let class_slug = sanitize_css_token(&def.name);
         if class_slug.is_empty() || def.properties.is_empty() {
             continue;
         }
+        let selector = if def.name == "default" {
+            String::from("fm-node")
+        } else {
+            format!("fm-node-user-{class_slug}")
+        };
         let (shape_props, text_props) = split_style_properties(&def.properties);
         if let Some(shape_css) = style_map_to_css(&shape_props) {
-            css.push_str(&format!(
-                ".fm-node-user-{class_slug} .fm-node-shape, .fm-node-user-{class_slug} .fm-node-shape * {{ {shape_css}; }}\n"
-            ));
+            if shape_props.contains_key("opacity") || shape_props.contains_key("filter") {
+                // Group compositing must happen once. Applying opacity/filter to both a
+                // grouped shape and each child compounds the effect (0.5 becomes 0.25).
+                css.push_str(&format!(".{selector} .fm-node-shape {{ {shape_css}; }}\n"));
+                let descendant_props = shape_props
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "opacity" | "filter"))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if let Some(descendant_css) = style_map_to_css(&descendant_props) {
+                    css.push_str(&format!(
+                        ".{selector} .fm-node-shape * {{ {descendant_css}; }}\n"
+                    ));
+                }
+            } else {
+                css.push_str(&format!(
+                    ".{selector} .fm-node-shape, .{selector} .fm-node-shape * {{ {shape_css}; }}\n"
+                ));
+            }
         }
         if let Some(text_css) = style_map_to_css(&text_props) {
             css.push_str(&format!(
-                ".fm-node-user-{class_slug} .fm-node-label, .fm-node-user-{class_slug} .fm-node-label * {{ {text_css}; }}\n"
+                ".{selector} .fm-node-label, .{selector} .fm-node-label * {{ {text_css}; }}\n"
             ));
         }
     }
 
     css
+}
+
+/// Scene paths and labels are separate layers, so they cannot inherit the legacy node group's
+/// CSS classes. Resolve the same author cascade and attach only the matching shape/text half.
+fn resolve_scene_node_inline_styles(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> (Option<String>, Option<String>) {
+    // Structured IR is also a public input. Validate its properties just as parser-originated
+    // declarations are validated, before exposing this channel as an SVG style attribute.
+    let properties = ir
+        .resolved_node_style(node_index)
+        .into_iter()
+        .filter_map(|(property, value)| {
+            if !fm_core::is_allowed_style_property(&property) || value.contains(';') {
+                return None;
+            }
+            fm_core::sanitize_style_value(&value).map(|value| (property, value))
+        })
+        .collect();
+    let (shape, text) = split_style_properties(&properties);
+    (style_map_to_css(&shape), style_map_to_css(&text))
 }
 
 /// Resolve inline styles for a node from `style` directives (shape, text).

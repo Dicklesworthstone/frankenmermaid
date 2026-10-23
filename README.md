@@ -1323,7 +1323,7 @@ When `--embed-source-spans` is passed (or `accessibility = true` in config), eve
 
 ### `classDef` / `style` / `linkStyle`
 
-`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references and applied during SVG rendering. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
+`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references. SVG and Canvas2D apply author styling, and GPU node plans share the Canvas node-style resolver. A `classDef default` supplies base styles for ordinary nodes, including nodes with named classes: named classes override individual properties, and direct node styles override those. Edges and subgraph containers keep their separate style channels. Both SVG backends apply node styles, including the scene backend's individual shape and text primitives. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
 
 ## How terminal rendering works
 
@@ -2237,7 +2237,7 @@ A --> B
 
 - **Sequence diagrams** support participants, messages, activation boxes, notes, fragments (alt/opt/loop/par/critical/break), participant groups, and lifecycle events (create/destroy). Some edge cases in deeply nested fragments may still be refined; the conformance fixture corpus covers the common shapes.
 - **XyChart** has dedicated layout and SVG rendering, including axis ticks, bar/line/area series, and category padding. Mixed-series and dual-axis polish is still evolving.
-- **`classDef` / `style` directives** are fully applied in SVG. Terminal and Canvas backends still use theme defaults (the structured style system is wired into core; backend-specific application is incremental).
+- **`classDef` / `style` directives** apply to SVG and Canvas nodes, including the implicit default class, named-class overrides, and direct styles. GPU node plans use the same resolved node styles. Terminal output does not provide a CSS color channel.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
 - **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.

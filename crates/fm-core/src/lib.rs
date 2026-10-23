@@ -8761,6 +8761,63 @@ impl MermaidDiagramIr {
         neighbors
     }
 
+    /// Resolve a node's author styles, from least to most specific: the `default` class,
+    /// explicitly assigned classes, `style` directives, then the node's own inline properties.
+    ///
+    /// The implicit default applies to nodes, including nodes with named classes. It does not
+    /// style edges or clusters. Raw class references are a fallback for callers that construct
+    /// IR without running [`Self::populate_structured_styles`].
+    #[must_use]
+    pub fn resolved_node_style(&self, node_index: usize) -> BTreeMap<String, String> {
+        let mut merged = self.declared_node_style(node_index);
+        if let Some(inline) = self
+            .nodes
+            .get(node_index)
+            .and_then(|node| node.inline_style.as_ref())
+        {
+            merged.extend(inline.properties.clone());
+        }
+        merged
+    }
+
+    // Excludes inline_style because populate_structured_styles stores its own derived result
+    // there. Re-populating after a declaration changes must not reapply the previous result.
+    fn declared_node_style(&self, node_index: usize) -> BTreeMap<String, String> {
+        let mut merged = BTreeMap::new();
+        let Some(node) = self.nodes.get(node_index) else {
+            return merged;
+        };
+
+        let mut merge_class = |name: &str| {
+            if let Some(def) = self.style_defs.iter().find(|def| def.name == name) {
+                merged.extend(def.properties.clone());
+            } else {
+                for reference in &self.style_refs {
+                    if let IrStyleTarget::Class(class_name) = &reference.target
+                        && class_name == name
+                    {
+                        merged.extend(parse_style_string(&reference.style).properties);
+                    }
+                }
+            }
+        };
+        // Mermaid 11.15.0 flowDb compiles ['default', 'node', ...vertex.classes]. The default
+        // remains a base layer when a named class overrides only some of its properties.
+        merge_class("default");
+        for class_name in &node.classes {
+            merge_class(class_name);
+        }
+
+        for reference in &self.style_refs {
+            if let IrStyleTarget::Node(target) = reference.target
+                && target == IrNodeId(node_index)
+            {
+                merged.extend(parse_style_string(&reference.style).properties);
+            }
+        }
+        merged
+    }
+
     /// Populate [`style_defs`](Self::style_defs) and per-node/edge
     /// [`inline_style`](IrNode::inline_style) fields from the raw
     /// [`style_refs`](Self::style_refs).
@@ -8786,30 +8843,13 @@ impl MermaidDiagramIr {
         }
         self.style_defs = defs.into_values().collect();
 
-        // 2. Apply per-node styles (cascade: classDef → style directive).
-        for (node_idx, node) in self.nodes.iter_mut().enumerate() {
-            let node_id = IrNodeId(node_idx);
-            let mut merged = BTreeMap::new();
-
-            // Layer 1: classDef properties via node.classes.
-            for class_name in &node.classes {
-                if let Some(def) = self.style_defs.iter().find(|d| d.name == *class_name) {
-                    merged.extend(def.properties.clone());
-                }
-            }
-
-            // Layer 2: direct `style nodeId` overrides.
-            for sr in &self.style_refs {
-                if let IrStyleTarget::Node(target_id) = sr.target
-                    && target_id == node_id
-                {
-                    let parsed = parse_style_string(&sr.style);
-                    merged.extend(parsed.properties);
-                }
-            }
-
+        // 2. Apply declarations in the same order used by renderers: default class, named
+        // classes, then direct node styles. Do not merge the previous derived inline result.
+        for node_idx in 0..self.nodes.len() {
+            let merged = self.declared_node_style(node_idx);
             if !merged.is_empty() {
-                node.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
+                self.nodes[node_idx].inline_style =
+                    Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
 
@@ -16011,6 +16051,197 @@ mod tests {
         // Node-level style overrides classDef.
         let node_style = ir.nodes[0].inline_style.as_ref().unwrap();
         assert_eq!(node_style.properties.get("fill").unwrap(), "#000");
+    }
+
+    #[test]
+    fn populate_structured_styles_default_named_and_direct_precedence() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for (id, classes) in [
+            ("plain", vec![]),
+            ("named", vec!["accent".to_string()]),
+            ("direct", vec!["accent".to_string()]),
+            ("undefined", vec!["missing".to_string()]),
+        ] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                classes,
+                ..Default::default()
+            });
+        }
+        // The named class precedes default both alphabetically and in source order.
+        // Neither ordering may let default erase its more specific properties.
+        for (target, style) in [
+            (IrStyleTarget::Class("accent".to_string()), "fill:#f80"),
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#ddd,stroke:#123,color:#456,stroke-width:2px",
+            ),
+            (IrStyleTarget::Node(IrNodeId(2)), "fill:#0af,color:#fff"),
+            (IrStyleTarget::Class("default".to_string()), "stroke:#789"),
+        ] {
+            ir.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+
+        ir.populate_structured_styles();
+
+        for (index, fill, color) in [
+            (0, "#ddd", "#456"),
+            (1, "#f80", "#456"),
+            (2, "#0af", "#fff"),
+            (3, "#ddd", "#456"),
+        ] {
+            let expected = BTreeMap::from([
+                ("fill".to_string(), fill.to_string()),
+                ("stroke".to_string(), "#789".to_string()),
+                ("color".to_string(), color.to_string()),
+                ("stroke-width".to_string(), "2px".to_string()),
+            ]);
+            assert_eq!(
+                ir.nodes[index].inline_style.as_ref().unwrap().properties,
+                expected,
+                "node {index}"
+            );
+            assert_eq!(ir.resolved_node_style(index), expected);
+        }
+        assert!(ir.nodes[0].classes.is_empty());
+        assert_eq!(ir.nodes[1].classes, ["accent"]);
+        assert_eq!(ir.nodes[3].classes, ["missing"]);
+    }
+
+    #[test]
+    fn populate_structured_styles_default_repopulates_after_edits() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            classes: vec!["accent".to_string()],
+            ..Default::default()
+        });
+        for (target, style) in [
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#111,stroke:#222",
+            ),
+            (IrStyleTarget::Class("accent".to_string()), "fill:#333"),
+            (IrStyleTarget::Node(IrNodeId(0)), "color:#444"),
+        ] {
+            ir.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+        ir.populate_structured_styles();
+
+        ir.style_refs[0].style = "fill:#aaa,stroke-width:3px".to_string();
+        ir.style_refs[1].style = "fill:#bbb".to_string();
+        ir.style_refs[2].style = "color:#ccc".to_string();
+        ir.populate_structured_styles();
+
+        // The prior derived inline values must not override edited declarations or
+        // retain properties that were removed from them.
+        assert_eq!(
+            ir.resolved_node_style(0),
+            BTreeMap::from([
+                ("fill".to_string(), "#bbb".to_string()),
+                ("color".to_string(), "#ccc".to_string()),
+                ("stroke-width".to_string(), "3px".to_string()),
+            ])
+        );
+        let styles = ir.style_defs.clone();
+        let inline = ir.nodes[0].inline_style.clone();
+        ir.populate_structured_styles();
+        assert_eq!(ir.style_defs, styles);
+        assert_eq!(ir.nodes[0].inline_style, inline);
+    }
+
+    #[test]
+    fn populate_structured_styles_default_does_not_style_edges_or_clusters() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes = vec![IrNode::default(), IrNode::default()];
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            ..Default::default()
+        });
+        ir.clusters.push(IrCluster {
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            classes: vec!["boundary".to_string()],
+            ..Default::default()
+        });
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Class("default".to_string()),
+            style: "fill:#abc,stroke:#123".to_string(),
+            span: Span::default(),
+        });
+        let clusters = ir.clusters.clone();
+        let refs = ir.style_refs.clone();
+
+        ir.populate_structured_styles();
+
+        let expected = BTreeMap::from([
+            ("fill".to_string(), "#abc".to_string()),
+            ("stroke".to_string(), "#123".to_string()),
+        ]);
+        assert_eq!(ir.resolved_node_style(0), expected);
+        assert_eq!(ir.resolved_node_style(1), expected);
+        assert!(ir.edges[0].inline_style.is_none());
+        assert_eq!(ir.clusters, clusters);
+        assert_eq!(ir.style_refs, refs);
+    }
+
+    #[test]
+    fn populate_structured_styles_resolver_raw_fallback_and_inline_priority() {
+        let mut raw = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        raw.nodes.push(IrNode {
+            id: "A".to_string(),
+            classes: vec!["accent".to_string()],
+            ..Default::default()
+        });
+        for (target, style) in [
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#abc,stroke:#123,stroke-width:2px,position:absolute",
+            ),
+            (
+                IrStyleTarget::Class("accent".to_string()),
+                "fill:#def,color:#456",
+            ),
+            (
+                IrStyleTarget::Node(IrNodeId(0)),
+                "fill:#fed,color:url(https://example.com/unsafe)",
+            ),
+        ] {
+            raw.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+        let mut populated = raw.clone();
+        populated.populate_structured_styles();
+        assert_eq!(raw.resolved_node_style(0), populated.resolved_node_style(0));
+
+        let inline = IrInlineStyle {
+            properties: BTreeMap::from([
+                ("fill".to_string(), "#000".to_string()),
+                ("color".to_string(), "#789".to_string()),
+            ]),
+        };
+        raw.nodes[0].inline_style = Some(Box::new(inline.clone()));
+        populated.nodes[0].inline_style = Some(Box::new(inline));
+        let expected = BTreeMap::from([
+            ("fill".to_string(), "#000".to_string()),
+            ("color".to_string(), "#789".to_string()),
+            ("stroke".to_string(), "#123".to_string()),
+            ("stroke-width".to_string(), "2px".to_string()),
+        ]);
+        assert_eq!(raw.resolved_node_style(0), expected);
+        assert_eq!(populated.resolved_node_style(0), expected);
+        assert!(raw.resolved_node_style(usize::MAX).is_empty());
     }
 
     #[test]

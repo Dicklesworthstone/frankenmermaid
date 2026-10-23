@@ -594,7 +594,7 @@ svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
 "#,
         );
         css.push_str(
-            r".fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{stroke-width:1.8}
+            r".fm-node.fm-node-shape-star :where(path),.fm-node.fm-node-shape-pentagon :where(path){stroke-width:1.8}
 .fm-edge{fill:none;stroke:var(--fm-edge-color);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}
 .fm-edge:hover{stroke:var(--fm-accent-1);stroke-width:2.25;opacity:1}
 .fm-edge-solid{stroke-dasharray:none}
