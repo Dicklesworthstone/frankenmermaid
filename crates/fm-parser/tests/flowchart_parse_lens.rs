@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use fm_core::DiagramType;
-use fm_parser::{FlowchartParseLens, parse};
+use fm_parser::{FlowchartParseLens, FlowchartParseLensError, parse};
 use proptest::prelude::*;
 
 fn flowchart_corpus() -> Vec<String> {
@@ -90,4 +90,203 @@ fn put_changes_one_ir_label_without_reformatting_unrelated_source() {
         .and_then(|label_id| reparsed.ir.labels.get(label_id.0))
         .map(|label| label.text.as_str());
     assert_eq!(reparsed_label, Some("Ready to ship"));
+}
+
+#[test]
+fn put_reorders_declarations_and_preserves_the_surrounding_document() {
+    let source = concat!(
+        "%%{init: {'theme':'forest'}}%%\r\n",
+        "%%{deck: {slides:[{id:'intro',nodes:['A','B','C']}]}}%%\r\n",
+        "flowchart TB\r\n",
+        "  %% retain these comments and all whitespace\r\n",
+        "  A[Root]  \r\n",
+        "\tB[\"Left 🦀\"]:::hot \t\r\n",
+        "  %% keep this line in place\r\n",
+        "    C{{\"Right\"}}\r\n",
+        "\r\n",
+        "  A -->|first| B\r\n",
+        "  A -.-> C\r\n",
+        "  classDef hot fill:#f00,stroke:#333\r\n",
+        "  style B color:#fff\r\n",
+        "  linkStyle 0 stroke:#456\r\n",
+        "  click C \"https://example.com/\" \"Open details\"\r\n",
+        "%% retain a final comment without a newline",
+    );
+    let expected = source
+        .replace("\tB[\"Left 🦀\"]:::hot \t", "\tC{{\"Right\"}} \t")
+        .replace("    C{{\"Right\"}}", "    B[\"Left 🦀\"]:::hot");
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    let edited = parse(&expected).ir;
+    let updated = lens
+        .put(&edited)
+        .expect("independent declarations can move");
+    assert_eq!(updated, expected);
+    assert_eq!(
+        parse(&updated)
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "C", "B"]
+    );
+    assert_eq!(
+        lens.original_source(),
+        source,
+        "put never mutates its snapshot"
+    );
+
+    let refreshed = FlowchartParseLens::parse(&updated).expect("updated flowchart lens");
+    assert_eq!(
+        refreshed
+            .put(lens.ir())
+            .expect("the inverse permutation is safe"),
+        source,
+        "inverse edits preserve the exact format complement"
+    );
+}
+
+#[test]
+fn put_reorders_labels_by_semantics_including_shared_text_and_markup() {
+    let source = "flowchart TB\nA[Same]\nB[\"`**Same**`\"]\nC[Same]\nA --> B\nA --> C\n";
+    let expected = "flowchart TB\nA[Same]\nC[Same]\nB[\"`**Same**`\"]\nA --> B\nA --> C\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    assert_eq!(
+        lens.put(&parse(expected).ir)
+            .expect("markup stays on its authored node"),
+        expected
+    );
+}
+
+#[test]
+fn put_rejects_node_permutations_with_stale_references_or_other_changes() {
+    let source = "flowchart TB\nA[Root]\nB[Left]\nC[Right]\nA --> B\nA --> C\n";
+    let expected = "flowchart TB\nA[Root]\nC[Right]\nB[Left]\nA --> B\nA --> C\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    let mut stale = lens.ir().clone();
+    stale.nodes.swap(1, 2);
+    assert_eq!(
+        lens.put(&stale),
+        Err(FlowchartParseLensError::UnsupportedIrChange)
+    );
+
+    let valid = parse(expected).ir;
+    let mut rewired = valid.clone();
+    rewired.edges[0].to = rewired.edges[1].to;
+    assert_eq!(
+        lens.put(&rewired),
+        Err(FlowchartParseLensError::UnsupportedIrChange)
+    );
+
+    let mut relabeled = valid.clone();
+    let label = relabeled.nodes[1].label.expect("C has a label");
+    relabeled.labels[label.0].text = "Unrequested source edit".to_owned();
+    assert_eq!(
+        lens.put(&relabeled),
+        Err(FlowchartParseLensError::UnsupportedIrChange)
+    );
+
+    let mut changed_shape = valid;
+    changed_shape.nodes[1].shape = fm_core::NodeShape::Circle;
+    assert_eq!(
+        lens.put(&changed_shape),
+        Err(FlowchartParseLensError::UnsupportedIrChange)
+    );
+}
+
+#[test]
+fn put_rejects_ambiguous_declarations_and_subgraph_moves() {
+    for (source, reordered) in [
+        (
+            "flowchart TB\nA[Root] --> B[Left]\nA --> C[Right]\n",
+            "flowchart TB\nA[Root] --> C[Right]\nA --> B[Left]\n",
+        ),
+        (
+            "flowchart TB\nA[Root]; B[Left]\nC[Right]\nA --> B\nA --> C\n",
+            "flowchart TB\nA[Root]; C[Right]\nB[Left]\nA --> B\nA --> C\n",
+        ),
+        (
+            "flowchart TB\nsubgraph Group\nA[Root]\nB[Left]\nC[Right]\nend\nA --> B\nA --> C\n",
+            "flowchart TB\nsubgraph Group\nA[Root]\nC[Right]\nB[Left]\nend\nA --> B\nA --> C\n",
+        ),
+    ] {
+        let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+        assert_eq!(
+            lens.put(&parse(reordered).ir),
+            Err(FlowchartParseLensError::UnsupportedIrChange),
+            "an ambiguous source must remain untouched: {source}"
+        );
+        assert_eq!(lens.original_source(), source);
+    }
+}
+
+#[test]
+fn put_rejects_reorders_that_change_first_mention_semantics() {
+    let source = "flowchart TB\nA[one]\nA((two))\nB[beta]\n";
+    let candidate = "flowchart TB\nB[beta]\nA((two))\nA[one]\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    let edited = parse(candidate).ir;
+    let original_label = lens.ir().nodes[0].label.expect("original A label");
+    let reordered_label = edited.nodes[1].label.expect("reordered A label");
+    assert_eq!(lens.ir().labels[original_label.0].text, "one");
+    assert_eq!(edited.labels[reordered_label.0].text, "two");
+    assert_eq!(
+        lens.put(&edited),
+        Err(FlowchartParseLensError::UnsupportedIrChange),
+        "even an exactly reparsable source must preserve original node semantics"
+    );
+}
+
+#[test]
+fn put_rejects_labels_that_would_change_the_graph() {
+    let source = "flowchart TB\nA[\"Safe\"] --> B[Other]\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    for replacement in [
+        "Safe\"] --> Injected[Bad",
+        "Safe\"]\nInjected[Bad]\nA[\"Safe",
+        "Safe\"]; Injected[Bad]; A[\"Safe",
+    ] {
+        let mut edited = lens.ir().clone();
+        let label = edited.nodes[0].label.expect("A has a label");
+        edited.labels[label.0].text = replacement.to_owned();
+        assert_eq!(
+            lens.put(&edited),
+            Err(FlowchartParseLensError::UnsupportedIrChange),
+            "label syntax must not silently change topology: {replacement}"
+        );
+    }
+}
+
+#[test]
+fn put_rejects_a_partial_edit_of_a_label_shared_with_an_edge() {
+    let source = "flowchart TB\nA[Shared] -->|Shared| B[Shared]\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.expect("A has a label");
+    assert_eq!(
+        edited.edges[0].label,
+        Some(label),
+        "the fixture shares a label"
+    );
+    edited.labels[label.0].text = "Changed".to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(FlowchartParseLensError::UnsupportedIrChange),
+        "updating the nodes alone must not pretend the shared edge label changed"
+    );
+}
+
+#[test]
+fn put_accepts_unicode_and_label_deduplication_without_changing_topology() {
+    let source = "flowchart TB\nA[First] --> B[Second]\n";
+    let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
+    for replacement in ["naïve 🦀", "Second"] {
+        let mut edited = lens.ir().clone();
+        let label = edited.nodes[0].label.expect("A has a label");
+        edited.labels[label.0].text = replacement.to_owned();
+        assert_eq!(
+            lens.put(&edited).expect("plain label edit round-trips"),
+            source.replace("First", replacement)
+        );
+    }
 }

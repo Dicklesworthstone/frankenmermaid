@@ -529,9 +529,10 @@ pub struct ParseLensEditResponse {
 /// A flowchart-specific text/IR lens.
 ///
 /// The parser owns the original source as the format complement. [`Self::put`] accepts an IR with
-/// node-label text changed and splices only those label bytes back into that original source. This
-/// deliberately refuses graph-structure edits: changing an identifier without changing all of its
-/// edge references is not a faithful text-to-IR round trip.
+/// node-label text changed, or an existing-node declaration-order permutation, and splices only
+/// those source tokens. Reordering requires independent, single-line node declarations outside
+/// subgraphs. Every changed source is reparsed to prove that it represents the requested IR;
+/// topology changes and labels that would introduce Mermaid syntax are refused.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowchartParseLens {
@@ -552,7 +553,8 @@ impl std::fmt::Display for FlowchartParseLensError {
                 formatter.write_str("ParseLens currently supports flowcharts only")
             }
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit node-label text changes only; graph structure is unchanged",
+                "ParseLens can re-emit faithful node-label edits and independent node declaration \
+                 reorders only; graph topology and other source content must stay unchanged",
             ),
             Self::MissingSourceLabel(node_id) => {
                 write!(
@@ -589,7 +591,12 @@ impl FlowchartParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only changed flowchart node-label text.
+    /// Re-emits changed label text or a permutation of independent node declarations.
+    ///
+    /// A declaration reorder preserves line indentation, trailing whitespace, comments, directives,
+    /// edge statements, and line endings. Nodes first mentioned in an edge, declarations sharing a
+    /// line, and subgraphs are deliberately unsupported. Declaration order is a layout hint, not
+    /// a promise that an algorithm will preserve dragged pixel coordinates.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
         if edited.diagram_type != DiagramType::Flowchart {
             return Err(FlowchartParseLensError::NotFlowchart);
@@ -608,7 +615,7 @@ impl FlowchartParseLens {
             expected.text.clone_from(&actual.text);
         }
         if &labels_only != edited {
-            return Err(FlowchartParseLensError::UnsupportedIrChange);
+            return self.put_node_order(edited);
         }
 
         let changed_labels: Vec<usize> = original
@@ -669,8 +676,302 @@ impl FlowchartParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        Ok(updated)
+        validate_flowchart_reemission(updated, edited)
     }
+
+    fn put_node_order(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let unsupported = || FlowchartParseLensError::UnsupportedIrChange;
+        let original = self.ir();
+        if original.nodes.len() != edited.nodes.len()
+            || !original.clusters.is_empty()
+            || !original.graph.subgraphs.is_empty()
+            || original
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .eq(edited.nodes.iter().map(|node| &node.id))
+        {
+            return Err(unsupported());
+        }
+
+        let original_indices: BTreeMap<_, _> = original
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.as_str(), index))
+            .collect();
+        let mut seen = BTreeSet::new();
+        let mut permutation = Vec::with_capacity(edited.nodes.len());
+        for node in &edited.nodes {
+            if !seen.insert(node.id.as_str()) {
+                return Err(unsupported());
+            }
+            permutation.push(
+                *original_indices
+                    .get(node.id.as_str())
+                    .ok_or_else(unsupported)?,
+            );
+        }
+        if !flowchart_permutation_preserves_semantics(original, edited, &permutation) {
+            return Err(unsupported());
+        }
+
+        let source = self.original_source();
+        let (line_offsets, _) = line_offsets_and_ending_style(source);
+        let mut declarations = Vec::with_capacity(original.nodes.len());
+        for node in &original.nodes {
+            // The primary span is the first mention. Requiring that whole line to parse as one
+            // node prevents moving an edge (and therefore changing edge order or linkStyle N).
+            let span = node.span_primary;
+            if span.start.line != span.end.line {
+                return Err(unsupported());
+            }
+            let line_index = (span.start.line as usize)
+                .checked_sub(1)
+                .ok_or_else(unsupported)?;
+            let line_start = *line_offsets.get(line_index).ok_or_else(unsupported)?;
+            let line_end = line_offsets
+                .get(line_index + 1)
+                .copied()
+                .unwrap_or(source.len());
+            let line = source.get(line_start..line_end).ok_or_else(unsupported)?;
+            let declaration = line.trim();
+            // Keep comments stationary and refuse multi-statement lines instead of guessing a
+            // token boundary. Quoted occurrences of these delimiters are conservatively refused.
+            if declaration.is_empty() || declaration.contains(';') || declaration.contains("%%") {
+                return Err(unsupported());
+            }
+            let isolated = parse(&format!("flowchart TB\n{declaration}\n"));
+            if isolated.ir.nodes.len() != 1
+                || isolated.ir.nodes[0].id != node.id
+                || !isolated.ir.edges.is_empty()
+                || !isolated.ir.clusters.is_empty()
+                || !isolated.ir.style_refs.is_empty()
+                || !isolated.warnings.is_empty()
+            {
+                return Err(unsupported());
+            }
+            let start_byte = line_start + line.len() - line.trim_start().len();
+            let range = MermaidTextRange {
+                start_byte,
+                end_byte: start_byte + declaration.len(),
+            };
+            if declarations
+                .last()
+                .is_some_and(|previous: &MermaidTextRange| previous.end_byte > range.start_byte)
+            {
+                return Err(unsupported());
+            }
+            declarations.push(range);
+        }
+
+        let mut updated = source.to_owned();
+        for (slot, &old_index) in permutation.iter().enumerate().rev() {
+            let target = &declarations[slot];
+            let replacement = &declarations[old_index];
+            updated.replace_range(
+                target.start_byte..target.end_byte,
+                &source[replacement.start_byte..replacement.end_byte],
+            );
+        }
+        // This also rejects a caller that reordered nodes without remapping their numeric edge,
+        // port, graph-mirror, or style references. Nothing except source locations and label
+        // interning order is normalized; the full graph and metadata must agree.
+        validate_flowchart_reemission(updated, edited)
+    }
+}
+
+fn validate_flowchart_reemission(
+    source: String,
+    expected: &MermaidDiagramIr,
+) -> Result<String, FlowchartParseLensError> {
+    let actual = parse(&source).ir;
+    match (
+        comparable_flowchart_ir(&actual),
+        comparable_flowchart_ir(expected),
+    ) {
+        (Some(actual), Some(expected)) if actual == expected => Ok(source),
+        _ => Err(FlowchartParseLensError::UnsupportedIrChange),
+    }
+}
+
+/// Prove the requested edit is a permutation before moving source tokens. Repeated declarations
+/// can make label or shape resolution depend on first mention, so candidate reparsing alone is
+/// insufficient: a caller must not smuggle those extra semantic changes into a reorder request.
+fn flowchart_permutation_preserves_semantics(
+    original: &MermaidDiagramIr,
+    edited: &MermaidDiagramIr,
+    new_to_old: &[usize],
+) -> bool {
+    use fm_core::{IrEndpoint, IrNodeId, IrStyleTarget};
+
+    let (Some(original), Some(mut edited)) = (
+        comparable_flowchart_ir(original),
+        comparable_flowchart_ir(edited),
+    ) else {
+        return false;
+    };
+    let remap_node = |node: &mut IrNodeId| -> Option<()> {
+        node.0 = *new_to_old.get(node.0)?;
+        Some(())
+    };
+    let remap_endpoint = |endpoint: &mut IrEndpoint| -> Option<()> {
+        match endpoint {
+            IrEndpoint::Node(node) => remap_node(node),
+            IrEndpoint::Port(_) | IrEndpoint::Unresolved => Some(()),
+        }
+    };
+    for edge in &mut edited.edges {
+        if remap_endpoint(&mut edge.from).is_none() || remap_endpoint(&mut edge.to).is_none() {
+            return false;
+        }
+    }
+    for port in &mut edited.ports {
+        if remap_node(&mut port.node).is_none() {
+            return false;
+        }
+    }
+    for node in &mut edited.graph.nodes {
+        if remap_node(&mut node.node_id).is_none() {
+            return false;
+        }
+    }
+    edited.graph.nodes.sort_unstable_by_key(|node| node.node_id);
+    for edge in &mut edited.graph.edges {
+        if remap_endpoint(&mut edge.from).is_none() || remap_endpoint(&mut edge.to).is_none() {
+            return false;
+        }
+    }
+    for style in &mut edited.style_refs {
+        if let IrStyleTarget::Node(node) = &mut style.target
+            && remap_node(node).is_none()
+        {
+            return false;
+        }
+    }
+    let mut nodes: Vec<_> = edited.nodes.into_iter().enumerate().collect();
+    nodes.sort_unstable_by_key(|(index, _)| new_to_old[*index]);
+    edited.nodes = nodes.into_iter().map(|(_, node)| node).collect();
+    edited == original
+}
+
+/// Remove only source coordinates and label-interning accidents before checking PutGet.
+/// Node order and all numeric node references remain significant. A JSON-wide key scrub would
+/// also discard user configuration named `span`; enumerate the actual IR fields instead.
+fn comparable_flowchart_ir(ir: &MermaidDiagramIr) -> Option<MermaidDiagramIr> {
+    use fm_core::{IrConstraint, IrLabel, IrLabelId};
+    use std::collections::BTreeMap;
+
+    if ir.diagram_type != DiagramType::Flowchart
+        || ir
+            .label_markup
+            .keys()
+            .any(|label| label.0 >= ir.labels.len())
+    {
+        return None;
+    }
+    let mut normalized = ir.clone();
+    let label_keys: Vec<_> = ir
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            (
+                label.text.clone(),
+                ir.label_markup.get(&IrLabelId(index)).cloned(),
+            )
+        })
+        .collect();
+    let mut canonical: BTreeMap<_, _> = label_keys.iter().cloned().map(|key| (key, 0)).collect();
+    for (index, mapped) in canonical.values_mut().enumerate() {
+        *mapped = index;
+    }
+    let label_indices: Vec<_> = label_keys
+        .iter()
+        .map(|key| canonical.get(key).copied())
+        .collect::<Option<_>>()?;
+    let remap_label = |label: &mut Option<IrLabelId>| -> Option<()> {
+        if let Some(label) = label {
+            label.0 = *label_indices.get(label.0)?;
+        }
+        Some(())
+    };
+    normalized.labels = canonical
+        .keys()
+        .map(|(text, _)| IrLabel {
+            text: text.clone(),
+            span: Span::default(),
+        })
+        .collect();
+    normalized.label_markup = canonical
+        .iter()
+        .filter_map(|((_, markup), index)| markup.clone().map(|markup| (IrLabelId(*index), markup)))
+        .collect();
+
+    for node in &mut normalized.nodes {
+        remap_label(&mut node.label)?;
+        node.span_primary = Span::default();
+    }
+    for edge in &mut normalized.edges {
+        remap_label(&mut edge.label)?;
+        edge.span = Span::default();
+    }
+    for port in &mut normalized.ports {
+        port.span = Span::default();
+    }
+    for cluster in &mut normalized.clusters {
+        remap_label(&mut cluster.title)?;
+        cluster.span = Span::default();
+    }
+    for edge in &mut normalized.graph.edges {
+        edge.span = Span::default();
+    }
+    for cluster in &mut normalized.graph.clusters {
+        remap_label(&mut cluster.title)?;
+        cluster.span = Span::default();
+    }
+    for subgraph in &mut normalized.graph.subgraphs {
+        remap_label(&mut subgraph.title)?;
+        subgraph.span = Span::default();
+    }
+    for constraint in &mut normalized.constraints {
+        let (IrConstraint::SameRank { span, .. }
+        | IrConstraint::MinLength { span, .. }
+        | IrConstraint::Pin { span, .. }
+        | IrConstraint::OrderInRank { span, .. }
+        | IrConstraint::NonOverlap { span, .. }) = constraint;
+        *span = Span::default();
+    }
+    for style in &mut normalized.style_refs {
+        style.span = Span::default();
+    }
+    for style in &mut normalized.style_defs {
+        style.span = Span::default();
+    }
+    if let Some(deck) = &mut normalized.deck {
+        deck.span = Span::default();
+        for slide in &mut deck.slides {
+            slide.span = Span::default();
+        }
+    }
+    for diagnostic in &mut normalized.diagnostics {
+        diagnostic.span = None;
+        for related in &mut diagnostic.related {
+            related.span = Span::default();
+        }
+    }
+    for warning in &mut normalized.meta.init.warnings {
+        warning.span = Span::default();
+    }
+    for error in &mut normalized.meta.init.errors {
+        let (fm_core::MermaidError::Parse { span, .. }
+        | fm_core::MermaidError::Validation { span, .. }
+        | fm_core::MermaidError::Unsupported { span, .. }) = error;
+        *span = Span::default();
+    }
+    Some(normalized)
 }
 
 /// A sequence-diagram text/IR lens that preserves the original source as its formatting

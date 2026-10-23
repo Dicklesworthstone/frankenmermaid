@@ -172,10 +172,10 @@ struct RuntimeConfig {
 /// A source-to-layout lens for a flowchart editor.
 ///
 /// This composes the formatting-preserving parser lens with the ordering-preserving layout lens:
-/// label and source edits produce a new source snapshot and a freshly derived layout. A rank-order
-/// drag is intentionally refused until the parser lens can faithfully re-emit structural IR order;
-/// returning the original text for that edit would make an editor report a change that vanishes on
-/// the next parse.
+/// label edits and safe declaration-order permutations produce a new source snapshot and a freshly
+/// derived layout. Reordering requires standalone node declarations before their first references;
+/// ambiguous source forms and topology changes are refused. The source stores declaration order,
+/// not pixel coordinates: the selected layout algorithm still determines the resulting geometry.
 #[derive(Debug, Clone)]
 pub struct DiagramLens {
     parse: FlowchartParseLens,
@@ -197,7 +197,7 @@ impl std::fmt::Display for DiagramLensError {
             Self::Parse(error) => error.fmt(formatter),
             Self::Layout(error) => error.fmt(formatter),
             Self::LayoutEditCannotBeReemitted => formatter.write_str(
-                "the formatting-preserving ParseLens cannot yet re-emit a structural layout edit",
+                "this layout edit cannot be safely re-emitted; use standalone node declarations before their first references",
             ),
         }
     }
@@ -247,7 +247,7 @@ impl DiagramLens {
         self.layout.get()
     }
 
-    /// Apply a label-only semantic edit, then derive a fresh source and positioned graph.
+    /// Apply a supported semantic edit, then derive a fresh source and positioned graph.
     pub fn put_ir(&self, edited: &MermaidDiagramIr) -> Result<Self, DiagramLensError> {
         let source = self.parse.put(edited)?;
         Self::from_source(&source, self.config.clone())
@@ -255,9 +255,10 @@ impl DiagramLens {
 
     /// Apply an in-rank diagram edit only when its resulting IR can be faithfully re-emitted.
     ///
-    /// `LayoutLens` itself can produce an order-adjusted IR, but the current `FlowchartParseLens`
-    /// deliberately rejects structural edits. Keep that boundary explicit rather than pretending a
-    /// source update occurred while returning the original source text.
+    /// The parser verifies that the rewritten source reparses to the requested declaration order
+    /// without changing graph meaning. Unsupported source forms fail without mutating this snapshot.
+    /// The returned geometry is recomputed from the new source; arbitrary dragged coordinates are
+    /// not persisted because Mermaid declarations do not encode them.
     pub fn put_layout(&self, edited: &LayoutLensSnapshot) -> Result<Self, DiagramLensError> {
         let edited_ir = self.layout.put(edited)?;
         match self.parse.put(&edited_ir) {
@@ -4821,6 +4822,247 @@ mod tests {
             edited.nodes.len(),
             "the replacement source must be laid out again, not paired with the stale geometry"
         );
+    }
+
+    fn reorderable_flowchart(direction: &str, first: &str, second: &str) -> String {
+        format!(
+            concat!(
+                "%%{{init: {{'theme':'forest'}}}}%%\r\n",
+                "flowchart {direction}\r\n",
+                "  A[Root]\r\n",
+                "  %% keep this comment at its source position\r\n",
+                "  {first}\r\n",
+                "\t{second}  \t\r\n",
+                "  A -->|accept| B\r\n",
+                "  A -->|reject| C\r\n",
+                "  classDef hot fill:#ff8800\r\n",
+                "  class B hot\r\n",
+                "  style C stroke:#224466\r\n"
+            ),
+            direction = direction,
+            first = first,
+            second = second,
+        )
+    }
+
+    fn lens_sibling_declaration(node_id: &str) -> &'static str {
+        match node_id {
+            "B" => "B[\"Branch B\"]",
+            "C" => "C[Branch C]",
+            _ => panic!("unexpected sibling {node_id}"),
+        }
+    }
+
+    fn lens_sibling_order(lens: &DiagramLens) -> [&'static str; 2] {
+        let nodes = &lens.positioned_graph().nodes;
+        let b = nodes.iter().find(|node| node.node_id == "B").unwrap();
+        let c = nodes.iter().find(|node| node.node_id == "C").unwrap();
+        assert_eq!(b.rank, c.rank, "fixture nodes must share a rank");
+        let (b_position, c_position) = if matches!(
+            lens.ir().direction,
+            fm_core::GraphDirection::LR | fm_core::GraphDirection::RL
+        ) {
+            (b.center.y, c.center.y)
+        } else {
+            (b.center.x, c.center.x)
+        };
+        assert_ne!(b_position, c_position, "fixture siblings must not overlap");
+        if b_position < c_position {
+            ["B", "C"]
+        } else {
+            ["C", "B"]
+        }
+    }
+
+    fn reorderable_diagram_lens(direction: &str) -> (DiagramLens, [&'static str; 2]) {
+        let initial = DiagramLens::from_source(
+            &reorderable_flowchart(direction, "B[\"Branch B\"]", "C[Branch C]"),
+            LayoutConfig::default(),
+        )
+        .unwrap();
+        // Auto layout may choose either visual order, independently of declaration order. Start
+        // with declarations matching that order so the explicit reverse is always a real edit.
+        let original_order = lens_sibling_order(&initial);
+        let source = reorderable_flowchart(
+            direction,
+            lens_sibling_declaration(original_order[0]),
+            lens_sibling_declaration(original_order[1]),
+        );
+        let lens = DiagramLens::from_source(&source, LayoutConfig::default()).unwrap();
+        assert_eq!(
+            lens_sibling_order(&lens),
+            original_order,
+            "the fixture must have a stable starting visual order"
+        );
+        (lens, [original_order[1], original_order[0]])
+    }
+
+    fn order_lens_siblings(
+        lens: &DiagramLens,
+        requested_order: [&str; 2],
+    ) -> fm_layout::layout_lens::LayoutLensSnapshot {
+        assert_ne!(lens_sibling_order(lens), requested_order);
+        let mut edited = lens.positioned_graph().clone();
+        for (index, node_id) in requested_order.iter().enumerate() {
+            let node = edited
+                .nodes
+                .iter_mut()
+                .find(|node| node.node_id == *node_id)
+                .unwrap();
+            let position = (index as f32) * 100.0;
+            if matches!(
+                lens.ir().direction,
+                fm_core::GraphDirection::LR | fm_core::GraphDirection::RL
+            ) {
+                node.center.y = position;
+            } else {
+                node.center.x = position;
+            }
+        }
+        edited
+    }
+
+    fn lens_edge_meanings(ir: &fm_core::MermaidDiagramIr) -> Vec<(String, String, String)> {
+        ir.edges
+            .iter()
+            .map(|edge| {
+                let from = ir.resolve_endpoint_node(edge.from).unwrap();
+                let to = ir.resolve_endpoint_node(edge.to).unwrap();
+                let label = edge
+                    .label
+                    .map_or("", |label| ir.labels[label.0].text.as_str());
+                (
+                    ir.nodes[from.0].id.clone(),
+                    ir.nodes[to.0].id.clone(),
+                    label.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn diagram_lens_reemits_standalone_sibling_declarations_in_every_direction() {
+        for direction in ["TB", "TD", "BT", "LR", "RL"] {
+            let (lens, requested_order) = reorderable_diagram_lens(direction);
+            let source = lens.source().to_string();
+            assert_eq!(
+                lens.put_layout(lens.positioned_graph()).unwrap().source(),
+                source
+            );
+            let dragged = order_lens_siblings(&lens, requested_order);
+
+            let updated = lens
+                .put_layout(&dragged)
+                .expect("standalone declarations can move");
+            assert_ne!(
+                updated.source(),
+                source,
+                "the requested permutation must change the source"
+            );
+            assert_eq!(
+                updated.source(),
+                reorderable_flowchart(
+                    direction,
+                    lens_sibling_declaration(requested_order[0]),
+                    lens_sibling_declaration(requested_order[1]),
+                ),
+                "only the declaration tokens should move ({direction})"
+            );
+            assert_eq!(
+                updated
+                    .ir()
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["A", requested_order[0], requested_order[1]]
+            );
+            assert_eq!(
+                lens_edge_meanings(lens.ir()),
+                lens_edge_meanings(updated.ir())
+            );
+            for original in &lens.ir().nodes {
+                let current = updated
+                    .ir()
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == original.id)
+                    .unwrap();
+                assert_eq!(current.shape, original.shape);
+                assert_eq!(current.classes, original.classes);
+                assert_eq!(current.inline_style, original.inline_style);
+                assert_eq!(
+                    current.label.map(|id| &updated.ir().labels[id.0].text),
+                    original.label.map(|id| &lens.ir().labels[id.0].text)
+                );
+            }
+            let fresh =
+                DiagramLens::from_source(updated.source(), LayoutConfig::default()).unwrap();
+            assert_eq!(updated.positioned_graph(), fresh.positioned_graph());
+            assert_eq!(
+                updated
+                    .put_layout(updated.positioned_graph())
+                    .unwrap()
+                    .source(),
+                updated.source()
+            );
+            assert_eq!(
+                lens.source(),
+                source,
+                "putback must leave the original snapshot immutable"
+            );
+        }
+    }
+
+    #[test]
+    fn diagram_lens_label_edit_after_reordering_uses_the_new_source_spans() {
+        let (lens, requested_order) = reorderable_diagram_lens("TB");
+        let reordered = lens
+            .put_layout(&order_lens_siblings(&lens, requested_order))
+            .unwrap();
+        assert_ne!(reordered.source(), lens.source());
+        let mut edited = reordered.ir().clone();
+        let label = edited
+            .nodes
+            .iter()
+            .find(|node| node.id == "B")
+            .unwrap()
+            .label
+            .unwrap();
+        edited.labels[label.0].text = "A much longer renamed branch".to_string();
+
+        let updated = reordered.put_ir(&edited).unwrap();
+        let declarations = requested_order.map(|node_id| match node_id {
+            "B" => "B[\"A much longer renamed branch\"]",
+            _ => lens_sibling_declaration(node_id),
+        });
+        assert_eq!(
+            updated.source(),
+            reorderable_flowchart("TB", declarations[0], declarations[1])
+        );
+        assert_eq!(
+            lens_edge_meanings(lens.ir()),
+            lens_edge_meanings(updated.ir())
+        );
+        assert_eq!(
+            updated.put_ir(updated.ir()).unwrap().source(),
+            updated.source()
+        );
+    }
+
+    #[test]
+    fn diagram_lens_rejects_cross_rank_drags_without_mutating_source() {
+        let source = reorderable_flowchart("LR", "B[\"Branch B\"]", "C[Branch C]");
+        let lens = DiagramLens::from_source(&source, LayoutConfig::default()).unwrap();
+        let mut dragged = lens.positioned_graph().clone();
+        dragged.nodes[0].center.x += 100.0;
+        assert!(matches!(
+            lens.put_layout(&dragged),
+            Err(DiagramLensError::Layout(
+                fm_layout::layout_lens::LayoutLensError::RankAxisMoved(_)
+            ))
+        ));
+        assert_eq!(lens.source(), source);
     }
 
     #[test]
