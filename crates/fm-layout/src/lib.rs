@@ -9262,7 +9262,9 @@ fn xy_chart_category_count(xy_chart_meta: &IrXyChartMeta) -> usize {
     )
 }
 
-fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
+/// The value domain shared by XY chart layout and every rendering backend.
+#[must_use]
+pub fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
     let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
     let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
 
@@ -9292,7 +9294,9 @@ fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
     (min_value, max_value)
 }
 
-fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
+/// A value's y position on a vertical XY chart, clamped to its plot rectangle.
+#[must_use]
+pub fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
     let range = (y_max - y_min).max(f32::EPSILON);
     let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
@@ -9338,6 +9342,94 @@ pub fn xychart_plot_bounds(meta: &IrXyChartMeta, bounds: LayoutRect) -> LayoutRe
         y: bounds.y + top,
         width: (bounds.width - left - right).max(1.0),
         height: (bounds.height - top - bottom).max(1.0),
+    }
+}
+
+/// Category labels for all XY chart data slots, including numeric x domains and unnamed slots.
+#[must_use]
+pub fn xychart_categories(meta: &IrXyChartMeta) -> Vec<String> {
+    let count = xy_chart_category_count(meta);
+    if meta.x_axis.categories.is_empty() {
+        let min = meta.x_axis.min.unwrap_or(0.0);
+        let max = meta
+            .x_axis
+            .max
+            .unwrap_or_else(|| count.saturating_sub(1) as f32);
+        let max = if (max - min).abs() < f32::EPSILON {
+            min + 1.0
+        } else {
+            max
+        };
+        if count <= 1 {
+            return vec![format_xychart_tick_value(min)];
+        }
+        let step = (max - min) / (count.saturating_sub(1) as f32).max(1.0);
+        return (0..count)
+            .map(|index| format_xychart_tick_value(min + step * index as f32))
+            .collect();
+    }
+    let mut categories = meta.x_axis.categories.clone();
+    if categories.len() < count {
+        categories.extend((categories.len()..count).map(|index| (index + 1).to_string()));
+    }
+    categories
+}
+
+/// The "nice" y-axis step Mermaid uses: d3's `tickStep(min, max, 10)`.
+///
+/// Snap to 1/2/5 × 10^k using d3's thresholds, not quarter points. In particular, the
+/// range 0..7 uses 0.5 steps and 4000..11000 uses 500 steps. These decisions must agree
+/// across SVG and Canvas or the same chart acquires a different scale on export.
+fn xychart_nice_step(min: f32, max: f32) -> f64 {
+    let span = f64::from(max) - f64::from(min);
+    if !span.is_finite() || span <= 0.0 {
+        return 0.0;
+    }
+    let raw = span / 10.0;
+    let power = raw.log10().floor();
+    let error = raw / 10.0_f64.powf(power);
+    let factor = if error >= 50.0_f64.sqrt() {
+        10.0
+    } else if error >= 10.0_f64.sqrt() {
+        5.0
+    } else if error >= 2.0_f64.sqrt() {
+        2.0
+    } else {
+        1.0
+    };
+    10.0_f64.powf(power) * factor
+}
+
+/// Numeric XY ticks in ascending order, bounded even for a malformed domain.
+#[must_use]
+pub fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
+    let step = xychart_nice_step(min, max);
+    if step <= 0.0 {
+        return vec![min];
+    }
+    let first = (f64::from(min) / step).ceil();
+    let last = (f64::from(max) / step).floor();
+    let count = last - first;
+    if !count.is_finite() || count < 0.0 || count > 200.0 {
+        return vec![min, max];
+    }
+    let ticks: Vec<f32> = (0..=(count as i64))
+        .map(|index| ((first + index as f64) * step) as f32)
+        .collect();
+    if ticks.is_empty() {
+        vec![min, max]
+    } else {
+        ticks
+    }
+}
+
+/// Format XY chart values consistently in axis labels and data-mark alternatives.
+#[must_use]
+pub fn format_xychart_tick_value(value: f32) -> String {
+    if (value - value.round()).abs() < 0.0001 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
     }
 }
 

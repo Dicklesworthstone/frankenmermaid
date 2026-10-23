@@ -816,3 +816,330 @@ fn a_class_with_only_a_stereotype_shows_it_on_both_the_canvas_and_the_svg() {
         "the class name was lost when the stereotype was drawn: {texts:?}"
     );
 }
+
+mod xychart {
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, MockCanvas2dContext, TextAlign,
+    };
+
+    fn render(
+        source: &str,
+    ) -> (
+        fm_core::MermaidDiagramIr,
+        fm_layout::DiagramLayout,
+        MockCanvas2dContext,
+    ) {
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.diagram_type, fm_core::DiagramType::XyChart);
+        assert!(ir.xy_chart_meta.is_some());
+        let layout = fm_layout::layout_diagram(&ir);
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        });
+        let result = renderer.render(&layout, &ir, &mut context);
+        let label_count = context
+            .operations()
+            .iter()
+            .filter(|op| matches!(op, DrawOperation::FillText(..)))
+            .count();
+        assert_eq!(result.labels_drawn, label_count);
+        assert_eq!(result.nodes_drawn, layout.nodes.len());
+        (ir, layout, context)
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.0001, "{actual} != {expected}");
+    }
+
+    fn text(context: &MockCanvas2dContext, wanted: &str) -> (f64, f64, TextAlign, String) {
+        let mut align = TextAlign::Left;
+        let mut fill = String::new();
+        let mut found = Vec::new();
+        for op in context.operations() {
+            match op {
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::FillText(value, x, y) if value == wanted => {
+                    found.push((*x, *y, align, fill.clone()));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(found.len(), 1, "expected one {wanted:?}, got {found:?}");
+        found.pop().unwrap()
+    }
+
+    #[derive(Debug)]
+    struct PaintedPath {
+        points: Vec<(f64, f64)>,
+        closed: bool,
+        color: String,
+        alpha: f64,
+        width: f64,
+        filled: bool,
+    }
+
+    fn paths(context: &MockCanvas2dContext) -> Vec<PaintedPath> {
+        let mut result = Vec::new();
+        let (mut points, mut closed) = (Vec::new(), false);
+        let (mut fill, mut stroke) = (String::new(), String::new());
+        let (mut alpha, mut width) = (1.0, 1.0);
+        for op in context.operations() {
+            match op {
+                DrawOperation::BeginPath => {
+                    points.clear();
+                    closed = false;
+                }
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::ClosePath => closed = true,
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::SetStrokeStyle(value) => stroke.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::SetLineWidth(value) => width = *value,
+                DrawOperation::Fill | DrawOperation::Stroke if !points.is_empty() => {
+                    let filled = matches!(op, DrawOperation::Fill);
+                    result.push(PaintedPath {
+                        points: points.clone(),
+                        closed,
+                        color: if filled { fill.clone() } else { stroke.clone() },
+                        alpha,
+                        width,
+                        filled,
+                    });
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn value_axes_and_grouped_bars_use_the_layout_scale() {
+        let source = "xychart-beta\n title Orders\n x-axis \"Month\" [Jan, Feb, Mar]\n y-axis \"Units\" -20 --> 80\n bar \"Actual\" [-20, 40, 80]\n bar \"Target\" [20, 30, 60]\n";
+        let (ir, layout, context) = render(source);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        assert_eq!(meta.series.len(), 2);
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let config = CanvasRenderConfig::default();
+
+        // The ticks encode the declared numeric range, including zero and negative values.
+        // Checking a category name alone used to pass while the entire value scale was absent.
+        for value in (-20..=80).step_by(10) {
+            let (x, y, align, fill) = text(&context, &value.to_string());
+            close(x, f64::from(plot.x) - 10.0);
+            close(
+                y,
+                f64::from(plot.y + plot.height * (80 - value) as f32 / 100.0) + 4.0,
+            );
+            assert_eq!(align, TextAlign::Right);
+            assert_eq!(fill, config.label_color);
+        }
+        for (index, label) in ["Jan", "Feb", "Mar"].iter().enumerate() {
+            let (x, y, align, _) = text(&context, label);
+            close(
+                x,
+                f64::from(plot.x) + f64::from(plot.width) / 3.0 * (index as f64 + 0.5),
+            );
+            close(y, f64::from(plot.y + plot.height) + 24.0);
+            assert_eq!(align, TextAlign::Center);
+        }
+        for label in ["Orders", "Month", "Units"] {
+            text(&context, label);
+        }
+
+        // Every bar is painted once, in its series color, with exactly the layout's rectangle.
+        let (mut fill, mut alpha) = (String::new(), 1.0);
+        let mut bars = Vec::new();
+        for op in context.operations() {
+            match op {
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::FillRect(x, y, w, h) if config.accents.contains(&fill) => {
+                    bars.push((fill.clone(), alpha, (*x, *y, *w, *h)));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(bars.len(), 6);
+        for (series_index, series) in meta.series.iter().enumerate() {
+            for (index, id) in series.nodes.iter().enumerate() {
+                let node = layout.nodes.iter().find(|n| n.node_index == id.0).unwrap();
+                let bar = &bars[series_index * 3 + index];
+                assert_eq!(bar.0, config.accents[series_index]);
+                close(bar.1, 0.78);
+                for (actual, expected) in [
+                    (bar.2.0, node.bounds.x),
+                    (bar.2.1, node.bounds.y),
+                    (bar.2.2, node.bounds.width),
+                    (bar.2.3, node.bounds.height),
+                ] {
+                    close(actual, f64::from(expected));
+                }
+            }
+        }
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &Default::default());
+        assert_eq!(svg.matches("class=\"fm-xychart-bar\"").count(), bars.len());
+        assert!(svg.contains("class=\"fm-xychart-x-label\">Month</text>"));
+        assert!(svg.contains("class=\"fm-xychart-y-label\">Units</text>"));
+        // The old generic node labels included data text inside every bar. No duplicate labels.
+        let texts: Vec<_> = context
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::FillText(value, ..) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 17);
+    }
+
+    #[test]
+    fn horizontal_lines_and_areas_keep_their_series_and_zero_baseline() {
+        let source = "xychart-beta horizontal\n title Revenue\n x-axis \"Quarter\" [Q1, Q2, Q3]\n y-axis \"Amount\" -10 --> 30\n line [0, 10, 20]\n area [-5, 5, 25]\n";
+        let (ir, layout, context) = render(source);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        assert!(meta.horizontal);
+        assert_eq!(meta.series[1].kind, fm_core::IrXySeriesKind::Area);
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let config = CanvasRenderConfig::default();
+        let paths = paths(&context);
+
+        for (series_index, series) in meta.series.iter().enumerate() {
+            let centers: Vec<_> = series
+                .nodes
+                .iter()
+                .map(|id| {
+                    let point = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == id.0)
+                        .unwrap()
+                        .bounds
+                        .center();
+                    (f64::from(point.x), f64::from(point.y))
+                })
+                .collect();
+            let lines: Vec<_> = paths
+                .iter()
+                .filter(|path| {
+                    !path.filled && path.color == config.accents[series_index] && path.width == 3.0
+                })
+                .collect();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].points, centers);
+            assert!(!lines[0].closed);
+            if series_index == 1 {
+                let fills: Vec<_> = paths
+                    .iter()
+                    .filter(|path| path.filled && path.color == config.accents[1])
+                    .collect();
+                assert_eq!(fills.len(), 1);
+                let area = fills[0];
+                assert!(area.closed);
+                close(area.alpha, 0.16);
+                assert_eq!(&area.points[1..4], centers.as_slice());
+                let zero_x = f64::from(plot.x + plot.width / 4.0);
+                assert_eq!(area.points[0], (zero_x, centers[0].1));
+                assert_eq!(area.points[4], (zero_x, centers[2].1));
+            }
+        }
+        assert_eq!(
+            context
+                .operations()
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                .count(),
+            6
+        );
+        let (zero_x, zero_y, zero_align, _) = text(&context, "0");
+        close(zero_x, f64::from(plot.x + plot.width / 4.0));
+        close(zero_y, f64::from(plot.y) - 11.0);
+        assert_eq!(zero_align, TextAlign::Center);
+        let (q_x, q_y, q_align, _) = text(&context, "Q1");
+        close(q_x, f64::from(plot.x) - 11.0);
+        close(
+            q_y,
+            f64::from(plot.y + plot.height / 6.0) + config.font_size * 0.74 * 0.35,
+        );
+        assert_eq!(q_align, TextAlign::Right);
+        for label in ["Revenue", "Quarter", "Amount"] {
+            text(&context, label);
+        }
+    }
+
+    #[test]
+    fn numeric_categories_and_degenerate_series_still_have_finite_geometry() {
+        for source in [
+            "xychart-beta\n x-axis 10 --> 30\n y-axis 0 --> 0\n area [0, 0, 0]\n",
+            "xychart-beta\n x-axis [only]\n line [4]\n",
+            "xychart-beta\n title Empty\n",
+        ] {
+            let (_, _, context) = render(source);
+            for op in context.operations() {
+                let numbers: Vec<f64> = match op {
+                    DrawOperation::MoveTo(x, y)
+                    | DrawOperation::LineTo(x, y)
+                    | DrawOperation::FillText(_, x, y) => vec![*x, *y],
+                    DrawOperation::FillRect(x, y, w, h) | DrawOperation::StrokeRect(x, y, w, h) => {
+                        vec![*x, *y, *w, *h]
+                    }
+                    DrawOperation::Arc(x, y, radius, start, end) => {
+                        vec![*x, *y, *radius, *start, *end]
+                    }
+                    _ => Vec::new(),
+                };
+                assert!(
+                    numbers.iter().all(|value| value.is_finite()),
+                    "non-finite operation: {op:?}"
+                );
+            }
+            if source.contains("10 --> 30") {
+                for label in ["10", "20", "30"] {
+                    text(&context, label);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chart_drawing_is_invariant_under_layout_origin_translation() {
+        let source = "xychart-beta\n title Sales\n x-axis [A, B]\n bar [10, 20]\n";
+        let (ir, layout, _) = render(source);
+        for auto_fit in [false, true] {
+            let config = CanvasRenderConfig {
+                auto_fit,
+                ..Default::default()
+            };
+            let draw = |layout: &fm_layout::DiagramLayout| {
+                let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+                Canvas2dRenderer::new(config.clone()).render(layout, &ir, &mut context);
+                context
+            };
+            let original = draw(&layout);
+            let mut moved = layout.clone();
+            moved.bounds.x += 512.0;
+            moved.bounds.y -= 256.0;
+            for node in &mut moved.nodes {
+                node.bounds.x += 512.0;
+                node.bounds.y -= 256.0;
+            }
+            for edge in &mut moved.edges {
+                for point in &mut edge.points {
+                    point.x += 512.0;
+                    point.y -= 256.0;
+                }
+            }
+            let shifted = draw(&moved);
+            for label in ["Sales", "A", "B", "0", "20"] {
+                let first = text(&original, label);
+                let second = text(&shifted, label);
+                close(first.0, second.0);
+                close(first.1, second.1);
+                assert_eq!(first.2, second.2);
+            }
+        }
+    }
+}

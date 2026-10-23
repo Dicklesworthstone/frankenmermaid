@@ -55,7 +55,8 @@ use fm_layout::{
     MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
     TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
-    try_relayout_directed_path_suffix,
+    format_xychart_tick_value, resolve_xychart_y_domain, try_relayout_directed_path_suffix,
+    xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
 /// Node fill gradient mode.
@@ -8114,7 +8115,7 @@ fn render_xychart_svg(
             theme,
         );
     } else {
-        // Nice tick values, not quarter points (see `xychart_nice_step`).
+        // Nice tick values shared with the Canvas renderer, not quarter points.
         for tick_value in xychart_y_ticks(y_min, y_max) {
             let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
                 (tick_value - y_min) / (y_max - y_min)
@@ -8785,87 +8786,6 @@ fn write_xychart_horizontal_axes(
     doc
 }
 
-fn xychart_categories(xy_chart_meta: &IrXyChartMeta) -> Vec<String> {
-    let series_count = xy_chart_meta
-        .series
-        .iter()
-        .map(|series| series.values.len())
-        .max()
-        .unwrap_or(0);
-    let count = series_count.max(xy_chart_meta.x_axis.categories.len());
-
-    if xy_chart_meta.x_axis.categories.is_empty() {
-        let (x_min, x_max) = resolve_xychart_x_domain(xy_chart_meta, count);
-        if count <= 1 {
-            return vec![format_xychart_tick_value(x_min)];
-        }
-        let step = (x_max - x_min) / (count.saturating_sub(1) as f32).max(1.0);
-        return (0..count)
-            .map(|index| format_xychart_tick_value(x_min + step * index as f32))
-            .collect();
-    }
-
-    let mut categories = xy_chart_meta.x_axis.categories.clone();
-    if categories.len() < count {
-        categories.extend((categories.len()..count).map(|index| (index + 1).to_string()));
-    }
-    categories
-}
-
-fn resolve_xychart_x_domain(xy_chart_meta: &IrXyChartMeta, count: usize) -> (f32, f32) {
-    let min = xy_chart_meta.x_axis.min.unwrap_or(0.0);
-    let max = xy_chart_meta
-        .x_axis
-        .max
-        .unwrap_or_else(|| count.saturating_sub(1) as f32);
-    if (max - min).abs() < f32::EPSILON {
-        (min, min + 1.0)
-    } else {
-        (min, max)
-    }
-}
-
-fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
-    let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
-    let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
-
-    if xy_chart_meta.y_axis.min.is_none() || xy_chart_meta.y_axis.max.is_none() {
-        for value in xy_chart_meta
-            .series
-            .iter()
-            .flat_map(|series| series.values.iter().copied())
-        {
-            min_value = min_value.min(value);
-            max_value = max_value.max(value);
-        }
-    }
-
-    if !min_value.is_finite() || !max_value.is_finite() {
-        return (0.0, 1.0);
-    }
-    if xy_chart_meta.y_axis.min.is_none() && min_value > 0.0 {
-        min_value = 0.0;
-    }
-    if xy_chart_meta.y_axis.max.is_none() && max_value < 0.0 {
-        max_value = 0.0;
-    }
-    if (max_value - min_value).abs() < f32::EPSILON {
-        max_value += 1.0;
-    }
-    (min_value, max_value)
-}
-
-fn xychart_value_to_y(
-    value: f32,
-    y_min: f32,
-    y_max: f32,
-    plot_bounds: fm_layout::LayoutRect,
-) -> f32 {
-    let range = (y_max - y_min).max(f32::EPSILON);
-    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
-    plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
-}
-
 /// The accessible name for one xychart data mark (bd-sdhzh).
 ///
 /// `"Series, Category: 42"`, or `"Category: 42"` for an unnamed series, or `"42"` when the x axis
@@ -8914,70 +8834,6 @@ fn write_xychart_mark_accessible_name(
     }
 }
 
-/// The "nice" y-axis step mermaid uses: d3's `tickStep(min, max, 10)`.
-///
-/// MERMAID DOES NOT DIVIDE THE RANGE, IT SNAPS TO 1/2/5 x 10^k. We emitted five ticks at quarter
-/// points, so `y-axis 4000 --> 11000` labelled 5750 and 9250 — values that appear nowhere on a
-/// chart anyone would draw by hand. Measured across six ranges on the pinned 11.15.0 bundle, every
-/// one of which this reproduces exactly:
-///
-/// ```text
-///   0 -> 10        step 1        0 -> 100        step 10
-///   0 -> 1         step 0.1      0 -> 7          step 0.5
-///   100 -> 900     step 100      4000 -> 11000   step 500
-/// ```
-///
-/// The thresholds are d3's own — sqrt(50), sqrt(10), sqrt(2) — and they are not round numbers.
-/// `0 -> 7` is the case that needs them: the raw step is 0.7, whose error 7.0 sits between sqrt(10)
-/// and sqrt(50), so the factor is 5 and the step 0.5. A rule using 7.5 as the cutoff picks 1.0
-/// there and still agrees with mermaid on all five other ranges.
-fn xychart_nice_step(min: f32, max: f32) -> f64 {
-    const COUNT: f64 = 10.0;
-    let span = f64::from(max) - f64::from(min);
-    if !span.is_finite() || span <= 0.0 {
-        return 0.0;
-    }
-    let raw = span / COUNT;
-    let power = raw.log10().floor();
-    let error = raw / 10.0_f64.powf(power);
-    let factor = if error >= 50.0_f64.sqrt() {
-        10.0
-    } else if error >= 10.0_f64.sqrt() {
-        5.0
-    } else if error >= 2.0_f64.sqrt() {
-        2.0
-    } else {
-        1.0
-    };
-    10.0_f64.powf(power) * factor
-}
-
-/// The y values mermaid labels, ascending: every multiple of the nice step inside `[min, max]`.
-///
-/// Falls back to the endpoints when the range is degenerate or the step would produce an absurd
-/// number of ticks, so a malformed axis cannot spin here.
-fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
-    let step = xychart_nice_step(min, max);
-    if step <= 0.0 {
-        return vec![min];
-    }
-    let first = (f64::from(min) / step).ceil();
-    let last = (f64::from(max) / step).floor();
-    let count = last - first;
-    if !count.is_finite() || count < 0.0 || count > 200.0 {
-        return vec![min, max];
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let ticks: Vec<f32> = (0..=(count as i64))
-        .map(|index| ((first + index as f64) * step) as f32)
-        .collect();
-    if ticks.is_empty() {
-        vec![min, max]
-    } else {
-        ticks
-    }
-}
-
 /// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
 pub(crate) struct JourneyLegendEntry {
     pub(crate) name: String,
@@ -9016,14 +8872,6 @@ fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
             entry
         })
         .collect()
-}
-
-fn format_xychart_tick_value(value: f32) -> String {
-    if (value - value.round()).abs() < 0.0001 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
 }
 
 /// Look up a node's centrality tier by index (O(1) via HashMap).

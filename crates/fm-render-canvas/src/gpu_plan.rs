@@ -5493,6 +5493,14 @@ mod tests {
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
+            (
+                "draw_xychart_axes",
+                "bd-adabx: XY value/category axes and titles are not in the GPU scene",
+            ),
+            (
+                "draw_xychart_series",
+                "bd-adabx: XY series palette and area fills are not in the GPU scene",
+            ),
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
             (
                 "draw_path_markers",

@@ -8,7 +8,7 @@ use crate::shapes::{
     draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape,
 };
 use crate::viewport::{Viewport, fit_to_viewport};
-use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
+use fm_core::{ArrowType, DiagramType, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, NodeShape};
 use fm_layout::{
     DiagramLayout, FillStyle, LineCap as IrLineCap, LineJoin as IrLineJoin, MarkerKind, PathCmd,
     RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
@@ -258,6 +258,26 @@ impl Canvas2dRenderer {
             )
         };
 
+        // XY marks are data, not labelled graph nodes. The generic path loses the numeric
+        // scale and axis titles, paints every series alike, and never fills area series.
+        if let Some(meta) = ir.xy_chart_meta.as_ref()
+            && ir.diagram_type == DiagramType::XyChart
+        {
+            let labels_drawn = self.draw_xychart_axes(ir, meta, layout, ctx, offset_x, offset_y);
+            let (nodes_drawn, edges_drawn) =
+                self.draw_xychart_series(meta, layout, ctx, offset_x, offset_y);
+            ctx.restore();
+            return CanvasRenderResult {
+                draw_calls: self.draw_calls,
+                nodes_drawn,
+                edges_drawn,
+                clusters_drawn: 0,
+                labels_drawn,
+                viewport,
+                hit_regions: crate::interaction::hit_regions(ir, layout),
+            };
+        }
+
         let mut labels_drawn = 0;
 
         // Draw clusters (background)
@@ -271,7 +291,7 @@ impl Canvas2dRenderer {
         self.draw_treemap(ir, layout, ctx, offset_x, offset_y);
         self.draw_radar(ir, layout, ctx, offset_x, offset_y);
 
-        // Draw the time/category axis (gantt dates, xychart categories).
+        // Draw extension-provided axis labels, such as gantt dates.
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
 
         // Draw the gantt today marker, on top of the bands and under the bars.
@@ -1278,6 +1298,285 @@ impl Canvas2dRenderer {
 }
 
 impl Canvas2dRenderer {
+    /// Draw the same value scale, category slots and titles used by the SVG chart.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_xychart_axes<C: Canvas2dContext>(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        meta: &IrXyChartMeta,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> usize {
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (left, top) = (f64::from(plot.x) + offset_x, f64::from(plot.y) + offset_y);
+        let (width, height) = (f64::from(plot.width), f64::from(plot.height));
+        let (right, bottom) = (left + width, top + height);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let categories = fm_layout::xychart_categories(meta);
+        let mut labels = 0;
+
+        ctx.set_fill_style("rgba(148,163,184,0.06)");
+        ctx.fill_rect(left, top, width, height);
+        ctx.set_stroke_style("rgba(148,163,184,0.16)");
+        ctx.set_line_width(1.0);
+        ctx.set_line_dash(&[]);
+        ctx.stroke_rect(left, top, width, height);
+        self.draw_calls += 2;
+
+        ctx.set_font(&format!(
+            "{}px {}",
+            (self.config.font_size * 0.72).max(8.0),
+            self.config.font_family
+        ));
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_text_baseline(TextBaseline::Alphabetic);
+        for value in fm_layout::xychart_y_ticks(min, max) {
+            let (x, y) = if meta.horizontal {
+                (
+                    f64::from(fm_layout::xychart_value_to_x(value, min, max, plot)) + offset_x,
+                    top,
+                )
+            } else {
+                (
+                    left,
+                    f64::from(fm_layout::xychart_value_to_y(value, min, max, plot)) + offset_y,
+                )
+            };
+            ctx.set_stroke_style("rgba(148,163,184,0.35)");
+            ctx.set_line_dash(&[4.0, 4.0]);
+            ctx.begin_path();
+            ctx.move_to(x, y);
+            if meta.horizontal {
+                ctx.line_to(x, bottom);
+            } else {
+                ctx.line_to(right, y);
+            }
+            ctx.stroke();
+
+            ctx.set_stroke_style(&self.config.label_color);
+            ctx.set_line_dash(&[]);
+            ctx.begin_path();
+            ctx.move_to(x, y);
+            if meta.horizontal {
+                ctx.line_to(x, top - 5.0);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(&fm_layout::format_xychart_tick_value(value), x, top - 11.0);
+            } else {
+                ctx.line_to(left - 5.0, y);
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(
+                    &fm_layout::format_xychart_tick_value(value),
+                    left - 10.0,
+                    y + 4.0,
+                );
+            }
+            ctx.stroke();
+            self.draw_calls += 3;
+            labels += 1;
+        }
+
+        ctx.set_stroke_style(&self.config.edge_stroke);
+        ctx.set_line_width(1.5);
+        ctx.begin_path();
+        ctx.move_to(left, top);
+        ctx.line_to(left, bottom);
+        if meta.horizontal {
+            ctx.move_to(left, top);
+            ctx.line_to(right, top);
+        } else {
+            ctx.move_to(left, bottom);
+            ctx.line_to(right, bottom);
+        }
+        ctx.stroke();
+        self.draw_calls += 1;
+
+        let category_font = (self.config.font_size * 0.74).max(8.0);
+        ctx.set_font(&format!("{category_font}px {}", self.config.font_family));
+        ctx.set_stroke_style(&self.config.label_color);
+        ctx.set_line_width(1.0);
+        let band = if meta.horizontal { height } else { width } / categories.len().max(1) as f64;
+        for (index, category) in categories.iter().enumerate() {
+            let position = band * (index as f64 + 0.5);
+            ctx.begin_path();
+            if meta.horizontal {
+                let y = top + position;
+                ctx.move_to(left - 5.0, y);
+                ctx.line_to(left, y);
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(category, left - 11.0, y + category_font * 0.35);
+            } else {
+                let x = left + position;
+                ctx.move_to(x, bottom);
+                ctx.line_to(x, bottom + 5.0);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(category, x, bottom + 24.0);
+            }
+            ctx.stroke();
+            self.draw_calls += 2;
+            labels += 1;
+        }
+
+        ctx.set_font(&format!(
+            "{}px {}",
+            (self.config.font_size * 0.76).max(8.0),
+            self.config.font_family
+        ));
+        if let Some(label) = meta.y_axis.label.as_deref() {
+            if meta.horizontal {
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(label, left + width / 2.0, top - 34.0);
+            } else {
+                ctx.set_text_align(TextAlign::Left);
+                ctx.fill_text(label, left - 52.0, top - 12.0);
+            }
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        if let Some(label) = meta.x_axis.label.as_deref() {
+            if meta.horizontal {
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(label, left - 11.0, top - 34.0);
+            } else {
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(label, left + width / 2.0, bottom + 48.0);
+            }
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        if let Some(title) = ir.declared_title_if_drawn() {
+            ctx.set_font(&format!(
+                "600 {}px {}",
+                (self.config.font_size * 1.18).max(8.0),
+                self.config.font_family
+            ));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.fill_text(
+                title,
+                f64::from(layout.bounds.x + layout.bounds.width / 2.0) + offset_x,
+                top - if meta.horizontal { 70.0 } else { 34.0 },
+            );
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        labels
+    }
+
+    /// Paint data from the layout's exact mark boxes; never reconstruct their values or ordering.
+    fn draw_xychart_series<C: Canvas2dContext>(
+        &mut self,
+        meta: &IrXyChartMeta,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> (usize, usize) {
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let baseline = min.min(0.0).max(max.min(0.0));
+        let baseline_x =
+            f64::from(fm_layout::xychart_value_to_x(baseline, min, max, plot)) + offset_x;
+        let baseline_y =
+            f64::from(fm_layout::xychart_value_to_y(baseline, min, max, plot)) + offset_y;
+        let by_index: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        let (mut nodes_drawn, mut edges_drawn) = (0, 0);
+        ctx.set_line_dash(&[]);
+
+        for (series_index, series) in meta.series.iter().enumerate() {
+            let color = &self.config.accents[series_index % self.config.accents.len()];
+            let nodes: Vec<_> = series
+                .nodes
+                .iter()
+                .filter_map(|id| by_index.get(&id.0).copied())
+                .collect();
+            let Some(first) = nodes.first() else {
+                continue;
+            };
+            ctx.set_fill_style(color);
+            ctx.set_stroke_style(color);
+            nodes_drawn += nodes.len();
+            if series.kind == IrXySeriesKind::Bar {
+                ctx.set_line_width(1.0);
+                for node in nodes {
+                    let bounds = node.bounds;
+                    let (x, y) = (
+                        f64::from(bounds.x) + offset_x,
+                        f64::from(bounds.y) + offset_y,
+                    );
+                    let (w, h) = (f64::from(bounds.width), f64::from(bounds.height));
+                    ctx.set_global_alpha(0.78);
+                    ctx.fill_rect(x, y, w, h);
+                    ctx.set_global_alpha(1.0);
+                    ctx.stroke_rect(x, y, w, h);
+                    self.draw_calls += 2;
+                }
+                continue;
+            }
+
+            let center = |node: &fm_layout::LayoutNodeBox| {
+                let center = node.bounds.center();
+                (
+                    f64::from(center.x) + offset_x,
+                    f64::from(center.y) + offset_y,
+                )
+            };
+            let (first_x, first_y) = center(first);
+            if series.kind == IrXySeriesKind::Area {
+                ctx.begin_path();
+                if meta.horizontal {
+                    ctx.move_to(baseline_x, first_y);
+                } else {
+                    ctx.move_to(first_x, baseline_y);
+                }
+                let (mut last_x, mut last_y) = (first_x, first_y);
+                for node in &nodes {
+                    (last_x, last_y) = center(node);
+                    ctx.line_to(last_x, last_y);
+                }
+                if meta.horizontal {
+                    ctx.line_to(baseline_x, last_y);
+                } else {
+                    ctx.line_to(last_x, baseline_y);
+                }
+                ctx.close_path();
+                ctx.set_global_alpha(0.16);
+                ctx.fill();
+                ctx.set_global_alpha(1.0);
+                self.draw_calls += 1;
+            }
+            ctx.set_line_width(3.0);
+            ctx.set_line_cap(LineCap::Round);
+            ctx.set_line_join(LineJoin::Round);
+            ctx.begin_path();
+            ctx.move_to(first_x, first_y);
+            for node in nodes.iter().skip(1) {
+                let (x, y) = center(node);
+                ctx.line_to(x, y);
+            }
+            ctx.stroke();
+            self.draw_calls += 1;
+            edges_drawn += nodes.len().saturating_sub(1);
+
+            ctx.set_stroke_style(&self.config.node_fill);
+            ctx.set_line_width(2.0);
+            for node in nodes {
+                let (x, y) = center(node);
+                let radius = f64::from((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5));
+                ctx.begin_path();
+                ctx.arc(x, y, radius, 0.0, std::f64::consts::TAU);
+                ctx.fill();
+                ctx.stroke();
+                self.draw_calls += 2;
+            }
+        }
+        (nodes_drawn, edges_drawn)
+    }
+
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -1385,9 +1684,9 @@ impl Canvas2dRenderer {
     }
 
     /// Draw sequence activation bars from layout extensions.
-    /// Draw axis tick labels -- gantt dates and xychart categories.
+    /// Draw axis tick labels supplied by layout extensions, such as gantt dates.
     ///
-    /// `extensions.axis_ticks` is filled by the gantt and xychart layout arms and drawn by
+    /// `extensions.axis_ticks` is filled by the gantt layout arm and drawn by
     /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is the browser preview
     /// surface -- fm-wasm renders through `render_to_canvas_with_layout` -- so a gantt showed bars
     /// with nothing to measure them against, which is exactly the state bd-trsd fixed on the SVG side
@@ -4289,8 +4588,8 @@ fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
-    // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
-    // the generic node/edge path, so the generic title fallback remains enabled.
+    // XY charts draw their title in the plot's reserved margin and return before this
+    // screen-space overlay. Other families keep the shared title fallback.
     //
     // ⚠️ WHICH FAMILIES TAKE A TITLE IS NOT THIS BACKEND'S DECISION. This used to return
     // `ir.meta.title` outright, so the canvas drew a title on every family — including the ones

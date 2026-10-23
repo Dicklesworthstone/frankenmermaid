@@ -1372,6 +1372,12 @@ For diagrams that exceed the terminal viewport, the renderer can produce a scale
 
 The Canvas2D renderer is an alternative to SVG for browser-based rendering, particularly suited for large diagrams and interactive use.
 
+XY charts have a dedicated Canvas2D path with numeric ticks and gridlines, category and axis
+labels, chart titles, grouped bars, connected line points, and area fills. Vertical and
+horizontal charts share their domains, tick values, and category labels with SVG; data marks
+use the layout's exact rectangles and point centers, including negative values and zero
+baselines. The GPU scene does not yet carry these dedicated XY draws.
+
 ### Trait-based abstraction
 
 `Canvas2dContext` is a trait with 40 methods covering path operations (`begin_path`, `move_to`, `line_to`, `quadratic_curve_to`, `bezier_curve_to`, `arc`, `arc_to`, `rect`, …), drawing (`fill`, `stroke`, `fill_rect`, `stroke_rect`, `clear_rect`), text (`fill_text`, `stroke_text`, `measure_text`, plus alignment / baseline setters), style (fill / stroke / line-width / line-cap / line-join / line-dash / global-alpha / font), transform (`save`, `restore`, `translate`, `scale`, `rotate`, `set_transform`, `reset_transform`, `clip`), and shadows.
