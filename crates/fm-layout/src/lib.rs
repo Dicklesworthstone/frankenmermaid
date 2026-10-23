@@ -24,6 +24,7 @@ pub mod fnx_ordering;
 pub mod adapton;
 mod cga_routing;
 mod compound;
+pub mod edge_labels;
 mod event_model;
 pub mod invariants;
 mod ishikawa;
@@ -4532,7 +4533,7 @@ impl IncrementalLayoutEngine {
         );
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
-        separate_shared_channels(ir, &mut edges);
+        separate_shared_channels(ir, &nodes, &mut edges);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -5688,7 +5689,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
-    separate_shared_channels(ir, &mut edges);
+    separate_shared_channels(ir, &nodes, &mut edges);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -20236,12 +20237,17 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
 /// Separate connected orthogonal runs that would imply relationships absent from the graph.
 /// Preserve genuine fan-in or fan-out buses while splitting mixed fans into distinct tracks.
 /// Keep endpoint ports fixed; constrained routes remain unchanged when no local track fits.
-fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
+fn separate_shared_channels(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    edges: &mut [LayoutEdgePath],
+) {
     const TRACK_GAP: f32 = 10.0;
     const MIN_TRACK_GAP: f32 = 2.0;
     const CONTACT_EPS: f32 = 0.5;
     const GEOMETRY_EPS: f32 = 0.01;
     const MAX_SHARED: usize = 64;
+    let containers = composite_containers(ir, ir.nodes.len());
 
     #[derive(Clone, Copy)]
     struct Run {
@@ -20466,6 +20472,58 @@ fn separate_shared_channels(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath])
                             }
                         }
                     }
+                    // The router has already cleared node boxes. Moving this run changes both
+                    // neighboring stubs as well, so checking only its new middle segment could
+                    // still push a stub into a node. Unchanged tracks need no extra node scan.
+                    if (candidate - line).abs() > GEOMETRY_EPS {
+                        let edge = &ir.edges[edges[run.path].edge_index];
+                        let endpoint_nodes = [
+                            endpoint_node_index(ir, edge.from),
+                            endpoint_node_index(ir, edge.to),
+                        ];
+                        let mut moved = [
+                            points[run.start - 1],
+                            points[run.start],
+                            points[run.start + 1],
+                            points[run.start + 2],
+                        ];
+                        for bend in &mut moved[1..3] {
+                            if horizontal {
+                                bend.y = candidate;
+                            } else {
+                                bend.x = candidate;
+                            }
+                        }
+                        for node in nodes {
+                            // Composite states are also nodes. As in build_edge_paths, an
+                            // enclosing state cannot be an obstacle to its own transitions.
+                            if endpoint_nodes.iter().flatten().any(|&endpoint| {
+                                containers
+                                    .get(endpoint)
+                                    .is_some_and(|parents| parents.contains(&node.node_index))
+                            }) {
+                                continue;
+                            }
+                            let bounds = node.bounds;
+                            let left = bounds.x + GEOMETRY_EPS;
+                            let right = bounds.x + bounds.width - GEOMETRY_EPS;
+                            let top = bounds.y + GEOMETRY_EPS;
+                            let bottom = bounds.y + bounds.height - GEOMETRY_EPS;
+                            // All three segments are orthogonal. Their projected intervals
+                            // test the rectangle's interior, permitting an endpoint on its face.
+                            if left < right
+                                && top < bottom
+                                && moved.windows(2).any(|pair| {
+                                    pair[0].x.max(pair[1].x) > left
+                                        && pair[0].x.min(pair[1].x) < right
+                                        && pair[0].y.max(pair[1].y) > top
+                                        && pair[0].y.min(pair[1].y) < bottom
+                                })
+                            {
+                                return true;
+                            }
+                        }
+                    }
                     false
                 };
                 let mut destination = None;
@@ -20546,6 +20604,25 @@ fn composite_containers(ir: &MermaidDiagramIr, node_count: usize) -> Vec<Vec<usi
         }
     }
     containers
+}
+
+/// Whether a state node is already drawn by its matching composite-state cluster.
+/// Its node bounds remain available for routing transitions to the container boundary.
+#[must_use]
+pub fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
+    if ir.diagram_type != DiagramType::State {
+        return false;
+    }
+    let node_id = ir
+        .nodes
+        .get(node_box.node_index)
+        .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
+    ir.clusters.iter().any(|cluster| {
+        cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .is_some_and(|label| label.text == node_id)
+    })
 }
 
 /// Make a composite state's node BE its container.
@@ -30105,11 +30182,11 @@ mod tests {
                     "fixture must expose the mixed bus"
                 );
                 let mut after = before.clone();
-                separate_shared_channels(&ir, &mut after);
+                separate_shared_channels(&ir, &[], &mut after);
                 assert_shared_channel_geometry_preserved(&before, &after);
                 assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
                 let mut repeated = before.clone();
-                separate_shared_channels(&ir, &mut repeated);
+                separate_shared_channels(&ir, &[], &mut repeated);
                 assert_eq!(after, repeated, "channel assignment must be deterministic");
             }
         }
@@ -30141,7 +30218,7 @@ mod tests {
                     })
                     .collect();
                 let mut after = before.clone();
-                separate_shared_channels(&ir, &mut after);
+                separate_shared_channels(&ir, &[], &mut after);
                 assert_eq!(
                     after, before,
                     "a genuine bus should retain its original route"
@@ -30174,7 +30251,7 @@ mod tests {
             ];
             assert!(shared_channel_has_false_junction(&ir, &before));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(
                 after[2], before[2],
@@ -30202,7 +30279,7 @@ mod tests {
                 shared_channel_test_path(2, &[(110.0, 60.0), (190.0, 60.0)], transpose),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(after[2], before[2], "an endpoint segment cannot move");
             assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
@@ -30230,7 +30307,7 @@ mod tests {
                 })
                 .collect();
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert!(
                 !shared_channel_has_false_junction(&ir, &after),
@@ -30256,7 +30333,7 @@ mod tests {
                 ),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
             let line = |path: &LayoutEdgePath| {
@@ -30290,7 +30367,7 @@ mod tests {
                 })
                 .collect();
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_eq!(
                 after, before,
                 "zero-clearance routes need new bends, not reversed stubs"
@@ -30333,7 +30410,7 @@ mod tests {
                 transpose,
             ));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_eq!(
                 &after[..65],
                 &before[..65],
@@ -30352,6 +30429,200 @@ mod tests {
                     "a dense skipped group must remain occupied"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn shared_channels_keep_moved_runs_and_both_stubs_out_of_nodes() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E[Obstacle]\n").ir;
+        for transpose in [false, true] {
+            for (first_target, second_target, x, y, width, height) in [
+                (100.0, 200.0, 120.0, 35.0, 30.0, 10.0),
+                (100.0, 200.0, 195.0, 42.0, 10.0, 5.5),
+                (200.0, 300.0, 95.0, 52.0, 10.0, 6.0),
+            ] {
+                let before = vec![
+                    shared_channel_test_path(
+                        0,
+                        &[
+                            (0.0, 0.0),
+                            (0.0, 50.0),
+                            (first_target, 50.0),
+                            (first_target, 100.0),
+                        ],
+                        transpose,
+                    ),
+                    shared_channel_test_path(
+                        1,
+                        &[
+                            (100.0, 0.0),
+                            (100.0, 50.0),
+                            (second_target, 50.0),
+                            (second_target, 100.0),
+                        ],
+                        transpose,
+                    ),
+                ];
+                let bounds = if transpose {
+                    LayoutRect {
+                        x: y,
+                        y: x,
+                        width: height,
+                        height: width,
+                    }
+                } else {
+                    LayoutRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }
+                };
+                let obstacle = LayoutNodeBox {
+                    node_index: ir.nodes.iter().position(|node| node.id == "E").unwrap(),
+                    node_id: "E".to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds,
+                };
+                let clear = |paths: &[LayoutEdgePath]| {
+                    paths.iter().all(|path| {
+                        path.points.windows(2).all(|pair| {
+                            !super::cga_routing::segment_intersects_obstacles(
+                                pair[0],
+                                pair[1],
+                                &[bounds],
+                                0.0,
+                            )
+                        })
+                    })
+                };
+                assert!(clear(&before), "the router's original paths must be clear");
+                let mut unprotected = before.clone();
+                separate_shared_channels(&ir, &[], &mut unprotected);
+                assert!(
+                    !clear(&unprotected),
+                    "control must expose the node-blind nudge"
+                );
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &[obstacle], &mut after);
+                assert_shared_channel_geometry_preserved(&before, &after);
+                assert!(
+                    clear(&after),
+                    "a displaced run or stub entered the node: {after:?}"
+                );
+                assert!(!shared_channel_has_false_junction(&ir, &after));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_retain_clear_routes_when_nodes_block_every_track() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E[Above]\n F[Below]\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            let nodes: Vec<_> = [("E", -1000.0, 1049.0), ("F", 51.0, 1000.0)]
+                .into_iter()
+                .map(|(id, y, height)| LayoutNodeBox {
+                    node_index: ir.nodes.iter().position(|node| node.id == id).unwrap(),
+                    node_id: id.to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: 110.0,
+                            width: height,
+                            height: 80.0,
+                        }
+                    } else {
+                        LayoutRect {
+                            x: 110.0,
+                            y,
+                            width: 80.0,
+                            height,
+                        }
+                    },
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &nodes, &mut after);
+            assert_eq!(
+                after, before,
+                "node clearance takes precedence when no track fits"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_allow_tracks_inside_their_composite_state() {
+        let ir =
+            fm_parser::parse("stateDiagram-v2\n state Box {\n A-->B\n C-->D\n }\n Outside-->Box\n")
+                .ir;
+        let container_index = ir.nodes.iter().position(|node| node.id == "Box").unwrap();
+        let containers = super::composite_containers(&ir, ir.nodes.len());
+        assert!(
+            containers
+                .iter()
+                .any(|parents| parents.contains(&container_index))
+        );
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            let container = LayoutNodeBox {
+                node_index: container_index,
+                node_id: "Box".to_owned(),
+                rank: 0,
+                order: 0,
+                span: Span::default(),
+                bounds: if transpose {
+                    LayoutRect {
+                        x: -20.0,
+                        y: -20.0,
+                        width: 140.0,
+                        height: 240.0,
+                    }
+                } else {
+                    LayoutRect {
+                        x: -20.0,
+                        y: -20.0,
+                        width: 240.0,
+                        height: 140.0,
+                    }
+                },
+            };
+            let mut expected = before.clone();
+            separate_shared_channels(&ir, &[], &mut expected);
+            let mut after = before;
+            separate_shared_channels(&ir, &[container], &mut after);
+            assert_eq!(
+                after, expected,
+                "a composite must not wall in its own tracks"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after));
         }
     }
 
@@ -30391,7 +30662,7 @@ mod tests {
             ];
             assert!(shared_channel_has_false_junction(&ir, &before));
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_shared_channel_geometry_preserved(&before, &after);
             assert_eq!(
                 after[2], before[2],
@@ -30417,7 +30688,7 @@ mod tests {
                 shared_channel_test_path(4, &[(150.0, 30.0), (250.0, 30.0)], transpose),
             ];
             let mut after = before.clone();
-            separate_shared_channels(&ir, &mut after);
+            separate_shared_channels(&ir, &[], &mut after);
             assert_eq!(
                 after, before,
                 "a shared source cannot justify extending through a straight peer's target port"
