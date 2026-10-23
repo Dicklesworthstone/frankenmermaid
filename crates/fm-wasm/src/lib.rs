@@ -36,7 +36,8 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
-    FlowchartParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
+    ClassParseLens, ErParseLens, FlowchartParseLens, FlowchartParseLensError, ParseLensSnapshot,
+    SequenceParseLens, StateParseLens, apply_parse_lens_delete, apply_parse_lens_edit,
     apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
 };
 #[cfg(target_arch = "wasm32")]
@@ -273,6 +274,60 @@ impl DiagramLens {
     fn layout_reemission_error() -> DiagramLensError {
         DiagramLensError::LayoutEditCannotBeReemitted
     }
+}
+
+/// A semantic edit's source and freshly parsed bindings, ready for the next editor operation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IrLensEditResponse {
+    pub updated_source: String,
+    pub snapshot: ParseLensSnapshot,
+}
+
+/// Re-emit a supported IR edit through the diagram family's formatting-preserving lens.
+///
+/// Start with the IR returned by `parseLens`, change existing label text, and pass the complete
+/// edited IR with the original source. Each family reparses the candidate and verifies the entire
+/// requested graph before returning it. Flowcharts also accept the independent declaration-order
+/// permutations supported by [`FlowchartParseLens`]. Other structural changes are rejected.
+///
+/// Labels are interned: changing one label's text changes every node or edge referring to that
+/// label ID. The family lens must be able to update all those occurrences faithfully. The response
+/// supplies new spans and bindings because even a label-only edit can move subsequent source text.
+///
+/// # Errors
+/// Returns the family lens's reason when an edit cannot be faithfully re-emitted, or an explicit
+/// unsupported-family error. It never falls back to replacing a whole source statement.
+pub fn apply_ir_lens_edit(
+    input: &str,
+    edited: &MermaidDiagramIr,
+) -> Result<IrLensEditResponse, String> {
+    let updated_source = match edited.diagram_type {
+        fm_core::DiagramType::Flowchart => FlowchartParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Sequence => SequenceParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Class => ClassParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::State => StateParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Er => ErParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        family => Err(format!(
+            "semantic IR edits are unsupported for {}; supported families are flowchart, sequence, class, state, and ER",
+            family.as_str()
+        )),
+    }?;
+    let snapshot = build_parse_lens(&updated_source);
+    Ok(IrLensEditResponse {
+        updated_source,
+        snapshot,
+    })
 }
 
 /// A browser-consumable description of the primitive sets prepared for WebGPU.
@@ -2108,6 +2163,18 @@ pub fn parse_lens_js(input: &str) -> Result<JsValue, JsValue> {
     to_js_value(&build_parse_lens(input))
 }
 
+/// Apply a complete edited IR through the semantic family lens and return fresh source bindings.
+///
+/// Unlike source-span replacement, this validates graph meaning before returning an edit. The
+/// `edited_ir` object has the same shape as `parseLens(input).parsed.ir`.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = applyIrLensEdit))]
+pub fn apply_ir_lens_edit_js(input: &str, edited_ir: JsValue) -> Result<JsValue, JsValue> {
+    let edited: MermaidDiagramIr = serde_wasm_bindgen::from_value(edited_ir)
+        .map_err(|error| js_error(format!("invalid edited diagram IR: {error}")))?;
+    let response = apply_ir_lens_edit(input, &edited).map_err(js_error)?;
+    to_js_value(&response)
+}
+
 /// One live render per worker, so a superseded typing update cannot publish over a newer one.
 static WORKER_COORDINATOR: LazyLock<RwLock<WorkerRenderCoordinator>> =
     LazyLock::new(|| RwLock::new(WorkerRenderCoordinator::default()));
@@ -2782,12 +2849,12 @@ mod tests {
         WasmHitRegion, WebGpuPlanSummary, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, build_diagram_geometry, build_webgpu_plan, canvas_font_size_px,
-        collect_source_spans, config_schema_json, handle_worker_message, hit_test_layout_edge,
-        hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
-        merge_svg_config, parse_theme_preset, read_runtime_config, render, render_deck,
-        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        validate_config_json, validate_init_directives_js, write_runtime_config,
+        apply_canvas_theme_preset, apply_ir_lens_edit, build_diagram_geometry, build_webgpu_plan,
+        canvas_font_size_px, collect_source_spans, config_schema_json, handle_worker_message,
+        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
+        merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
+        render_deck, render_svg_js, render_worker_request, requested_theme_preset,
+        resolve_renderer, validate_config_json, validate_init_directives_js, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3672,6 +3739,142 @@ mod tests {
         let insert_error = apply_parse_lens_insert_line_after(input, "fm-node-nope-9", "C-->D")
             .expect_err("an unknown id must not resolve");
         assert!(insert_error.to_string().contains("fm-node-nope-9"));
+    }
+
+    const IR_LENS_SOURCES: [&str; 5] = [
+        "flowchart LR\r\n  %% keep this comment\r\n  A[\"Original node\"] -->|Original relation| B[Target]\r\n",
+        "sequenceDiagram\r\n  %% keep this comment\r\n  participant A as \"Original node\"\r\n  participant B as Target\r\n  A->>B: Original relation\r\n",
+        "classDiagram\r\n  %% keep this comment\r\n  A[\"Original node\"]\r\n  B[Target]\r\n  A *-- B : Original relation\r\n",
+        "stateDiagram-v2\r\n  %% keep this comment\r\n  state \"Original node\" as A\r\n  state \"Target\" as B\r\n  A --> B: Original relation\r\n",
+        "erDiagram\r\n  %% keep this comment\r\n  A[\"Original node\"]\r\n  B[Target]\r\n  A ||--o{ B : Original relation\r\n",
+    ];
+
+    #[test]
+    fn ir_lens_noop_preserves_source_and_snapshot_for_every_supported_family() {
+        for source in IR_LENS_SOURCES {
+            let original = build_parse_lens(source);
+            let result = apply_ir_lens_edit(source, &original.parsed.ir).unwrap();
+            assert_eq!(result.updated_source, source);
+            assert_eq!(result.snapshot, original);
+            assert_eq!(result.snapshot.original_source(), source);
+        }
+    }
+
+    #[test]
+    fn ir_lens_edits_node_and_relationship_labels_through_every_family() {
+        for source in IR_LENS_SOURCES {
+            let mut edited = parse(source).ir;
+            let node_label = edited
+                .nodes
+                .iter()
+                .find(|node| node.id == "A")
+                .and_then(|node| node.label)
+                .expect("fixture has an explicit node label");
+            let edge_label = edited.edges[0].label.expect("fixture has a relationship");
+            edited.labels[node_label.0].text = "Renamed naïve 🦀 node".to_string();
+            edited.labels[edge_label.0].text = "Updated relationship text".to_string();
+
+            let result = apply_ir_lens_edit(source, &edited)
+                .unwrap_or_else(|error| panic!("{}: {error}", edited.diagram_type.as_str()));
+            assert_eq!(
+                result.updated_source,
+                source
+                    .replace("Original node", "Renamed naïve 🦀 node")
+                    .replace("Original relation", "Updated relationship text")
+            );
+            assert_eq!(
+                result.snapshot,
+                build_parse_lens(&result.updated_source),
+                "bindings must be rebuilt from the accepted source"
+            );
+            let reparsed = &result.snapshot.parsed.ir;
+            assert_eq!(reparsed.nodes.len(), edited.nodes.len());
+            assert_eq!(reparsed.edges.len(), edited.edges.len());
+            assert_eq!(reparsed.edges[0].arrow, edited.edges[0].arrow);
+            assert_eq!(reparsed.edges[0].extras, edited.edges[0].extras);
+            assert_eq!(
+                reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+                "Updated relationship text"
+            );
+        }
+    }
+
+    #[test]
+    fn ir_lens_response_supports_the_next_semantic_and_source_span_edits() {
+        let source = IR_LENS_SOURCES[1];
+        let mut edited = parse(source).ir;
+        let label = edited.edges[0].label.unwrap();
+        edited.labels[label.0].text = "A longer request message".to_string();
+        let first = apply_ir_lens_edit(source, &edited).unwrap();
+
+        let mut next_ir = first.snapshot.parsed.ir.clone();
+        let label = next_ir.edges[0].label.unwrap();
+        next_ir.labels[label.0].text = "Acknowledged".to_string();
+        let second = apply_ir_lens_edit(first.snapshot.original_source(), &next_ir).unwrap();
+        assert_eq!(
+            second.updated_source,
+            source.replace("Original relation", "Acknowledged")
+        );
+        let edge_binding = second
+            .snapshot
+            .bindings
+            .iter()
+            .find(|binding| binding.kind == fm_core::MermaidSourceMapKind::Edge)
+            .unwrap();
+        assert!(
+            edge_binding
+                .snippet
+                .as_ref()
+                .unwrap()
+                .contains("Acknowledged")
+        );
+        let unchanged = second
+            .snapshot
+            .apply_edit(&MermaidLensEdit {
+                element_id: edge_binding.element_id.clone(),
+                replacement: edge_binding.snippet.clone().unwrap(),
+            })
+            .unwrap();
+        assert_eq!(unchanged.updated_source, second.updated_source);
+
+        let serialized = serde_json::to_value(&second).unwrap();
+        assert_eq!(serialized["updatedSource"], second.updated_source);
+        assert!(serialized["snapshot"]["bindings"].is_array());
+    }
+
+    #[test]
+    fn ir_lens_rejects_topology_mutations_for_every_supported_family() {
+        for source in IR_LENS_SOURCES {
+            let mut edited = parse(source).ir;
+            let original_edge = edited.edges[0].clone();
+            edited.edges[0].to = edited.edges[0].from;
+            assert_ne!(edited.edges[0], original_edge);
+            assert!(
+                apply_ir_lens_edit(source, &edited).is_err(),
+                "{} must not silently discard a topology edit",
+                edited.diagram_type.as_str()
+            );
+            assert_eq!(parse(source).ir.edges[0], original_edge);
+        }
+    }
+
+    #[test]
+    fn ir_lens_rejects_syntax_injection_and_stale_or_unsupported_inputs() {
+        let source = IR_LENS_SOURCES[1];
+        let mut edited = parse(source).ir;
+        let label = edited.edges[0].label.unwrap();
+        edited.labels[label.0].text = "request\n  B->>A: injected".to_string();
+        assert!(apply_ir_lens_edit(source, &edited).is_err());
+
+        let stale_ir = parse(source).ir;
+        let changed_source = source.replace("A->>B", "B->>A");
+        assert!(apply_ir_lens_edit(&changed_source, &stale_ir).is_err());
+        assert!(apply_ir_lens_edit(IR_LENS_SOURCES[0], &stale_ir).is_err());
+
+        let pie_source = "pie\n  \"Share\": 10\n";
+        let error = apply_ir_lens_edit(pie_source, &parse(pie_source).ir).unwrap_err();
+        assert!(error.contains("unsupported for pie"), "{error}");
+        assert!(error.contains("supported families"), "{error}");
     }
 
     #[test]

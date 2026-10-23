@@ -515,6 +515,7 @@ import {
   applyLensEdit,
   parseLens,
   applyParseLensEdit,
+  applyIrLensEdit,
   Diagram,
 } from '@frankenmermaid/core';
 
@@ -536,13 +537,21 @@ const parsed = parse('classDiagram\nA <|-- B');
 // Generate a human-readable description (for screen readers, alt text)
 const description = describeDiagram('flowchart TD\nA-->B-->C');
 
-// Bidirectional structural lens for editor integrations
-const lens = diagramLens('flowchart LR\nA-->B');
-const edited = applyLensEdit(lens, { /* ... */ });
+// Source-span edits use a binding from the exact source being edited.
+const source = 'flowchart LR\nA[Start]\nA-->B';
+const binding = diagramLens(source).find(entry => entry.sourceId === 'A')!;
+const edited = applyLensEdit(source, binding.elementId, 'A[Begin]');
+const ptEdited = applyParseLensEdit(source, binding.elementId, 'A[Begin]');
+// ptEdited also contains a fresh snapshot with the updated spans.
 
-// Parse-tree-level lens for token-grained edits
-const ptLens = parseLens('flowchart LR\nA-->B');
-const ptEdited = applyParseLensEdit(ptLens, { /* ... */ });
+// Semantic edits validate the complete IR before re-emitting source.
+const sequence = 'sequenceDiagram\nClient->>Server: request';
+const snapshot = parseLens(sequence);
+const editedIr = structuredClone(snapshot.parsed.ir);
+editedIr.labels[editedIr.edges[0].label].text = 'authenticated request';
+const semanticEdit = applyIrLensEdit(sequence, editedIr);
+// semanticEdit.updatedSource preserves the arrow, endpoints, and formatting.
+// semanticEdit.snapshot supplies the next edit's IR and source bindings.
 
 // Imperative Diagram class with Canvas2D (or WebGPU fallback) renderer
 const diagram = new Diagram(
@@ -581,26 +590,39 @@ const overview = renderSvg(source, {
 identifies SVGs with label preservation enabled. Layout budgets and decoration reductions
 remain active independently of this text policy.
 
-The wasm-bindgen surface intentionally stays narrow: ten free functions (`init`, `renderSvg`, `renderDeck`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
+The wasm-bindgen surface includes rendering, parsing, source bindings, and guarded semantic
+editing through `applyIrLensEdit`, plus the interactive `Diagram` class. New exports are generated
+from `fm-wasm` when the WASM package is rebuilt. The capability matrix and source-span artifacts
+are produced by the CLI / Rust library surfaces; for browser-side capability introspection use
+the auto-generated metadata block at the top of this README or load the JSON emitted by
+`fm-cli capabilities`.
 
 The WASM build integrates the same `IncrementalLayoutEngine` used by the CLI, so successive renders of near-identical input skip stages whose dependency-graph inputs have not changed.
 
 ## The lens system — bidirectional editor integration
 
-`diagramLens` / `applyLensEdit` and `parseLens` / `applyParseLensEdit` together form a bidirectional bridge between source text and structured edits. The motivating constraint: when an editor performs a structural action ("rename node `A` to `Start`", "swap participant order", "add a new task to section `Backend`"), the resulting source text should preserve everything else exactly — comments, whitespace, ordering of unrelated declarations, even quote style.
-
-Naive parse → re-emit pipelines lose all of that. The lens system instead:
-
-1. Parses the input into an IR plus a **trivia map** that records the exact original spelling of every token (whitespace, comments, quote style, delimiter choice).
-2. Exposes structural edit operations that operate on the IR while preserving the trivia map for unchanged regions.
-3. Emits the edited source by walking the trivia map and substituting only the changed tokens.
+The lens system retains the original source alongside its IR and source bindings. Editors can
+replace a bound source span, insert or delete a source line, or submit a supported semantic edit.
+Semantic putback preserves unrelated comments, whitespace, quotes, and line endings, then reparses
+the candidate source to verify the complete requested IR before accepting it.
 
 | Function | Use case |
 |---|---|
-| `diagramLens(source)` | Diagram-level structural lens — edits at the node/edge level |
-| `applyLensEdit(lens, edit)` | Apply one structural edit, return the new source |
-| `parseLens(source)` | Lower-level parse lens — gives access to parse-tree node-level edits |
-| `applyParseLensEdit(lens, edit)` | Apply one parse-tree edit |
+| `diagramLens(source)` | Return node, edge, and cluster source bindings. |
+| `applyLensEdit(source, elementId, replacement)` | Replace a bound source span and return an edit receipt with `updatedSource`. |
+| `parseLens(source)` | Return the parsed IR, formatting complement, source map, and bindings. |
+| `applyParseLensEdit(source, elementId, replacement)` | Replace a bound span and return the receipt plus a fresh snapshot. |
+| `applyParseLensDelete(source, elementId)` | Delete the addressed source line and refresh the snapshot. |
+| `applyParseLensInsertLineAfter(source, elementId, text)` | Insert a line using the target's indentation and line ending, then refresh the snapshot. |
+| `applyIrLensEdit(source, editedIr)` | Validate a supported IR edit and return `{ updatedSource, snapshot }`. |
+
+The semantic API supports existing node labels and edge/message labels in flowchart, sequence,
+class, state, and ER diagrams. Flowcharts also support safe permutations of independent node
+declarations through the Rust ordering lens. Label IDs are interned: editing a label changes every
+node or edge referring to that ID. Keep the rest of the IR unchanged, and use the returned snapshot
+for subsequent edits. Topology changes, stale source references, changes to relationship metadata,
+and source forms that cannot be rewritten faithfully return an error. Source-span operations remain
+available when the editor explicitly intends to replace Mermaid syntax.
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
 
@@ -2077,7 +2099,7 @@ For richer reporting, the golden harness emits structured JSON evidence per scen
 The WASM API, the lens system, and source-span attributes between them cover the pieces an editor needs: render, structural edit, click-to-source.
 
 ```ts
-import { init, renderSvg, diagramLens, applyLensEdit } from '@frankenmermaid/core';
+import { init, renderSvg, parseLens, applyIrLensEdit } from '@frankenmermaid/core';
 await init();
 
 // Initial render with source spans
@@ -2090,10 +2112,15 @@ container.addEventListener('click', (e) => {
   if (span) editor.revealPosition(parsePosition(span));
 });
 
-// Structural edits via the lens — preserves formatting of unchanged regions
-const lens = diagramLens(source);
-const newSource = applyLensEdit(lens, { kind: 'rename-node', from: 'A', to: 'Start' });
-editor.setValue(newSource);
+// Change A's explicit display label while preserving its identifier and relationships.
+const snapshot = parseLens(source);
+const editedIr = structuredClone(snapshot.parsed.ir);
+const node = editedIr.nodes.find(node => node.id === 'A');
+if (node?.label != null) {
+  editedIr.labels[node.label].text = 'Start';
+  const result = applyIrLensEdit(source, editedIr);
+  editor.setValue(result.updatedSource);
+}
 ```
 
 ### Static-site documentation pipelines
