@@ -316,196 +316,42 @@ where
 /// [`build_smooth_path_by`] but writing into a caller-provided buffer so a whole edge fragment can be
 /// assembled without allocating the per-edge `d` String first. Pinned by
 /// `build_smooth_path_into_matches_build_smooth_path`.
-pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, mut point_at: F)
+pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, point_at: F)
 where
     F: FnMut(usize) -> (f32, f32),
 {
-    if n == 0 {
-        return;
-    }
-    let first = point_at(0);
-    write_point(out, 'M', first.0, first.1);
-    if n == 1 {
-        return;
-    }
-    if n == 2 {
-        let second = point_at(1);
-        out.push(' ');
-        write_point(out, 'L', second.0, second.1);
-        return;
-    }
-
-    // Near-collinear collapse (GH#7): orthogonal routes whose source and target almost line up
-    // produce a polyline with a tiny mid-route jog (a few px). Catmull-Rom smoothing of that jog
-    // rendered as a visible S-wiggle in an otherwise straight edge. If every interior waypoint
-    // sits within `STRAIGHT_EPS` of the start→end chord, the honest shape is a straight line.
-    const STRAIGHT_EPS: f32 = 2.0;
-    let last = point_at(n - 1);
-    let chord = (last.0 - first.0, last.1 - first.1);
-    let chord_len = (chord.0 * chord.0 + chord.1 * chord.1).sqrt();
-    if chord_len > f32::EPSILON {
-        let mut straight = true;
-        for i in 1..(n - 1) {
-            let p = point_at(i);
-            let dev = ((p.0 - first.0) * chord.1 - (p.1 - first.1) * chord.0).abs() / chord_len;
-            // Reject points that deviate laterally OR lie outside the chord span (backtracking).
-            let along = ((p.0 - first.0) * chord.0 + (p.1 - first.1) * chord.1) / chord_len;
-            if dev > STRAIGHT_EPS || along < -STRAIGHT_EPS || along > chord_len + STRAIGHT_EPS {
-                straight = false;
-                break;
-            }
-        }
-        if straight {
+    let mut first = true;
+    let _ = fm_layout::edge_paths::emit_smoothed_path(n, point_at, |command| {
+        if first {
+            first = false;
+        } else {
             out.push(' ');
-            write_point(out, 'L', last.0, last.1);
-            return;
         }
-    }
-
-    // Clamping cubic controls into each individual segment prevents overshoot, but an
-    // axis-aligned segment's bounding box has zero width or height. Every such cubic therefore
-    // becomes a straight line and its corners stay sharp. Round the *junctions* instead, with
-    // a local trim that cannot turn into a large spline bulge or consume a whole port stub.
-    let mut previous = first;
-    let orthogonal = (1..n).all(|index| {
-        let point = point_at(index);
-        let aligned = point.0 == previous.0 || point.1 == previous.1;
-        previous = point;
-        aligned && point.0.is_finite() && point.1.is_finite()
+        match command {
+            fm_layout::PathCmd::MoveTo { x, y } => write_point(out, 'M', x, y),
+            fm_layout::PathCmd::LineTo { x, y } => write_point(out, 'L', x, y),
+            fm_layout::PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                write_cubic(out, 'C', (c1x, c1y), (c2x, c2y), (x, y));
+            }
+            fm_layout::PathCmd::QuadTo { cx, cy, x, y } => {
+                PathCommand::QuadraticTo {
+                    x1: cx,
+                    y1: cy,
+                    x,
+                    y,
+                }
+                .render(out);
+            }
+            fm_layout::PathCmd::Close => out.push('Z'),
+        }
     });
-    if orthogonal && first.0.is_finite() && first.1.is_finite() {
-        append_rounded_orthogonal_path(out, n, &mut point_at);
-        return;
-    }
-
-    let t: f32 = 0.25;
-    for i in 0..(n - 1) {
-        let p_prev = if i == 0 { point_at(0) } else { point_at(i - 1) };
-        let p_cur = point_at(i);
-        let p_next = point_at(i + 1);
-        let p_next2 = if i + 2 < n {
-            point_at(i + 2)
-        } else {
-            point_at(n - 1)
-        };
-
-        // Catmull-Rom tangents, then clamp each control point into the current segment's
-        // bounding box (GH#7). Unclamped neighbor-chord tangents overshoot at right-angle
-        // waypoints — an edge leaving a node straight down and then turning left first bulged
-        // ~25px to the RIGHT, so sibling branches from one port crossed each other in a
-        // pretzel. The cubic convex-hull property means clamped control points keep every
-        // segment inside the channel the router actually chose, so smoothed edges can no
-        // longer swing wide or cross where their polylines do not.
-        let (seg_lo_x, seg_hi_x) = if p_cur.0 <= p_next.0 {
-            (p_cur.0, p_next.0)
-        } else {
-            (p_next.0, p_cur.0)
-        };
-        let (seg_lo_y, seg_hi_y) = if p_cur.1 <= p_next.1 {
-            (p_cur.1, p_next.1)
-        } else {
-            (p_next.1, p_cur.1)
-        };
-
-        let cp1x = (p_cur.0 + (p_next.0 - p_prev.0) * t).clamp(seg_lo_x, seg_hi_x);
-        let cp1y = (p_cur.1 + (p_next.1 - p_prev.1) * t).clamp(seg_lo_y, seg_hi_y);
-        let cp2x = (p_next.0 - (p_next2.0 - p_cur.0) * t).clamp(seg_lo_x, seg_hi_x);
-        let cp2y = (p_next.1 - (p_next2.1 - p_cur.1) * t).clamp(seg_lo_y, seg_hi_y);
-
-        out.push(' ');
-        write_cubic(out, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
-    }
-}
-
-/// Append a route after its initial `M`, preserving the router's terminal directions.
-/// A quadratic elbow with a 6px trim strays at most 1.5px from the original L-shaped
-/// centerline, within the obstacle router's intended 8px clearance. Half-segment caps
-/// keep neighboring elbows disjoint and leave straight terminal stubs for arrow markers.
-fn append_rounded_orthogonal_path<F>(out: &mut String, n: usize, point_at: &mut F)
-where
-    F: FnMut(usize) -> (f32, f32),
-{
-    const CORNER_TRIM: f32 = 6.0;
-    let mut previous = point_at(0);
-    let mut cursor = previous;
-    let mut index = 1;
-    let Some(mut corner) = next_orthogonal_corner(previous, n, &mut index, point_at) else {
-        return;
-    };
-    while let Some(next) = next_orthogonal_corner(corner, n, &mut index, point_at) {
-        let incoming = (corner.0 - previous.0, corner.1 - previous.1);
-        let outgoing = (next.0 - corner.0, next.1 - corner.1);
-        let turns = (incoming.0 == 0.0) != (outgoing.0 == 0.0);
-        if turns {
-            let incoming_length = incoming.0.abs() + incoming.1.abs();
-            let outgoing_length = outgoing.0.abs() + outgoing.1.abs();
-            let trim = CORNER_TRIM
-                .min(incoming_length * 0.5)
-                .min(outgoing_length * 0.5);
-            let entry = (
-                corner.0 - incoming.0 / incoming_length * trim,
-                corner.1 - incoming.1 / incoming_length * trim,
-            );
-            let exit = (
-                corner.0 + outgoing.0 / outgoing_length * trim,
-                corner.1 + outgoing.1 / outgoing_length * trim,
-            );
-            if entry != cursor {
-                out.push(' ');
-                write_point(out, 'L', entry.0, entry.1);
-            }
-            out.push(' ');
-            PathCommand::QuadraticTo {
-                x1: corner.0,
-                y1: corner.1,
-                x: exit.0,
-                y: exit.1,
-            }
-            .render(out);
-            cursor = exit;
-        } else {
-            // Preserve reversals. Rounding a 180-degree turn would invent a different route.
-            out.push(' ');
-            write_point(out, 'L', corner.0, corner.1);
-            cursor = corner;
-        }
-        previous = corner;
-        corner = next;
-    }
-    if corner != cursor {
-        out.push(' ');
-        write_point(out, 'L', corner.0, corner.1);
-    }
-}
-
-/// Skip duplicate and forward-collinear waypoints before measuring either side of an elbow.
-/// Keeping the original corners for both lengths makes the radius independent of how many
-/// redundant waypoints the router happened to put along a straight channel.
-fn next_orthogonal_corner<F>(
-    origin: (f32, f32),
-    n: usize,
-    index: &mut usize,
-    point_at: &mut F,
-) -> Option<(f32, f32)>
-where
-    F: FnMut(usize) -> (f32, f32),
-{
-    let mut candidate = origin;
-    while *index < n {
-        let next = point_at(*index);
-        if candidate != origin && next != candidate {
-            let incoming = (candidate.0 - origin.0, candidate.1 - origin.1);
-            let outgoing = (next.0 - candidate.0, next.1 - candidate.1);
-            if (incoming.0 == 0.0) != (outgoing.0 == 0.0)
-                || incoming.0 * outgoing.0 + incoming.1 * outgoing.1 <= 0.0
-            {
-                break;
-            }
-        }
-        candidate = next;
-        *index += 1;
-    }
-    (candidate != origin).then_some(candidate)
 }
 
 /// Fluent builder for SVG path `d` attribute strings.

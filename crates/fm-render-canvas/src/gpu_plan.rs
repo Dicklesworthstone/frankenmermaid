@@ -1427,39 +1427,8 @@ impl GpuRenderPlan {
         // centre-lines, sections are filled rectangles, and columns are right-edge separators.
         // ER crow's-foot cardinality (bd-hh0o7). `collect_scene_markers` still refuses to map
         // these onto the arrowhead shader — that refusal is correct and stays — so the outline is
-        // emitted here as segments instead.
+        // emitted beside the routed edges below as segments instead.
         let mut er_marker_segments = Vec::new();
-        //
-        // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair`, the
-        // SAME pair fm-render-svg selects with — NOT a second notation table. `LayoutEdgePath`
-        // carries no marker fields; the scene `RenderPath` does, and this builder works from the
-        // layout, so the notation is re-read from the IR edge the path points at.
-        for path in &layout.edges {
-            let Some(edge) = ir.edges.get(path.edge_index) else {
-                continue;
-            };
-            let Some(notation) = edge.er_notation() else {
-                continue;
-            };
-            let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-            for (form, placement) in [
-                (
-                    left.map(|f| fm_layout::MarkerKind::er_pair(f).0),
-                    path_marker_start_endpoint(path),
-                ),
-                (
-                    right.map(|f| fm_layout::MarkerKind::er_pair(f).1),
-                    path_marker_end_endpoint(path),
-                ),
-            ] {
-                let (Some(glyph), Some((position, angle))) =
-                    (form.and_then(fm_layout::MarkerKind::er_glyph), placement)
-                else {
-                    continue;
-                };
-                push_er_glyph_segments(&glyph, position, angle, &mut er_marker_segments);
-            }
-        }
 
         // TREEMAP tiles and the RADAR wheel (bd-dw450). Both families keep their whole diagram in
         // a layout extension that only fm-render-svg read, so the GPU plan emitted nothing for them
@@ -1978,6 +1947,9 @@ impl GpuRenderPlan {
                 .edges
                 .get(edge.edge_index)
                 .map_or(fm_core::ArrowType::Arrow, |ir_edge| ir_edge.arrow);
+            if arrow == fm_core::ArrowType::Invisible {
+                continue;
+            }
             // ONE source of truth with the raster pass: `legacy_edge_stroke` is the same function
             // `draw_edges` strokes with, so a `==>` thick edge and a dotted edge carry the widths
             // they are actually drawn at instead of a plan-local guess.
@@ -2010,38 +1982,68 @@ impl GpuRenderPlan {
                 _ => [0.0, 0.0],
             };
 
-            // The dash pattern belongs to the EDGE, not to a segment of it, so each segment records
-            // how far along the edge it begins and the shader offsets its phase by that. Accumulated
-            // in the same order the segments are emitted, which is the order the points were routed.
+            // Sample the same bounded curves Canvas and Scene draw. Dash phase follows the sampled
+            // arc length, so a dotted connector keeps its rhythm through both lines and elbows.
             let mut dash_phase = 0.0f32;
-            for points in edge.points.windows(2) {
-                let [from, to] = points else {
-                    continue;
-                };
-                edge_segments.push(GpuEdgeSegment {
-                    from: [from.x, from.y],
-                    to: [to.x, to.y],
-                    edge_index,
-                    color,
-                    dash_phase,
-                    dash,
-                    width,
+            let mut current = None;
+            let endpoints =
+                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
+                    flatten_connector_command(command, &mut current, &mut |from, to| {
+                        let dx = to.x - from.x;
+                        let dy = to.y - from.y;
+                        let length = (dx * dx + dy * dy).sqrt();
+                        if !length.is_finite() || length <= 0.0 {
+                            return;
+                        }
+                        edge_segments.push(GpuEdgeSegment {
+                            from: [from.x, from.y],
+                            to: [to.x, to.y],
+                            edge_index,
+                            color,
+                            dash_phase,
+                            dash,
+                            width,
+                        });
+                        dash_phase += length;
+                    })
                 });
-                let dx = to.x - from.x;
-                let dy = to.y - from.y;
-                dash_phase += (dx * dx + dy * dy).sqrt();
+
+            // Cardinality glyphs use the drawn path's tangents, including a collapsed tiny jog or
+            // duplicate terminal points. A degenerate route has no direction and gets no marker.
+            if let Some(notation) = ir
+                .edges
+                .get(edge.edge_index)
+                .and_then(fm_core::IrEdge::er_notation)
+                && let Some(endpoints) = endpoints
+            {
+                let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+                for (kind, endpoint) in [
+                    (
+                        left.map(|form| MarkerKind::er_pair(form).0),
+                        endpoints.start,
+                    ),
+                    (right.map(|form| MarkerKind::er_pair(form).1), endpoints.end),
+                ] {
+                    if let Some(glyph) = kind.and_then(MarkerKind::er_glyph) {
+                        push_er_glyph_segments(
+                            &glyph,
+                            [endpoint.point.x, endpoint.point.y],
+                            endpoint.tangent.y.atan2(endpoint.tangent.x),
+                            &mut er_marker_segments,
+                        );
+                    }
+                }
             }
 
-            // Arrowheads mirror the Canvas2D geometry exactly: the END head on the last point,
-            // angled along the final segment; a BIDIRECTIONAL edge also gets a START head on the
-            // first point, facing back the way it came.
+            // Marker directions come from the exact emitted curves, not their tessellation chords.
             const HEAD_SIZE: f32 = 10.0;
-            if edge.points.len() >= 2 && arrow_has_end_head(arrow) {
-                let last = edge.points[edge.points.len() - 1];
-                let prev = edge.points[edge.points.len() - 2];
+            if let Some(endpoints) = endpoints
+                && arrow_has_end_head(arrow)
+            {
+                let end = endpoints.end;
                 arrowheads.push(GpuArrowheadInstance {
-                    position: [last.x, last.y],
-                    angle: (last.y - prev.y).atan2(last.x - prev.x),
+                    position: [end.point.x, end.point.y],
+                    angle: end.tangent.y.atan2(end.tangent.x),
                     size: HEAD_SIZE,
                     edge_index,
                     kind: GpuMarkerKind::Arrow as u32,
@@ -2049,12 +2051,13 @@ impl GpuRenderPlan {
                     fill: color,
                 });
             }
-            if edge.points.len() >= 2 && matches!(arrow, fm_core::ArrowType::DoubleArrow) {
-                let start = edge.points[0];
-                let next = edge.points[1];
+            if let Some(endpoints) = endpoints
+                && matches!(arrow, fm_core::ArrowType::DoubleArrow)
+            {
+                let start = endpoints.start;
                 arrowheads.push(GpuArrowheadInstance {
-                    position: [start.x, start.y],
-                    angle: (start.y - next.y).atan2(start.x - next.x),
+                    position: [start.point.x, start.point.y],
+                    angle: (-start.tangent.y).atan2(-start.tangent.x),
                     size: HEAD_SIZE,
                     edge_index,
                     kind: GpuMarkerKind::Arrow as u32,
@@ -2852,24 +2855,126 @@ fn push_er_glyph_segments(
     }
 }
 
-/// Where a laid-out edge starts, and the direction it leaves in.
-fn path_marker_start_endpoint(path: &fm_layout::LayoutEdgePath) -> Option<([f32; 2], f32)> {
-    let first = path.points.first()?;
-    let next = path.points.get(1)?;
-    Some((
-        [first.x, first.y],
-        (next.y - first.y).atan2(next.x - first.x),
-    ))
+/// Flatten only connector curves into the existing instanced-segment format. A 0.05 layout-unit
+/// flatness bound stays below half a screen pixel at the viewport's maximum 10x zoom. The fixed
+/// subdivision limit bounds work for extreme coordinates; straight legs remain single segments.
+fn flatten_connector_command<F>(command: PathCmd, current: &mut Option<LayoutPoint>, emit: &mut F)
+where
+    F: FnMut(LayoutPoint, LayoutPoint),
+{
+    match command {
+        PathCmd::MoveTo { x, y } => *current = Some(LayoutPoint { x, y }),
+        PathCmd::LineTo { x, y } => {
+            let end = LayoutPoint { x, y };
+            if let Some(start) = current.replace(end) {
+                emit(start, end);
+            }
+        }
+        PathCmd::QuadTo { cx, cy, x, y } => {
+            let end = LayoutPoint { x, y };
+            if let Some(start) = current.replace(end) {
+                let control = LayoutPoint { x: cx, y: cy };
+                if [start, control, end].iter().all(finite_point) {
+                    flatten_connector_quadratic(start, control, end, 0, emit);
+                }
+            }
+        }
+        PathCmd::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
+            let end = LayoutPoint { x, y };
+            if let Some(start) = current.replace(end) {
+                let first = LayoutPoint { x: c1x, y: c1y };
+                let second = LayoutPoint { x: c2x, y: c2y };
+                if [start, first, second, end].iter().all(finite_point) {
+                    flatten_connector_cubic(start, first, second, end, 0, emit);
+                }
+            }
+        }
+        // Routed connectors are open; the shared emitter never closes one.
+        PathCmd::Close => {}
+    }
 }
 
-/// Where a laid-out edge ends, and the direction it arrives in.
-fn path_marker_end_endpoint(path: &fm_layout::LayoutEdgePath) -> Option<([f32; 2], f32)> {
-    let last = path.points.last()?;
-    let previous = path.points.get(path.points.len().checked_sub(2)?)?;
-    Some((
-        [last.x, last.y],
-        (last.y - previous.y).atan2(last.x - previous.x),
-    ))
+fn finite_point(point: &LayoutPoint) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn connector_midpoint(first: LayoutPoint, second: LayoutPoint) -> LayoutPoint {
+    LayoutPoint {
+        x: first.x * 0.5 + second.x * 0.5,
+        y: first.y * 0.5 + second.y * 0.5,
+    }
+}
+
+fn connector_controls_are_flat(
+    start: LayoutPoint,
+    end: LayoutPoint,
+    controls: &[LayoutPoint],
+) -> bool {
+    const FLATNESS_SQUARED: f32 = 0.05 * 0.05;
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length_squared = dx * dx + dy * dy;
+    controls.iter().all(|control| {
+        let cx = control.x - start.x;
+        let cy = control.y - start.y;
+        if length_squared <= f32::EPSILON {
+            cx * cx + cy * cy <= FLATNESS_SQUARED
+        } else {
+            let cross = cx * dy - cy * dx;
+            cross * cross <= FLATNESS_SQUARED * length_squared
+        }
+    })
+}
+
+fn flatten_connector_quadratic<F>(
+    start: LayoutPoint,
+    control: LayoutPoint,
+    end: LayoutPoint,
+    depth: u8,
+    emit: &mut F,
+) where
+    F: FnMut(LayoutPoint, LayoutPoint),
+{
+    if depth >= 12 || connector_controls_are_flat(start, end, &[control]) {
+        emit(start, end);
+        return;
+    }
+    let left = connector_midpoint(start, control);
+    let right = connector_midpoint(control, end);
+    let middle = connector_midpoint(left, right);
+    flatten_connector_quadratic(start, left, middle, depth + 1, emit);
+    flatten_connector_quadratic(middle, right, end, depth + 1, emit);
+}
+
+fn flatten_connector_cubic<F>(
+    start: LayoutPoint,
+    first: LayoutPoint,
+    second: LayoutPoint,
+    end: LayoutPoint,
+    depth: u8,
+    emit: &mut F,
+) where
+    F: FnMut(LayoutPoint, LayoutPoint),
+{
+    if depth >= 12 || connector_controls_are_flat(start, end, &[first, second]) {
+        emit(start, end);
+        return;
+    }
+    let left = connector_midpoint(start, first);
+    let center = connector_midpoint(first, second);
+    let right = connector_midpoint(second, end);
+    let left_control = connector_midpoint(left, center);
+    let right_control = connector_midpoint(center, right);
+    let middle = connector_midpoint(left_control, right_control);
+    flatten_connector_cubic(start, left, left_control, middle, depth + 1, emit);
+    flatten_connector_cubic(middle, right_control, right, end, depth + 1, emit);
 }
 
 fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInstance>) {
@@ -2891,6 +2996,12 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                     && !path.marker_start.lacks_gpu_glyph()
                     && let Some((position, angle)) = path_marker_start(&path.commands)
                 {
+                    let angle = if path.marker_start == MarkerKind::TriangleOpenStart {
+                        angle + core::f32::consts::PI
+                    } else {
+                        crate::renderer::start_marker_angle(path.marker_start, f64::from(angle))
+                            as f32
+                    };
                     markers.push(scene_marker_instance(
                         path.marker_start,
                         position,
@@ -2945,64 +3056,19 @@ fn scene_marker_instance(
 }
 
 fn path_marker_start(commands: &[PathCmd]) -> Option<([f32; 2], f32)> {
-    let mut current = None;
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => current = Some([x, y]),
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                return Some((start, (y - start[1]).atan2(x - start[0])));
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let control = if [cx, cy] == start { [x, y] } else { [cx, cy] };
-                return Some((start, (control[1] - start[1]).atan2(control[0] - start[0])));
-            }
-            PathCmd::CubicTo { c1x, c1y, x, y, .. } => {
-                let start = current?;
-                let control = if [c1x, c1y] == start {
-                    [x, y]
-                } else {
-                    [c1x, c1y]
-                };
-                return Some((start, (control[1] - start[1]).atan2(control[0] - start[0])));
-            }
-            PathCmd::Close => {}
-        }
-    }
-    None
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.start;
+    Some((
+        [endpoint.point.x, endpoint.point.y],
+        endpoint.tangent.y.atan2(endpoint.tangent.x),
+    ))
 }
 
 fn path_marker_end(commands: &[PathCmd]) -> Option<([f32; 2], f32)> {
-    let mut current = None;
-    let mut last = None;
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => current = Some([x, y]),
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                let end = [x, y];
-                last = Some((end, (end[1] - start[1]).atan2(end[0] - start[0])));
-                current = Some(end);
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let end = [x, y];
-                let control = if [cx, cy] == end { start } else { [cx, cy] };
-                last = Some((end, (end[1] - control[1]).atan2(end[0] - control[0])));
-                current = Some(end);
-            }
-            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
-                let start = current?;
-                let end = [x, y];
-                let control = if [c2x, c2y] == end { start } else { [c2x, c2y] };
-                last = Some((end, (end[1] - control[1]).atan2(end[0] - control[0])));
-                current = Some(end);
-            }
-            PathCmd::Close => {}
-        }
-    }
-    last
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.end;
+    Some((
+        [endpoint.point.x, endpoint.point.y],
+        endpoint.tangent.y.atan2(endpoint.tangent.x),
+    ))
 }
 
 /// WGSL for the instanced SDF node pass (bd-2u0.2 component 4).
@@ -3375,7 +3441,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexO
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let p = in.local;
-    let triangle = p.x <= 0.0 && p.x >= -1.0 && abs(p.y) <= (p.x + 1.0) * 0.4;
+    let triangle = p.x <= 0.0 && p.x >= -1.0 && abs(p.y) <= -p.x * 0.5;
     let diamond_distance = abs(p.x) + abs(p.y) * 2.5;
     let circle_distance = length(p * vec2<f32>(1.0, 2.5));
     let cross = (abs(p.x) <= 0.12 && abs(p.y) <= 0.5) || (abs(p.x) <= 0.5 && abs(p.y) <= 0.12);
@@ -3396,8 +3462,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return in.color;
     }
     if in.kind == 5u {
-        let edge_distance = abs(abs(p.y) - (p.x + 1.0) * 0.4);
-        if !triangle || (p.x < -0.14 && edge_distance > 0.1) { discard; }
+        let edge_distance = abs(abs(p.y) + p.x * 0.5);
+        if !triangle || (p.x > -0.86 && edge_distance > 0.1) { discard; }
         return in.color;
     }
     if !triangle { discard; }
@@ -3552,18 +3618,238 @@ mod tests {
     }
 
     #[test]
-    fn plan_expands_only_visible_edge_polylines_into_segments() {
+    fn plan_expands_only_visible_edge_paths_into_connected_segments() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
 
-        assert_eq!(plan.edge_segments.len(), 2);
+        assert!(
+            plan.edge_segments.len() > 2,
+            "the bent graph path must be sampled as a curve"
+        );
         assert_eq!(plan.edge_segments[0].from, [50.0, 35.0]);
-        assert_eq!(plan.edge_segments[1].to, [90.0, 30.0]);
+        assert_eq!(plan.edge_segments.last().unwrap().to, [90.0, 30.0]);
         assert!(
             plan.edge_segments
                 .iter()
                 .all(|segment| segment.edge_index == 7)
         );
+        assert!(
+            plan.edge_segments
+                .windows(2)
+                .all(|pair| pair[0].to == pair[1].from)
+        );
+        assert!(
+            plan.edge_segments
+                .iter()
+                .all(|segment| segment.from != segment.to)
+        );
+    }
+
+    #[test]
+    fn sampled_graph_connectors_follow_scene_curves_with_bounded_error() {
+        fn scene_edge(group: &super::RenderGroup) -> Option<&[super::PathCmd]> {
+            group.children.iter().find_map(|item| match item {
+                super::RenderItem::Group(child) => scene_edge(child),
+                super::RenderItem::Path(path)
+                    if path.source == fm_layout::RenderSource::Edge(0) =>
+                {
+                    Some(path.commands.as_slice())
+                }
+                _ => None,
+            })
+        }
+        fn distance_to_segment(point: [f32; 2], segment: &super::GpuEdgeSegment) -> f32 {
+            let dx = segment.to[0] - segment.from[0];
+            let dy = segment.to[1] - segment.from[1];
+            let t = (((point[0] - segment.from[0]) * dx + (point[1] - segment.from[1]) * dy)
+                / (dx * dx + dy * dy))
+                .clamp(0.0, 1.0);
+            (point[0] - (segment.from[0] + dx * t)).hypot(point[1] - (segment.from[1] + dy * t))
+        }
+        let ir = fm_parser::parse("flowchart LR\nA -.-> B").ir;
+        for points in [
+            vec![(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)],
+            vec![(10.0, 20.0), (30.0, 60.0), (70.0, 60.0), (90.0, 20.0)],
+        ] {
+            let mut layout = fm_layout::layout_diagram(&ir);
+            layout.edges[0].points = points.iter().map(|&(x, y)| LayoutPoint { x, y }).collect();
+            let scene = fm_layout::build_render_scene(&ir, &layout);
+            let commands = scene_edge(&scene.root).expect("scene must draw the real parsed edge");
+            assert!(commands.iter().any(|command| matches!(
+                command,
+                super::PathCmd::QuadTo { .. } | super::PathCmd::CubicTo { .. }
+            )));
+            let plan = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.5);
+            let segments = &plan.edge_segments;
+            assert!(
+                segments.len() > points.len() - 1,
+                "GPU must sample the actual curved route"
+            );
+            assert_eq!(segments[0].from, [points[0].0, points[0].1]);
+            let last = points.last().unwrap();
+            assert_eq!(segments.last().unwrap().to, [last.0, last.1]);
+            assert!(segments.windows(2).all(|pair| pair[0].to == pair[1].from));
+
+            // Evaluate the scene with the independent Bernstein formula, not the subdivision
+            // helper under test. Every sample must lie within the GPU's stated flatness bound.
+            let mut current = [0.0, 0.0];
+            for command in commands {
+                let mut samples = Vec::new();
+                match *command {
+                    super::PathCmd::MoveTo { x, y } | super::PathCmd::LineTo { x, y } => {
+                        current = [x, y]
+                    }
+                    super::PathCmd::QuadTo { cx, cy, x, y } => {
+                        for step in 0..=64 {
+                            let t = step as f32 / 64.0;
+                            let u = 1.0 - t;
+                            samples.push([
+                                u * u * current[0] + 2.0 * u * t * cx + t * t * x,
+                                u * u * current[1] + 2.0 * u * t * cy + t * t * y,
+                            ]);
+                        }
+                        current = [x, y];
+                    }
+                    super::PathCmd::CubicTo {
+                        c1x,
+                        c1y,
+                        c2x,
+                        c2y,
+                        x,
+                        y,
+                    } => {
+                        for step in 0..=64 {
+                            let t = step as f32 / 64.0;
+                            let u = 1.0 - t;
+                            samples.push([
+                                u.powi(3) * current[0]
+                                    + 3.0 * u * u * t * c1x
+                                    + 3.0 * u * t * t * c2x
+                                    + t.powi(3) * x,
+                                u.powi(3) * current[1]
+                                    + 3.0 * u * u * t * c1y
+                                    + 3.0 * u * t * t * c2y
+                                    + t.powi(3) * y,
+                            ]);
+                        }
+                        current = [x, y];
+                    }
+                    super::PathCmd::Close => panic!("connector must remain open"),
+                }
+                for sample in samples {
+                    let error = segments
+                        .iter()
+                        .map(|segment| distance_to_segment(sample, segment))
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(
+                        error <= 0.051,
+                        "GPU curve missed scene sample {sample:?} by {error}"
+                    );
+                }
+            }
+            let mut distance = 0.0;
+            for segment in segments {
+                assert_eq!(segment.dash, [5.0, 5.0]);
+                assert!((segment.dash_phase - distance).abs() < 1e-4);
+                distance +=
+                    (segment.to[0] - segment.from[0]).hypot(segment.to[1] - segment.from[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_connectors_preserve_sequence_routes_and_omit_invisible_geometry() {
+        let ir = fm_parser::parse("sequenceDiagram\nA->>A: retry").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        let points = &layout.edges[0].points;
+        assert!(points.len() > 2);
+        assert_eq!(plan.edge_segments.len(), points.len() - 1);
+        for (segment, pair) in plan.edge_segments.iter().zip(points.windows(2)) {
+            assert_eq!(segment.from, [pair[0].x, pair[0].y]);
+            assert_eq!(segment.to, [pair[1].x, pair[1].y]);
+        }
+
+        let invisible = ir_with_edge_at_fixture_index(fm_core::ArrowType::Invisible);
+        let plan = GpuRenderPlan::from_layout(&invisible, &test_layout(), 1.5);
+        assert!(plan.edge_segments.is_empty());
+        assert!(plan.arrowheads.is_empty());
+        assert!(plan.er_marker_segments.is_empty());
+    }
+
+    #[test]
+    fn gpu_scene_markers_follow_curves_after_repeated_terminal_points() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 80.0),
+            (120.0, 80.0),
+            (120.0, 80.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| LayoutPoint { x, y })
+        .collect();
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        for plan in [
+            GpuRenderPlan::from_layout(&ir, &layout, 1.5),
+            GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.5),
+        ] {
+            assert!(plan.edge_segments.len() > 2, "fixture must remain curved");
+            assert_eq!(plan.arrowheads.len(), 2);
+            for (position, expected) in [([0.0, 0.0], (-2.0_f32).atan2(-1.0)), ([120.0, 80.0], 0.0)]
+            {
+                let marker = plan
+                    .arrowheads
+                    .iter()
+                    .find(|marker| marker.position == position)
+                    .unwrap();
+                assert!((marker.angle - expected).sin().abs() < 1e-6);
+                assert!((marker.angle - expected).cos() > 0.99999);
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_marker_tangents_follow_collapsed_routes_with_repeated_endpoints() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 1.0),
+            (120.0, 1.0),
+            (120.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| LayoutPoint { x, y })
+        .collect();
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let direct = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        let with_scene = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.5);
+        for plan in [direct, with_scene] {
+            assert_eq!(plan.edge_segments.len(), 1);
+            assert_eq!(plan.arrowheads.len(), 2);
+            for (position, expected) in [
+                ([0.0, 0.0], (-1.0_f32).atan2(-120.0)),
+                ([120.0, 1.0], 1.0_f32.atan2(120.0)),
+            ] {
+                let marker = plan
+                    .arrowheads
+                    .iter()
+                    .find(|marker| marker.position == position)
+                    .unwrap();
+                // Start-marker helpers may represent the same angle modulo one turn.
+                assert!((marker.angle - expected).sin().abs() < 1e-6);
+                assert!((marker.angle - expected).cos() > 0.99999);
+            }
+        }
+        layout.edges[0].points = [LayoutPoint { x: 5.0, y: 9.0 }; 4].into_iter().collect();
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert!(plan.edge_segments.is_empty());
+        assert!(plan.arrowheads.is_empty());
     }
 
     /// A labelled edge reaches the GPU plan WITH its label (bd-qj46q).

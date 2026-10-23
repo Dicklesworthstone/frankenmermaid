@@ -25,6 +25,7 @@ pub mod adapton;
 mod cga_routing;
 mod compound;
 pub mod edge_labels;
+pub mod edge_paths;
 mod event_model;
 pub mod invariants;
 mod ishikawa;
@@ -3259,7 +3260,8 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
 
     for edge in &layout.edges {
         // A `~~~` link has done its work in the layout and is never drawn.
-        if edge.points.len() < 2
+        if edge.bundled
+            || edge.points.len() < 2
             || ir
                 .edges
                 .get(edge.edge_index)
@@ -3269,44 +3271,11 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         }
 
         let mut commands = Vec::with_capacity(edge.points.len() * 2);
-        let n = edge.points.len();
-
-        // Implement smoothing logic (Catmull-Rom to Cubic Bezier)
-        commands.push(PathCmd::MoveTo {
-            x: edge.points[0].x,
-            y: edge.points[0].y,
+        let endpoints = edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
+            commands.push(command);
         });
-
-        if n == 2 {
-            commands.push(PathCmd::LineTo {
-                x: edge.points[1].x,
-                y: edge.points[1].y,
-            });
-        } else {
-            let t: f32 = 0.25; // Tension factor matching legacy renderer
-            for i in 0..(n - 1) {
-                let p_prev = if i == 0 {
-                    edge.points[0]
-                } else {
-                    edge.points[i - 1]
-                };
-                let p_cur = edge.points[i];
-                let p_next = edge.points[i + 1];
-                let p_next2 = if i + 2 < n {
-                    edge.points[i + 2]
-                } else {
-                    edge.points[n - 1]
-                };
-
-                commands.push(PathCmd::CubicTo {
-                    c1x: (p_next.x - p_prev.x).mul_add(t, p_cur.x),
-                    c1y: (p_next.y - p_prev.y).mul_add(t, p_cur.y),
-                    c2x: (p_next2.x - p_cur.x).mul_add(-t, p_next.x),
-                    c2y: (p_next2.y - p_cur.y).mul_add(-t, p_next.y),
-                    x: p_next.x,
-                    y: p_next.y,
-                });
-            }
+        if endpoints.is_none() {
+            continue;
         }
 
         let mut stroke = StrokeStyle::solid("#475569", 1.5);

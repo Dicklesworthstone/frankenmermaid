@@ -2516,14 +2516,19 @@ impl Canvas2dRenderer {
             ctx.set_line_width(stroke_width);
             ctx.set_line_dash(dash);
 
-            // Draw edge path
+            // Draw the same bounded connector geometry as SVG and the shared scene. Native
+            // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
+            // chart paths retain their polylines through the shared diagram-family policy.
             ctx.begin_path();
-            let first = &points[0];
-            ctx.move_to(f64::from(first.x) + offset_x, f64::from(first.y) + offset_y);
-
-            for point in points.iter().skip(1) {
-                ctx.line_to(f64::from(point.x) + offset_x, f64::from(point.y) + offset_y);
-            }
+            let path_endpoints =
+                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
+                    self.emit_path_commands(
+                        ctx,
+                        std::slice::from_ref(&command),
+                        offset_x,
+                        offset_y,
+                    );
+                });
             ctx.stroke();
             self.draw_calls += 1;
 
@@ -2538,24 +2543,24 @@ impl Canvas2dRenderer {
             //
             // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
             // the same pair fm-render-svg and the GPU plan select with, not a second table.
-            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation) {
+            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
+                && let Some(endpoints) = path_endpoints
+            {
                 let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-                let start = &points[0];
-                let next = &points[1];
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
+                let start = endpoints.start;
+                let end = endpoints.end;
                 let placements = [
                     (
                         left.map(|form| MarkerKind::er_pair(form).0),
-                        f64::from(start.x) + offset_x,
-                        f64::from(start.y) + offset_y,
-                        f64::from(next.y - start.y).atan2(f64::from(next.x - start.x)),
+                        f64::from(start.point.x) + offset_x,
+                        f64::from(start.point.y) + offset_y,
+                        f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
                     ),
                     (
                         right.map(|form| MarkerKind::er_pair(form).1),
-                        f64::from(end.x) + offset_x,
-                        f64::from(end.y) + offset_y,
-                        f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x)),
+                        f64::from(end.point.x) + offset_x,
+                        f64::from(end.point.y) + offset_y,
+                        f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
                     ),
                 ];
                 for (kind, mx, my, angle) in placements {
@@ -2588,16 +2593,16 @@ impl Canvas2dRenderer {
                     .and_then(legacy_uml_markers);
                 merge_uml_markers(primary, co)
             };
-            if let Some((marker_start, marker_end)) = uml_markers {
-                let start = &points[0];
-                let next = &points[1];
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
+            if let Some((marker_start, marker_end)) = uml_markers
+                && let Some(endpoints) = path_endpoints
+            {
+                let start = endpoints.start;
+                let end = endpoints.end;
 
                 if marker_start != MarkerKind::None {
-                    let sx = f64::from(start.x) + offset_x;
-                    let sy = f64::from(start.y) + offset_y;
-                    let angle = f64::from(next.y - start.y).atan2(f64::from(next.x - start.x));
+                    let sx = f64::from(start.point.x) + offset_x;
+                    let sy = f64::from(start.point.y) + offset_y;
+                    let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
                     let marker_calls = draw_marker_primitive(
                         ctx,
                         marker_start,
@@ -2611,9 +2616,9 @@ impl Canvas2dRenderer {
                 }
 
                 if marker_end != MarkerKind::None {
-                    let ex = f64::from(end.x) + offset_x;
-                    let ey = f64::from(end.y) + offset_y;
-                    let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+                    let ex = f64::from(end.point.x) + offset_x;
+                    let ey = f64::from(end.point.y) + offset_y;
+                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
                     let marker_calls = draw_marker_primitive(
                         ctx,
                         marker_end,
@@ -2625,13 +2630,12 @@ impl Canvas2dRenderer {
                     );
                     self.draw_calls += marker_calls;
                 }
-            } else {
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
-                let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+            } else if let Some(endpoints) = path_endpoints {
+                let end = endpoints.end;
+                let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
 
-                let ex = f64::from(end.x) + offset_x;
-                let ey = f64::from(end.y) + offset_y;
+                let ex = f64::from(end.point.x) + offset_x;
+                let ey = f64::from(end.point.y) + offset_y;
 
                 match arrow {
                     ArrowType::Line => {}
@@ -2657,12 +2661,11 @@ impl Canvas2dRenderer {
                         | ArrowType::DoubleThickArrow
                         | ArrowType::DoubleDottedArrow
                 ) {
-                    let start = &points[0];
-                    let next = &points[1];
+                    let start = endpoints.start;
                     let start_angle =
-                        f64::from(start.y - next.y).atan2(f64::from(start.x - next.x));
-                    let sx = f64::from(start.x) + offset_x;
-                    let sy = f64::from(start.y) + offset_y;
+                        f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
+                    let sx = f64::from(start.point.x) + offset_x;
+                    let sy = f64::from(start.point.y) + offset_y;
 
                     draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
                     self.draw_calls += 1;
@@ -3672,11 +3675,23 @@ fn draw_marker_primitive<C: Canvas2dContext>(
     }
 }
 
-/// The angle to draw `marker` with at a path's START, given the start tangent (pointing INTO the
-/// path). A diamond is drawn on the -x side of its tip, so it is turned half round: unflipped, it
-/// lay inside the owning node, which painted over it.
-fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
-    if matches!(marker, MarkerKind::Diamond | MarkerKind::DiamondOpen) {
+/// Source arrow tips face against the path's forward tangent. Diamonds also extend behind
+/// their tip and must turn out of the owning node. `TriangleOpenStart` turns in its primitive;
+/// ER glyphs already encode which endpoint they belong to.
+pub(crate) fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
+    if matches!(
+        marker,
+        MarkerKind::Diamond
+            | MarkerKind::DiamondOpen
+            | MarkerKind::Arrow
+            | MarkerKind::ThickArrow
+            | MarkerKind::DottedArrow
+            | MarkerKind::Open
+            | MarkerKind::HalfArrowTop
+            | MarkerKind::HalfArrowBottom
+            | MarkerKind::StickArrowTop
+            | MarkerKind::StickArrowBottom
+    ) {
         angle + std::f64::consts::PI
     } else {
         angle
@@ -3684,167 +3699,26 @@ fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
 }
 
 fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
-    let mut current = None;
-    let mut subpath_start = None;
-
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => {
-                let point = (f64::from(x), f64::from(y));
-                current = Some(point);
-                subpath_start = Some(point);
-            }
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                let end = (f64::from(x), f64::from(y));
-                return Some((start.0, start.1, angle_between(start, end)));
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                return Some((
-                    start.0,
-                    start.1,
-                    angle_from_start_tangent(start, control, end),
-                ));
-            }
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x: _,
-                c2y: _,
-                x,
-                y,
-            } => {
-                let start = current?;
-                let control = (f64::from(c1x), f64::from(c1y));
-                let end = (f64::from(x), f64::from(y));
-                return Some((
-                    start.0,
-                    start.1,
-                    angle_from_start_tangent(start, control, end),
-                ));
-            }
-            PathCmd::Close => {
-                current = subpath_start;
-            }
-        }
-    }
-
-    None
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.start;
+    Some((
+        f64::from(endpoint.point.x),
+        f64::from(endpoint.point.y),
+        f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x)),
+    ))
 }
 
 fn path_marker_end_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
-    if matches!(commands.first(), Some(PathCmd::MoveTo { .. }))
-        && let Some((last_command, preceding_commands)) = commands.split_last()
-    {
-        match *last_command {
-            PathCmd::LineTo { x, y } => {
-                let start = match preceding_commands.last().copied() {
-                    Some(
-                        PathCmd::MoveTo { x, y }
-                        | PathCmd::LineTo { x, y }
-                        | PathCmd::QuadTo { x, y, .. }
-                        | PathCmd::CubicTo { x, y, .. },
-                    ) => Some((f64::from(x), f64::from(y))),
-                    Some(PathCmd::Close) | None => None,
-                };
-                if let Some(start) = start {
-                    let end = (f64::from(x), f64::from(y));
-                    return Some((end.0, end.1, angle_between(start, end)));
-                }
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                if points_are_distinct(control, end) {
-                    return Some((end.0, end.1, angle_between(control, end)));
-                }
-            }
-            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
-                let control = (f64::from(c2x), f64::from(c2y));
-                let end = (f64::from(x), f64::from(y));
-                if points_are_distinct(control, end) {
-                    return Some((end.0, end.1, angle_between(control, end)));
-                }
-            }
-            PathCmd::MoveTo { .. } | PathCmd::Close => {}
-        }
-    }
-
-    let mut current = None;
-    let mut subpath_start = None;
-    let mut last = None;
-
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => {
-                let point = (f64::from(x), f64::from(y));
-                current = Some(point);
-                subpath_start = Some(point);
-            }
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_between(start, end)));
-                current = Some(end);
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_from_end_tangent(start, control, end)));
-                current = Some(end);
-            }
-            PathCmd::CubicTo {
-                c1x: _,
-                c1y: _,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => {
-                let start = current?;
-                let control = (f64::from(c2x), f64::from(c2y));
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_from_end_tangent(start, control, end)));
-                current = Some(end);
-            }
-            PathCmd::Close => {
-                if let (Some(start), Some(end)) = (subpath_start, current) {
-                    last = Some((start.0, start.1, angle_between(end, start)));
-                    current = Some(start);
-                }
-            }
-        }
-    }
-
-    last
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.end;
+    Some((
+        f64::from(endpoint.point.x),
+        f64::from(endpoint.point.y),
+        f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x)),
+    ))
 }
 
+#[cfg(test)]
 fn angle_between(start: (f64, f64), end: (f64, f64)) -> f64 {
     (end.1 - start.1).atan2(end.0 - start.0)
-}
-
-fn angle_from_start_tangent(start: (f64, f64), control: (f64, f64), end: (f64, f64)) -> f64 {
-    if points_are_distinct(start, control) {
-        angle_between(start, control)
-    } else {
-        angle_between(start, end)
-    }
-}
-
-fn angle_from_end_tangent(start: (f64, f64), control: (f64, f64), end: (f64, f64)) -> f64 {
-    if points_are_distinct(control, end) {
-        angle_between(control, end)
-    } else {
-        angle_between(start, end)
-    }
-}
-
-fn points_are_distinct(a: (f64, f64), b: (f64, f64)) -> bool {
-    (a.0 - b.0).abs() > f64::EPSILON || (a.1 - b.1).abs() > f64::EPSILON
 }
 
 fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
@@ -4935,6 +4809,265 @@ mod tests {
             1
         );
         ctx.operations().to_vec()
+    }
+
+    fn first_stroked_path(operations: &[DrawOperation]) -> Vec<PathCmd> {
+        operations
+            .iter()
+            .skip_while(|operation| !matches!(operation, DrawOperation::BeginPath))
+            .take_while(|operation| !matches!(operation, DrawOperation::Stroke))
+            .filter_map(|operation| match *operation {
+                DrawOperation::MoveTo(x, y) => Some(PathCmd::MoveTo {
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::LineTo(x, y) => Some(PathCmd::LineTo {
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => Some(PathCmd::QuadTo {
+                    cx: cx as f32,
+                    cy: cy as f32,
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::BezierCurveTo(c1x, c1y, c2x, c2y, x, y) => Some(PathCmd::CubicTo {
+                    c1x: c1x as f32,
+                    c1y: c1y as f32,
+                    c2x: c2x as f32,
+                    c2y: c2y as f32,
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn scene_edge_path(group: &RenderGroup, edge_index: usize) -> Option<&[PathCmd]> {
+        group.children.iter().find_map(|item| match item {
+            RenderItem::Group(group) => scene_edge_path(group, edge_index),
+            RenderItem::Path(path) if path.source == RenderSource::Edge(edge_index) => {
+                Some(path.commands.as_slice())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn graph_connectors_draw_real_rounded_elbows_matching_the_shared_scene() {
+        let expected = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 34.0, y: 0.0 },
+            PathCmd::QuadTo {
+                cx: 40.0,
+                cy: 0.0,
+                x: 40.0,
+                y: 6.0,
+            },
+            PathCmd::LineTo { x: 40.0, y: 74.0 },
+            PathCmd::QuadTo {
+                cx: 40.0,
+                cy: 80.0,
+                x: 46.0,
+                y: 80.0,
+            },
+            PathCmd::LineTo { x: 120.0, y: 80.0 },
+        ];
+        for source in [
+            "flowchart LR\nA --> B",
+            "classDiagram\nA --> B",
+            "stateDiagram-v2\nA --> B",
+            "erDiagram\nA ||--o{ B : owns",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let mut layout = layout_diagram(&ir);
+            assert_eq!(
+                layout.edges.len(),
+                1,
+                "fixture must contain one real parsed edge"
+            );
+            layout.edges[0].points = [(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let actual = first_stroked_path(ctx.operations());
+            assert_eq!(actual, expected, "{source}");
+            let scene = build_render_scene(&ir, &layout);
+            assert_eq!(
+                scene_edge_path(&scene.root, 0).unwrap(),
+                actual,
+                "scene diverged for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn connector_markers_follow_collapsed_geometry_and_skip_zero_length_routes() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 1.0),
+            (120.0, 1.0),
+            (120.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+        .collect();
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+        renderer.draw_edges(&layout, &ir, &mut ctx, 7.0, -3.0, &mut 0);
+        assert_eq!(
+            first_stroked_path(ctx.operations()),
+            vec![
+                PathCmd::MoveTo { x: 7.0, y: -3.0 },
+                PathCmd::LineTo { x: 127.0, y: -2.0 },
+            ]
+        );
+        let rotations: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                if let DrawOperation::Rotate(angle) = operation {
+                    Some(*angle)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(rotations.len(), 2);
+        for expected in [1.0_f64.atan2(120.0), (-1.0_f64).atan2(-120.0)] {
+            assert!(
+                rotations
+                    .iter()
+                    .any(|angle| (*angle - expected).abs() < 1e-10),
+                "marker ignored the drawn tangent: {rotations:?}"
+            );
+        }
+
+        let scene = build_render_scene(&ir, &layout);
+        ctx.clear();
+        renderer.render_scene(&scene, &mut ctx);
+        let scene_rotations: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::Rotate(angle) => Some(*angle),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scene_rotations.len(), rotations.len());
+        for angle in &rotations {
+            assert!(
+                scene_rotations.iter().any(|scene_angle| {
+                    (scene_angle - angle).sin().abs() < 1e-10
+                        && (scene_angle - angle).cos() > 0.99999
+                }),
+                "scene arrow direction differs from Canvas: {scene_rotations:?}"
+            );
+        }
+
+        layout.edges[0].points = [fm_layout::LayoutPoint { x: 5.0, y: 9.0 }; 4]
+            .into_iter()
+            .collect();
+        ctx.clear();
+        renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+        assert!(
+            !ctx.operations()
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(_))),
+            "a point has no arrow direction"
+        );
+        let scene = build_render_scene(&ir, &layout);
+        ctx.clear();
+        renderer.render_scene(&scene, &mut ctx);
+        assert!(
+            !ctx.operations()
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(_))),
+            "a scene must not invent an arrow direction for a point"
+        );
+    }
+
+    #[test]
+    fn curved_connector_scene_markers_ignore_repeated_terminal_points() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 80.0),
+            (120.0, 80.0),
+            (120.0, 80.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+        .collect();
+        let scene = build_render_scene(&ir, &layout);
+        assert!(
+            scene_edge_path(&scene.root, 0)
+                .unwrap()
+                .iter()
+                .any(|command| matches!(command, PathCmd::CubicTo { .. }))
+        );
+        for use_scene in [false, true] {
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            if use_scene {
+                renderer.render_scene(&scene, &mut ctx);
+            } else {
+                renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            }
+            let rotations: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::Rotate(angle) => Some(*angle),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rotations.len(), 2);
+            for expected in [(-2.0_f64).atan2(-1.0), 0.0] {
+                assert!(
+                    rotations.iter().any(|angle| {
+                        (angle - expected).sin().abs() < 1e-10 && (angle - expected).cos() > 0.99999
+                    }),
+                    "scene={use_scene} used a degenerate segment's direction: {rotations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_self_message_keeps_its_rectangular_route() {
+        let ir = fm_parser::parse("sequenceDiagram\nA->>A: retry").ir;
+        let layout = layout_diagram(&ir);
+        assert!(
+            layout.edges[0].points.len() > 2,
+            "fixture must exercise a self-message bend"
+        );
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+        renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+        let commands = first_stroked_path(ctx.operations());
+        assert_eq!(commands.len(), layout.edges[0].points.len());
+        assert!(
+            commands[1..]
+                .iter()
+                .all(|command| matches!(command, PathCmd::LineTo { .. }))
+        );
+        for (command, point) in commands.iter().zip(&layout.edges[0].points) {
+            let (PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y }) = command else {
+                unreachable!()
+            };
+            assert_eq!((*x, *y), (point.x, point.y));
+        }
     }
 
     #[test]
