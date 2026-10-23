@@ -247,8 +247,122 @@ fn put_rejects_alias_text_that_injects_a_state_transition() {
 }
 
 #[test]
-fn put_rejects_a_partial_edit_of_a_shared_state_and_transition_label() {
+fn put_updates_every_occurrence_of_a_shared_state_and_transition_label() {
     let source = "stateDiagram-v2\nstate \"Shared\" as A\nstate \"Other\" as B\nA --> B: Shared\n";
+    let lens = StateParseLens::parse(source).unwrap();
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    assert_eq!(edited.edges[0].label, Some(label));
+    edited.labels[label.0].text = "Changed".to_owned();
+    let updated = lens
+        .put(&edited)
+        .expect("state and transition update together");
+    assert_eq!(updated, source.replace("Shared", "Changed"));
+    let reparsed = parse(&updated).ir;
+    assert_eq!(reparsed.nodes[0].label, reparsed.edges[0].label);
+    assert_eq!(
+        reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+        "Changed"
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_changes_transition_text_preserving_guards_actions_and_composite_state_metadata() {
+    let source = concat!(
+        "stateDiagram-v2\r\n",
+        "  %% finish remains in this comment\r\n",
+        "  state \"Session\" as A {\r\n",
+        "    [*] --> Running\r\n",
+        "    Running --> [*]\r\n",
+        "  }\r\n",
+        "  state \"Done\" as B\r\n",
+        "  A --> B: \"finish [ready] / cleanup()\"\r\n",
+        "  note right of A: Retain this note\r\n",
+    );
+    let lens = StateParseLens::parse(source).unwrap();
+    let original = lens.ir();
+    assert_eq!(original.edges.len(), 3);
+    assert_eq!(original.clusters.len(), 1);
+    assert_eq!(original.state_notes.len(), 1);
+    let edge = &original.edges[2];
+    let label = edge.label.unwrap();
+    assert_eq!(original.labels[label.0].text, "finish [ready] / cleanup()");
+    assert_eq!(edge.guard(), Some("ready"));
+    assert_eq!(edge.action(), Some("cleanup()"));
+    let mut edited = original.clone();
+    edited.labels[label.0].text = "terminé 🦀 [ready] / cleanup()".to_owned();
+    let updated = lens.put(&edited).expect("transition event text re-emits");
+    assert_eq!(updated, source.replace(": \"finish", ": \"terminé 🦀"));
+    let reparsed = parse(&updated).ir;
+    assert_eq!(
+        reparsed.labels[reparsed.edges[2].label.unwrap().0].text,
+        "terminé 🦀 [ready] / cleanup()"
+    );
+    assert_eq!(reparsed.edges[2].extras, edge.extras);
+    assert_eq!(reparsed.clusters[0].members, original.clusters[0].members);
+    assert_eq!(
+        reparsed.graph.subgraphs[0].members,
+        original.graph.subgraphs[0].members
+    );
+    assert_eq!(reparsed.state_notes[0].text, original.state_notes[0].text);
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn state_transition_metadata_uses_the_normalized_visible_label() {
+    for label in [
+        "finish [ready] / cleanup()",
+        "\"finish [ready] / cleanup()\"",
+        "\"`finish [ready] / cleanup()`\"",
+        "\"finish [#114;eady] / clean#117;p()\"",
+    ] {
+        let source = format!("stateDiagram-v2\nA --> B: {label}\n");
+        let parsed = parse(&source).ir;
+        let edge = &parsed.edges[0];
+        assert_eq!(
+            parsed.labels[edge.label.unwrap().0].text,
+            "finish [ready] / cleanup()",
+            "{label}"
+        );
+        assert_eq!(edge.guard(), Some("ready"), "{label}");
+        assert_eq!(edge.action(), Some("cleanup()"), "{label}");
+    }
+}
+
+#[test]
+fn put_rejects_transition_injection_and_unrequested_guard_changes() {
+    let source = "stateDiagram-v2\nstate \"Session\" as A\nstate \"Done\" as B\nA --> B: Safe\n";
+    let lens = StateParseLens::parse(source).unwrap();
+    let label = lens.ir().edges[0].label.unwrap();
+    let replacement = "Changed\nInjected --> B: added";
+    let candidate = parse(&source.replace("Safe", replacement)).ir;
+    assert_eq!(candidate.nodes.len(), lens.ir().nodes.len() + 1);
+    assert_eq!(candidate.edges.len(), lens.ir().edges.len() + 1);
+    let mut edited = lens.ir().clone();
+    edited.labels[label.0].text = replacement.to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(StateParseLensError::UnsupportedIrChange)
+    );
+    edited.labels[label.0].text = "Changed [newGuard]".to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(StateParseLensError::UnsupportedIrChange)
+    );
+    edited.labels[label.0].text = "Changed".to_owned();
+    edited.edges[0].extras_mut().guard = Some("newGuard".into());
+    assert_eq!(
+        lens.put(&edited),
+        Err(StateParseLensError::UnsupportedIrChange)
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_shared_labels_when_an_encoded_transition_cannot_be_located() {
+    let source =
+        "stateDiagram-v2\nstate \"Shared\" as A\nstate \"Other\" as B\nA --> B: #83;hared\n";
     let lens = StateParseLens::parse(source).unwrap();
     let mut edited = lens.ir().clone();
     let label = edited.nodes[0].label.unwrap();
@@ -259,4 +373,5 @@ fn put_rejects_a_partial_edit_of_a_shared_state_and_transition_label() {
         Err(StateParseLensError::UnsupportedIrChange)
     );
     assert_eq!(lens.original_source(), source);
+    assert_eq!(lens.ir().labels[label.0].text, "Shared");
 }

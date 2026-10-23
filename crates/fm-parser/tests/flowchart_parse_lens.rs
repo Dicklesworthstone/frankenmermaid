@@ -327,7 +327,7 @@ fn put_rejects_labels_that_would_change_the_graph() {
 }
 
 #[test]
-fn put_rejects_a_partial_edit_of_a_label_shared_with_an_edge() {
+fn put_updates_every_occurrence_of_a_label_shared_with_an_edge() {
     let source = "flowchart TB\nA[Shared] -->|Shared| B[Shared]\n";
     let lens = FlowchartParseLens::parse(source).expect("flowchart lens");
     let mut edited = lens.ir().clone();
@@ -338,11 +338,159 @@ fn put_rejects_a_partial_edit_of_a_label_shared_with_an_edge() {
         "the fixture shares a label"
     );
     edited.labels[label.0].text = "Changed".to_owned();
+    let updated = lens.put(&edited).expect("nodes and edge update together");
+    assert_eq!(updated, source.replace("Shared", "Changed"));
+    let reparsed = parse(&updated).ir;
+    assert_eq!(reparsed.nodes[0].label, reparsed.edges[0].label);
+    assert_eq!(reparsed.nodes[1].label, reparsed.edges[0].label);
+    assert_eq!(
+        reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+        "Changed"
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_changes_pipe_and_inline_edge_labels_without_changing_ids_styles_or_wrappers() {
+    for (statement, token) in [
+        ("Old -->|\"Old\"| B", "\"Old\""),
+        ("Old -- \"Old\" --> B", "\"Old\""),
+        ("Old -. \"Old\" .-> B", "\"Old\""),
+        ("Old == \"Old\" ==> B", "\"Old\""),
+        ("Old -->|\"`**Old**`\"| B", "\"`**Old**`\""),
+    ] {
+        let source = format!(
+            concat!(
+                "flowchart LR\r\n",
+                "  %% Old remains in this comment\r\n",
+                "  Old[Start]\r\n",
+                "  B[End]\r\n",
+                "  {statement}\r\n",
+                "  linkStyle 0 stroke:#123456,stroke-width:3px\r\n",
+            ),
+            statement = statement,
+        );
+        let lens = FlowchartParseLens::parse(&source).unwrap();
+        let original = lens.ir();
+        assert_eq!(original.edges.len(), 1, "{statement}");
+        let label = original.edges[0].label.unwrap();
+        assert_eq!(original.labels[label.0].text, "Old", "{statement}");
+        assert!(original.edges[0].inline_style.is_some());
+        let mut edited = original.clone();
+        edited.labels[label.0].text = "Nouveau 🦀".to_owned();
+        let updated = lens.put(&edited).expect("existing edge text re-emits");
+        let expected_statement = statement.replace(token, &token.replace("Old", "Nouveau 🦀"));
+        assert_eq!(updated, source.replace(statement, &expected_statement));
+        let reparsed = parse(&updated).ir;
+        assert_eq!(reparsed.nodes[0].id, "Old");
+        assert_eq!(
+            reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+            "Nouveau 🦀"
+        );
+        assert_eq!(
+            reparsed.edges[0].inline_style,
+            original.edges[0].inline_style
+        );
+        assert_eq!(reparsed.edges[0].extras, original.edges[0].extras);
+        assert_eq!(
+            (
+                reparsed.edges[0].from,
+                reparsed.edges[0].to,
+                reparsed.edges[0].arrow
+            ),
+            (
+                original.edges[0].from,
+                original.edges[0].to,
+                original.edges[0].arrow
+            )
+        );
+        assert_eq!(lens.original_source(), source);
+    }
+}
+
+#[test]
+fn put_updates_parallel_and_chained_edge_tokens_once_with_simultaneous_label_edits() {
+    let source = concat!(
+        "flowchart TB\n",
+        "  A[Alpha]\n",
+        "  B[Beta]\n",
+        "  C[Gamma]\n",
+        "  D[Delta]\n",
+        "  A & B -->|Shared| C & D\n",
+        "  C -->|Shared| A -->|Shared| D\n",
+        "  B -->|Other| A\n",
+    );
+    let lens = FlowchartParseLens::parse(source).unwrap();
+    let original = lens.ir();
+    assert_eq!(original.edges.len(), 7);
+    let shared = original.edges[0].label.unwrap();
+    assert!(
+        original.edges[..6]
+            .iter()
+            .all(|edge| edge.label == Some(shared))
+    );
+    let other = original.edges[6].label.unwrap();
+    let mut edited = original.clone();
+    edited.labels[shared.0].text = "Longer 🦀".to_owned();
+    edited.labels[other.0].text = "Next".to_owned();
+    let updated = lens
+        .put(&edited)
+        .expect("shared source ranges are written once");
+    assert_eq!(
+        updated,
+        source
+            .replace("|Shared|", "|Longer 🦀|")
+            .replace("|Other|", "|Next|")
+    );
+    let reparsed = parse(&updated).ir;
+    assert_eq!(reparsed.edges.len(), original.edges.len());
+    for (index, (before, after)) in original.edges.iter().zip(&reparsed.edges).enumerate() {
+        assert_eq!(
+            (before.from, before.to, before.arrow),
+            (after.from, after.to, after.arrow)
+        );
+        assert_eq!(
+            reparsed.labels[after.label.unwrap().0].text,
+            if index < 6 { "Longer 🦀" } else { "Next" }
+        );
+    }
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_edge_label_injection_removal_and_normalization() {
+    let source = "flowchart TB\nA[Start]\nB[End]\nA -->|Safe| B\n";
+    let lens = FlowchartParseLens::parse(source).unwrap();
+    let replacement = "Safe| B\nInjected -->|Bad";
+    let candidate = parse(&source.replace("Safe", replacement)).ir;
+    assert_eq!(candidate.nodes.len(), lens.ir().nodes.len() + 1);
+    assert_eq!(candidate.edges.len(), lens.ir().edges.len() + 1);
+    for replacement in [replacement, "", "#83;afe"] {
+        let mut edited = lens.ir().clone();
+        let label = edited.edges[0].label.unwrap();
+        edited.labels[label.0].text = replacement.to_owned();
+        assert_eq!(
+            lens.put(&edited),
+            Err(FlowchartParseLensError::UnsupportedIrChange)
+        );
+    }
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_shared_labels_when_an_encoded_edge_cannot_be_located() {
+    let source = "flowchart TB\nA[Shared] -->|#83;hared| B[Shared]\n";
+    let lens = FlowchartParseLens::parse(source).unwrap();
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    assert_eq!(edited.edges[0].label, Some(label));
+    edited.labels[label.0].text = "Changed".to_owned();
     assert_eq!(
         lens.put(&edited),
-        Err(FlowchartParseLensError::UnsupportedIrChange),
-        "updating the nodes alone must not pretend the shared edge label changed"
+        Err(FlowchartParseLensError::UnsupportedIrChange)
     );
+    assert_eq!(lens.original_source(), source);
+    assert_eq!(lens.ir().labels[label.0].text, "Shared");
 }
 
 #[test]

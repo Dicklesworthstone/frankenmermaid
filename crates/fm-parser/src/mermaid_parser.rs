@@ -6254,7 +6254,11 @@ fn lower_state_flow_ast(
                 //
                 // The structured fields stay: they are the right shape for a consumer that wants
                 // the parts, and keeping them costs nothing now that the label is whole.
-                let (_clean_label, guard, action) = extract_state_guard_action(label.as_deref());
+                // Structured metadata must describe the same normalized text as the visible
+                // label, rather than retaining quote wrappers or encoded entities in the action.
+                let normalized_label = clean_label(label.as_deref());
+                let (_clean_label, guard, action) =
+                    extract_state_guard_action(normalized_label.as_deref());
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);

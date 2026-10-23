@@ -201,9 +201,138 @@ fn put_rejects_alias_text_that_injects_a_sequence_message() {
 }
 
 #[test]
-fn put_rejects_a_partial_edit_of_a_shared_participant_and_message_label() {
+fn put_updates_every_occurrence_of_a_shared_participant_and_message_label() {
     let source =
         "sequenceDiagram\nparticipant A as Shared\nparticipant B as Other\nA->>B: Shared\n";
+    let lens = SequenceParseLens::parse(source).unwrap();
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    assert_eq!(edited.edges[0].label, Some(label));
+    edited.labels[label.0].text = "Changed".to_owned();
+    let updated = lens
+        .put(&edited)
+        .expect("participant and message update together");
+    assert_eq!(updated, source.replace("Shared", "Changed"));
+    let reparsed = parse(&updated).ir;
+    assert_eq!(reparsed.nodes[0].label, reparsed.edges[0].label);
+    assert_eq!(
+        reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+        "Changed"
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_changes_messages_without_losing_quotes_activation_or_sequence_metadata() {
+    let source = concat!(
+        "%%{init: {'theme':'forest'}}%%\r\n",
+        "sequenceDiagram\r\n",
+        "  %% Request remains in this comment\r\n",
+        "  autonumber 10 2\r\n",
+        "  participant Request as Client\r\n",
+        "  actor B as Server\r\n",
+        "  alt accepted\r\n",
+        "    Request->>+B: \"Request\"\r\n",
+        "    B-->>-Request: Existing\r\n",
+        "  else retry\r\n",
+        "    Request->>B: retry\r\n",
+        "  end\r\n",
+        "  Note over Request,B: Keep note\r\n",
+    );
+    let lens = SequenceParseLens::parse(source).unwrap();
+    let original = lens.ir();
+    let metadata = original.sequence_meta.as_ref().unwrap();
+    assert_eq!(metadata.activations.len(), 1);
+    assert_eq!(metadata.fragments.len(), 1);
+    assert_eq!(metadata.notes.len(), 1);
+    let label = original.edges[0].label.unwrap();
+    assert_eq!(original.labels[label.0].text, "Request");
+
+    for replacement in ["naïve 🦀: ready", "Existing"] {
+        let mut edited = original.clone();
+        edited.labels[label.0].text = replacement.to_owned();
+        let participant = edited.nodes[0].label.unwrap();
+        edited.labels[participant.0].text = "Browser".to_owned();
+        let updated = lens.put(&edited).expect("message and alias edits re-emit");
+        assert_eq!(
+            updated,
+            source
+                .replace(": \"Request\"", &format!(": \"{replacement}\""))
+                .replace("as Client", "as Browser")
+        );
+        let reparsed = parse(&updated).ir;
+        assert_eq!(reparsed.sequence_meta, original.sequence_meta);
+        assert_eq!(reparsed.nodes[0].id, "Request");
+        assert_eq!(
+            reparsed.labels[reparsed.nodes[0].label.unwrap().0].text,
+            "Browser"
+        );
+        assert_eq!(
+            reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+            replacement
+        );
+        for (before, after) in original.edges.iter().zip(&reparsed.edges) {
+            assert_eq!(
+                (before.from, before.to, before.arrow),
+                (after.from, after.to, after.arrow)
+            );
+        }
+        if replacement == "Existing" {
+            assert_eq!(reparsed.edges[0].label, reparsed.edges[1].label);
+        }
+    }
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_message_syntax_injection_and_unrequested_ir_changes() {
+    let source = "sequenceDiagram\nautonumber\nparticipant A as Client\nparticipant B as Server\nA->>B: Safe\n";
+    let lens = SequenceParseLens::parse(source).unwrap();
+    let label = lens.ir().edges[0].label.unwrap();
+    let replacement = "Changed\nA->>B: injected";
+    assert_eq!(
+        parse(&source.replace("Safe", replacement)).ir.edges.len(),
+        2
+    );
+    let mut edited = lens.ir().clone();
+    edited.labels[label.0].text = replacement.to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+
+    edited.labels[label.0].text = "Changed".to_owned();
+    let valid = edited.clone();
+    edited.edges[0].label = Some(fm_core::IrLabelId(usize::MAX));
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    edited = valid.clone();
+    edited.edges[0].from = edited.edges[0].to;
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    edited = valid.clone();
+    edited.nodes[0].shape = fm_core::NodeShape::Circle;
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    edited = valid;
+    edited.sequence_meta.as_mut().unwrap().autonumber_start = 999;
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_shared_labels_when_an_encoded_message_cannot_be_located() {
+    let source =
+        "sequenceDiagram\nparticipant A as Shared\nparticipant B as Other\nA->>B: #83;hared\n";
     let lens = SequenceParseLens::parse(source).unwrap();
     let mut edited = lens.ir().clone();
     let label = edited.nodes[0].label.unwrap();
@@ -214,4 +343,5 @@ fn put_rejects_a_partial_edit_of_a_shared_participant_and_message_label() {
         Err(SequenceParseLensError::UnsupportedIrChange)
     );
     assert_eq!(lens.original_source(), source);
+    assert_eq!(lens.ir().labels[label.0].text, "Shared");
 }

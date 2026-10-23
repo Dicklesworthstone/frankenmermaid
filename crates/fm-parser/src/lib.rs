@@ -529,7 +529,7 @@ pub struct ParseLensEditResponse {
 /// A flowchart-specific text/IR lens.
 ///
 /// The parser owns the original source as the format complement. [`Self::put`] accepts an IR with
-/// node-label text changed, or an existing-node declaration-order permutation, and splices only
+/// node/edge-label text changed, or an existing-node declaration-order permutation, and splices only
 /// those source tokens. Reordering requires independent, single-line node declarations outside
 /// subgraphs. Every changed source is reparsed to prove that it represents the requested IR;
 /// topology changes and labels that would introduce Mermaid syntax are refused.
@@ -553,7 +553,7 @@ impl std::fmt::Display for FlowchartParseLensError {
                 formatter.write_str("ParseLens currently supports flowcharts only")
             }
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit faithful node-label edits and independent node declaration \
+                "ParseLens can re-emit faithful node/edge-label edits and independent node declaration \
                  reorders only; graph topology and other source content must stay unchanged",
             ),
             Self::MissingSourceLabel(node_id) => {
@@ -630,6 +630,7 @@ impl FlowchartParseLens {
         }
 
         let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
         for (node_index, node) in original.nodes.iter().enumerate() {
             let Some(label_id) = node.label else {
                 continue;
@@ -658,24 +659,26 @@ impl FlowchartParseLens {
             )
             .ok_or_else(|| FlowchartParseLensError::MissingSourceLabel(node.id.clone()))?;
             replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
         }
 
-        if replacements.len() != changed_labels.len()
-            && changed_labels.iter().any(|label_id| {
-                !original
-                    .nodes
-                    .iter()
-                    .any(|node| node.label.is_some_and(|id| id.0 == *label_id))
-            })
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(FlowchartParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
         {
             return Err(FlowchartParseLensError::UnsupportedIrChange);
         }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(FlowchartParseLensError::UnsupportedIrChange)?;
 
         validate_label_reemission(updated, original, labels_only, &changed_labels)
             .ok_or(FlowchartParseLensError::UnsupportedIrChange)
@@ -783,6 +786,137 @@ impl FlowchartParseLens {
         // interning order is normalized; the full graph and metadata must agree.
         validate_ir_reemission(updated, edited).ok_or(FlowchartParseLensError::UnsupportedIrChange)
     }
+}
+
+/// Locate existing edge-label text without maintaining a second copy of each diagram's grammar.
+/// A candidate must be the unique contiguous range whose replacement changes this edge's label;
+/// matching text in a node ID, another label, or a comment is not enough. Parallel edges can share
+/// one source token, so probe results are cached and duplicate replacements are coalesced later.
+fn collect_edge_label_replacements<'a>(
+    snapshot: &ParseLensSnapshot,
+    edited: &'a MermaidDiagramIr,
+    changed_labels: &[usize],
+    replacements: &mut Vec<(MermaidTextRange, &'a str)>,
+    covered_labels: &mut [bool],
+) -> Option<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let original = &snapshot.parsed.ir;
+    let source = snapshot.original_source();
+    let existing_labels: BTreeSet<_> = original
+        .labels
+        .iter()
+        .map(|label| label.text.as_str())
+        .collect();
+    let mut probe_index = 0_usize;
+    let probe = loop {
+        let candidate = format!("fmLensProbe{probe_index}");
+        if !existing_labels.contains(candidate.as_str()) {
+            break candidate;
+        }
+        probe_index += 1;
+    };
+    let mut probed_ranges: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+
+    for (edge_index, edge) in original.edges.iter().enumerate() {
+        let Some(label_id) = edge.label else {
+            continue;
+        };
+        if !changed_labels.contains(&label_id.0) {
+            continue;
+        }
+        let old_label = original.labels.get(label_id.0)?.text.as_str();
+        if old_label.is_empty() {
+            return None;
+        }
+        let source_entry =
+            snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Edge && entry.index == edge_index
+            })?;
+        let statement = resolve_span_text_range(source, source_entry.span)?;
+        let snippet = source.get(statement.start_byte..statement.end_byte)?;
+        let mut matched_range = None;
+        for (offset, _) in snippet.match_indices(old_label) {
+            let start = statement.start_byte + offset;
+            let end = start + old_label.len();
+            let affected_edges = probed_ranges.entry((start, end)).or_insert_with(|| {
+                let mut candidate = source.to_owned();
+                candidate.replace_range(start..end, &probe);
+                let candidate = parse(&candidate).ir;
+                if candidate.diagram_type != original.diagram_type
+                    || candidate.nodes.len() != original.nodes.len()
+                    || !candidate
+                        .nodes
+                        .iter()
+                        .zip(&original.nodes)
+                        .all(|(after, before)| after.id == before.id)
+                    || candidate.edges.len() != original.edges.len()
+                    || !candidate
+                        .edges
+                        .iter()
+                        .zip(&original.edges)
+                        .all(|(after, before)| {
+                            (after.from, after.to, after.arrow)
+                                == (before.from, before.to, before.arrow)
+                        })
+                {
+                    return Vec::new();
+                }
+                candidate
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, edge)| {
+                        edge.label
+                            .and_then(|label| candidate.labels.get(label.0))
+                            .is_some_and(|label| label.text == probe)
+                            .then_some(index)
+                    })
+                    .collect()
+            });
+            if affected_edges.contains(&edge_index) {
+                if matched_range.is_some() {
+                    return None;
+                }
+                matched_range = Some(MermaidTextRange {
+                    start_byte: start,
+                    end_byte: end,
+                });
+            }
+        }
+        replacements.push((matched_range?, edited.labels.get(label_id.0)?.text.as_str()));
+        *covered_labels.get_mut(label_id.0)? = true;
+    }
+    Some(())
+}
+
+/// Apply each source token exactly once, refusing conflicting or overlapping edits atomically.
+fn splice_label_replacements(
+    source: &str,
+    mut replacements: Vec<(MermaidTextRange, &str)>,
+) -> Option<String> {
+    replacements.sort_unstable_by_key(|(range, _)| (range.start_byte, range.end_byte));
+    let mut unique: Vec<(MermaidTextRange, &str)> = Vec::with_capacity(replacements.len());
+    for (range, replacement) in replacements {
+        source.get(range.start_byte..range.end_byte)?;
+        if range.start_byte == range.end_byte {
+            return None;
+        }
+        if let Some((previous, previous_replacement)) = unique.last() {
+            if *previous == range && *previous_replacement == replacement {
+                continue;
+            }
+            if previous.end_byte > range.start_byte {
+                return None;
+            }
+        }
+        unique.push((range, replacement));
+    }
+    let mut updated = source.to_owned();
+    for (range, replacement) in unique.into_iter().rev() {
+        updated.replace_range(range.start_byte..range.end_byte, replacement);
+    }
+    Some(updated)
 }
 
 /// Validate a label-only edit whose unchanged structure and formatting metadata were already
@@ -1019,7 +1153,7 @@ impl std::fmt::Display for SequenceParseLensError {
         match self {
             Self::NotSequence => formatter.write_str("ParseLens currently supports sequence diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit participant-label text changes only; sequence structure is unchanged",
+                "ParseLens can re-emit participant/message-label text changes only; sequence structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1051,7 +1185,8 @@ impl SequenceParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits explicit participant alias text only when reparsing preserves the requested IR.
+    /// Re-emits explicit participant aliases and existing message labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, SequenceParseLensError> {
         if edited.diagram_type != DiagramType::Sequence {
             return Err(SequenceParseLensError::NotSequence);
@@ -1111,6 +1246,14 @@ impl SequenceParseLens {
             replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
             covered_labels[label_id.0] = true;
         }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(SequenceParseLensError::UnsupportedIrChange)?;
         if changed_labels
             .iter()
             .any(|label_id| !covered_labels[*label_id])
@@ -1118,11 +1261,8 @@ impl SequenceParseLens {
             return Err(SequenceParseLensError::UnsupportedIrChange);
         }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(SequenceParseLensError::UnsupportedIrChange)?;
         validate_label_reemission(updated, original, labels_only, &changed_labels)
             .ok_or(SequenceParseLensError::UnsupportedIrChange)
     }
@@ -1147,7 +1287,7 @@ impl std::fmt::Display for ClassParseLensError {
         match self {
             Self::NotClass => formatter.write_str("ParseLens currently supports class diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit class-label text changes only; class structure is unchanged",
+                "ParseLens can re-emit explicit class/relationship-label text changes only; class structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1179,7 +1319,8 @@ impl ClassParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits explicit class-node label text only when reparsing preserves the requested IR.
+    /// Re-emits explicit class labels and existing relationship labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ClassParseLensError> {
         if edited.diagram_type != DiagramType::Class {
             return Err(ClassParseLensError::NotClass);
@@ -1239,6 +1380,14 @@ impl ClassParseLens {
             replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
             covered_labels[label_id.0] = true;
         }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(ClassParseLensError::UnsupportedIrChange)?;
         if changed_labels
             .iter()
             .any(|label_id| !covered_labels[*label_id])
@@ -1246,11 +1395,8 @@ impl ClassParseLens {
             return Err(ClassParseLensError::UnsupportedIrChange);
         }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(ClassParseLensError::UnsupportedIrChange)?;
         validate_label_reemission(updated, original, labels_only, &changed_labels)
             .ok_or(ClassParseLensError::UnsupportedIrChange)
     }
@@ -1275,7 +1421,7 @@ impl std::fmt::Display for StateParseLensError {
         match self {
             Self::NotState => formatter.write_str("ParseLens currently supports state diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit state-label text changes only; state structure is unchanged",
+                "ParseLens can re-emit explicit state/transition-label text changes only; state structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1307,7 +1453,8 @@ impl StateParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits explicit `state Label as Id` text only when reparsing preserves the requested IR.
+    /// Re-emits explicit `state Label as Id` text and existing transition labels when reparsing
+    /// preserves the requested IR. Shared labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, StateParseLensError> {
         if edited.diagram_type != DiagramType::State {
             return Err(StateParseLensError::NotState);
@@ -1367,6 +1514,14 @@ impl StateParseLens {
             replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
             covered_labels[label_id.0] = true;
         }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(StateParseLensError::UnsupportedIrChange)?;
         if changed_labels
             .iter()
             .any(|label_id| !covered_labels[*label_id])
@@ -1374,11 +1529,8 @@ impl StateParseLens {
             return Err(StateParseLensError::UnsupportedIrChange);
         }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(StateParseLensError::UnsupportedIrChange)?;
         validate_label_reemission(updated, original, labels_only, &changed_labels)
             .ok_or(StateParseLensError::UnsupportedIrChange)
     }
@@ -1403,7 +1555,7 @@ impl std::fmt::Display for ErParseLensError {
         match self {
             Self::NotEr => formatter.write_str("ParseLens currently supports ER diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit ER entity-label text changes only; ER structure is unchanged",
+                "ParseLens can re-emit explicit ER entity/relationship-label text changes only; ER structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1435,7 +1587,8 @@ impl ErParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits explicit ER entity-label text only when reparsing preserves the requested IR.
+    /// Re-emits explicit ER entity labels and existing relationship labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ErParseLensError> {
         if edited.diagram_type != DiagramType::Er {
             return Err(ErParseLensError::NotEr);
@@ -1495,6 +1648,14 @@ impl ErParseLens {
             replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
             covered_labels[label_id.0] = true;
         }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(ErParseLensError::UnsupportedIrChange)?;
         if changed_labels
             .iter()
             .any(|label_id| !covered_labels[*label_id])
@@ -1502,11 +1663,8 @@ impl ErParseLens {
             return Err(ErParseLensError::UnsupportedIrChange);
         }
 
-        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
-        let mut updated = self.original_source().to_string();
-        for (range, replacement) in replacements {
-            updated.replace_range(range.start_byte..range.end_byte, replacement);
-        }
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(ErParseLensError::UnsupportedIrChange)?;
         validate_label_reemission(updated, original, labels_only, &changed_labels)
             .ok_or(ErParseLensError::UnsupportedIrChange)
     }

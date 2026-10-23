@@ -204,8 +204,106 @@ fn put_rejects_entity_label_text_that_injects_a_relationship() {
 }
 
 #[test]
-fn put_rejects_a_partial_edit_of_a_shared_entity_and_relationship_label() {
+fn put_updates_every_occurrence_of_a_shared_entity_and_relationship_label() {
     let source = "erDiagram\nA[Shared]\nB[Other]\nA ||--o{ B : Shared\n";
+    let lens = ErParseLens::parse(source).unwrap();
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    assert_eq!(edited.edges[0].label, Some(label));
+    edited.labels[label.0].text = "Changed".to_owned();
+    let updated = lens
+        .put(&edited)
+        .expect("entity and relationship update together");
+    assert_eq!(updated, source.replace("Shared", "Changed"));
+    let reparsed = parse(&updated).ir;
+    assert_eq!(reparsed.nodes[0].label, reparsed.edges[0].label);
+    assert_eq!(
+        reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+        "Changed"
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_changes_relationship_text_preserving_symbolic_and_word_cardinality() {
+    for (operator, notation) in [
+        ("||--o{", "||--o{"),
+        ("one or more to zero or more", "}|--o{"),
+    ] {
+        let source = format!(
+            concat!(
+                "erDiagram\r\n",
+                "  %% Owns remains in this comment\r\n",
+                "  direction LR\r\n",
+                "  A[Account] {{\r\n",
+                "    int id PK, UK \"identifier\"\r\n",
+                "    string owner FK\r\n",
+                "  }}\r\n",
+                "  B[Item] {{\r\n",
+                "    string name\r\n",
+                "  }}\r\n",
+                "  A {operator} B : \"Owns\"\r\n",
+                "  classDef hot fill:#ff8800\r\n",
+                "  class A hot\r\n",
+            ),
+            operator = operator,
+        );
+        let lens = ErParseLens::parse(&source).unwrap();
+        let original = lens.ir();
+        assert_eq!(original.edges.len(), 1);
+        assert_eq!(original.edges[0].er_notation(), Some(notation));
+        assert_eq!(original.nodes[0].members.len(), 2);
+        let label = original.edges[0].label.unwrap();
+        let mut edited = original.clone();
+        edited.labels[label.0].text = "Possède 🦀: daily".to_owned();
+        let updated = lens.put(&edited).expect("ER relationship text re-emits");
+        assert_eq!(
+            updated,
+            source.replace(": \"Owns\"", ": \"Possède 🦀: daily\"")
+        );
+        let reparsed = parse(&updated).ir;
+        assert_eq!(
+            reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+            "Possède 🦀: daily"
+        );
+        assert_eq!(reparsed.edges[0].extras, original.edges[0].extras);
+        assert_eq!(reparsed.direction, original.direction);
+        for (before, after) in original.nodes.iter().zip(&reparsed.nodes) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.members, before.members);
+            assert_eq!(after.classes, before.classes);
+        }
+        assert_eq!(lens.original_source(), source);
+    }
+}
+
+#[test]
+fn put_rejects_relationship_injection_and_unrequested_er_cardinality_changes() {
+    let source = "erDiagram\nA[Account]\nB[Item]\nA ||--o{ B : Safe\n";
+    let lens = ErParseLens::parse(source).unwrap();
+    let label = lens.ir().edges[0].label.unwrap();
+    let replacement = "Changed\nInjected ||--o{ B : added";
+    let candidate = parse(&source.replace("Safe", replacement)).ir;
+    assert_eq!(candidate.nodes.len(), lens.ir().nodes.len() + 1);
+    assert_eq!(candidate.edges.len(), lens.ir().edges.len() + 1);
+    let mut edited = lens.ir().clone();
+    edited.labels[label.0].text = replacement.to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(ErParseLensError::UnsupportedIrChange)
+    );
+    edited.labels[label.0].text = "Changed".to_owned();
+    edited.edges[0].extras_mut().er_notation = Some("||--||".into());
+    assert_eq!(
+        lens.put(&edited),
+        Err(ErParseLensError::UnsupportedIrChange)
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_shared_labels_when_an_encoded_er_relationship_cannot_be_located() {
+    let source = "erDiagram\nA[Shared]\nB[Other]\nA ||--o{ B : #83;hared\n";
     let lens = ErParseLens::parse(source).unwrap();
     let mut edited = lens.ir().clone();
     let label = edited.nodes[0].label.unwrap();
@@ -216,6 +314,7 @@ fn put_rejects_a_partial_edit_of_a_shared_entity_and_relationship_label() {
         Err(ErParseLensError::UnsupportedIrChange)
     );
     assert_eq!(lens.original_source(), source);
+    assert_eq!(lens.ir().labels[label.0].text, "Shared");
 }
 
 #[test]
