@@ -1899,55 +1899,6 @@ fn incremental_overlap_alignment(
     ))
 }
 
-/// Smooth edges that cross a dirty/clean subgraph boundary.
-///
-/// After incremental re-layout, edges with one endpoint in the dirty region and one in
-/// the clean region may have intermediate waypoints that create visual kinks. This pass
-/// applies a gentle Laplacian smoothing to interior waypoints of boundary edges, pulling
-/// each interior point toward the midpoint of its neighbors to reduce angular
-/// discontinuities while preserving the start and end anchors.
-fn smooth_boundary_edges(
-    ir: &MermaidDiagramIr,
-    edges: &mut [LayoutEdgePath],
-    dirty_node_indexes: &BTreeSet<usize>,
-) {
-    const SMOOTHING_FACTOR: f32 = 0.3;
-    const SMOOTHING_PASSES: usize = 2;
-
-    for edge_path in edges.iter_mut() {
-        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
-            continue;
-        };
-        let source = endpoint_node_index(ir, edge.from);
-        let target = endpoint_node_index(ir, edge.to);
-        let (Some(src), Some(tgt)) = (source, target) else {
-            continue;
-        };
-        let src_dirty = dirty_node_indexes.contains(&src);
-        let tgt_dirty = dirty_node_indexes.contains(&tgt);
-        // Only smooth boundary-crossing edges (one dirty, one clean).
-        if src_dirty == tgt_dirty {
-            continue;
-        }
-        if edge_path.points.len() < 3 {
-            continue;
-        }
-        // Laplacian smoothing: pull interior points toward neighbor midpoints.
-        for _ in 0..SMOOTHING_PASSES {
-            let len = edge_path.points.len();
-            for i in 1..len - 1 {
-                let prev = edge_path.points[i - 1];
-                let next = edge_path.points[i + 1];
-                let mid_x = (prev.x + next.x) * 0.5;
-                let mid_y = (prev.y + next.y) * 0.5;
-                let pt = &mut edge_path.points[i];
-                pt.x += (mid_x - pt.x) * SMOOTHING_FACTOR;
-                pt.y += (mid_y - pt.y) * SMOOTHING_FACTOR;
-            }
-        }
-    }
-}
-
 /// The edit list between two IRs, plus whether they share a dependency topology.
 struct LayoutDiff {
     edits: Vec<LayoutEdit>,
@@ -4531,7 +4482,10 @@ impl IncrementalLayoutEngine {
             // request.
             edge_routing_with_source_hints(config.edge_routing, ir),
         );
-        smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
+        // These routes were just rebuilt from the current node and cluster boxes, including
+        // the source's routing mode. A second smoothing pass would cut the router's detours
+        // through obstacles and turn orthogonal connectors into diagonals after an edit.
+        // Keep the same route postprocessing as the full layout path in every routing mode.
         bundle_parallel_edges(ir, &mut edges);
         separate_shared_channels(ir, &nodes, &mut edges);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
@@ -23671,6 +23625,123 @@ mod tests {
                 baseline_layout.layout.nodes[node_index].bounds,
                 "clean region drifted for node {node_index}"
             );
+        }
+    }
+
+    fn incremental_obstacle_detour(
+        direction: GraphDirection,
+        routing: EdgeRouting,
+    ) -> (MermaidDiagramIr, TracedLayout) {
+        let mut baseline = large_subgraph_dependency_ir();
+        baseline.direction = direction;
+        // The shortcut must go around node 6 and remains incident to the edited node 5.
+        // Two disconnected regions force the selective path to preserve a clean region.
+        toggle_edge(&mut baseline, 5, 7);
+        let edge_index = baseline.edges.len() - 1;
+        let edge = &baseline.edges[edge_index];
+        baseline.graph.edges.push(IrGraphEdge {
+            edge_id: edge_index,
+            from: edge.from,
+            to: edge.to,
+            span: edge.span,
+            ..IrGraphEdge::default()
+        });
+        let config = super::LayoutConfig {
+            edge_routing: routing,
+            ..super::LayoutConfig::default()
+        };
+        let mut engine = IncrementalLayoutEngine::default();
+        let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let mut edited = baseline;
+        let label_index = edited.nodes[5].label.expect("node 5 has a label").0;
+        edited.labels[label_index].text = "Left region relabel for selective re-layout".to_string();
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Sugiyama,
+            config,
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_incremental_subgraph_relayout"
+        );
+        assert_eq!(rerun.trace.incremental.recomputed_nodes, 32);
+        for node_index in 32..64 {
+            assert_eq!(
+                rerun.layout.nodes[node_index].bounds, warm.layout.nodes[node_index].bounds,
+                "clean region drifted for node {node_index}"
+            );
+        }
+        (edited, rerun)
+    }
+
+    #[test]
+    fn incremental_width_edit_preserves_orthogonal_obstacle_detours() {
+        for direction in [GraphDirection::TB, GraphDirection::LR] {
+            let (ir, rerun) = incremental_obstacle_detour(direction, EdgeRouting::Orthogonal);
+            let detour = rerun
+                .layout
+                .edges
+                .iter()
+                .find(|path| path.edge_index == ir.edges.len() - 1)
+                .expect("the shortcut edge must be routed");
+            assert!(
+                detour.points.len() >= 4,
+                "fixture must exercise an obstacle detour: {detour:?}"
+            );
+            let obstacle = rerun.layout.nodes[6].bounds;
+            for segment in detour.points.windows(2) {
+                assert!(
+                    (segment[0].x - segment[1].x).abs() < 0.001
+                        || (segment[0].y - segment[1].y).abs() < 0.001,
+                    "{direction:?} edit introduced a diagonal: {segment:?}"
+                );
+                assert!(
+                    !super::cga_routing::segment_intersects_obstacles(
+                        segment[0],
+                        segment[1],
+                        &[obstacle],
+                        0.0,
+                    ),
+                    "{direction:?} edited shortcut intersects node 6: {segment:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_rerouting_preserves_fresh_router_geometry() {
+        for routing in [EdgeRouting::Orthogonal, EdgeRouting::Spline] {
+            for direction in [GraphDirection::TB, GraphDirection::LR] {
+                let (ir, rerun) = incremental_obstacle_detour(direction, routing);
+                let highlighted_edges = rerun
+                    .layout
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.reversed)
+                    .map(|edge| edge.edge_index)
+                    .collect();
+                // Route from the resulting positions, then apply the same shared postpasses
+                // as a full layout. Incremental edits must not deform those fresh paths.
+                let mut expected = build_edge_paths(
+                    &ir,
+                    &rerun.layout.nodes,
+                    &rerun.layout.clusters,
+                    &highlighted_edges,
+                    routing,
+                );
+                super::bundle_parallel_edges(&ir, &mut expected);
+                super::separate_shared_channels(&ir, &rerun.layout.nodes, &mut expected);
+                assert_eq!(
+                    rerun.layout.edges, expected,
+                    "incremental routing changed fresh {routing:?} geometry in {direction:?}"
+                );
+            }
         }
     }
 
