@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use fm_core::DiagramType;
-use fm_parser::{SequenceParseLens, parse};
+use fm_parser::{SequenceParseLens, SequenceParseLensError, parse};
 use proptest::prelude::*;
 
 fn collect_mmd_sources(directory: &Path, sources: &mut Vec<String>) {
@@ -104,4 +104,114 @@ fn put_changes_one_participant_alias_without_reformatting_unrelated_source() {
         .and_then(|label_id| reparsed.ir.labels.get(label_id.0))
         .map(|label| label.text.as_str());
     assert_eq!(reparsed_label, Some("Browser Client"));
+}
+
+#[test]
+fn put_preserves_sequence_metadata_with_unicode_shared_and_merged_aliases() {
+    for (first, second, replacement) in [
+        ("Old", "Existing", "naïve 🦀"),
+        ("Old", "Existing", "Existing"),
+        ("Shared", "Shared", "Renamed"),
+    ] {
+        let source = format!(
+            concat!(
+                "sequenceDiagram\r\n",
+                "  %% retain this comment\r\n",
+                "  autonumber 10 2\r\n",
+                "  participant A as \"{first}\"\r\n",
+                "  actor B as \"{second}\"\r\n",
+                "  A->>B: request\r\n",
+                "  activate B\r\n",
+                "  alt accepted\r\n",
+                "    B-->>A: response\r\n",
+                "  else retry\r\n",
+                "    A->>B: retry\r\n",
+                "  end\r\n",
+                "  Note over A,B: Retain note\r\n",
+                "  deactivate B\r\n"
+            ),
+            first = first,
+            second = second,
+        );
+        let lens = SequenceParseLens::parse(&source).unwrap();
+        let original = lens.ir();
+        let meta = original.sequence_meta.as_ref().unwrap();
+        assert_eq!(meta.autonumber_start, 10);
+        assert_eq!(meta.autonumber_increment, 2);
+        assert_eq!(meta.activations.len(), 1);
+        assert_eq!(meta.fragments.len(), 1);
+        assert_eq!(meta.notes.len(), 1);
+        let label = original.nodes[0].label.unwrap();
+        let mut edited = original.clone();
+        edited.labels[label.0].text = replacement.to_owned();
+
+        let updated = lens.put(&edited).expect("ordinary aliases remain editable");
+        assert_eq!(updated, source.replace(first, replacement));
+        let reparsed = parse(&updated).ir;
+        assert_eq!(reparsed.sequence_meta, original.sequence_meta);
+        assert_eq!(reparsed.nodes.len(), original.nodes.len());
+        for (before, after) in original.nodes.iter().zip(&reparsed.nodes) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.shape, before.shape);
+            assert_eq!(after.classes, before.classes);
+        }
+        assert_eq!(reparsed.edges.len(), original.edges.len());
+        for (before, after) in original.edges.iter().zip(&reparsed.edges) {
+            assert_eq!(
+                (after.from, after.to, after.arrow),
+                (before.from, before.to, before.arrow)
+            );
+            assert_eq!(
+                after.label.map(|id| &reparsed.labels[id.0].text),
+                before.label.map(|id| &original.labels[id.0].text)
+            );
+        }
+        let a_label = reparsed.nodes[0].label.unwrap();
+        let b_label = reparsed.nodes[1].label.unwrap();
+        assert_eq!(reparsed.labels[a_label.0].text, replacement);
+        assert_eq!(
+            reparsed.labels[b_label.0].text,
+            if first == second { replacement } else { second }
+        );
+        if first == second || replacement == second {
+            assert_eq!(
+                a_label, b_label,
+                "equal aliases must remain interned together"
+            );
+        }
+        assert_eq!(lens.original_source(), source);
+    }
+}
+
+#[test]
+fn put_rejects_alias_text_that_injects_a_sequence_message() {
+    let source = "sequenceDiagram\nparticipant A as Safe\nparticipant B as Keep\nA->>B: original\n";
+    let replacement = "Changed\nA->>B: injected";
+    let lens = SequenceParseLens::parse(source).unwrap();
+    let candidate = parse(&source.replace("Safe", replacement)).ir;
+    assert_eq!(candidate.edges.len(), lens.ir().edges.len() + 1);
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    edited.labels[label.0].text = replacement.to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    assert_eq!(lens.original_source(), source);
+}
+
+#[test]
+fn put_rejects_a_partial_edit_of_a_shared_participant_and_message_label() {
+    let source =
+        "sequenceDiagram\nparticipant A as Shared\nparticipant B as Other\nA->>B: Shared\n";
+    let lens = SequenceParseLens::parse(source).unwrap();
+    let mut edited = lens.ir().clone();
+    let label = edited.nodes[0].label.unwrap();
+    assert_eq!(edited.edges[0].label, Some(label));
+    edited.labels[label.0].text = "Changed".to_owned();
+    assert_eq!(
+        lens.put(&edited),
+        Err(SequenceParseLensError::UnsupportedIrChange)
+    );
+    assert_eq!(lens.original_source(), source);
 }

@@ -677,20 +677,8 @@ impl FlowchartParseLens {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
 
-        // Callers edit the visible label text; a single Markdown text run repeats that text in
-        // its formatting metadata. Derive only that redundant payload while retaining every
-        // style flag. Mixed runs and arbitrary caller markup edits remain unsupported.
-        for label_index in &changed_labels {
-            if let Some(markup) = labels_only
-                .label_markup
-                .get_mut(&fm_core::IrLabelId(*label_index))
-                && let [fm_core::IrLabelSegment::Text { text, .. }] = markup.as_mut_slice()
-                && *text == original.labels[*label_index].text
-            {
-                text.clone_from(&edited.labels[*label_index].text);
-            }
-        }
-        validate_flowchart_reemission(updated, &labels_only)
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(FlowchartParseLensError::UnsupportedIrChange)
     }
 
     fn put_node_order(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
@@ -793,21 +781,36 @@ impl FlowchartParseLens {
         // This also rejects a caller that reordered nodes without remapping their numeric edge,
         // port, graph-mirror, or style references. Nothing except source locations and label
         // interning order is normalized; the full graph and metadata must agree.
-        validate_flowchart_reemission(updated, edited)
+        validate_ir_reemission(updated, edited).ok_or(FlowchartParseLensError::UnsupportedIrChange)
     }
 }
 
-fn validate_flowchart_reemission(
+/// Validate a label-only edit whose unchanged structure and formatting metadata were already
+/// checked against the original IR. Only the redundant text of a single Markdown run is derived.
+fn validate_label_reemission(
     source: String,
-    expected: &MermaidDiagramIr,
-) -> Result<String, FlowchartParseLensError> {
+    original: &MermaidDiagramIr,
+    mut expected: MermaidDiagramIr,
+    changed_labels: &[usize],
+) -> Option<String> {
+    for label_index in changed_labels {
+        if let Some(markup) = expected
+            .label_markup
+            .get_mut(&fm_core::IrLabelId(*label_index))
+            && let [fm_core::IrLabelSegment::Text { text, .. }] = markup.as_mut_slice()
+            && *text == original.labels[*label_index].text
+        {
+            text.clone_from(&expected.labels[*label_index].text);
+        }
+    }
+    validate_ir_reemission(source, &expected)
+}
+
+fn validate_ir_reemission(source: String, expected: &MermaidDiagramIr) -> Option<String> {
     let actual = parse(&source).ir;
-    match (
-        comparable_flowchart_ir(&actual),
-        comparable_flowchart_ir(expected),
-    ) {
-        (Some(actual), Some(expected)) if actual == expected => Ok(source),
-        _ => Err(FlowchartParseLensError::UnsupportedIrChange),
+    match (comparable_lens_ir(&actual), comparable_lens_ir(expected)) {
+        (Some(actual), Some(expected)) if actual == expected => Some(source),
+        _ => None,
     }
 }
 
@@ -821,10 +824,9 @@ fn flowchart_permutation_preserves_semantics(
 ) -> bool {
     use fm_core::{IrEndpoint, IrNodeId, IrStyleTarget};
 
-    let (Some(original), Some(mut edited)) = (
-        comparable_flowchart_ir(original),
-        comparable_flowchart_ir(edited),
-    ) else {
+    let (Some(original), Some(mut edited)) =
+        (comparable_lens_ir(original), comparable_lens_ir(edited))
+    else {
         return false;
     };
     let remap_node = |node: &mut IrNodeId| -> Option<()> {
@@ -874,15 +876,21 @@ fn flowchart_permutation_preserves_semantics(
 /// Remove only source coordinates and label-interning accidents before checking PutGet.
 /// Node order and all numeric node references remain significant. A JSON-wide key scrub would
 /// also discard user configuration named `span`; enumerate the actual IR fields instead.
-fn comparable_flowchart_ir(ir: &MermaidDiagramIr) -> Option<MermaidDiagramIr> {
+fn comparable_lens_ir(ir: &MermaidDiagramIr) -> Option<MermaidDiagramIr> {
     use fm_core::{IrConstraint, IrLabel, IrLabelId};
     use std::collections::BTreeMap;
 
-    if ir.diagram_type != DiagramType::Flowchart
-        || ir
-            .label_markup
-            .keys()
-            .any(|label| label.0 >= ir.labels.len())
+    if !matches!(
+        ir.diagram_type,
+        DiagramType::Flowchart
+            | DiagramType::Sequence
+            | DiagramType::Class
+            | DiagramType::State
+            | DiagramType::Er
+    ) || ir
+        .label_markup
+        .keys()
+        .any(|label| label.0 >= ir.labels.len())
     {
         return None;
     }
@@ -970,6 +978,9 @@ fn comparable_flowchart_ir(ir: &MermaidDiagramIr) -> Option<MermaidDiagramIr> {
             slide.span = Span::default();
         }
     }
+    for note in &mut normalized.state_notes {
+        note.span = Span::default();
+    }
     for diagnostic in &mut normalized.diagnostics {
         diagnostic.span = None;
         for related in &mut diagnostic.related {
@@ -1040,7 +1051,7 @@ impl SequenceParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit participant alias text.
+    /// Re-emits explicit participant alias text only when reparsing preserves the requested IR.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, SequenceParseLensError> {
         if edited.diagram_type != DiagramType::Sequence {
             return Err(SequenceParseLensError::NotSequence);
@@ -1112,7 +1123,8 @@ impl SequenceParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        Ok(updated)
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(SequenceParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -1167,7 +1179,7 @@ impl ClassParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit class-node label text.
+    /// Re-emits explicit class-node label text only when reparsing preserves the requested IR.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ClassParseLensError> {
         if edited.diagram_type != DiagramType::Class {
             return Err(ClassParseLensError::NotClass);
@@ -1239,7 +1251,8 @@ impl ClassParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        Ok(updated)
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(ClassParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -1294,7 +1307,7 @@ impl StateParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit `state Label as Id` label text.
+    /// Re-emits explicit `state Label as Id` text only when reparsing preserves the requested IR.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, StateParseLensError> {
         if edited.diagram_type != DiagramType::State {
             return Err(StateParseLensError::NotState);
@@ -1366,7 +1379,8 @@ impl StateParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        Ok(updated)
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(StateParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -1421,7 +1435,7 @@ impl ErParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit ER entity-label text.
+    /// Re-emits explicit ER entity-label text only when reparsing preserves the requested IR.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ErParseLensError> {
         if edited.diagram_type != DiagramType::Er {
             return Err(ErParseLensError::NotEr);
@@ -1493,7 +1507,8 @@ impl ErParseLens {
         for (range, replacement) in replacements {
             updated.replace_range(range.start_byte..range.end_byte, replacement);
         }
-        Ok(updated)
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(ErParseLensError::UnsupportedIrChange)
     }
 }
 
