@@ -56,6 +56,7 @@ use fm_layout::{
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
     TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
     format_xychart_tick_value, is_composite_state_node, resolve_xychart_y_domain,
+    sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
     try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
@@ -15082,103 +15083,6 @@ struct EdgeRenderContext<'a> {
     sankey_widest_flow: Option<f32>,
 }
 
-/// A sankey node's label: its name, then its throughput on the next line, as mermaid labels it.
-///
-/// ⚠️ THE TOTAL IS THE MAX OF INFLOW AND OUTFLOW, NOT THE SUM, and not either side alone. Measured
-/// on the pinned 11.15.0 bundle with `A,M,10` / `M,B,3`: mermaid draws `M\n10`. The sum would be
-/// 13 and the outflow 3, so a node that does not conserve flow distinguishes all three rules —
-/// every balanced diagram makes them agree, which is why the differential fixture carries an
-/// unbalanced one.
-///
-/// The number is formatted plainly: `A,B,1.5` / `A,C,2.25` gives `A\n3.75`, with no padding and no
-/// trailing zeros.
-fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
-    if ir.diagram_type != DiagramType::Sankey {
-        return None;
-    }
-    let node = ir.nodes.get(node_index)?;
-    let mut inflow = 0.0_f32;
-    let mut outflow = 0.0_f32;
-    for edge in &ir.edges {
-        let Some(value) = sankey_flow_value(ir, edge) else {
-            continue;
-        };
-        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            inflow += value;
-        }
-        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            outflow += value;
-        }
-    }
-    let total = inflow.max(outflow);
-    if total <= 0.0 {
-        return None;
-    }
-    Some(format!(
-        "{}\n{}",
-        ir.node_display_text(node),
-        format_sankey_total(total)
-    ))
-}
-
-/// At most TWO decimal places, trailing zeros trimmed: 150 renders `150`, 3.75 renders `3.75`,
-/// 124.729 renders `124.73`.
-///
-/// ⚠️ THE ROUNDING IS THE POINT, AND IT IS NOT COSMETIC. This printed the raw value, so a flow
-/// written `1234.5678` drew `1234.5677` — digits the author never typed, because the total is
-/// accumulated in `f32` and the nearest `f32` to that sum prints back with the error visible. The
-/// reference draws `1234.57`; rounding to two places both matches it and stops float noise reaching
-/// the picture. Measured in Chromium 151 against the pinned 11.15.0 bundle:
-///
-/// ```text
-///   10           -> 10        (no `.00`: the trailing zeros are trimmed)
-///   124.729      -> 124.73
-///   1.23456789   -> 1.23
-///   1234.5678    -> 1234.57
-///   0.3333333    -> 0.33
-/// ```
-///
-/// ⚠️ ONE RESIDUAL DIVERGENCE, RECORDED RATHER THAN PAPERED OVER. `A,B,0.005` draws `0.01` upstream
-/// and cannot reliably do so here: mermaid parses into `f64`, where the stored value sits just above
-/// the exact half and rounds up, while `sankey_flow_value` parses into `f32`, where the nearest
-/// representable value can fall on the other side. That is a property of the IR's numeric width, not
-/// of this formatter, and closing it means widening the stored flow value — a change to the IR, not
-/// a print. The conformance test pins the FORMAT for that input without asserting a digit this
-/// function cannot promise.
-fn format_sankey_total(total: f32) -> String {
-    let rounded = format!("{total:.2}");
-    // Trim only inside the fraction: `trim_end_matches('0')` stops at the first non-`0`, so
-    // `1200.00` loses the two fractional zeros and stops at the dot, never the integer's own.
-    if rounded.contains('.') {
-        rounded
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    } else {
-        rounded
-    }
-}
-
-/// Value carried by a sankey flow, which `parse_sankey` stores as the edge LABEL.
-fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
-    let text = ir.labels.get(edge.label?.0)?.text.trim();
-    let value = text.parse::<f32>().ok()?;
-    (value.is_finite() && value > 0.0).then_some(value)
-}
-
-/// Largest sankey flow in the diagram, computed ONCE per render. `None` for every other type.
-fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
-    if ir.diagram_type != DiagramType::Sankey {
-        return None;
-    }
-    let widest = ir
-        .edges
-        .iter()
-        .filter_map(|edge| sankey_flow_value(ir, edge))
-        .fold(0.0_f32, f32::max);
-    (widest > 0.0).then_some(widest)
-}
-
 /// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to
 /// the `Element` the slow path builds — every attribute value goes through the same serializers
 /// (`write_escaped_attr` / `AttributeValue::write_value`), so only the attribute names, order, and
@@ -15719,33 +15623,6 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
         let _ = (from_label, to_label);
         out.push_str("</text></g>");
     }
-}
-
-/// Ribbon width for a sankey flow, proportional to its value (bd-e69x).
-///
-/// Proportional width IS the sankey diagram — it is the only thing carrying the quantity. Drawing
-/// every flow at the generic edge width leaves a stable, tidy picture that conveys nothing, which
-/// is why a byte golden pinned it for months without complaint.
-///
-/// Returns `None` for anything that is not a numeric sankey flow, so every other diagram type and
-/// any malformed row keeps the arrow-derived width exactly as before.
-fn sankey_flow_stroke_width(
-    ir: &MermaidDiagramIr,
-    edge: Option<&fm_core::IrEdge>,
-    widest: Option<f32>,
-) -> Option<f32> {
-    /// Keeps the smallest flow visible instead of collapsing it to a hairline.
-    const MIN_WIDTH: f32 = 1.5;
-    /// Width of the largest flow; every other flow is scaled against it.
-    const MAX_WIDTH: f32 = 24.0;
-
-    // `widest` is `None` for every non-sankey diagram and for a sankey with no usable flow, so it
-    // subsumes the old `diagram_type` guard AND the old `widest <= 0.0` bail.
-    let widest = widest?;
-    let value = sankey_flow_value(ir, edge?)?;
-    // Normalise against the widest flow so the ratio between two ribbons equals the ratio between
-    // their values — the property a reader actually reads off the picture.
-    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
 }
 
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {

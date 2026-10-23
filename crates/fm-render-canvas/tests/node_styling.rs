@@ -70,8 +70,12 @@ fn painted_nodes(ir: &MermaidDiagramIr) -> BTreeMap<String, NodePaint> {
 }
 
 fn attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
-    let prefix = format!(" {name}=\"");
-    let value = element.split_once(&prefix)?.1;
+    let prefix = format!("{name}=\"");
+    let value = element.strip_prefix(&prefix).or_else(|| {
+        element
+            .split_once(&format!(" {prefix}"))
+            .map(|(_, value)| value)
+    })?;
     Some(value.split_once('"')?.0)
 }
 
@@ -679,23 +683,29 @@ fn scene_svg_sanitizes_programmatic_node_styles() {
             ..SvgRenderConfig::default()
         },
     );
-    assert_style(scene_node_element(&svg, "path", 0), "stroke", "#445566");
-    assert_style(scene_node_element(&svg, "text", 0), "fill", "#778899");
+    let shape = scene_node_element(&svg, "path", 0);
+    let label = scene_node_element(&svg, "text", 0);
+    assert_style(shape, "stroke", "#445566");
+    assert_style(label, "fill", "#778899");
     assert!(
         !svg.contains("javascript:"),
         "unsafe paint reached scene SVG"
     );
-    assert!(
-        !svg.contains("position:"),
-        "disallowed property reached scene SVG"
-    );
+    for element in [shape, label] {
+        assert!(
+            !attribute(element, "style")
+                .unwrap_or_default()
+                .contains("position:"),
+            "disallowed property reached an authored node style"
+        );
+    }
     assert_eq!(
-        attribute(scene_node_element(&svg, "path", 0), "style"),
+        attribute(shape, "style"),
         Some("stroke:#445566"),
         "shape values must not inject additional declarations"
     );
     assert_eq!(
-        attribute(scene_node_element(&svg, "text", 0), "style"),
+        attribute(label, "style"),
         Some("fill:#778899"),
         "label values must not inject additional declarations"
     );

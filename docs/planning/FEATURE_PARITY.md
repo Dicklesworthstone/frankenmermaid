@@ -127,7 +127,7 @@ Current status in this file is grounded in:
 | Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
 | SVG renderer | Partial | 21 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
 | Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs, and opt-in bounded debug metrics overlay (crossings/bends/horizontal symmetry) |
-| Canvas/WASM | Partial | Canvas2D with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, and dedicated vertical/horizontal XY axes and bar/line/area series; mock-context coverage exists, while GPU XY support and compiled package qualification remain separate |
+| Canvas/WASM | Partial | Canvas2D with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, dedicated vertical/horizontal XY axes and bar/line/area series, and proportional Sankey ribbons with node throughput labels; Canvas/GPU Sankey plans share SVG quantity rules; compiled package qualification and GPU XY support remain separate |
 | Diff engine | Complete | Structural node/edge diffing with change classification |
 | Minimap | Complete | Density-aware scaling with viewport indicator |
 

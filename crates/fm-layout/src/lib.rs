@@ -9764,6 +9764,96 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// A Sankey node's name and throughput, shared by the rendering backends.
+///
+/// Throughput is the larger of inflow and outflow: `A,M,10` / `M,B,3` labels M
+/// with 10, not 13 or 3. Nonpositive and nonfinite values do not contribute.
+#[must_use]
+pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let node = ir.nodes.get(node_index)?;
+    let mut inflow = 0.0_f32;
+    let mut outflow = 0.0_f32;
+    for edge in &ir.edges {
+        let Some(value) = sankey_flow_value(ir, edge) else {
+            continue;
+        };
+        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            inflow += value;
+        }
+        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            outflow += value;
+        }
+    }
+    let total = inflow.max(outflow);
+    if total <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "{}\n{}",
+        ir.node_display_text(node),
+        format_sankey_total(total)
+    ))
+}
+
+/// At most two decimal places, with fractional trailing zeros trimmed.
+///
+/// This preserves the SVG formatter's f32 rounding: 1234.5678 displays as
+/// 1234.57 rather than exposing float noise, and 1200 stays 1200. Half-cent
+/// values can still round differently from Mermaid's f64 representation.
+fn format_sankey_total(total: f32) -> String {
+    let rounded = format!("{total:.2}");
+    if rounded.contains('.') {
+        rounded
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        rounded
+    }
+}
+
+/// Sankey values are stored in edge labels, not in a separate weight field.
+fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
+    let text = ir.labels.get(edge.label?.0)?.text.trim();
+    let value = text.parse::<f32>().ok()?;
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// Largest positive, finite Sankey flow; compute once per render, not per edge.
+/// Returns `None` for every other diagram type and for diagrams without a usable value.
+#[must_use]
+pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let widest = ir
+        .edges
+        .iter()
+        .filter_map(|edge| sankey_flow_value(ir, edge))
+        .fold(0.0_f32, f32::max);
+    (widest > 0.0).then_some(widest)
+}
+
+/// Proportional Sankey ribbon width, with a 24px maximum and a visible 1.5px floor.
+///
+/// Pass the result of [`sankey_widest_flow`] for this diagram. `None` preserves
+/// generic edge styling for other diagram types and malformed flow values.
+#[must_use]
+pub fn sankey_flow_stroke_width(
+    ir: &MermaidDiagramIr,
+    edge: Option<&fm_core::IrEdge>,
+    widest: Option<f32>,
+) -> Option<f32> {
+    const MIN_WIDTH: f32 = 1.5;
+    const MAX_WIDTH: f32 = 24.0;
+    let widest = widest?;
+    let value = sankey_flow_value(ir, edge?)?;
+    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
+}
+
 #[must_use]
 pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
     Arc::unwrap_or_clone(layout_diagram_sankey_traced(ir).layout)

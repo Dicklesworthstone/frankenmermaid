@@ -1065,6 +1065,10 @@ fn edge_label_text<'a>(
     ir: &'a MermaidDiagramIr,
     edge: &fm_layout::LayoutEdgePath,
 ) -> Option<&'a str> {
+    // Sankey edge labels are numeric input data, represented by ribbon widths and node totals.
+    if ir.diagram_type == fm_core::DiagramType::Sankey {
+        return None;
+    }
     ir.edges
         .get(edge.edge_index)
         .and_then(|ir_edge| ir_edge.label)
@@ -1968,6 +1972,7 @@ impl GpuRenderPlan {
             .sum();
         let mut edge_segments = Vec::with_capacity(segment_count);
         let mut arrowheads = Vec::new();
+        let sankey_widest = fm_layout::sankey_widest_flow(ir);
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
             let arrow = ir
                 .edges
@@ -1978,7 +1983,12 @@ impl GpuRenderPlan {
             // they are actually drawn at instead of a plan-local guess.
             let (width, dash_pattern) =
                 crate::renderer::legacy_edge_stroke(arrow, f64::from(edge_stroke_width));
-            let width = width as f32;
+            let width = fm_layout::sankey_flow_stroke_width(
+                ir,
+                ir.edges.get(edge.edge_index),
+                sankey_widest,
+            )
+            .unwrap_or(width as f32);
             let edge_index = edge.edge_index.try_into().unwrap_or(u32::MAX);
 
             // `linkStyle` resolved through the raster pass's own helper, so a GPU render and a
@@ -2092,14 +2102,43 @@ impl GpuRenderPlan {
             }
         }
 
-        // TEXT (bd-2u0.2 component 3). One run per node label, matching the raster pass, which
-        // issues exactly one fill_text per label — so the two are countable against each other.
+        // TEXT (bd-2u0.2 component 3). Sankey names and totals each get their own line/run,
+        // matching the raster pass rather than collapsing a newline into adjacent glyphs.
         //
         // Two passes on purpose: the atlas has to know every glyph the diagram uses before any quad
         // can be given a UV, and a quad built against a half-finished atlas would point at a cell
         // that later moves.
+        let sankey_labels: Vec<Option<String>> = if ir.diagram_type == fm_core::DiagramType::Sankey
+        {
+            layout
+                .nodes
+                .iter()
+                .map(|node| fm_layout::sankey_node_label(ir, node.node_index))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
-        for node in &layout.nodes {
+        for (position, node) in layout.nodes.iter().enumerate() {
+            if let Some(Some(label)) = sankey_labels.get(position) {
+                let font_px = crate::renderer::resolve_declared_node_font(ir, node.node_index)
+                    .size
+                    .map(|size| size as f32)
+                    .filter(|size| size.is_finite() && *size > 0.0)
+                    .unwrap_or(DEFAULT_FONT_SIZE_PX);
+                let line_height = font_px * fm_core::FontMetricsConfig::default().line_height;
+                let center_x = node.bounds.x + node.bounds.width * 0.5;
+                let center_y = node.bounds.y + node.bounds.height * 0.5;
+                let start_y = center_y - (label.lines().count() as f32 - 1.0) * line_height * 0.5;
+                for (line_index, line) in label.lines().enumerate() {
+                    labelled.push((
+                        node.node_index.try_into().unwrap_or(u32::MAX),
+                        [center_x, start_y + line_index as f32 * line_height],
+                        line,
+                    ));
+                }
+                continue;
+            }
             if let Some(ir_node) = ir.nodes.get(node.node_index)
                 && let Some(label_id) = ir_node.label
                 && let Some(label) = ir.labels.get(label_id.0)

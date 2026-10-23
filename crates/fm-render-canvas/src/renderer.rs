@@ -2450,6 +2450,7 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
         let mut edge_label_font = None;
+        let sankey_widest = fm_layout::sankey_widest_flow(ir);
 
         for edge_path in &layout.edges {
             let ir_edge = ir.edges.get(edge_path.edge_index);
@@ -2492,7 +2493,10 @@ impl Canvas2dRenderer {
             let stroke = declared_stroke
                 .as_deref()
                 .unwrap_or(&self.config.edge_stroke);
-            let stroke_width = declared_width.unwrap_or(legacy_width);
+            let quantity_width = fm_layout::sankey_flow_stroke_width(ir, ir_edge, sankey_widest)
+                .map(f64::from)
+                .unwrap_or(legacy_width);
+            let stroke_width = declared_width.unwrap_or(quantity_width);
             // A declared dash OVERRIDES the arrow-derived one: `legacy_edge_stroke` infers a
             // pattern from the arrow glyph (`-.->` is dotted), and an explicit `stroke-dasharray`
             // is the author answering the same question more specifically.
@@ -2722,8 +2726,10 @@ impl Canvas2dRenderer {
                 place(edge.target_cardinality(), &last, &penultimate);
             }
 
-            // Draw edge label if present
-            if let Some(label_id) = ir_edge.and_then(|e| e.label)
+            // A Sankey edge label stores its quantity. The ribbon width and node totals
+            // communicate that value; SVG likewise omits a separate number on each link.
+            if ir.diagram_type != DiagramType::Sankey
+                && let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
                 && points.len() >= 2
             {
@@ -3396,7 +3402,10 @@ impl Canvas2dRenderer {
                 // Standard single-label rendering.
                 // Layout and SVG use the same rule: state ornaments and junctions draw no text,
                 // while gitGraph commits keep their labels even when they use those shapes.
-                let label_text = ir_node.map(|node| ir.node_display_text(node)).unwrap_or("");
+                let sankey_label = fm_layout::sankey_node_label(ir, node_box.node_index);
+                let label_text = sankey_label.as_deref().unwrap_or_else(|| {
+                    ir_node.map(|node| ir.node_display_text(node)).unwrap_or("")
+                });
 
                 if !label_text.is_empty() {
                     // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
