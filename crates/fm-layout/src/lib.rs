@@ -13023,7 +13023,7 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             }
             // Route the final attachment points. Moving a routed path afterwards can detach its
             // endpoints from curved outlines and move an otherwise clear segment into an obstacle.
-            let points = if ir.diagram_type == DiagramType::Mindmap
+            let mut points = if ir.diagram_type == DiagramType::Mindmap
                 && parallel_offset.abs() <= 0.01
                 && !cga_routing::segment_intersects_obstacles(from_pt, to_pt, &obstacle_bounds, 8.0)
             {
@@ -13037,6 +13037,31 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                     None,
                 )
             };
+            if points.windows(2).any(|pair| {
+                cga_routing::segment_intersects_obstacles(pair[0], pair[1], &obstacle_bounds, 8.0)
+            }) {
+                // Force placement has no empty rank corridors: nearby boxes can form a barrier
+                // across the whole strip between these ports. Permit a wider bounded search,
+                // keeping the endpoint boxes as obstacles so it cannot escape through them.
+                let retry_horizontal = if horizontal_ranks {
+                    (to_pt.x - from_pt.x).abs() >= 0.001
+                } else {
+                    (to_pt.y - from_pt.y).abs() < 0.001
+                };
+                if let Some(clear) = bounded_orthogonal_route(
+                    from_pt,
+                    to_pt,
+                    retry_horizontal,
+                    &obstacle_bounds,
+                    None,
+                    Some([
+                        node_outline_bounds(nodes[from_idx].bounds, from_shape),
+                        node_outline_bounds(nodes[to_idx].bounds, to_shape),
+                    ]),
+                ) {
+                    points = clear;
+                }
+            }
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(from_idx), saved_from) {
                 *slot = saved;
             }
@@ -13681,9 +13706,14 @@ fn class_compartment_dimensions(
     // `class A { <<interface>> }` sized a box to fit `A` and then drew a string four times wider.
     // Height had always counted this row; only the width forgot it — the asymmetry that made the
     // omission survive, since a too-narrow box overflows visibly rather than dropping content.
-    // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
+    // Renderers draw it at `font_size * 0.85`. Use the same conservative glyph allowances as
+    // other preserved text so a wide stereotype cannot cross its own compartment border.
     let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
-        metrics.estimate_dimensions(&stereotype.label()).0 * 0.85
+        metrics.estimate_preserved_width(
+            &stereotype.label(),
+            metrics.font_size() * 0.85,
+            metrics.avg_char_width(),
+        )
     });
 
     Some((member_width.max(stereotype_width) + 16.0, height))
@@ -13784,10 +13814,10 @@ fn class_member_row_width(
         row.push_str(" : ");
         row.push_str(&fm_core::parse_generic_types(return_type));
     }
-    // Rows render at `font_size * 0.9`, but the estimate runs ~10% narrower than browsers draw the
-    // text: scaled down to 0.9 the widest row (`+String beakColor`) ran past its box's edge. The
-    // full-size estimate is the row as drawn, with its margin.
-    metrics.estimate_dimensions(&row).0
+    // Preserve the full-size allowance for rows drawn at 90% size, then account for the actual
+    // wide glyphs and font fallback differences. The plain estimate still let `+Decimal amount`
+    // cross Payment's right border in the default browser font.
+    metrics.estimate_preserved_width(&row, metrics.font_size(), metrics.avg_char_width())
 }
 
 fn node_size_cache_key(
@@ -18931,16 +18961,19 @@ fn build_edge_paths_with_orientation(
                         obstacle_index.as_mut(),
                     ),
                 };
-                for &(slot, saved) in parked.iter().rev() {
-                    obstacle_bounds[slot] = saved;
-                }
-                // Only an aligned detour has six points. It leaves and enters at the faces'
+                // An aligned detour leaves and enters at the faces'
                 // centres, where the edges between neighbouring ranks attach too, so its stubs
                 // ran along theirs; on a flat face it attaches part-way toward its detour instead.
                 if pair_total == 1
                     && pts.len() == 6
                     && matches!(edge_routing, EdgeRouting::Orthogonal)
+                    && if horizontal_ranks {
+                        (source_anchor.y - target_anchor.y).abs() < 0.001
+                    } else {
+                        (source_anchor.x - target_anchor.x).abs() < 0.001
+                    }
                 {
+                    let original = pts.clone();
                     let across = |p: LayoutPoint| if horizontal_ranks { p.y } else { p.x };
                     let toward = across(pts[2]) - across(pts[0]);
                     for (bends, (end_box, end_shape)) in
@@ -18966,6 +18999,17 @@ fn build_edge_paths_with_orientation(
                             }
                         }
                     }
+                    // Moving a port changes the two side stubs too. Keep the already-clear
+                    // route if that cosmetic separation would run through another node.
+                    if pts.windows(2).any(|pair| {
+                        segment_blocked(pair[0], pair[1], &obstacle_bounds, obstacle_index.as_mut())
+                            .is_some()
+                    }) {
+                        pts = original;
+                    }
+                }
+                for &(slot, saved) in parked.iter().rev() {
+                    obstacle_bounds[slot] = saved;
                 }
                 pts
             };
@@ -19549,7 +19593,7 @@ fn route_edge_points_with_obstacle_index(
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> EdgePoints {
     let epsilon = 0.001_f32;
     let aligned = if horizontal_ranks {
@@ -19559,8 +19603,24 @@ fn route_edge_points_with_obstacle_index(
     };
     let points = if !aligned {
         turning_route(source, target, horizontal_ranks, obstacles, obstacle_index)
-    } else if let Some(clear) = clear_line(source, target, obstacles, obstacle_index) {
-        aligned_detour(source, target, clear, horizontal_ranks)
+    } else if let Some(clear) = clear_line(source, target, obstacles, obstacle_index.as_deref_mut())
+    {
+        let detour = aligned_detour(source, target, clear, horizontal_ranks);
+        if detour.windows(2).all(|pair| {
+            segment_blocked(pair[0], pair[1], obstacles, obstacle_index.as_deref_mut()).is_none()
+        }) {
+            detour
+        } else {
+            bounded_orthogonal_route(
+                source,
+                target,
+                horizontal_ranks,
+                obstacles,
+                obstacle_index,
+                None,
+            )
+            .unwrap_or(detour)
+        }
     } else {
         smallvec![source, target]
     };
@@ -19613,7 +19673,10 @@ fn clear_line(
         (a.y, a.x.min(b.x), a.x.max(b.x))
     };
     let downward = first < line;
-    let mut at = first;
+    // The CGA intersection test includes contact with the inflated box boundary. The first
+    // nudge, like every later one below, must step just beyond it; otherwise validation rejects
+    // even a simple clear detour and needlessly sends it through the bounded grid search.
+    let mut at = first + if downward { -0.5 } else { 0.5 };
     for _ in 0..obstacles.len() {
         let in_the_way = obstacles.iter().find(|r| {
             let (span_lo, span_hi, cross_lo, cross_hi) = if vertical {
@@ -19694,10 +19757,8 @@ fn turning_route(
     )
     .unwrap_or(mid);
     let halfway = turn(mid);
-    if (end - start).abs() <= 2.0 * STUB
-        || (segment_blocked(source, halfway[1], obstacles, obstacle_index.as_deref_mut()).is_none()
-            && segment_blocked(halfway[2], target, obstacles, obstacle_index.as_deref_mut())
-                .is_none())
+    if segment_blocked(source, halfway[1], obstacles, obstacle_index.as_deref_mut()).is_none()
+        && segment_blocked(halfway[2], target, obstacles, obstacle_index.as_deref_mut()).is_none()
     {
         return halfway;
     }
@@ -19728,8 +19789,226 @@ fn turning_route(
     if clear(&detour, &mut obstacle_index) {
         detour
     } else {
-        halfway
+        bounded_orthogonal_route(
+            source,
+            target,
+            horizontal_ranks,
+            obstacles,
+            obstacle_index,
+            None,
+        )
+        .unwrap_or(halfway)
     }
+}
+
+/// Find a clear corridor when the cheap one- and two-turn routes are obstructed.
+///
+/// Search a rectilinear grid formed by the nearest obstacle boundaries. Edges are generated on
+/// demand and checked against the COMPLETE obstacle set, so a boundary omitted by the size cap
+/// can limit the search but can never make an obstructed route look clear. Independent caps on
+/// boundary count and expanded states keep a difficult edge from creating an unbounded global
+/// visibility graph. Failure leaves the caller's existing route intact rather than losing an edge.
+///
+/// Ranked routes advance between the endpoint faces along their rank axis, preventing a detour
+/// through their temporarily excluded bounds. Force layouts can supply those endpoint bounds to
+/// permit wider, winding corridors; every segment then also avoids both endpoint interiors.
+fn bounded_orthogonal_route(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+    endpoint_bounds: Option<[LayoutRect; 2]>,
+) -> Option<EdgePoints> {
+    const CLEARANCE: f32 = 8.5;
+    const MAX_OBSTACLES: usize = 64;
+    const MAX_EXPANSIONS: usize = 8_192;
+    const BEND_COST: f32 = 20.0;
+
+    let (start, end) = if horizontal_ranks {
+        (source.x, target.x)
+    } else {
+        (source.y, target.y)
+    };
+    if !start.is_finite()
+        || !end.is_finite()
+        || !source.x.is_finite()
+        || !source.y.is_finite()
+        || !target.x.is_finite()
+        || !target.y.is_finite()
+        || (end - start).abs() < 0.001
+    {
+        return None;
+    }
+    let forward = (end - start).signum();
+    let (lo_x, hi_x) = (source.x.min(target.x), source.x.max(target.x));
+    let (lo_y, hi_y) = (source.y.min(target.y), source.y.max(target.y));
+    let mut nearest = BinaryHeap::new();
+    let mut envelope = (lo_x, hi_x, lo_y, hi_y);
+    for (index, bounds) in obstacles.iter().enumerate() {
+        let right = bounds.x + bounds.width;
+        let bottom = bounds.y + bounds.height;
+        if bounds.width <= 0.0
+            || bounds.height <= 0.0
+            || !bounds.x.is_finite()
+            || !bounds.y.is_finite()
+            || !right.is_finite()
+            || !bottom.is_finite()
+        {
+            continue;
+        }
+        envelope.0 = envelope.0.min(bounds.x);
+        envelope.1 = envelope.1.max(right);
+        envelope.2 = envelope.2.max(bounds.y);
+        envelope.3 = envelope.3.max(bottom);
+        let distance = (bounds.x - hi_x).max(lo_x - right).max(0.0)
+            + (bounds.y - hi_y).max(lo_y - bottom).max(0.0);
+        nearest.push((distance.to_bits(), index));
+        if nearest.len() > MAX_OBSTACLES {
+            nearest.pop();
+        }
+    }
+    let mut xs = vec![
+        source.x,
+        target.x,
+        envelope.0 - CLEARANCE,
+        envelope.1 + CLEARANCE,
+    ];
+    let mut ys = vec![
+        source.y,
+        target.y,
+        envelope.2 - CLEARANCE,
+        envelope.3 + CLEARANCE,
+    ];
+    // A short outward stub is available even where no obstacle boundary happens to supply one.
+    let stub = ((end - start).abs() / 4.0).min(16.0) * forward;
+    let along = if horizontal_ranks { &mut xs } else { &mut ys };
+    along.extend([start + stub, end - stub]);
+    for (_, index) in nearest.into_sorted_vec() {
+        let bounds = obstacles[index];
+        xs.extend([bounds.x - CLEARANCE, bounds.x + bounds.width + CLEARANCE]);
+        ys.extend([bounds.y - CLEARANCE, bounds.y + bounds.height + CLEARANCE]);
+    }
+    if let Some(bounds) = endpoint_bounds {
+        for bounds in bounds {
+            // Endpoints need a way out of their own port. Half a pixel keeps the returning
+            // corridor off their border without closing the small gaps in force placement.
+            xs.extend([bounds.x - 0.5, bounds.x + bounds.width + 0.5]);
+            ys.extend([bounds.y - 0.5, bounds.y + bounds.height + 0.5]);
+        }
+    } else {
+        let along = if horizontal_ranks { &mut xs } else { &mut ys };
+        along.retain(|&value| value >= start.min(end) && value <= start.max(end));
+    }
+    for axis in [&mut xs, &mut ys] {
+        axis.retain(|value| value.is_finite());
+        axis.sort_by(f32::total_cmp);
+        axis.dedup_by(|a, b| *a == *b);
+    }
+    let source_x = xs.iter().position(|&x| x == source.x)?;
+    let source_y = ys.iter().position(|&y| y == source.y)?;
+    let target_x = xs.iter().position(|&x| x == target.x)?;
+    let target_y = ys.iter().position(|&y| y == target.y)?;
+    let width = xs.len();
+    let source_cell = source_y * width + source_x;
+    let target_cell = target_y * width + target_x;
+    let preferred_axis = usize::from(horizontal_ranks);
+    let initial = source_cell * 2 + preferred_axis;
+    let mut costs = vec![f32::INFINITY; width * ys.len() * 2];
+    let mut previous = vec![usize::MAX; costs.len()];
+    let mut queue = BinaryHeap::new();
+    costs[initial] = 0.0;
+    let heuristic = |x: usize, y: usize| (xs[x] - target.x).abs() + (ys[y] - target.y).abs();
+    queue.push(Reverse((
+        heuristic(source_x, source_y).to_bits(),
+        0_u32,
+        initial,
+    )));
+
+    let mut expanded = 0;
+    while let Some(Reverse((_, cost_bits, state))) = queue.pop() {
+        let cost = f32::from_bits(cost_bits);
+        if cost != costs[state] {
+            continue;
+        }
+        if expanded >= MAX_EXPANSIONS {
+            return None;
+        }
+        expanded += 1;
+        let cell = state / 2;
+        let (x, y) = (cell % width, cell / width);
+        if cell == target_cell && state % 2 == preferred_axis {
+            let mut route = EdgePoints::new();
+            let mut cursor = state;
+            loop {
+                let cell = cursor / 2;
+                route.push(LayoutPoint {
+                    x: xs[cell % width],
+                    y: ys[cell / width],
+                });
+                if cursor == initial {
+                    break;
+                }
+                cursor = previous[cursor];
+            }
+            route.reverse();
+            return Some(simplify_polyline(route));
+        }
+        let candidates = [
+            x.checked_sub(1).map(|next| (next, y, 1)),
+            (x + 1 < width).then_some((x + 1, y, 1)),
+            y.checked_sub(1).map(|next| (x, next, 0)),
+            (y + 1 < ys.len()).then_some((x, y + 1, 0)),
+        ];
+        for (next_x, next_y, axis) in candidates.into_iter().flatten() {
+            let next_cell = next_y * width + next_x;
+            if (cell == source_cell || next_cell == target_cell) && axis != preferred_axis {
+                continue;
+            }
+            let (from, to) = (
+                LayoutPoint { x: xs[x], y: ys[y] },
+                LayoutPoint {
+                    x: xs[next_x],
+                    y: ys[next_y],
+                },
+            );
+            let primary_step = if horizontal_ranks {
+                to.x - from.x
+            } else {
+                to.y - from.y
+            };
+            if primary_step * forward < 0.0
+                && (endpoint_bounds.is_none() || cell == source_cell || next_cell == target_cell)
+            {
+                continue;
+            }
+            // Strict interior overlap allows a segment to meet its own port on the boundary,
+            // while every later segment must remain outside the complete endpoint rectangle.
+            if endpoint_bounds.is_some_and(|bounds| {
+                bounds.iter().any(|bounds| {
+                    from.x.max(to.x) > bounds.x + 0.001
+                        && from.x.min(to.x) < bounds.x + bounds.width - 0.001
+                        && from.y.max(to.y) > bounds.y + 0.001
+                        && from.y.min(to.y) < bounds.y + bounds.height - 0.001
+                })
+            }) {
+                continue;
+            }
+            let step = (to.x - from.x).abs() + (to.y - from.y).abs();
+            let next_cost = cost + step + if axis == state % 2 { 0.0 } else { BEND_COST };
+            let next = next_cell * 2 + axis;
+            if next_cost >= costs[next]
+                || segment_blocked(from, to, obstacles, obstacle_index.as_deref_mut()).is_some()
+            {
+                continue;
+            }
+            costs[next] = next_cost;
+            previous[next] = state;
+            let score = next_cost + heuristic(next_x, next_y);
+            queue.push(Reverse((score.to_bits(), next_cost.to_bits(), next)));
+        }
+    }
+    None
 }
 
 /// The detour for an aligned edge whose straight run is blocked: out of the source perpendicular
@@ -26073,6 +26352,119 @@ mod tests {
         let basic = route_edge_points(source, target, false);
         let obstacle_aware = route_edge_points_with_obstacles(source, target, false, &[]);
         assert_eq!(basic, obstacle_aware);
+    }
+
+    #[test]
+    fn obstacle_routing_finds_a_clear_corridor_when_the_first_detour_is_blocked() {
+        for aligned in [false, true] {
+            for transpose in [false, true] {
+                let point = |x, y| {
+                    if transpose {
+                        LayoutPoint { x: y, y: x }
+                    } else {
+                        LayoutPoint { x, y }
+                    }
+                };
+                // Alternating barriers obstruct the midpoint and both short turns. The fourth
+                // box blocks the side chosen by the first clearance nudge; the OTHER side still
+                // has a valid corridor. Returning the obstructed midpoint cut through these boxes.
+                let obstacles: Vec<_> = [
+                    (-100.0, 40.0, 150.0, 30.0),
+                    (50.0, 90.0, 150.0, 30.0),
+                    (-100.0, 140.0, 150.0, 30.0),
+                    (if aligned { 50.0 } else { -50.0 }, -20.0, 30.0, 50.0),
+                ]
+                .into_iter()
+                .map(|(x, y, width, height)| {
+                    if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: x,
+                            width: height,
+                            height: width,
+                        }
+                    } else {
+                        LayoutRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        }
+                    }
+                })
+                .collect();
+                let first = point(0.0, 0.0);
+                let last = point(if aligned { 0.0 } else { 100.0 }, 200.0);
+                for (source, target) in [(first, last), (last, first)] {
+                    let route =
+                        route_edge_points_with_obstacles(source, target, transpose, &obstacles);
+                    assert_eq!(route.first(), Some(&source));
+                    assert_eq!(route.last(), Some(&target));
+                    assert_eq!(
+                        route,
+                        route_edge_points_with_obstacles(source, target, transpose, &obstacles)
+                    );
+                    for pair in route.windows(2) {
+                        assert!(pair[0].x == pair[1].x || pair[0].y == pair[1].y);
+                        assert!(
+                            !super::cga_routing::segment_intersects_obstacles(
+                                pair[0], pair[1], &obstacles, 8.0
+                            ),
+                            "aligned={aligned}, transpose={transpose}: {pair:?} crosses a node in {route:?}"
+                        );
+                    }
+                    for (a, b) in [
+                        (route[0], route[1]),
+                        (route[route.len() - 2], route[route.len() - 1]),
+                    ] {
+                        assert!(
+                            if transpose { a.y == b.y } else { a.x == b.x },
+                            "a port's attachment direction changed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_routing_keeps_impossible_and_invalid_routes_finite() {
+        let source = LayoutPoint { x: 0.0, y: 0.0 };
+        let target = LayoutPoint { x: 100.0, y: 200.0 };
+        // The source is enclosed by an unrelated box, so no clear route exists.
+        let obstacles = [LayoutRect {
+            x: -10.0,
+            y: -10.0,
+            width: 20.0,
+            height: 20.0,
+        }];
+        assert!(
+            super::bounded_orthogonal_route(source, target, false, &obstacles, None, None)
+                .is_none()
+        );
+        let route = route_edge_points_with_obstacles(source, target, false, &obstacles);
+        assert_eq!(route.first(), Some(&source));
+        assert_eq!(route.last(), Some(&target));
+        assert!(
+            route
+                .iter()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+        );
+        assert!(super::bounded_orthogonal_route(source, source, false, &[], None, None).is_none());
+        assert!(
+            super::bounded_orthogonal_route(
+                LayoutPoint {
+                    x: f32::NAN,
+                    y: 0.0
+                },
+                target,
+                false,
+                &[],
+                None,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -32508,45 +32900,12 @@ mod tests {
 
     /// bd-h2ze: a routed edge must not run through a node it does not connect to.
     ///
-    /// An edge crossing a node box reads as connecting to it, so the picture asserts a relationship
-    /// the source never declared — the same class as bd-h9gx and bd-5wbp, where the diagram still
-    /// looks well-formed and is simply wrong.
-    ///
-    /// The fixture is `cycle_ladder`'s edge list, which carried 5 of the 30 crossings measured
-    /// across the committed goldens. Its shape is the point: the rungs run in BOTH directions
-    /// between the spines, so cycle removal reverses some of them and the survivors span ranks that
-    /// a middle node already occupies.
-    ///
-    /// A small tolerance is allowed because an edge legitimately touches the boundary of boxes it
-    /// passes: the assertion is about running THROUGH a node, not grazing one.
-    ///
-    /// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished. Run it with
-    /// `--ignored` and it FAILS on the current router with
-    ///
-    ///     Some((12, 0, 28.969482))   (edge_index, node_index, penetration_px)
-    ///
-    /// i.e. `LADDER_EDGES[12]`, the L3→R3 rung, runs 28.97px into N0's box — the middle of a 66.5px
-    /// node it does not connect to. Un-ignoring it is bd-h2ze's acceptance gate; do not relax the
-    /// tolerance to whatever a fix happens to produce.
-    ///
-    /// THE MECHANISM, which this test localised and which is the useful half of it. Every branch of
-    /// `route_edge_points_with_obstacle_index` builds exactly ONE segment and nudges that. For a TD
-    /// flowchart (`horizontal_ranks == false`, `|dx| >= epsilon`) the emitted route is
-    ///
-    ///     source, (source.x, y_bend), (target.x, y_bend), target
-    ///
-    /// and only the HORIZONTAL run at `y_bend` is passed to `find_obstacle_nudge_y`. The vertical leg
-    /// at `source.x` from `source.y` to `y_bend`, and the one at `target.x` from `y_bend` to
-    /// `target.y`, are never tested against an obstacle — so either can pass straight through a node
-    /// sharing its column, which is exactly what edge 12 does down the left spine.
-    ///
-    /// So obstacle avoidance is not missing, it is INCOMPLETE: two of the three segments are unchecked.
-    /// A fix therefore cannot be a better nudge; the legs are anchored at the endpoints and cannot be
-    /// slid sideways, so clearing them needs an extra bend (a 5-6 point jog). That is a change to core
-    /// routing which will move cycle_braid, cycle_feedback, cycle_ladder, cycle_scc_heavy and
-    /// state_composite plus their layout checksums, and it must be blessed with a semantic diff.
+    /// This dense ladder dispatches to force layout. Its closely packed boxes can block every
+    /// corridor between two endpoint faces: returning an obstructed midpoint sent edge 1 through
+    /// N9 by 22.88px. The bounded retry must search outside that strip while protecting its own
+    /// endpoint boxes too. Keep the original 4px tolerance, which permits grazing a border but
+    /// rejects a connection running through another node.
     #[test]
-    #[ignore = "bd-h2ze: reproduces a live routing defect; un-ignore as the acceptance gate"]
     fn routed_edges_do_not_run_through_unrelated_nodes() {
         let ir = graph_ir(DiagramType::Flowchart, 10, &LADDER_EDGES);
         let layout = layout_diagram(&ir);
@@ -35919,6 +36278,38 @@ mod tests {
             super::class_compartment_dimensions(node, &metrics).is_some(),
             "a generic-only class still uses the class header renderer"
         );
+    }
+
+    #[test]
+    fn class_compartments_reserve_room_for_wide_glyphs_at_the_rendered_size() {
+        // `W` approaches one em in the default sans-serif fonts. An average-character estimate
+        // makes these short-name classes too narrow even though their member rows are complete.
+        for body in [
+            "+WWWWWWWWWWWWWWWW",
+            "+read() WWWWWWWWWWWWWWWW",
+            "<<WWWWWWWWWWWWWWWW>>",
+        ] {
+            let ir = parse(&format!("classDiagram\n  class A {{\n    {body}\n  }}\n")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            assert!(
+                meta.has_compartments(),
+                "the tested row must reach the renderer"
+            );
+            for font_size in [10.0, 15.0, 24.0] {
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size,
+                    ..Default::default()
+                });
+                let (width, _) = compute_node_size(&ir, node, &metrics);
+                let rendered_font = font_size * if meta.stereotype.is_some() { 0.85 } else { 0.9 };
+                let minimum = 16.0 * rendered_font + 16.0;
+                assert!(
+                    width >= minimum,
+                    "{body:?} at {font_size}px needs {minimum}px including side padding, got {width}"
+                );
+            }
+        }
     }
 
     #[test]
