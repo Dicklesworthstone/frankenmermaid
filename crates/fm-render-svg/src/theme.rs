@@ -128,7 +128,7 @@ impl ThemeColors {
                 background: "#ffffff".into(),
                 text: "#1e293b".into(),
                 node_fill: "#f8fafc".into(),
-                node_stroke: "#94a3b8".into(),
+                node_stroke: "#7c8da5".into(),
                 edge: "#64748b".into(),
                 cluster_fill: "#f1f5f9".into(),
                 cluster_stroke: "#cbd5e1".into(),
@@ -159,19 +159,21 @@ impl ThemeColors {
                 background: "#0f172a".into(),
                 text: "#f8fafc".into(),
                 node_fill: "#1e293b".into(),
-                node_stroke: "#334155".into(),
+                node_stroke: "#64748b".into(),
                 edge: "#94a3b8".into(),
                 cluster_fill: "rgba(30,41,59,0.6)".into(),
                 cluster_stroke: "#475569".into(),
+                // Keep each accent in the same hue family as the default palette so a
+                // mindmap branch or shape role keeps its identity when the theme changes.
                 accents: [
+                    "#818cf8".into(), // Indigo
                     "#38bdf8".into(), // Sky
-                    "#34d399".into(), // Emerald
+                    "#2dd4bf".into(), // Teal
                     "#a78bfa".into(), // Violet
                     "#fbbf24".into(), // Amber
-                    "#fb7185".into(), // Rose
-                    "#2dd4bf".into(), // Teal
-                    "#818cf8".into(), // Indigo
                     "#f472b6".into(), // Pink
+                    "#34d399".into(), // Emerald
+                    "#fb7185".into(), // Rose
                 ],
             },
 
@@ -592,10 +594,7 @@ svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
 "#,
         );
         css.push_str(
-            r".fm-node.fm-node-shape-note :where(path,rect){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill)))}
-.fm-node.fm-node-shape-cloud :where(path){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,var(--fm-accent-2) 15%,var(--fm-node-fill)))}
-.fm-node.fm-node-shape-cylinder :where(path){fill:var(--fm-node-fill);fill:var(--fm-mindmap-fill,color-mix(in srgb,var(--fm-accent-1) 12%,var(--fm-node-fill)))}
-.fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{stroke-width:1.8}
+            r".fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{stroke-width:1.8}
 .fm-edge{fill:none;stroke:var(--fm-edge-color);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}
 .fm-edge:hover{stroke:var(--fm-accent-1);stroke-width:2.25;opacity:1}
 .fm-edge-solid{stroke-dasharray:none}
@@ -779,6 +778,66 @@ mod tests {
                 contrast_ratio(&colors.edge, background) >= 3.0,
                 "connectors must remain distinguishable on {background}"
             );
+            assert!(
+                contrast_ratio(&colors.node_stroke, background) >= 3.0,
+                "node outlines must remain distinguishable on {background}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_shape_palettes_keep_text_and_outlines_readable() {
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let colors = ThemeColors::from_preset(preset);
+            assert!(contrast_ratio(&colors.node_stroke, &colors.node_fill) >= 3.0);
+            let mut fills = std::collections::BTreeSet::new();
+            for shape in [
+                fm_core::NodeShape::Diamond,
+                fm_core::NodeShape::Stadium,
+                fm_core::NodeShape::Cylinder,
+                fm_core::NodeShape::Cloud,
+            ] {
+                let style = fm_core::semantic_shape_style(
+                    fm_core::DiagramType::Flowchart,
+                    shape,
+                    &colors.node_fill,
+                    &colors.node_stroke,
+                    &colors.text,
+                    &colors.accents,
+                )
+                .expect("default palettes must support semantic shape colors");
+                assert_ne!(style.fill, colors.node_fill);
+                assert!(
+                    contrast_ratio(&colors.text, &style.fill) >= 4.5,
+                    "{preset:?} {shape:?} must retain readable labels"
+                );
+                assert!(
+                    contrast_ratio(&style.stroke, &style.fill) >= 3.0,
+                    "{preset:?} {shape:?} must retain a visible outline"
+                );
+                fills.insert(style.fill);
+            }
+            assert_eq!(fills.len(), 4, "shape roles must have distinct surfaces");
+        }
+    }
+
+    #[test]
+    fn switching_to_dark_preserves_branch_and_shape_role_hues() {
+        let light = ThemeColors::default();
+        let dark = ThemeColors::from_preset(ThemePreset::Dark);
+        for (index, (light_accent, dark_accent)) in
+            light.accents.iter().zip(&dark.accents).enumerate()
+        {
+            let hue_difference = (hex_to_hsl(light_accent).0 - hex_to_hsl(dark_accent).0).abs();
+            let hue_distance = hue_difference.min(360.0 - hue_difference);
+            assert!(
+                hue_distance <= 20.0,
+                "accent slot {index} must keep its hue family across themes"
+            );
+            assert!(
+                luminance(dark_accent) > luminance(light_accent),
+                "accent slot {index} must brighten against the dark background"
+            );
         }
     }
 
@@ -845,7 +904,7 @@ mod tests {
                 assert!(rule.contains("--fm-node-hover-accent:"));
                 assert!(!rule.contains("--fm-node-accent:"));
             }
-            assert!(css.contains(".fm-node.fm-node-shape-cylinder"));
+            assert!(!css.contains("color-mix("));
         }
     }
 
@@ -1031,7 +1090,7 @@ mod tests {
         assert!(style.contains(".fm-edge"));
         assert!(style.contains(".fm-cluster"));
         assert!(style.contains(".fm-node-accent-1"));
-        assert!(style.contains(".fm-node.fm-node-shape-note"));
+        assert!(style.contains(".fm-node.fm-node-shape-star"));
     }
 
     #[test]

@@ -475,6 +475,10 @@ pub(crate) fn describe_edge_labels(
 }
 
 /// Generate accessibility CSS with media query support.
+///
+/// Semantic shapes carry local paint variables, so high contrast must reset those as well as
+/// the root palette. Keep the text rule at normal priority so author classDef and inline colors
+/// retain precedence over the default presentation attributes.
 #[must_use]
 pub fn accessibility_css() -> &'static str {
     r"
@@ -487,6 +491,11 @@ pub fn accessibility_css() -> &'static str {
     --fm-node-stroke: #000000 !important;
     --fm-edge-color: #000000 !important;
   }
+  .fm-node-semantic {
+    --fm-node-fill: #ffffff !important;
+    --fm-node-stroke: #000000 !important;
+  }
+  .fm-node-semantic text { fill: #000000; }
   .fm-node { stroke-width: 2px !important; }
   .fm-edge { stroke-width: 2px !important; }
 }

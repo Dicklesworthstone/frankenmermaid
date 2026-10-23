@@ -420,6 +420,7 @@ struct RuntimeInitConfig {
     shadows: Option<bool>,
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
+    semantic_colors: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
     node_gradients: Option<bool>,
@@ -439,6 +440,7 @@ impl RuntimeInitConfig {
             rounded_corners: self.rounded_corners,
             embed_theme_css: self.embed_theme_css,
             theme: self.theme.clone(),
+            semantic_colors: self.semantic_colors,
             enable_links: self.enable_links,
             link_mode: self.link_mode.clone(),
             node_gradients: self.node_gradients,
@@ -469,6 +471,9 @@ impl RuntimeInitConfig {
         }
         if self.svg.theme.is_some() {
             merged.theme = self.svg.theme.clone();
+        }
+        if self.svg.semantic_colors.is_some() {
+            merged.semantic_colors = self.svg.semantic_colors;
         }
         if self.svg.enable_links.is_some() {
             merged.enable_links = self.svg.enable_links;
@@ -503,6 +508,7 @@ struct SvgConfigOverrides {
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
     theme: Option<String>,
+    semantic_colors: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
     node_gradients: Option<bool>,
@@ -1154,6 +1160,9 @@ fn merge_svg_config(
     if let Some(value) = overrides.preserve_labels {
         merged.preserve_labels = value;
     }
+    if let Some(value) = overrides.semantic_colors {
+        merged.semantic_colors = value;
+    }
     if let Some(value) = overrides.detail_tier.as_deref() {
         merged.detail_tier = match value.trim().to_ascii_lowercase().as_str() {
             "auto" => fm_core::MermaidTier::Auto,
@@ -1268,6 +1277,7 @@ fn apply_canvas_theme_preset(
     canvas.cluster_stroke = colors.cluster_stroke;
     canvas.label_color = colors.text;
     canvas.accents = colors.accents;
+    canvas.semantic_colors = matches!(preset, ThemePreset::Default | ThemePreset::Dark);
     canvas
 }
 
@@ -1278,6 +1288,8 @@ fn align_canvas_typography_with_svg(
     canvas.font_family.clone_from(&svg.font_family);
     canvas.font_size = f64::from(svg.font_size);
     canvas.line_height = f64::from(svg.line_height);
+    canvas.semantic_colors =
+        svg.semantic_colors && matches!(svg.theme, ThemePreset::Default | ThemePreset::Dark);
     // The gantt today date rides along with the typography rather than being plumbed separately,
     // because the requirement is the same one: the two backends must not disagree. A canvas preview
     // that drew a today line on a different day from the SVG export -- or drew none while the export
@@ -2690,7 +2702,10 @@ impl Diagram {
             ..SvgConfigOverrides::default()
         };
         self.svg_config = merge_svg_config(&self.svg_config, &overrides, None).map_err(js_error)?;
-        self.canvas_config = apply_canvas_theme_preset(self.canvas_config.clone(), preset);
+        self.canvas_config = align_canvas_typography_with_svg(
+            apply_canvas_theme_preset(self.canvas_config.clone(), preset),
+            &self.svg_config,
+        );
         self.session.set_render_config(self.canvas_config.clone());
         Ok(())
     }
@@ -3402,13 +3417,49 @@ mod tests {
         let themed = apply_canvas_theme_preset(base, ThemePreset::Dark);
 
         assert_eq!(themed.node_fill, "#1e293b");
-        assert_eq!(themed.node_stroke, "#334155");
+        assert_eq!(themed.node_stroke, "#64748b");
         assert_eq!(themed.edge_stroke, "#94a3b8");
         assert_eq!(themed.label_color, "#f8fafc");
         assert_eq!(
             themed.accents,
             fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).accents
         );
+    }
+
+    #[test]
+    fn semantic_colors_follow_public_options_across_theme_changes() {
+        let overrides: RuntimeInitConfig =
+            serde_json::from_str(r#"{"semanticColors":false,"svg":{"semanticColors":true}}"#)
+                .expect("public options");
+        assert_eq!(
+            overrides.effective_svg_overrides().semantic_colors,
+            Some(true)
+        );
+
+        let disabled: RuntimeInitConfig =
+            serde_json::from_str(r#"{"semanticColors":false}"#).expect("top-level option");
+        let svg = merge_svg_config(
+            &SvgRenderConfig::default(),
+            &disabled.effective_svg_overrides(),
+            None,
+        )
+        .expect("disable role colors");
+        assert!(!svg.semantic_colors);
+        for preset in [ThemePreset::Default, ThemePreset::Dark, ThemePreset::Forest] {
+            let mut themed_svg = svg.clone();
+            themed_svg.theme = preset;
+            let canvas = align_canvas_typography_with_svg(
+                apply_canvas_theme_preset(CanvasRenderConfig::default(), preset),
+                &themed_svg,
+            );
+            assert!(!canvas.semantic_colors, "opt-out must survive {preset:?}");
+            themed_svg.semantic_colors = true;
+            let canvas = align_canvas_typography_with_svg(canvas, &themed_svg);
+            assert_eq!(
+                canvas.semantic_colors,
+                matches!(preset, ThemePreset::Default | ThemePreset::Dark)
+            );
+        }
     }
 
     #[test]

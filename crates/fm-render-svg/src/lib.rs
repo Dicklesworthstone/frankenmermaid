@@ -161,6 +161,9 @@ pub struct SvgRenderConfig {
     pub root_classes: Vec<String>,
     /// Theme preset to use (default if not specified).
     pub theme: ThemePreset,
+    /// Use restrained shape-role colors in default and dark flowcharts.
+    /// Explicit theme variables, class definitions, and node styles retain precedence.
+    pub semantic_colors: bool,
     /// Whether to embed theme CSS in the SVG.
     pub embed_theme_css: bool,
     /// Whether CSS-only diagram animations should be emitted.
@@ -278,6 +281,7 @@ impl Default for SvgRenderConfig {
             rounded_corners: 8.0,
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
+            semantic_colors: true,
             embed_theme_css: true,
             animations_enabled: false,
             animation_duration_ms: 360,
@@ -1801,6 +1805,60 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
     theme
 }
 
+/// Resolve visual roles before either SVG writer chooses its serialization path. The returned
+/// colors are ordinary paints, so standalone exports do not depend on CSS color-mix support.
+fn flowchart_shape_colors(
+    ir: &MermaidDiagramIr,
+    shape: fm_core::NodeShape,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Option<fm_core::NodeShapeStyle> {
+    if !config.semantic_colors || ir.diagram_type != DiagramType::Flowchart {
+        return None;
+    }
+    let preset = ir
+        .meta
+        .theme_overrides
+        .theme
+        .as_deref()
+        .and_then(|name| name.parse::<ThemePreset>().ok())
+        .unwrap_or(config.theme);
+    if !matches!(preset, ThemePreset::Default | ThemePreset::Dark) {
+        return None;
+    }
+    let mut style = fm_core::semantic_shape_style(
+        ir.diagram_type,
+        shape,
+        &colors.node_fill,
+        &colors.node_stroke,
+        &colors.text,
+        &colors.accents,
+    )?;
+    let variables = &ir.meta.theme_overrides.theme_variables;
+    if variables
+        .get("primaryColor")
+        .and_then(|value| sanitize_svg_paint(value))
+        .is_some()
+    {
+        style.fill.clone_from(&colors.node_fill);
+    }
+    if variables
+        .get("primaryBorderColor")
+        .and_then(|value| sanitize_svg_paint(value))
+        .is_some()
+    {
+        style.stroke.clone_from(&colors.node_stroke);
+    }
+    Some(style)
+}
+
+fn semantic_node_css(colors: &fm_core::NodeShapeStyle) -> String {
+    format!(
+        "--fm-node-fill:{};--fm-node-stroke:{}",
+        colors.fill, colors.stroke
+    )
+}
+
 /// Drop one exact stylesheet range, retaining its end marker. Marker pairs deliberately sit on
 /// rule boundaries, so a CSS layout drift is a safe no-op rather than a partial declaration edit.
 fn strip_css_range(css: &mut String, start: &str, end: &str) {
@@ -1821,7 +1879,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         strip_css_range(
             css,
             ".fm-node-user-mindmap-branch-0{",
-            ".fm-node.fm-node-shape-note ",
+            ".fm-node.fm-node-shape-star ",
         );
     }
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
@@ -1834,16 +1892,12 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         ir.nodes.iter().any(|node| {
             matches!(
                 node.shape,
-                fm_core::NodeShape::Note
-                    | fm_core::NodeShape::Cloud
-                    | fm_core::NodeShape::Cylinder
-                    | fm_core::NodeShape::Star
-                    | fm_core::NodeShape::Pentagon
+                fm_core::NodeShape::Star | fm_core::NodeShape::Pentagon
             )
         })
     });
     if !has_special_shapes {
-        strip_css_range(css, ".fm-node.fm-node-shape-note ", ".fm-edge{");
+        strip_css_range(css, ".fm-node.fm-node-shape-star ", ".fm-edge{");
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -3613,15 +3667,33 @@ fn print_css(gradient_def_emitted: bool) -> String {
     };
     format!(
         "@media print {{
-  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
-    fill: #111 !important;
+  svg {{
+    --fm-bg: #fff !important;
+    --fm-node-fill: #fff !important;
+    --fm-node-stroke: #111 !important;
+    --fm-edge-color: #111 !important;
+    --fm-edge-muted: #111 !important;
+    --fm-edge-label-bg: #fff !important;
+    --fm-edge-label-text: #111 !important;
+    --fm-text-color: #111 !important;
+    background: #fff !important;
   }}
-  .fm-node path, .fm-node rect, .fm-node circle, .fm-edge {{
-    stroke: #111 !important;
+  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
+    fill: #111;
+  }}
+  .fm-edge-labeled > rect {{
+    fill: #fff !important;
+  }}
+  .fm-node path, .fm-node rect, .fm-node circle, .fm-node ellipse, .fm-node polygon, .fm-node line, .fm-edge {{
+    stroke: #111;
   }}
   .fm-cluster {{
     fill: #fff !important;
     stroke: #666 !important;
+  }}
+  .fm-node-semantic {{
+    --fm-node-fill: #fff !important;
+    --fm-node-stroke: #111 !important;
   }}{gradient_reset}
 }}"
     )
@@ -4128,7 +4200,7 @@ fn svg_geometry(
     // The tier describes the layout's decoration budget; expanding a frame to retain text must
     // not feed back into tier selection or change the font used to measure that same text.
     let detail = resolve_detail_profile(frame.viewbox_width, frame.viewbox_height, config);
-    let label_positions = resolve_preserved_edge_label_positions(ir, layout, config, detail);
+    let label_positions = resolve_graph_edge_label_positions(ir, layout, config, detail);
     if let Some(positions) = &label_positions {
         let (mut left, mut top) = (0.0_f32, 0.0_f32);
         let (mut right, mut bottom) = (frame.viewbox_width, frame.viewbox_height);
@@ -4137,8 +4209,9 @@ fn svg_geometry(
             let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
                 continue;
             };
+            let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
             let (width, height, _) =
-                edge_label_dimensions(&label.text, detail.edge_font_size, config);
+                edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
             let x = position.x + frame.offset_x;
             let y = position.y + frame.offset_y;
             left = left.min(x - width / 2.0 - 2.0);
@@ -9697,7 +9770,12 @@ fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
 /// `render_node`'s `PathBuilder::move_to(p0).line_to(p1)…close().build()`: commands join with single spaces
 /// (`M{x0} {y0} L{x1} {y1} … Z`), and coords use `AttributeValue::Number::write_value`, which is bit-for-bit
 /// identical to `PathBuilder`'s `FmtNum` (both: `n as i32` round-trip → `write_int_into` else `write_fixed2`).
-fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill: Option<&str>) {
+fn write_polygon_shape_into(
+    f: &mut String,
+    points: &[(f32, f32)],
+    shape_fill: &str,
+    special_fill: Option<&str>,
+) {
     f.push_str("<path d=\"");
     for (i, &(px, py)) in points.iter().enumerate() {
         f.push_str(if i == 0 { "M" } else { " L" });
@@ -9705,7 +9783,9 @@ fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill:
         f.push(' ');
         let _ = crate::attributes::write_number_into(f, py);
     }
-    f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
+    f.push_str(" Z\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(f, shape_fill);
+    f.push('"');
     write_special_fill_style_into(f, special_fill);
     f.push_str("/>");
 }
@@ -9719,6 +9799,7 @@ fn write_cylinder_shape_into(
     y: f32,
     w: f32,
     h: f32,
+    shape_fill: &str,
     special_fill: Option<&str>,
 ) {
     let ry = h * 0.1;
@@ -9763,7 +9844,9 @@ fn write_cylinder_shape_into(
     let _ = crate::attributes::write_number_into(f, right_x);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, top_y);
-    f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    f.push_str("\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(f, shape_fill);
+    f.push('"');
     write_special_fill_style_into(f, special_fill);
     f.push_str("/>");
 }
@@ -9879,6 +9962,7 @@ fn build_common_node_fragment<const A11Y: bool>(
     user_classes: &str,
     shape: fm_core::NodeShape,
     special_fill: Option<&str>,
+    semantic_colors: Option<&fm_core::NodeShapeStyle>,
 ) -> String {
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
@@ -9902,6 +9986,7 @@ fn build_common_node_fragment<const A11Y: bool>(
         user_classes,
         shape,
         special_fill,
+        semantic_colors,
     );
     f
 }
@@ -9928,8 +10013,14 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     user_classes: &str,
     shape: fm_core::NodeShape,
     special_fill: Option<&str>,
+    semantic_colors: Option<&fm_core::NodeShapeStyle>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
+    let shape_fill = if semantic_colors.is_some() {
+        "var(--fm-node-fill)"
+    } else {
+        "url(#fm-node-gradient)"
+    };
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
@@ -9942,11 +10033,18 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     let _ = crate::attributes::write_uint_into(f, accent as u64);
     f.push(' ');
     f.push_str(node_shape_css_class(shape));
+    if semantic_colors.is_some() {
+        f.push_str(" fm-node-semantic");
+    }
     // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
     // empty for the overwhelmingly common no-class node. Matches the slow path's ` fm-node-user-…` tail.
     f.push_str(user_classes);
     f.push_str("\" data-id=\"");
     let _ = write_escaped_attr(f, node_id);
+    if let Some(colors) = semantic_colors {
+        f.push_str("\" style=\"");
+        let _ = write_escaped_attr(f, &semantic_node_css(colors));
+    }
     // The a11y attributes appear in the same insertion order `render_node`'s slow path builds them
     // (`aria_labels` -> role + aria-label, then `keyboard_nav` -> tabindex). `A11Y` is const, so the
     // full variant compiles to the same straight-line pushes it always did, and the lean variant compiles
@@ -9972,7 +10070,9 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             let _ = crate::attributes::write_number_into(f, y + h / 2.0);
             f.push_str("\" r=\"");
             let _ = crate::attributes::write_number_into(f, w.min(h) / 2.0);
-            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(f, shape_fill);
+            f.push('"');
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
         }
@@ -9984,6 +10084,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             write_polygon_shape_into(
                 f,
                 &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10000,11 +10101,12 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + inset, y + h),
                     (x, cy),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
         fm_core::NodeShape::Cylinder => {
-            write_cylinder_shape_into(f, x, y, w, h, special_fill);
+            write_cylinder_shape_into(f, x, y, w, h, shape_fill, special_fill);
         }
         fm_core::NodeShape::Trapezoid => {
             let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
@@ -10016,6 +10118,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10029,6 +10132,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - inset, y + h),
                     (x + inset, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10042,6 +10146,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - inset, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10055,6 +10160,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w, y + h),
                     (x + inset, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10070,6 +10176,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - flag, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -10085,7 +10192,9 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             let _ = crate::attributes::write_number_into(f, h);
             f.push_str("\" rx=\"");
             let _ = crate::attributes::write_number_into(f, rx);
-            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(f, shape_fill);
+            f.push('"');
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
         }
@@ -10417,6 +10526,7 @@ fn render_node_into(
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
@@ -10945,6 +11055,7 @@ fn render_node_into(
             user_classes,
             shape,
             common_fragment_special_fill(node),
+            semantic_colors.as_ref(),
         );
         return;
     }
@@ -11004,6 +11115,18 @@ fn render_node(
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
+    let flowchart_colors = semantic_colors.as_ref().map(|style| {
+        let mut palette = colors.clone();
+        palette.node_fill = if config.embed_theme_css {
+            String::from("var(--fm-node-fill)")
+        } else {
+            style.fill.clone()
+        };
+        palette.node_stroke.clone_from(&style.stroke);
+        palette
+    });
+    let colors = flowchart_colors.as_ref().unwrap_or(colors);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
@@ -11153,6 +11276,7 @@ fn render_node(
             user_classes,
             shape,
             common_fragment_special_fill(node),
+            semantic_colors.as_ref(),
         ));
     }
 
@@ -11163,6 +11287,9 @@ fn render_node(
         .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
         .data("id", node_id);
+    if semantic_colors.is_some() {
+        group = group.class("fm-node-semantic");
+    }
     if !config.embed_theme_css && mindmap_role.is_some_and(|role| role.is_root) {
         // Inheritance lets author class/inline font weights override the root's emphasis.
         group = group.attr("font-weight", "600");
@@ -11171,11 +11298,19 @@ fn render_node(
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
         group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());
     }
+    let mut group_style = semantic_colors
+        .as_ref()
+        .filter(|_| config.embed_theme_css)
+        .map(semantic_node_css)
+        .unwrap_or_default();
     if config.animations_enabled {
-        group = group.attr(
-            "style",
-            &animation_style_attr(node_animation_order(node_box)),
-        );
+        if !group_style.is_empty() {
+            group_style.push(';');
+        }
+        group_style.push_str(&animation_style_attr(node_animation_order(node_box)));
+    }
+    if !group_style.is_empty() {
+        group = group.attr("style", &group_style);
     }
     if let Some(icon) = node_icon {
         group = group.class("fm-node-has-icon");
@@ -11407,10 +11542,10 @@ fn render_node(
             .y(y)
             .width(w)
             .height(h)
+            .rx(w.min(h) / 2.0)
             .fill(&colors.node_fill)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
-            .rx(w.min(h) / 2.0),
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
 
         NodeShape::Diamond => {
             let path = PathBuilder::new()
@@ -11458,6 +11593,7 @@ fn render_node(
                 } else if shape == NodeShape::DoubleCircle
                     && config.node_gradients
                     && mindmap_role.is_none()
+                    && semantic_colors.is_none()
                 {
                     "url(#fm-node-gradient)"
                 } else {
@@ -12448,6 +12584,7 @@ fn render_node(
 
     let shape_elem = if config.node_gradients
         && mindmap_role.is_none()
+        && semantic_colors.is_none()
         && !matches!(
             shape,
             NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar
@@ -14890,8 +15027,8 @@ struct EdgeRenderContext<'a> {
     detail: RenderDetailProfile,
     colors: &'a ThemeColors,
     accessible_node_labels: Option<&'a [&'a str]>,
-    /// Positions indexed by IR edge index, resolved once in paint order for preserved flowcharts.
-    /// Other diagrams and adaptive overviews retain their existing label placement.
+    /// Positions indexed by IR edge index, resolved once in paint order for generic graphs.
+    /// Sequence messages and chart annotations retain their specialized label placement.
     preserved_label_positions: Option<&'a [Option<fm_layout::LayoutPoint>]>,
     /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
     ///
@@ -15036,7 +15173,7 @@ fn write_common_edge_path_into(
     edge_index: i32,
     marker_end: &str,
 ) {
-    // Path `d` is pure SVG path geometry (`M/L/C/A/Z` + digits/spaces/commas/dots/minus from
+    // Path `d` is pure SVG path geometry (`M/L/Q/C/A/Z` + digits/spaces/commas/dots/minus from
     // `write_fixed2`) and can never contain an XML special (`& < > " '`), so escaping it is a no-op
     // scan. Write it raw — byte-identical, and consistent with the streaming fast path
     // (`write_common_edge_full_fragment_into`) which already emits `d` unescaped via
@@ -15357,7 +15494,12 @@ fn compute_edge_label<'a>(
     }
 }
 
-fn edge_label_dimensions(label: &str, font_size: f32, config: &SvgRenderConfig) -> (f32, f32, f32) {
+fn edge_label_dimensions(
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    collision_aware: bool,
+) -> (f32, f32, f32) {
     let line_count = label.lines().count().max(1) as f32;
     let max_chars = label
         .lines()
@@ -15368,7 +15510,7 @@ fn edge_label_dimensions(label: &str, font_size: f32, config: &SvgRenderConfig) 
     // Reserve at the base font size, which also leaves room for the smaller tier-specific edge
     // face. Counting characters alone gives WWW the same width as iii and leaves wide glyphs
     // outside both their opaque plate and the collision solver's idea of that plate.
-    let text_width = if config.preserve_labels {
+    let text_width = if collision_aware || config.preserve_labels {
         preserved_label_width(label, config.font_size, config, &config.font_metrics())
     } else {
         legacy_width
@@ -15381,19 +15523,26 @@ fn edge_label_dimensions(label: &str, font_size: f32, config: &SvgRenderConfig) 
     )
 }
 
-/// Resolve once in the same order in which ordinary edge groups are painted. Keeping earlier
-/// plates as obstacles prevents a later opaque backing box from hiding an already placed label.
-fn resolve_preserved_edge_label_positions(
+/// Resolve generic graph labels in paint order, independently of the text-preservation setting.
+/// Keeping earlier plates as obstacles prevents a later opaque backing from hiding an already
+/// placed label. Sequence messages and chart annotations retain their specialized positioning.
+fn resolve_graph_edge_label_positions(
     ir: &MermaidDiagramIr,
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
     detail: RenderDetailProfile,
 ) -> Option<Vec<Option<fm_layout::LayoutPoint>>> {
-    if !config.preserve_labels || ir.diagram_type != DiagramType::Flowchart {
+    if !detail.show_edge_labels
+        || !matches!(
+            ir.diagram_type,
+            DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
+        )
+    {
         return None;
     }
     let mut positions = vec![None; ir.edges.len()];
     let mut plates = Vec::new();
+    let route_obstacles = graph_edge_label_route_obstacles(ir, layout);
     for path in &layout.edges {
         if path.bundled || path.points.len() < 2 || !detail.show_edge_labels {
             continue;
@@ -15407,7 +15556,19 @@ fn resolve_preserved_edge_label_positions(
         let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
             continue;
         };
-        let (width, height, _) = edge_label_dimensions(&label.text, detail.edge_font_size, config);
+        let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
+        let (width, height, _) =
+            edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+        let foreign_routes: Vec<_> = route_obstacles
+            .iter()
+            .filter(|(edge_index, obstacle)| {
+                *edge_index != path.edge_index
+                    && !matches!(obstacle, EdgeLabelObstacle::Segment(from, to)
+                        if path.points.windows(2).any(|pair|
+                            edge_label_routes_share_line(pair[0], pair[1], *from, *to)))
+            })
+            .map(|(_, obstacle)| *obstacle)
+            .collect();
         let position = clear_edge_label_position(
             fm_layout::edge_label_position(path),
             width,
@@ -15415,6 +15576,7 @@ fn resolve_preserved_edge_label_positions(
             layout,
             config.padding,
             &plates,
+            &foreign_routes,
         );
         positions[path.edge_index] = Some(position);
         plates.push(fm_layout::LayoutRect {
@@ -15425,6 +15587,207 @@ fn resolve_preserved_edge_label_positions(
         });
     }
     Some(positions)
+}
+
+#[derive(Clone, Copy)]
+enum EdgeLabelObstacle {
+    Bounds(fm_layout::LayoutRect),
+    Segment(fm_layout::LayoutPoint, fm_layout::LayoutPoint),
+}
+
+type EdgeLabelInterval = Option<(f32, f32)>;
+
+/// Branches commonly share only part of a straight trunk. That centerline is already the
+/// label's own route; treating it as a foreign obstacle needlessly disconnects the label.
+fn edge_label_routes_share_line(
+    a: fm_layout::LayoutPoint,
+    b: fm_layout::LayoutPoint,
+    from: fm_layout::LayoutPoint,
+    to: fm_layout::LayoutPoint,
+) -> bool {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length_squared = dx * dx + dy * dy;
+    let cross_from = (from.x - a.x) * dy - (from.y - a.y) * dx;
+    let cross_to = (to.x - a.x) * dy - (to.y - a.y) * dx;
+    let along_from = (from.x - a.x) * dx + (from.y - a.y) * dy;
+    let along_to = (to.x - a.x) * dx + (to.y - a.y) * dy;
+    length_squared > f32::EPSILON
+        && cross_from == 0.0
+        && cross_to == 0.0
+        && along_from.min(along_to) < length_squared
+        && along_from.max(along_to) > 0.0
+}
+
+/// Clip a segment to the label's cross-axis slab before projecting its forbidden interval.
+/// Using the whole diagonal segment's bounding box would displace labels from empty space.
+fn edge_label_segment_interval(
+    from: (f32, f32),
+    to: (f32, f32),
+    cross_position: f32,
+    cross_clearance: f32,
+    along_clearance: f32,
+) -> EdgeLabelInterval {
+    let delta = to.1 - from.1;
+    let (lo, hi) = if delta.abs() <= f32::EPSILON {
+        if from.1 <= cross_position - cross_clearance || from.1 >= cross_position + cross_clearance
+        {
+            return None;
+        }
+        (0.0, 1.0)
+    } else {
+        let a = (cross_position - cross_clearance - from.1) / delta;
+        let b = (cross_position + cross_clearance - from.1) / delta;
+        let (lo, hi) = (a.min(b).max(0.0), a.max(b).min(1.0));
+        if lo > hi {
+            return None;
+        }
+        (lo, hi)
+    };
+    let a = from.0 + (to.0 - from.0) * lo;
+    let b = from.0 + (to.0 - from.0) * hi;
+    Some((a.min(b) - along_clearance, a.max(b) + along_clearance))
+}
+
+impl EdgeLabelObstacle {
+    fn exclusion_intervals(
+        self,
+        anchor: fm_layout::LayoutPoint,
+        clearance_x: f32,
+        clearance_y: f32,
+    ) -> (EdgeLabelInterval, EdgeLabelInterval) {
+        match self {
+            Self::Bounds(bounds) => {
+                let x = (
+                    bounds.x - clearance_x,
+                    bounds.x + bounds.width + clearance_x,
+                );
+                let y = (
+                    bounds.y - clearance_y,
+                    bounds.y + bounds.height + clearance_y,
+                );
+                (
+                    (y.0 < anchor.y && anchor.y < y.1).then_some(x),
+                    (x.0 < anchor.x && anchor.x < x.1).then_some(y),
+                )
+            }
+            Self::Segment(from, to) => {
+                // Include the stroke and the rounded elbow's <=1.5px departure from its route.
+                let x = clearance_x + 3.0;
+                let y = clearance_y + 3.0;
+                (
+                    edge_label_segment_interval((from.x, from.y), (to.x, to.y), anchor.y, y, x),
+                    edge_label_segment_interval((from.y, from.x), (to.y, to.x), anchor.x, x, y),
+                )
+            }
+        }
+    }
+}
+
+/// Visible foreign routes can overpaint a label even when every node and earlier plate is clear.
+/// Cache their segments once, including the actual ER glyph envelope at each endpoint. The
+/// glyph description is shared with the raster renderers and pinned against the SVG marker defs.
+fn graph_edge_label_route_obstacles(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+) -> Vec<(usize, EdgeLabelObstacle)> {
+    let mut obstacles = Vec::new();
+    for path in &layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        if path.bundled || edge.arrow == fm_core::ArrowType::Invisible || path.points.len() < 2 {
+            continue;
+        }
+        for pair in path.points.windows(2) {
+            if pair[0] != pair[1] {
+                obstacles.push((
+                    path.edge_index,
+                    EdgeLabelObstacle::Segment(pair[0], pair[1]),
+                ));
+            }
+        }
+        let Some(notation) = edge.er_notation() else {
+            continue;
+        };
+        let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+        let first = path.points[0];
+        let last = path.points[path.points.len() - 1];
+        for (endpoint, neighbor, kind, start) in [
+            (
+                first,
+                path.points.iter().copied().find(|point| *point != first),
+                left.map(|form| fm_layout::MarkerKind::er_pair(form).0),
+                true,
+            ),
+            (
+                last,
+                path.points
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|point| *point != last),
+                right.map(|form| fm_layout::MarkerKind::er_pair(form).1),
+                false,
+            ),
+        ] {
+            let (Some(neighbor), Some(glyph)) = (neighbor, kind.and_then(|kind| kind.er_glyph()))
+            else {
+                continue;
+            };
+            let direction = if start {
+                (neighbor.x - endpoint.x, neighbor.y - endpoint.y)
+            } else {
+                (endpoint.x - neighbor.x, endpoint.y - neighbor.y)
+            };
+            let length = direction.0.hypot(direction.1);
+            if !length.is_finite() || length <= f32::EPSILON {
+                continue;
+            }
+            let (dx, dy) = (direction.0 / length, direction.1 / length);
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            for x in &glyph.bars {
+                lo = lo.min(*x);
+                hi = hi.max(*x);
+            }
+            if glyph.foot {
+                lo = lo.min(-fm_layout::ErMarkerGlyph::FOOT_HALF_LENGTH);
+                hi = hi.max(fm_layout::ErMarkerGlyph::FOOT_HALF_LENGTH);
+            }
+            if let Some(x) = glyph.bubble {
+                lo = lo.min(x - fm_layout::ErMarkerGlyph::BUBBLE_RADIUS);
+                hi = hi.max(x + fm_layout::ErMarkerGlyph::BUBBLE_RADIUS);
+            }
+            let half_height = if glyph.foot || !glyph.bars.is_empty() {
+                fm_layout::ErMarkerGlyph::BAR_HALF_HEIGHT
+            } else {
+                fm_layout::ErMarkerGlyph::BUBBLE_RADIUS
+            };
+            let mut bounds = fm_layout::LayoutRect {
+                x: f32::INFINITY,
+                y: f32::INFINITY,
+                width: 0.0,
+                height: 0.0,
+            };
+            let (mut right, mut bottom) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for (x, y) in [
+                (lo, -half_height),
+                (lo, half_height),
+                (hi, -half_height),
+                (hi, half_height),
+            ] {
+                let (x, y) = (endpoint.x + dx * x - dy * y, endpoint.y + dy * x + dx * y);
+                bounds.x = bounds.x.min(x);
+                bounds.y = bounds.y.min(y);
+                right = right.max(x);
+                bottom = bottom.max(y);
+            }
+            bounds.width = right - bounds.x;
+            bounds.height = bottom - bounds.y;
+            obstacles.push((path.edge_index, EdgeLabelObstacle::Bounds(bounds)));
+        }
+    }
+    obstacles
 }
 
 /// The endpoints of the connected forbidden interval containing `position`. Merging projections
@@ -15449,7 +15812,7 @@ fn edge_label_exclusion_interval(mut intervals: Vec<(f32, f32)>, position: f32) 
         .unwrap_or((position, position))
 }
 
-/// Keep the padded label box clear of nodes and earlier plates, starting at the routed midpoint.
+/// Keep the padded label clear of nodes, earlier plates and foreign routes, starting at its midpoint.
 /// Project into the frame before testing collisions, including for an otherwise clear label.
 /// Prefer the nearest free +/- X/Y position inside that frame. If none fits, retain the nearest
 /// clear outside position; `svg_geometry` includes it in the exported frame.
@@ -15460,6 +15823,7 @@ fn clear_edge_label_position(
     layout: &DiagramLayout,
     padding: f32,
     placed_labels: &[fm_layout::LayoutRect],
+    foreign_routes: &[EdgeLabelObstacle],
 ) -> fm_layout::LayoutPoint {
     let half_width = width / 2.0;
     let half_height = height / 2.0;
@@ -15486,33 +15850,30 @@ fn clear_edge_label_position(
         layout
             .nodes
             .iter()
-            .map(|node| &node.bounds)
-            .chain(placed_labels)
+            .map(|node| EdgeLabelObstacle::Bounds(node.bounds))
+            .chain(
+                layout
+                    .extensions
+                    .state_notes
+                    .iter()
+                    .map(|note| EdgeLabelObstacle::Bounds(note.bounds)),
+            )
+            .chain(placed_labels.iter().copied().map(EdgeLabelObstacle::Bounds))
+            .chain(foreign_routes.iter().copied())
     };
-    let overlaps_x = |bounds: &fm_layout::LayoutRect| {
-        anchor.x > bounds.x - clearance_x && anchor.x < bounds.x + bounds.width + clearance_x
-    };
-    let overlaps_y = |bounds: &fm_layout::LayoutRect| {
-        anchor.y > bounds.y - clearance_y && anchor.y < bounds.y + bounds.height + clearance_y
-    };
-    if !obstacles().any(|bounds| overlaps_x(bounds) && overlaps_y(bounds)) {
+    if !obstacles().any(|obstacle| {
+        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
+        x.is_some_and(|(lo, hi)| lo < anchor.x && anchor.x < hi)
+            && y.is_some_and(|(lo, hi)| lo < anchor.y && anchor.y < hi)
+    }) {
         return anchor;
     }
     let mut x_intervals = Vec::new();
     let mut y_intervals = Vec::new();
-    for bounds in obstacles() {
-        if overlaps_y(bounds) {
-            x_intervals.push((
-                bounds.x - clearance_x,
-                bounds.x + bounds.width + clearance_x,
-            ));
-        }
-        if overlaps_x(bounds) {
-            y_intervals.push((
-                bounds.y - clearance_y,
-                bounds.y + bounds.height + clearance_y,
-            ));
-        }
+    for obstacle in obstacles() {
+        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
+        x_intervals.extend(x);
+        y_intervals.extend(y);
     }
     let (left, right) = edge_label_exclusion_interval(x_intervals, anchor.x);
     let (top, bottom) = edge_label_exclusion_interval(y_intervals, anchor.y);
@@ -15581,7 +15942,8 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     use crate::attributes::{
         AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
     };
-    let (label_width, label_height, _) = edge_label_dimensions(label_str, label_font_size, config);
+    let (label_width, label_height, _) =
+        edge_label_dimensions(label_str, label_font_size, config, centered);
     let start_y = if centered {
         ly
     } else {
@@ -16201,9 +16563,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         // Add background rect for label
         let label_text = label_text.as_ref();
         let label_font_size = detail.edge_font_size;
-        let (label_width, label_height, total_text_height) =
-            edge_label_dimensions(label_text, label_font_size, config);
         let centered = preserved_label_positions.is_some();
+        let (label_width, label_height, total_text_height) =
+            edge_label_dimensions(label_text, label_font_size, config, centered);
         let start_y =
             ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
 
@@ -17565,6 +17927,327 @@ mod tests {
         (ir, layout)
     }
 
+    fn edge_label_test_number(element: &str, name: &str) -> f32 {
+        element
+            .split_once(&format!("{name}=\""))
+            .expect("label geometry attribute")
+            .1
+            .split_once('"')
+            .expect("attribute end")
+            .0
+            .parse()
+            .expect("finite label geometry")
+    }
+
+    fn edge_label_test_plate(fragment: &str) -> fm_layout::LayoutRect {
+        let rect = fragment
+            .split_once("<rect ")
+            .expect("label backing plate")
+            .1
+            .split_once("/>")
+            .expect("plate end")
+            .0;
+        fm_layout::LayoutRect {
+            x: edge_label_test_number(rect, "x"),
+            y: edge_label_test_number(rect, "y"),
+            width: edge_label_test_number(rect, "width"),
+            height: edge_label_test_number(rect, "height"),
+        }
+    }
+
+    fn edge_label_test_assert_clear(
+        plate: &fm_layout::LayoutRect,
+        obstacle: &fm_layout::LayoutRect,
+    ) {
+        assert!(
+            plate.x + plate.width <= obstacle.x - 1.98
+                || plate.x >= obstacle.x + obstacle.width + 1.98
+                || plate.y + plate.height <= obstacle.y - 1.98
+                || plate.y >= obstacle.y + obstacle.height + 1.98,
+            "label plate {plate:?} intersects obstacle {obstacle:?}"
+        );
+    }
+
+    #[test]
+    fn default_graph_labels_clear_nodes_and_center_text_in_both_svg_writers() {
+        let colors = ThemeColors::default();
+        for family in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::State,
+            DiagramType::Er,
+        ] {
+            for preserve_labels in [false, true] {
+                for large_font in [false, true] {
+                    for arrow in [ArrowType::Arrow, ArrowType::DottedArrow] {
+                        let (mut ir, mut layout) = edge_label_test_scene();
+                        ir.diagram_type = family;
+                        ir.edges[1].arrow = arrow;
+                        ir.labels[ir.edges[1].label.unwrap().0].text =
+                            "WW wide relation".to_string();
+                        layout.nodes[3] = edge_label_test_node(3, 350.0, 88.0, 60.0, 24.0);
+                        let mut config = SvgRenderConfig {
+                            preserve_labels,
+                            ..Default::default()
+                        };
+                        if large_font {
+                            config.font_size = 30.0;
+                            config.avg_char_width = 18.0;
+                        }
+                        let geometry = svg_geometry(&ir, &layout, &config);
+                        let positions = geometry
+                            .label_positions
+                            .as_ref()
+                            .expect("default graph label placement");
+                        let position = positions[1].expect("labeled edge position");
+                        assert_eq!(position.x, 380.0, "retain the nearest route anchor");
+                        assert_ne!(position.y, 100.0, "the original anchor is obstructed");
+                        let context = EdgeRenderContext {
+                            ir: &ir,
+                            offset_x: geometry.frame.offset_x,
+                            offset_y: geometry.frame.offset_y,
+                            config: &config,
+                            detail: geometry.detail,
+                            colors: &colors,
+                            accessible_node_labels: None,
+                            preserved_label_positions: Some(positions),
+                            sankey_widest_flow: None,
+                        };
+                        let mut streamed = String::new();
+                        render_edge_into(&mut streamed, &layout.edges[1], &context);
+                        let element = render_edge(&layout.edges[1], &context).render();
+                        assert_eq!(streamed, element, "{family:?}/{preserve_labels}/{arrow:?}");
+                        let mut plate = edge_label_test_plate(&streamed);
+                        assert!(plate.x >= 1.98 && plate.y >= 1.98);
+                        assert!(plate.x + plate.width <= geometry.frame.viewbox_width - 1.98);
+                        assert!(plate.y + plate.height <= geometry.frame.viewbox_height - 1.98);
+                        let text = streamed
+                            .split_once("<text ")
+                            .expect("label text")
+                            .1
+                            .split_once('>')
+                            .expect("text attributes")
+                            .0;
+                        assert!(text.contains("dominant-baseline=\"central\""));
+                        assert!(text.contains("style=\"font-size:"));
+                        assert!(
+                            (edge_label_test_number(text, "x") - plate.x - plate.width / 2.0).abs()
+                                < 0.02
+                        );
+                        assert!(
+                            (edge_label_test_number(text, "y") - plate.y - plate.height / 2.0)
+                                .abs()
+                                < 0.02
+                        );
+                        assert!(
+                            (edge_label_test_number(text, "font-size")
+                                - geometry.detail.edge_font_size)
+                                .abs()
+                                < 0.01
+                        );
+                        plate.x -= geometry.frame.offset_x;
+                        plate.y -= geometry.frame.offset_y;
+                        for node in &layout.nodes {
+                            edge_label_test_assert_clear(&plate, &node.bounds);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_graph_labels_measure_the_drawn_truncated_text() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        let label_id = ir.edges[1].label.unwrap();
+        ir.labels[label_id.0].text = "W".repeat(120);
+        layout.nodes.clear();
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Normal,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        assert_eq!(geometry.frame.viewbox_width, 700.0 + config.padding * 2.0);
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        let fragment = svg.split_once("id=\"fm-edge-1\"").unwrap().1;
+        let plate = edge_label_test_plate(fragment);
+        assert!(plate.width < 700.0, "only the visible text reserves space");
+        assert!(fragment.contains(&format!(">{}…</text>", "W".repeat(39))));
+        let full = svg_geometry(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                preserve_labels: true,
+                ..config
+            },
+        );
+        assert!(full.frame.viewbox_width > geometry.frame.viewbox_width * 2.0);
+    }
+
+    #[test]
+    fn default_state_relationship_labels_clear_note_boxes() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        ir.diagram_type = DiagramType::State;
+        layout.nodes.clear();
+        let note_bounds = fm_layout::LayoutRect {
+            x: 300.0,
+            y: 80.0,
+            width: 160.0,
+            height: 40.0,
+        };
+        layout
+            .extensions
+            .state_notes
+            .push(fm_layout::LayoutStateNote {
+                node_index: usize::MAX,
+                side: fm_layout::StateNoteSide::Right,
+                text: "State annotation".to_string(),
+                bounds: note_bounds,
+                leader_start: fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+                leader_end: fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+            });
+        let config = SvgRenderConfig::default();
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        let fragment = svg.split_once("id=\"fm-edge-1\"").unwrap().1;
+        let mut plate = edge_label_test_plate(fragment);
+        plate.x -= geometry.frame.offset_x;
+        plate.y -= geometry.frame.offset_y;
+        edge_label_test_assert_clear(&plate, &note_bounds);
+    }
+
+    #[test]
+    fn er_schema_relationship_plates_clear_every_entity_with_default_settings() {
+        let ir = fm_parser::parse(concat!(
+            "erDiagram\n",
+            "CUSTOMER ||--o{ ORDER : places\n",
+            "ORDER ||--|{ LINE_ITEM : contains\n",
+            "PRODUCT ||--o{ LINE_ITEM : includes\n",
+            "CUSTOMER {\n int id PK\n string name\n string email\n}\n",
+            "ORDER {\n int id PK\n int customer_id FK\n date placed_at\n}\n",
+            "LINE_ITEM {\n int id PK\n int order_id FK\n int product_id FK\n decimal price\n}\n",
+            "PRODUCT {\n int id PK\n string title\n decimal price\n}\n",
+        ))
+        .ir;
+        assert_eq!(ir.edges.len(), 3);
+        for preserve_labels in [false, true] {
+            let config = SvgRenderConfig {
+                preserve_labels,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let frame = svg_frame(&ir, &layout, &config);
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let mut plates = Vec::new();
+            for edge in &layout.edges {
+                let fragment = svg
+                    .split_once(&format!("id=\"fm-edge-{}\"", edge.edge_index))
+                    .expect("relationship group")
+                    .1;
+                let mut plate = edge_label_test_plate(fragment);
+                assert!(plate.x >= 1.98 && plate.y >= 1.98);
+                assert!(plate.x + plate.width <= frame.viewbox_width - 1.98);
+                assert!(plate.y + plate.height <= frame.viewbox_height - 1.98);
+                plate.x -= frame.offset_x;
+                plate.y -= frame.offset_y;
+                for bounds in layout.nodes.iter().map(|node| &node.bounds).chain(&plates) {
+                    edge_label_test_assert_clear(&plate, bounds);
+                }
+                if edge.edge_index == 1 {
+                    // "contains" used to sit under the subsequently painted PRODUCT route
+                    // and its zero-or-more bubble. Check the emitted plate against sampled
+                    // foreign geometry, not the placement solver's own obstacle envelopes.
+                    let foreign = layout
+                        .edges
+                        .iter()
+                        .find(|path| path.edge_index == 2)
+                        .unwrap();
+                    for pair in foreign.points.windows(2) {
+                        for step in 0..=32 {
+                            let t = step as f32 / 32.0;
+                            let point = fm_layout::LayoutRect {
+                                x: pair[0].x + (pair[1].x - pair[0].x) * t,
+                                y: pair[0].y + (pair[1].y - pair[0].y) * t,
+                                width: 0.0,
+                                height: 0.0,
+                            };
+                            edge_label_test_assert_clear(&plate, &point);
+                        }
+                    }
+                    let end = foreign.points[foreign.points.len() - 1];
+                    let previous = foreign
+                        .points
+                        .iter()
+                        .rev()
+                        .find(|point| **point != end)
+                        .unwrap();
+                    let (dx, dy) = (end.x - previous.x, end.y - previous.y);
+                    let length = dx.hypot(dy);
+                    // The SVG zero-or-more end glyph has a radius-6 circle 30px behind the port.
+                    let bubble = fm_layout::LayoutRect {
+                        x: end.x - 30.0 * dx / length - 6.0,
+                        y: end.y - 30.0 * dy / length - 6.0,
+                        width: 12.0,
+                        height: 12.0,
+                    };
+                    edge_label_test_assert_clear(&plate, &bubble);
+                    let anchor = fm_layout::edge_label_position(edge);
+                    assert!((plate.x + plate.width / 2.0 - anchor.x).abs() < plate.width / 2.0);
+                }
+                plates.push(plate);
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_diagonal_routes_do_not_reserve_their_whole_bounding_box() {
+        let layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        let routes = [EdgeLabelObstacle::Segment(
+            fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+            fm_layout::LayoutPoint { x: 100.0, y: 100.0 },
+        )];
+        let clear = fm_layout::LayoutPoint { x: 10.0, y: 90.0 };
+        assert_eq!(
+            clear_edge_label_position(clear, 20.0, 20.0, &layout, 24.0, &[], &routes),
+            clear,
+        );
+        let crossing = fm_layout::LayoutPoint { x: 50.0, y: 50.0 };
+        let moved = clear_edge_label_position(crossing, 20.0, 20.0, &layout, 24.0, &[], &routes);
+        assert_ne!(moved, crossing);
+        assert!((moved.x - moved.y).abs() >= 29.99);
+    }
+
+    #[test]
+    fn partially_shared_branch_trunks_keep_labels_on_their_own_route() {
+        let (ir, mut layout) = edge_label_test_scene();
+        layout.nodes.clear();
+        layout.edges[0].points = [
+            fm_layout::LayoutPoint { x: 200.0, y: 100.0 },
+            fm_layout::LayoutPoint { x: 200.0, y: 250.0 },
+            fm_layout::LayoutPoint { x: 300.0, y: 250.0 },
+        ]
+        .into_iter()
+        .collect();
+        layout.edges[1].points = [
+            fm_layout::LayoutPoint { x: 200.0, y: 100.0 },
+            fm_layout::LayoutPoint { x: 200.0, y: 300.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = SvgRenderConfig::default();
+        let geometry = svg_geometry(&ir, &layout, &config);
+        assert_eq!(
+            geometry.label_positions.unwrap()[1],
+            Some(fm_layout::LayoutPoint { x: 200.0, y: 200.0 }),
+        );
+    }
+
     #[test]
     fn label_clearance_merges_obstacle_chains_and_respects_the_existing_frame() {
         assert_eq!(
@@ -17576,7 +18259,7 @@ mod tests {
             .nodes
             .push(edge_label_test_node(0, 0.0, 0.0, 100.0, 70.0));
         let anchor = fm_layout::LayoutPoint { x: 50.0, y: 65.0 };
-        let clear = clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]);
+        let clear = clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]);
         assert_eq!(clear, fm_layout::LayoutPoint { x: 50.0, y: 82.0 });
         assert_eq!(
             clear.y - 10.0 - 70.0,
@@ -17589,12 +18272,12 @@ mod tests {
         // grows around this position instead of leaving the label underneath an opaque node.
         layout.nodes[0].bounds.height = 100.0;
         assert_eq!(
-            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]),
             fm_layout::LayoutPoint { x: 50.0, y: 112.0 }
         );
         layout.nodes.clear();
         assert_eq!(
-            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[]),
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]),
             anchor
         );
     }
@@ -17618,6 +18301,7 @@ mod tests {
                     20.0,
                     &layout,
                     0.0,
+                    &[],
                     &[],
                 ),
                 fm_layout::LayoutPoint {
@@ -17646,6 +18330,7 @@ mod tests {
             &ir.labels[label_id.0].text,
             geometry.detail.edge_font_size,
             &config,
+            true,
         );
         assert!(width >= 80.0 * config.font_size + 28.0 - 0.01);
         assert!(geometry.frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
@@ -17672,16 +18357,16 @@ mod tests {
             preserve_labels: true,
             ..Default::default()
         };
-        let (wide, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 12.75, &config);
-        let (narrow, _, _) = edge_label_dimensions("iiiiiiiiiiiiiiiiiiii", 12.75, &config);
+        let (wide, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 12.75, &config, true);
+        let (narrow, _, _) = edge_label_dimensions("iiiiiiiiiiiiiiiiiiii", 12.75, &config, true);
         assert!(wide > narrow * 1.5);
         config.font_size = 30.0;
         config.avg_char_width = 15.0;
-        let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config);
+        let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config, true);
         assert!((doubled - 28.0 - (wide - 28.0) * 2.0).abs() < 0.01);
         assert_eq!(
-            edge_label_dimensions("e\u{301}", 25.5, &config),
-            edge_label_dimensions("é", 25.5, &config),
+            edge_label_dimensions("e\u{301}", 25.5, &config, true),
+            edge_label_dimensions("é", 25.5, &config, true),
             "a combining accent must not reserve another glyph advance"
         );
     }
@@ -17716,7 +18401,8 @@ mod tests {
             "the nearest clear placement is above the layout"
         );
         let label = &ir.labels[ir.edges[1].label.unwrap().0].text;
-        let (_, height, _) = edge_label_dimensions(label, geometry.detail.edge_font_size, &config);
+        let (_, height, _) =
+            edge_label_dimensions(label, geometry.detail.edge_font_size, &config, true);
         let plate_top = position.y + geometry.frame.offset_y - height / 2.0;
         assert!(plate_top >= config.padding + config.font_size + 22.0);
     }
@@ -17744,7 +18430,7 @@ mod tests {
                         };
                         let detail = resolve_detail_profile(700.0, 360.0, &config);
                         let positions =
-                            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail)
+                            resolve_graph_edge_label_positions(&ir, &layout, &config, detail)
                                 .expect("preserved positions");
                         let context = EdgeRenderContext {
                             ir: &ir,
@@ -17760,7 +18446,7 @@ mod tests {
                         let edge = &layout.edges[1];
                         let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
                         let (_, height, _) =
-                            edge_label_dimensions(label, detail.edge_font_size, &config);
+                            edge_label_dimensions(label, detail.edge_font_size, &config, true);
                         assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
                         assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
                         let mut streamed = String::new();
@@ -17806,7 +18492,7 @@ mod tests {
             if reversed {
                 layout.edges.reverse();
             }
-            let positions = resolve_preserved_edge_label_positions(&ir, &layout, &config, detail)
+            let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail)
                 .expect("preserved positions");
             let first_index = layout.edges[0].edge_index;
             let last_index = layout.edges[1].edge_index;
@@ -17844,22 +18530,19 @@ mod tests {
         let hidden = layout.edges[0].edge_index;
         let visible = layout.edges[1].edge_index;
         ir.edges[hidden].arrow = ArrowType::Invisible;
-        let positions =
-            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail).unwrap();
         assert_eq!(positions[hidden], None);
         assert_eq!(positions[visible], Some(anchor));
         ir.edges[hidden].arrow = ArrowType::Arrow;
         layout.edges[0].bundled = true;
-        let positions =
-            resolve_preserved_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail).unwrap();
         assert_eq!(positions[hidden], None);
         assert_eq!(positions[visible], Some(anchor));
     }
 
     #[test]
-    fn preserved_placement_does_not_change_sequence_or_adaptive_edge_geometry() {
+    fn graph_label_placement_does_not_change_sequence_edge_geometry() {
         for (diagram_type, preserve_labels) in [
-            (DiagramType::Flowchart, false),
             (DiagramType::Sequence, false),
             (DiagramType::Sequence, true),
         ] {
@@ -18140,67 +18823,228 @@ mod tests {
 
     #[test]
     fn node_shape_fast_fragments_match_slow_render() {
-        let config = SvgRenderConfig::default();
-        let colors = ThemeColors::default();
-        let detail = resolve_detail_profile(800.0, 600.0, &config);
         let centrality = HashMap::new();
-
-        for shape in [
-            NodeShape::Diamond,
-            NodeShape::Hexagon,
-            NodeShape::Subroutine,
-            NodeShape::Cylinder,
-            NodeShape::Trapezoid,
-            NodeShape::InvTrapezoid,
-            NodeShape::Parallelogram,
-            NodeShape::InvParallelogram,
-            NodeShape::Asymmetric,
-        ] {
-            let ir = create_ir_with_single_node("N0", shape);
-            let node_box = LayoutNodeBox {
-                node_index: 0,
-                node_id: "N0".to_string(),
-                rank: 0,
-                order: 0,
-                span: Span::default(),
-                bounds: fm_layout::LayoutRect {
-                    x: 10.0,
-                    y: 20.0,
-                    width: 140.0,
-                    height: 90.0,
-                },
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let config = SvgRenderConfig {
+                theme: preset,
+                ..SvgRenderConfig::default()
             };
+            let colors = ThemeColors::from_preset(preset);
+            let detail = resolve_detail_profile(800.0, 600.0, &config);
+            for shape in [
+                NodeShape::Diamond,
+                NodeShape::Hexagon,
+                NodeShape::Stadium,
+                NodeShape::Circle,
+                NodeShape::DoubleCircle,
+                NodeShape::Note,
+                NodeShape::Cloud,
+                NodeShape::Subroutine,
+                NodeShape::Cylinder,
+                NodeShape::HorizontalCylinder,
+                NodeShape::LinedCylinder,
+                NodeShape::DataStore,
+                NodeShape::Trapezoid,
+                NodeShape::InvTrapezoid,
+                NodeShape::Parallelogram,
+                NodeShape::InvParallelogram,
+                NodeShape::Asymmetric,
+            ] {
+                let mut ir = create_ir_with_single_node("N0", shape);
+                // Keep every supported fragment eligible for its fast path, including circles.
+                ir.labels[0].text = "Role".to_string();
+                let node_box = LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "N0".to_string(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: fm_layout::LayoutRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 140.0,
+                        height: 90.0,
+                    },
+                };
+                let mut streamed = String::new();
+                render_node_into(
+                    &mut streamed,
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                );
+                for permit_fast in [false, true] {
+                    let mut built = String::new();
+                    render_node(
+                        &node_box,
+                        &ir,
+                        0.0,
+                        0.0,
+                        &config,
+                        detail,
+                        &colors,
+                        false,
+                        &centrality,
+                        permit_fast,
+                    )
+                    .write_to_string(&mut built);
+                    assert_eq!(streamed, built, "{preset:?} {shape:?} fast={permit_fast}");
+                }
+                if let Some(role) = flowchart_shape_colors(&ir, shape, &config, &colors) {
+                    assert!(streamed.contains("fm-node-semantic"));
+                    assert!(streamed.contains(&format!("--fm-node-fill:{}", role.fill)));
+                    assert!(streamed.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+                    assert!(streamed.contains("fill=\"var(--fm-node-fill)\""));
+                }
+            }
+        }
+    }
 
-            let mut streamed = String::new();
-            render_node_into(
-                &mut streamed,
-                &node_box,
-                &ir,
-                0.0,
-                0.0,
-                &config,
-                detail,
-                &colors,
-                false,
-                &centrality,
-            );
+    #[test]
+    fn semantic_shape_exports_use_concrete_paints_and_respect_palette_opt_outs() {
+        let marker = format!("id=\"{}\"", mermaid_node_element_id("N0", 0));
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let colors = ThemeColors::from_preset(preset);
+            let config = SvgRenderConfig {
+                theme: preset,
+                embed_theme_css: false,
+                ..SvgRenderConfig::default()
+            };
+            for shape in [
+                NodeShape::Diamond,
+                NodeShape::Stadium,
+                NodeShape::Cylinder,
+                NodeShape::Cloud,
+                NodeShape::DoubleCircle,
+            ] {
+                let ir = create_ir_with_single_node("N0", shape);
+                let role = flowchart_shape_colors(&ir, shape, &config, &colors)
+                    .expect("this shape has a semantic role");
+                let svg = render_svg_with_config(&ir, &config);
+                let node = svg
+                    .split_once(&marker)
+                    .expect("rendered node")
+                    .1
+                    .split_once("</g>")
+                    .expect("node group end")
+                    .0;
+                assert!(node.contains(&format!("fill=\"{}\"", role.fill)));
+                assert!(node.contains(&format!("stroke=\"{}\"", role.stroke)));
+                assert!(!node.contains("var(--fm-node-fill)"));
+                assert!(!node.contains("url(#fm-node-gradient)"));
+                if shape == NodeShape::DoubleCircle {
+                    assert!(
+                        node.contains("fill=\"none\""),
+                        "the inner ring stays hollow"
+                    );
+                }
+            }
+        }
 
-            let mut slow = String::new();
-            render_node(
-                &node_box,
-                &ir,
-                0.0,
-                0.0,
-                &config,
-                detail,
-                &colors,
-                false,
-                &centrality,
-                false,
-            )
-            .write_to_string(&mut slow);
+        for (preset, semantic_colors, directive) in [
+            (ThemePreset::Default, false, false),
+            (ThemePreset::Mermaid, true, false),
+            (ThemePreset::Monochrome, true, true),
+            (ThemePreset::HighContrast, true, true),
+            (ThemePreset::Forest, true, false),
+        ] {
+            let mut ir = create_ir_with_single_node("N0", NodeShape::Diamond);
+            if directive {
+                ir.meta.theme_overrides.theme = Some(preset.as_str().to_owned());
+            }
+            let config = SvgRenderConfig {
+                theme: if directive {
+                    ThemePreset::Default
+                } else {
+                    preset
+                },
+                semantic_colors,
+                embed_theme_css: false,
+                node_gradients: false,
+                ..SvgRenderConfig::default()
+            };
+            let colors = ThemeColors::from_preset(preset);
+            let svg = render_svg_with_config(&ir, &config);
+            let node = svg
+                .split_once(&marker)
+                .expect("rendered node")
+                .1
+                .split_once("</g>")
+                .expect("node group end")
+                .0;
+            assert!(!node.contains("fm-node-semantic"), "{preset:?}");
+            assert!(node.contains(&format!("fill=\"{}\"", colors.node_fill)));
+            assert!(node.contains(&format!("stroke=\"{}\"", colors.node_stroke)));
+        }
+    }
 
-            assert_eq!(streamed, slow, "shape {shape:?}");
+    #[test]
+    fn semantic_shape_variables_survive_animations_and_reset_for_print_and_contrast() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Diamond);
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let marker = format!("id=\"{}\"", mermaid_node_element_id("N0", 0));
+        for animations_enabled in [false, true] {
+            let config = SvgRenderConfig {
+                theme: ThemePreset::Dark,
+                animations_enabled,
+                ..SvgRenderConfig::default()
+            };
+            let role = flowchart_shape_colors(&ir, NodeShape::Diamond, &config, &colors)
+                .expect("decision role");
+            let svg = render_svg_with_config(&ir, &config);
+            let node = svg
+                .split_once(&marker)
+                .expect("rendered node")
+                .1
+                .split_once("</g>")
+                .expect("node group end")
+                .0;
+            let opening = node.split_once('>').expect("node opening tag").0;
+            let style = opening
+                .split_once("style=\"")
+                .expect("node style")
+                .1
+                .split_once('"')
+                .expect("node style end")
+                .0;
+            assert!(style.contains(&format!("--fm-node-fill:{}", role.fill)));
+            assert!(style.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+            assert_eq!(style.contains("--fm-enter-order:"), animations_enabled);
+            assert!(node.contains("fill=\"var(--fm-node-fill)\""));
+
+            let css: String = svg
+                .split_once("<style>")
+                .expect("embedded stylesheet")
+                .1
+                .split_once("</style>")
+                .expect("stylesheet end")
+                .0
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            for (media, fill, stroke) in [
+                ("@mediaprint{", "#fff", "#111"),
+                ("@media(prefers-contrast:more){", "#ffffff", "#000000"),
+            ] {
+                let reset = css
+                    .split_once(media)
+                    .expect("accessibility media query")
+                    .1
+                    .split_once(".fm-node-semantic{")
+                    .expect("local semantic variables must reset too")
+                    .1
+                    .split_once('}')
+                    .expect("reset rule end")
+                    .0;
+                assert!(reset.contains(&format!("--fm-node-fill:{fill}!important")));
+                assert!(reset.contains(&format!("--fm-node-stroke:{stroke}!important")));
+            }
         }
     }
 
@@ -21402,6 +22246,58 @@ mod tests {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
         assert!(svg.contains("@media print"));
+    }
+
+    #[test]
+    fn print_css_resets_dark_surfaces_without_forcing_authored_text_colors() {
+        let parsed = fm_parser::parse(
+            "flowchart TD\nA{Decision} -->|Yes| B[Result]\nstyle B fill:#002233,color:#ffcc00",
+        );
+        let svg = render_svg_with_config(
+            &parsed.ir,
+            &SvgRenderConfig {
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            },
+        );
+        let print = svg
+            .split_once("@media print")
+            .expect("print rules")
+            .1
+            .split_once("</style>")
+            .expect("stylesheet end")
+            .0;
+        for property in [
+            "--fm-bg: #fff !important",
+            "--fm-edge-label-bg: #fff !important",
+            "--fm-edge-color: #111 !important",
+            "background: #fff !important",
+        ] {
+            assert!(print.contains(property), "missing print reset: {property}");
+        }
+        let text_rule = print
+            .split_once(".fm-node text")
+            .expect("print text rule")
+            .1
+            .split_once('{')
+            .expect("text declarations")
+            .1
+            .split_once('}')
+            .expect("text rule end")
+            .0;
+        assert!(text_rule.contains("fill: #111"));
+        assert!(!text_rule.contains("!important"));
+        let authored = svg
+            .split_once("id=\"fm-node-b-1\"")
+            .expect("authored node")
+            .1
+            .split_once("</g>")
+            .expect("authored group end")
+            .0;
+        assert!(
+            authored.contains("#ffcc00"),
+            "author text paint must survive"
+        );
     }
 
     /// Printing must not reproduce the node gradient (bd-ccni).

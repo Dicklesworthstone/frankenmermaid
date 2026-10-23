@@ -100,8 +100,8 @@ pub const DEFAULT_NODE_FILL_RGBA: [f32; 4] = [248.0 / 255.0, 250.0 / 255.0, 252.
 /// the same defect class as disagreeing about a declared one -- it just has nobody to report it.
 pub const DEFAULT_CLUSTER_FILL_RGBA: [f32; 4] = [241.0 / 255.0, 245.0 / 255.0, 249.0 / 255.0, 1.0];
 
-/// Theme stroke used when the author declared none: `#94a3b8`.
-pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 1.0];
+/// Theme stroke used when the author declared none: `#7c8da5`.
+pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [124.0 / 255.0, 141.0 / 255.0, 165.0 / 255.0, 1.0];
 /// Border width used when the author declared none. Matches `CanvasRenderConfig::node_stroke_width`
 /// and the value the shader previously hard-coded, so an undeclared node renders identically to
 /// before this became per-instance.
@@ -164,7 +164,7 @@ pub const QUADRANT_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
 
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
-/// Clusters use the lighter `#cbd5e1` border; ordinary nodes use `#94a3b8`.
+/// Clusters use the lighter `#cbd5e1` border; ordinary nodes use `#7c8da5`.
 /// Keep the fallback distinct so a group does not acquire a node's heavier outline.
 pub const DEFAULT_CLUSTER_STROKE_RGBA: [f32; 4] =
     [203.0 / 255.0, 213.0 / 255.0, 225.0 / 255.0, 1.0];
@@ -1865,8 +1865,11 @@ impl GpuRenderPlan {
         }
 
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
-        let mindmap_defaults = (ir.diagram_type == fm_core::DiagramType::Mindmap)
-            .then(crate::renderer::CanvasRenderConfig::default);
+        let semantic_defaults = matches!(
+            ir.diagram_type,
+            fm_core::DiagramType::Flowchart | fm_core::DiagramType::Mindmap
+        )
+        .then(crate::renderer::CanvasRenderConfig::default);
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
         // them, so this costs an unused Vec and no allocation.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
@@ -1879,7 +1882,7 @@ impl GpuRenderPlan {
             // render of the same document cannot disagree about what the author asked for. An
             // undeclared or unparsable colour falls back to the theme constant rather than to
             // whatever happens to be in the instance buffer.
-            let (declared_fill, declared_stroke) = mindmap_defaults.as_ref().map_or_else(
+            let (declared_fill, declared_stroke) = semantic_defaults.as_ref().map_or_else(
                 || crate::renderer::resolve_node_colors(ir, node.node_index),
                 |config| {
                     crate::renderer::resolve_node_colors_with_defaults(ir, node.node_index, config)
@@ -5820,6 +5823,74 @@ mod tests {
             gpu_fill[0] > 0.9 && gpu_fill[1] < 0.1 && gpu_fill[2] < 0.1,
             "the agreed colour is not the declared red: {gpu_fill:?}"
         );
+    }
+
+    #[test]
+    fn flowchart_role_paints_match_the_canvas_in_default_gpu_instances() {
+        let config = crate::CanvasRenderConfig::default();
+        for (prefix, declaration, semantic) in [
+            ("", "A{Decision}", true),
+            ("", "A([Terminal])", true),
+            ("", "A[(Storage)]", true),
+            ("", "A@{shape: cloud, label: Cloud}", true),
+            ("", "A[Process]", false),
+            ("%%{init: {'theme':'monochrome'}}%%\n", "A{Decision}", false),
+        ] {
+            for style in ["", "style A fill:#ff0000", "style A stroke:#008800"] {
+                let source = format!("{prefix}flowchart TD\n{declaration}\n{style}\n");
+                let ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.nodes.len(), 1, "the fixture must have exactly one node");
+                let layout = fm_layout::layout_diagram(&ir);
+                let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+                let instance = plan.node_instances.first().expect("planned node");
+
+                let mut context = crate::MockCanvas2dContext::new(800.0, 600.0);
+                crate::render_to_canvas(&ir, &mut context, &config);
+                let mut fill = None;
+                let mut stroke = None;
+                let mut painted_fill = None;
+                let mut painted_stroke = None;
+                for operation in context.operations() {
+                    match operation {
+                        crate::DrawOperation::SetFillStyle(color) => {
+                            fill = super::parse_paint_rgba(color);
+                        }
+                        crate::DrawOperation::SetStrokeStyle(color) => {
+                            stroke = super::parse_paint_rgba(color);
+                        }
+                        crate::DrawOperation::Fill | crate::DrawOperation::FillRect(..)
+                            if painted_fill.is_none() =>
+                        {
+                            painted_fill = fill;
+                        }
+                        crate::DrawOperation::Stroke | crate::DrawOperation::StrokeRect(..)
+                            if painted_stroke.is_none() =>
+                        {
+                            painted_stroke = stroke;
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    instance.fill,
+                    painted_fill.expect("actual shape fill"),
+                    "{source}"
+                );
+                assert_eq!(
+                    instance.stroke,
+                    painted_stroke.expect("actual shape stroke"),
+                    "{source}"
+                );
+                if style.is_empty() {
+                    assert_eq!(instance.fill != super::DEFAULT_NODE_FILL_RGBA, semantic);
+                    assert_eq!(instance.stroke != super::DEFAULT_NODE_STROKE_RGBA, semantic);
+                } else if style.contains("fill:") {
+                    assert_eq!(instance.fill, super::parse_paint_rgba("#ff0000").unwrap());
+                } else {
+                    assert_eq!(instance.stroke, super::parse_paint_rgba("#008800").unwrap());
+                }
+            }
+        }
     }
 
     /// Scene path markers carry the same UML endpoint shape that the SVG backend renders.

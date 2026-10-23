@@ -2139,6 +2139,92 @@ pub enum NodeShape {
     BlockArrowY,
 }
 
+/// Theme-derived default paints for a flowchart shape with a recognizable role.
+///
+/// Renderers apply these as fallbacks independently for each paint channel. Authored fills,
+/// borders, and theme-variable overrides take precedence; hollow shape details stay hollow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeShapeStyle {
+    pub fill: String,
+    pub stroke: String,
+}
+
+/// Differentiate decisions, terminals, storage, and annotations without coloring arbitrary IDs.
+///
+/// The same concrete paints serve SVG, raster exports, and Canvas. Integer sRGB mixing avoids
+/// browser-only `color-mix()` behavior. Tints retain at least 4.5:1 text contrast and borders at
+/// least 3:1 against the resulting surface. Custom paints that cannot be measured are left alone.
+/// Callers choose whether their theme opts into semantic shape styling; classic Mermaid and
+/// explicitly monochrome themes can retain their original paints.
+#[must_use]
+pub fn semantic_shape_style(
+    diagram_type: DiagramType,
+    shape: NodeShape,
+    base_fill: &str,
+    base_stroke: &str,
+    text: &str,
+    accents: &[String; 8],
+) -> Option<NodeShapeStyle> {
+    if diagram_type != DiagramType::Flowchart {
+        return None;
+    }
+    let accent_index = match shape {
+        NodeShape::Diamond | NodeShape::Hexagon | NodeShape::Note => 4,
+        NodeShape::Stadium | NodeShape::Circle | NodeShape::DoubleCircle => 2,
+        NodeShape::Cylinder
+        | NodeShape::HorizontalCylinder
+        | NodeShape::LinedCylinder
+        | NodeShape::DataStore => 0,
+        NodeShape::Cloud => 1,
+        _ => return None,
+    };
+    let base_fill = mindmap::hex_rgb(base_fill)?;
+    let base_stroke = mindmap::hex_rgb(base_stroke)?;
+    let text = mindmap::hex_rgb(text)?;
+    let accent = mindmap::hex_rgb(&accents[accent_index])?;
+    let text_luminance = shape_color_luminance(text);
+    let fill = (0..=14)
+        .rev()
+        .map(|weight| mix_shape_colors(base_fill, accent, weight))
+        .find(|&fill| shape_color_contrast(text_luminance, shape_color_luminance(fill)) >= 4.5)?;
+    let fill_luminance = shape_color_luminance(fill);
+    // Blend the accent with the theme's outline first, keeping the different roles part of
+    // one visual system. Darken/lighten toward the readable text color only when needed.
+    let border_accent = mix_shape_colors(base_stroke, accent, 70);
+    let stroke = (0..=10)
+        .map(|step| mix_shape_colors(border_accent, text, step * 10))
+        .find(|&stroke| {
+            shape_color_contrast(shape_color_luminance(stroke), fill_luminance) >= 3.0
+        })?;
+    Some(NodeShapeStyle {
+        fill: format!("#{:02x}{:02x}{:02x}", fill[0], fill[1], fill[2]),
+        stroke: format!("#{:02x}{:02x}{:02x}", stroke[0], stroke[1], stroke[2]),
+    })
+}
+
+fn mix_shape_colors(base: [u8; 3], accent: [u8; 3], weight: u16) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        ((u16::from(base[index]) * (100 - weight) + u16::from(accent[index]) * weight + 50) / 100)
+            as u8
+    })
+}
+
+fn shape_color_luminance(rgb: [u8; 3]) -> f64 {
+    let channels = rgb.map(|channel| {
+        let srgb = f64::from(channel) / 255.0;
+        if srgb <= 0.04045 {
+            srgb / 12.92
+        } else {
+            ((srgb + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+fn shape_color_contrast(a: f64, b: f64) -> f64 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 /// The closed outline of a block arrow filling the box `(x, y, w, h)`, or `None` for any other
 /// shape. The shaft is the middle 60% across the arrow; each head is as long as the shaft is
 /// thick, capped at 40% of the length.
@@ -10036,6 +10122,115 @@ mod tests {
         parse_mermaid_js_config_value, parse_style_string, parse_style_string_with_rejections,
         resolve_span_text_range, sanitize_style_value, scale_budget, to_init_parse,
     };
+
+    #[test]
+    fn semantic_shape_styles_leave_other_families_and_neutral_processes_alone() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        for diagram_type in [
+            DiagramType::State,
+            DiagramType::Class,
+            DiagramType::Er,
+            DiagramType::Mindmap,
+            DiagramType::C4Context,
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    diagram_type,
+                    NodeShape::Diamond,
+                    "#f8fafc",
+                    "#7c8da5",
+                    "#1e293b",
+                    &accents,
+                )
+                .is_none()
+            );
+        }
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Rounded,
+            NodeShape::Subroutine,
+            NodeShape::FilledCircle,
+            NodeShape::HorizontalBar,
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    DiagramType::Flowchart,
+                    shape,
+                    "#f8fafc",
+                    "#7c8da5",
+                    "#1e293b",
+                    &accents,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_shape_styles_preserve_unmeasurable_author_paints() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        for (fill, stroke, text) in [
+            ("navy", "#7c8da5", "#fff"),
+            ("var(--surface)", "#7c8da5", "#1e293b"),
+            ("#f8fafc", "currentColor", "#1e293b"),
+            ("#f8fafc", "#7c8da5", "rgb(30, 41, 59)"),
+            ("#é12", "#7c8da5", "#1e293b"),
+            ("#ffffff00", "#7c8da5", "#1e293b"),
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    DiagramType::Flowchart,
+                    NodeShape::Diamond,
+                    fill,
+                    stroke,
+                    text,
+                    &accents,
+                )
+                .is_none(),
+                "unmeasurable custom paints must not be replaced: {fill}/{stroke}/{text}"
+            );
+        }
+        let mut custom_accents = accents;
+        custom_accents[4] = "var(--decision)".to_owned();
+        assert!(
+            super::semantic_shape_style(
+                DiagramType::Flowchart,
+                NodeShape::Diamond,
+                "#f8fafc",
+                "#7c8da5",
+                "#1e293b",
+                &custom_accents,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn semantic_shape_tint_recedes_when_text_contrast_needs_the_original_surface() {
+        let accents = std::array::from_fn(|_| "#000000".to_owned());
+        let style = super::semantic_shape_style(
+            DiagramType::Flowchart,
+            NodeShape::Diamond,
+            "#fff",
+            "#767676",
+            "#767676",
+            &accents,
+        )
+        .expect("readable base surface must remain usable");
+        assert_eq!(style.fill, "#ffffff");
+        assert!(
+            super::semantic_shape_style(
+                DiagramType::Flowchart,
+                NodeShape::Diamond,
+                "#777777",
+                "#777777",
+                "#777777",
+                &accents,
+            )
+            .is_none(),
+            "a low-contrast custom palette must not receive a misleading semantic restyle"
+        );
+    }
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
         Span::new(

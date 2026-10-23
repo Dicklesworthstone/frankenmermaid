@@ -55,7 +55,7 @@ pub fn branch_fill(base: &str, accent: &str, is_root: bool) -> String {
     format!("#{:02x}{:02x}{:02x}", mixed[0], mixed[1], mixed[2])
 }
 
-fn hex_rgb(paint: &str) -> Option<[u8; 3]> {
+pub(crate) fn hex_rgb(paint: &str) -> Option<[u8; 3]> {
     let hex = paint.trim().strip_prefix('#')?;
     if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;

@@ -6,7 +6,8 @@
 //! what fm-wasm ships to a browser, so a user who coloured their diagram saw it uncoloured in the
 //! preview and correctly coloured in exported SVG — the two outputs disagreeing about the document.
 
-use fm_render_canvas::{CanvasRenderConfig, MockCanvas2dContext, render_to_canvas};
+use fm_render_canvas::{CanvasRenderConfig, DrawOperation, MockCanvas2dContext, render_to_canvas};
+use fm_render_svg::{SvgRenderConfig, ThemeColors, ThemePreset};
 
 /// Fill styles a canvas run set, in order.
 fn fill_styles(ops_debug: &str) -> Vec<String> {
@@ -130,6 +131,192 @@ fn styling_applies_only_to_the_named_node() {
         default >= 1,
         "the UNstyled node did not keep the default fill, so the style leaked across nodes: \
          {fills:?}"
+    );
+}
+
+/// Observe paints in effect when the public renderer actually fills and strokes a single node.
+/// Labels do not count as shape fills, so text colors cannot make these assertions pass.
+fn single_node_paints(source: &str, config: &CanvasRenderConfig) -> (String, String) {
+    let ir = fm_parser::parse(source).ir;
+    assert_eq!(ir.nodes.len(), 1, "fixture must parse exactly one node");
+    assert!(
+        ir.edges.is_empty(),
+        "edge strokes would contaminate this probe"
+    );
+    let mut context = MockCanvas2dContext::new(800.0, 600.0);
+    let result = render_to_canvas(&ir, &mut context, config);
+    assert_eq!(result.nodes_drawn, 1);
+
+    let mut fill = String::new();
+    let mut stroke = String::new();
+    let mut painted_fill = None;
+    let mut painted_stroke = None;
+    for operation in context.operations() {
+        match operation {
+            DrawOperation::SetFillStyle(color) => fill.clone_from(color),
+            DrawOperation::SetStrokeStyle(color) => stroke.clone_from(color),
+            DrawOperation::Fill | DrawOperation::FillRect(..) if painted_fill.is_none() => {
+                painted_fill = Some(fill.clone());
+            }
+            DrawOperation::Stroke | DrawOperation::StrokeRect(..) if painted_stroke.is_none() => {
+                painted_stroke = Some(stroke.clone());
+            }
+            _ => {}
+        }
+    }
+    (
+        painted_fill.expect("the node must actually be filled"),
+        painted_stroke.expect("the node must actually be outlined"),
+    )
+}
+
+fn canvas_theme(preset: ThemePreset) -> CanvasRenderConfig {
+    let colors = ThemeColors::from_preset(preset);
+    CanvasRenderConfig {
+        node_fill: colors.node_fill,
+        node_stroke: colors.node_stroke,
+        edge_stroke: colors.edge,
+        cluster_fill: colors.cluster_fill,
+        cluster_stroke: colors.cluster_stroke,
+        label_color: colors.text,
+        accents: colors.accents,
+        ..CanvasRenderConfig::default()
+    }
+}
+
+#[test]
+fn default_shape_roles_are_distinct_and_match_portable_svg_paints() {
+    for preset in [ThemePreset::Default, ThemePreset::Dark] {
+        let config = canvas_theme(preset);
+        let mut roles = std::collections::BTreeSet::new();
+        for declaration in [
+            "A{Decision}",
+            "A([Terminal])",
+            "A[(Storage)]",
+            "A@{shape: cloud, label: Cloud}",
+        ] {
+            let source = format!("flowchart TD\n{declaration}\n");
+            let (fill, stroke) = single_node_paints(&source, &config);
+            assert_ne!(
+                fill, config.node_fill,
+                "{declaration} must have a role surface"
+            );
+            assert_ne!(
+                stroke, config.node_stroke,
+                "{declaration} must have a role border"
+            );
+            roles.insert(fill.clone());
+
+            let ir = fm_parser::parse(&source).ir;
+            let svg = fm_render_svg::render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    theme: preset,
+                    embed_theme_css: false,
+                    ..SvgRenderConfig::default()
+                },
+            );
+            assert!(
+                svg.contains(&format!("fill=\"{fill}\"")),
+                "{preset:?} {declaration}: portable SVG and Canvas must share the role fill"
+            );
+            assert!(
+                svg.contains(&format!("stroke=\"{stroke}\"")),
+                "{preset:?} {declaration}: portable SVG and Canvas must share the role border"
+            );
+        }
+        assert_eq!(
+            roles.len(),
+            4,
+            "the four shape roles must remain distinguishable"
+        );
+        assert_eq!(
+            single_node_paints("flowchart TD\nA[Process]\n", &config),
+            (config.node_fill.clone(), config.node_stroke.clone()),
+            "ordinary processes must retain the quiet base surface"
+        );
+    }
+}
+
+#[test]
+fn author_paint_channels_override_shape_roles_independently() {
+    let config = CanvasRenderConfig::default();
+    let source = "flowchart TD\nA{Decision}\n";
+    let (role_fill, role_stroke) = single_node_paints(source, &config);
+    for declaration in [
+        "style A fill:#ff0000\n",
+        "classDef chosen fill:#ff0000\nclass A chosen\n",
+    ] {
+        assert_eq!(
+            single_node_paints(&format!("{source}{declaration}"), &config),
+            ("#ff0000".to_owned(), role_stroke.clone()),
+            "a fill-only declaration must retain the semantic outline"
+        );
+    }
+    for declaration in [
+        "style A stroke:#008800\n",
+        "classDef chosen stroke:#008800\nclass A chosen\n",
+    ] {
+        assert_eq!(
+            single_node_paints(&format!("{source}{declaration}"), &config),
+            (role_fill.clone(), "#008800".to_owned()),
+            "a stroke-only declaration must retain the semantic surface"
+        );
+    }
+}
+
+#[test]
+fn semantic_shape_colors_respect_opt_out_and_other_diagram_families() {
+    let config = CanvasRenderConfig::default();
+    assert_eq!(
+        single_node_paints("stateDiagram-v2\nstate chooser <<choice>>\n", &config),
+        (config.node_fill.clone(), config.node_stroke.clone()),
+        "a state choice diamond must keep its own diagram's semantics"
+    );
+    let disabled = CanvasRenderConfig {
+        semantic_colors: false,
+        ..config.clone()
+    };
+    assert_eq!(
+        single_node_paints("flowchart TD\nA{Decision}\n", &disabled),
+        (config.node_fill.clone(), config.node_stroke.clone())
+    );
+    for preset in [
+        ThemePreset::Mermaid,
+        ThemePreset::Monochrome,
+        ThemePreset::HighContrast,
+        ThemePreset::Forest,
+    ] {
+        let config = canvas_theme(preset);
+        let source = format!(
+            "%%{{init: {{'theme': '{}'}}}}%%\nflowchart TD\nA{{Decision}}\n",
+            preset.as_str()
+        );
+        assert_eq!(
+            single_node_paints(&source, &config),
+            (config.node_fill.clone(), config.node_stroke.clone()),
+            "the explicit {preset:?} palette must not acquire semantic tints"
+        );
+    }
+}
+
+#[test]
+fn explicit_theme_variables_and_node_styles_beat_role_defaults() {
+    let config = CanvasRenderConfig::default();
+    let source = "%%{init: {'themeVariables': {'primaryColor':'#ffeecc', 'primaryBorderColor':'#884400'}}}%%\nflowchart TD\nA{Decision}\n";
+    assert_eq!(
+        single_node_paints(source, &config),
+        ("#ffeecc".to_owned(), "#884400".to_owned())
+    );
+    assert_eq!(
+        single_node_paints(&format!("{source}style A fill:#aaffaa\n"), &config),
+        ("#aaffaa".to_owned(), "#884400".to_owned()),
+        "the node's own fill must override the global theme variable"
+    );
+    assert_eq!(
+        single_node_paints(&format!("{source}style A stroke:#008800\n"), &config),
+        ("#ffeecc".to_owned(), "#008800".to_owned()),
+        "the node's own border must override the global theme variable"
     );
 }
 

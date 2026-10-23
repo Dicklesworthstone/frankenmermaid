@@ -45,6 +45,8 @@ pub struct CanvasRenderConfig {
     pub label_color: String,
     /// Semantic branch accents, in the same order as the SVG theme palette.
     pub accents: [String; 8],
+    /// Use restrained shape-role colors in flowcharts. Disable for exact named-theme palettes.
+    pub semantic_colors: bool,
     /// Whether to auto-fit the diagram to the canvas.
     pub auto_fit: bool,
     /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
@@ -92,7 +94,7 @@ impl Default for CanvasRenderConfig {
             line_height: 1.5,
             padding: 28.0,
             node_fill: String::from("#f8fafc"),
-            node_stroke: String::from("#94a3b8"),
+            node_stroke: String::from("#7c8da5"),
             node_stroke_width: 1.5,
             edge_stroke: String::from("#64748b"),
             edge_stroke_width: 1.5,
@@ -100,6 +102,7 @@ impl Default for CanvasRenderConfig {
             cluster_stroke: String::from("#cbd5e1"),
             label_color: String::from("#1e293b"),
             accents: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from),
+            semantic_colors: true,
             auto_fit: true,
             gantt_today: None,
         }
@@ -4046,14 +4049,41 @@ pub(crate) fn resolve_node_colors(
     (fill, merged.get("stroke").cloned())
 }
 
-/// Semantic mindmap defaults are fallbacks for each paint channel, never author declarations.
-/// A fill-only class must retain its branch border, and a stroke-only class its branch fill.
+/// Semantic defaults are fallbacks for each paint channel, never author declarations.
+/// A fill-only class retains its role border, and a stroke-only class retains its role fill.
 pub(crate) fn resolve_node_colors_with_defaults(
     ir: &MermaidDiagramIr,
     node_index: usize,
     config: &CanvasRenderConfig,
 ) -> (Option<String>, Option<String>) {
     let (fill, stroke) = resolve_node_colors(ir, node_index);
+    if config.semantic_colors
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.meta.theme_overrides.theme.as_deref().is_none_or(|name| {
+            name.eq_ignore_ascii_case("default") || name.eq_ignore_ascii_case("dark")
+        })
+        && let Some(node) = ir.nodes.get(node_index)
+        && let Some(role) = fm_core::semantic_shape_style(
+            ir.diagram_type,
+            node.shape,
+            &config.node_fill,
+            &config.node_stroke,
+            &config.label_color,
+            &config.accents,
+        )
+    {
+        let variables = &ir.meta.theme_overrides.theme_variables;
+        let theme_fill = variables
+            .get("primaryColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        let theme_stroke = variables
+            .get("primaryBorderColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        return (
+            fill.or(theme_fill).or(Some(role.fill)),
+            stroke.or(theme_stroke).or(Some(role.stroke)),
+        );
+    }
     let Some(role) = fm_core::mindmap::node_role(ir, node_index) else {
         let solid_marker = ir.nodes.get(node_index).is_some_and(|node| {
             matches!(
