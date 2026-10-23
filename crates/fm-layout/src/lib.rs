@@ -9785,7 +9785,8 @@ pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let mut node_sizes = compute_node_sizes(ir, &metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -9796,33 +9797,61 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let mut in_flow = vec![0.0_f32; node_count];
-    let mut out_flow = vec![0.0_f32; node_count];
-    for edge in &ir.edges {
-        let Some(source) = endpoint_node_index(ir, edge.from) else {
-            continue;
-        };
-        let Some(target) = endpoint_node_index(ir, edge.to) else {
-            continue;
-        };
+    let usable_flow = |edge: &fm_core::IrEdge| {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
         if source == target || source >= node_count || target >= node_count {
-            continue;
+            return None;
         }
-
-        let flow_val = edge
+        let value = edge
             .label
             .and_then(|label_id| ir.labels.get(label_id.0))
-            .and_then(|label| label.text.parse::<f32>().ok())
-            .unwrap_or(1.0);
-
-        out_flow[source] += flow_val;
-        in_flow[target] += flow_val;
+            .and_then(|label| label.text.trim().parse::<f64>().ok())?;
+        (value.is_finite() && value > 0.0).then_some((source, target, value))
+    };
+    // Changing units must not change the picture's height. Normalize before summing so even
+    // several finite values near f64::MAX cannot overflow into infinite node coordinates.
+    let widest_flow = ir
+        .edges
+        .iter()
+        .filter_map(usable_flow)
+        .map(|(_, _, value)| value)
+        .fold(0.0_f64, f64::max);
+    let mut in_flow = vec![0.0_f64; node_count];
+    let mut out_flow = vec![0.0_f64; node_count];
+    if widest_flow > 0.0 {
+        for (source, target, value) in ir.edges.iter().filter_map(usable_flow) {
+            let normalized = value / widest_flow;
+            out_flow[source] += normalized;
+            in_flow[target] += normalized;
+        }
     }
+    let max_throughput = in_flow
+        .iter()
+        .zip(&out_flow)
+        .map(|(&incoming, &outgoing)| incoming.max(outgoing))
+        .fold(0.0_f64, f64::max);
 
+    const MAX_FLOW_HEIGHT: f32 = 160.0;
     for (node_index, size) in node_sizes.iter_mut().enumerate() {
-        let flow = in_flow[node_index].max(out_flow[node_index]).max(1.0);
-        size.0 = size.0.max(108.0);
-        size.1 = size.1.max(30.0 + (flow * 14.0));
+        let relative_flow = if max_throughput > 0.0 {
+            (in_flow[node_index].max(out_flow[node_index]) / max_throughput) as f32
+        } else {
+            0.0
+        };
+        let name = ir.node_display_text(&ir.nodes[node_index]);
+        let rendered_label = sankey_node_label(ir, node_index);
+        let (label_width, label_height) =
+            metrics.estimate_dimensions(rendered_label.as_deref().unwrap_or(name));
+        // Reserve a quantity row even when an unsupported value has no rendered total. The
+        // text floor then stays stable across units, and tiny flows retain readable labels.
+        let label_height =
+            label_height.max(metrics.estimate_height(name) + metrics.line_height_px());
+        size.0 = size.0.max(label_width + 32.0).max(108.0);
+        size.1 = size
+            .1
+            .max(label_height + 24.0)
+            .max(relative_flow * MAX_FLOW_HEIGHT);
     }
 
     let ranks = layered_ranks(ir);
@@ -9838,18 +9867,42 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    let col_gap = spacing.rank_spacing + 136.0;
     let row_gap = spacing.node_spacing.mul_add(0.45, 18.0);
+    let column_sizes: BTreeMap<usize, (f32, f32)> = nodes_by_rank
+        .iter()
+        .map(|(&rank, nodes)| {
+            let width = nodes
+                .iter()
+                .map(|&node_index| node_sizes[node_index].0)
+                .fold(0.0_f32, f32::max);
+            let height = nodes
+                .iter()
+                .map(|&node_index| node_sizes[node_index].1)
+                .sum::<f32>()
+                + nodes.len().saturating_sub(1) as f32 * row_gap;
+            (rank, (width, height))
+        })
+        .collect();
+    let tallest_column = column_sizes
+        .values()
+        .map(|&(_, height)| height)
+        .fold(0.0_f32, f32::max);
 
+    let mut cursor_x = 0.0_f32;
     for (rank, nodes) in &nodes_by_rank {
-        let mut cursor_y = 0.0_f32;
+        let (column_width, column_height) = column_sizes[rank];
+        let center_x = cursor_x + column_width * 0.5;
+        let mut cursor_y = (tallest_column - column_height) * 0.5;
         for (order_index, node_index) in nodes.iter().enumerate() {
             let height = node_sizes[*node_index].1;
-            centers[*node_index] = (*rank as f32 * col_gap, cursor_y + (height / 2.0));
+            centers[*node_index] = (center_x, cursor_y + (height / 2.0));
             rank_by_node[*node_index] = *rank;
             order_by_node[*node_index] = order_index;
             cursor_y += height + row_gap;
         }
+        // Spacing is between the real column bounds, so long names and wide quantities cannot
+        // consume the neighboring column's label or ribbon corridor.
+        cursor_x += column_width + spacing.rank_spacing;
     }
 
     let mut traced = finalize_specialized_layout(
@@ -25858,6 +25911,157 @@ mod tests {
         assert!(hub.bounds.center().x < left_sink.bounds.center().x);
         assert!(hub.bounds.center().x < right_sink.bounds.center().x);
         assert_eq!(layout.extensions.bands.len(), 3);
+    }
+
+    fn sankey_example_ir() -> MermaidDiagramIr {
+        parse(include_str!("../../fm-cli/tests/golden/sankey_basic.mmd")).ir
+    }
+
+    #[test]
+    fn sankey_layout_keeps_the_basic_example_compact_and_centers_columns() {
+        let ir = sankey_example_ir();
+        let layout = layout_diagram_sankey(&ir);
+        assert_eq!(layout.nodes.len(), 7);
+        assert_eq!(layout.edges.len(), 8);
+        assert!(
+            layout.bounds.height < 700.0,
+            "seven nodes should not require a multi-thousand-unit canvas: {:?}",
+            layout.bounds
+        );
+        let source_a = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source A")
+            .unwrap();
+        let source_b = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source B")
+            .unwrap();
+        assert!(
+            (source_a.bounds.height - 1.5 * source_b.bounds.height).abs() < 0.001,
+            "normalization must preserve the 150:100 throughput ratio above the text floor"
+        );
+        let bands = &layout.extensions.bands;
+        assert_eq!(bands.len(), 3);
+        for band in bands.iter().skip(1) {
+            assert!(
+                (band.bounds.center().y - bands[0].bounds.center().y).abs() < 0.001,
+                "columns should share a vertical center: {bands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sankey_layout_heights_are_invariant_to_flow_units() {
+        let ir = sankey_example_ir();
+        let baseline = layout_diagram_sankey(&ir);
+        for scale in [1e-100_f64, 1e-6, 1e3, 1e30, 1e100] {
+            let mut scaled = ir.clone();
+            for edge in &ir.edges {
+                let label = edge.label.expect("fixture flows have values").0;
+                let value = ir.labels[label].text.parse::<f64>().unwrap();
+                scaled.labels[label].text = (value * scale).to_string();
+            }
+            let layout = layout_diagram_sankey(&scaled);
+            for (expected, actual) in baseline.nodes.iter().zip(&layout.nodes) {
+                assert!(
+                    (expected.bounds.height - actual.bounds.height).abs() < 0.001
+                        && (expected.bounds.y - actual.bounds.y).abs() < 0.001,
+                    "changing flow units by {scale} changed node {}: {:?} -> {:?}",
+                    expected.node_id,
+                    expected.bounds,
+                    actual.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_spaces_columns_from_their_actual_label_widths() {
+        let ir = parse(
+            "sankey-beta\n\
+             Upstream renewable generation portfolio allocation,Regional distribution and balancing operations,10\n\
+             Regional distribution and balancing operations,Final manufacturing and infrastructure consumption,10\n",
+        )
+        .ir;
+        let layout = layout_diagram_sankey(&ir);
+        assert_eq!(layout.nodes.len(), 3);
+        assert!(layout.nodes.iter().all(|node| node.bounds.width > 256.0));
+        for left in &layout.nodes {
+            for right in &layout.nodes {
+                if left.rank + 1 == right.rank {
+                    let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+                    assert!(
+                        gap + 0.001 >= LayoutSpacing::default().rank_spacing,
+                        "long labels consumed the inter-column corridor: {left:?}, {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_fits_name_and_quantity_for_tiny_and_wide_flows() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for source in [
+            "sankey-beta\nA,B,1\nA,C,0.01\n",
+            "sankey-beta\nA,B,12345678901234567890\n",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            for node in &layout.nodes {
+                let label = super::sankey_node_label(&ir, node.node_index)
+                    .expect("finite positive fixture flows have a quantity");
+                let (width, height) = metrics.estimate_dimensions(&label);
+                assert!(
+                    node.bounds.width + 0.001 >= width + 32.0
+                        && node.bounds.height + 0.001 >= height + 24.0,
+                    "node {} cannot fit its name and quantity {label:?}: {:?}",
+                    node.node_id,
+                    node.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_extreme_and_invalid_values_keep_geometry_finite() {
+        for source in [
+            "sankey-beta\nA,M,1e308\nB,M,1e308\nC,M,1e308\nM,Z,1e308\n",
+            "sankey-beta\nA,M,NaN\nB,M,inf\nC,M,-2\nD,M,0\nM,Z,not-a-number\n",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            assert!(!layout.nodes.is_empty());
+            for bounds in
+                std::iter::once(layout.bounds).chain(layout.nodes.iter().map(|node| node.bounds))
+            {
+                assert!(
+                    bounds.x.is_finite()
+                        && bounds.y.is_finite()
+                        && bounds.width.is_finite()
+                        && bounds.height.is_finite(),
+                    "flow magnitudes produced invalid geometry: {bounds:?}"
+                );
+            }
+            for (index, node) in layout.nodes.iter().enumerate() {
+                for other in &layout.nodes[index + 1..] {
+                    assert!(
+                        !rects_overlap(node.bounds, other.bounds),
+                        "normalized Sankey nodes overlap: {node:?}, {other:?}"
+                    );
+                }
+            }
+            for edge in &layout.edges {
+                assert!(
+                    edge.points
+                        .iter()
+                        .all(|point| point.x.is_finite() && point.y.is_finite()),
+                    "invalid node geometry reached an edge: {edge:?}"
+                );
+            }
+        }
     }
 
     /// Build a `packet-beta` IR from `(id, start_bit, end_bit)` triples.

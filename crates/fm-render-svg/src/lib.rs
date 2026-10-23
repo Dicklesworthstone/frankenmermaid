@@ -1584,14 +1584,24 @@ fn write_c4_card_text_style(out: &mut String, person_card: bool) {
 
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
-/// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
-/// calls the same `Element::write_to_string`.
-fn build_marker_defs_body(edge_color: &str, marker_mask: u32) -> String {
+/// both render backends add via `DefsBuilder::marker`. Ordinary markers remain byte-identical;
+/// Sankey's end marker uses a fixed user-space size instead of scaling with its ribbon width.
+fn build_marker_defs_body(edge_color: &str, marker_mask: u32, sankey: bool) -> String {
     use crate::defs::MarkerOrient;
     let mut s = String::new();
     let push = |s: &mut String, bit: u32, m: ArrowheadMarker| {
         if marker_mask & bit != 0 {
-            m.to_element().write_to_string(s);
+            let mut marker = m.to_element();
+            if sankey && bit == MARKER_END {
+                // Keep direction visible outside the widest 24px ribbon without multiplying
+                // the head by that ribbon's stroke. The original 8x7 chevron scales uniformly.
+                marker = marker
+                    .attr("markerUnits", "userSpaceOnUse")
+                    .attr("viewBox", "0 0 8 7")
+                    .attr_num("markerWidth", 32.0)
+                    .attr_num("markerHeight", 28.0);
+            }
+            marker.write_to_string(s);
         }
     };
     push(
@@ -1740,12 +1750,12 @@ fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u32) -> Cow<'static,
         // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
         if let Some(cell) = cell {
             return Cow::Borrowed(
-                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask))
+                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask, false))
                     .as_str(),
             );
         }
     }
-    Cow::Owned(build_marker_defs_body(edge_color, marker_mask))
+    Cow::Owned(build_marker_defs_body(edge_color, marker_mask, false))
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -2084,7 +2094,11 @@ fn render_scene_document_with_ir(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    let arrow_markers = marker_defs_body(edge_color, emit_fancy_markers);
+    let arrow_markers = if ir.is_some_and(|ir| ir.diagram_type == DiagramType::Sankey) {
+        Cow::Owned(build_marker_defs_body(edge_color, ALL_MARKER_MASK, true))
+    } else {
+        marker_defs_body(edge_color, emit_fancy_markers)
+    };
     // See the twin site in the main renderer: ER cardinality markers ride alongside the mask-driven
     // arrowhead defs rather than inside the mask.
     let er_markers = ir
@@ -4427,10 +4441,18 @@ fn render_layout_to_svg(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    let arrow_markers = known_live_marker_mask.map_or_else(
-        || marker_defs_body(edge_color, emit_fancy_markers),
-        |mask| marker_defs_body_for_mask(edge_color, mask),
-    );
+    let arrow_markers = if ir.diagram_type == DiagramType::Sankey {
+        Cow::Owned(build_marker_defs_body(
+            edge_color,
+            known_live_marker_mask.unwrap_or(ALL_MARKER_MASK),
+            true,
+        ))
+    } else {
+        known_live_marker_mask.map_or_else(
+            || marker_defs_body(edge_color, emit_fancy_markers),
+            |mask| marker_defs_body_for_mask(edge_color, mask),
+        )
+    };
     // ER crow's-foot cardinality markers (bd-dun16) are appended rather than folded into the mask.
     // The original reason was that the mask was a full `u16`; it is a `u32` since bd-lkm9i, so the
     // reason is now the second one alone, which was always the load-bearing half: these defs are
@@ -25378,6 +25400,60 @@ marker#arrow-open path {
             "timeline",
             1,
         );
+    }
+
+    /// Quantity width and direction remain separate in both SVG assembly paths and export modes.
+    #[test]
+    fn sankey_quantity_ribbons_keep_bounded_direction_markers() {
+        fn end_marker(svg: &str) -> &str {
+            svg.split("<marker")
+                .filter_map(|fragment| fragment.split_once('>'))
+                .map(|(tag, _)| tag)
+                .find(|tag| tag.contains("id=\"arrow-end\""))
+                .expect("a real Sankey ribbon must retain its direction marker")
+        }
+        let ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,50\nA,D,10").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        for embed_theme_css in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let widths = path_stroke_widths(&svg);
+            for width in ["24", "12", "2.40"] {
+                assert!(widths.iter().any(|actual| actual == width));
+            }
+            for output in [
+                svg,
+                render_scene_document_with_ir(&scene, &config, Some(&ir)),
+            ] {
+                let marker = end_marker(&output);
+                assert!(marker.contains("markerUnits=\"userSpaceOnUse\""));
+                assert!(marker.contains("viewBox=\"0 0 8 7\""));
+                assert!(marker.contains("markerWidth=\"32\""));
+                assert!(marker.contains("markerHeight=\"28\""));
+                for selector in [".fm-edge{", ".fm-edge:hover{", ".fm-edge-thick{"] {
+                    if let Some((_, rule)) = output.split_once(selector) {
+                        assert!(
+                            !rule
+                                .split('}')
+                                .next()
+                                .unwrap()
+                                .split(';')
+                                .any(|declaration| declaration.trim().starts_with("stroke-width:")),
+                            "theme rule {selector} overrides the encoded ribbon width"
+                        );
+                    }
+                }
+            }
+        }
+        let ordinary = render_source("flowchart LR\nA --> B");
+        let marker = end_marker(&ordinary);
+        assert!(marker.contains("markerUnits=\"strokeWidth\""));
+        assert!(marker.contains("markerWidth=\"8\""));
+        assert!(marker.contains("markerHeight=\"7\""));
     }
 
     /// Ribbon widths are proportional to flow value, and stay so after hoisting the normaliser.

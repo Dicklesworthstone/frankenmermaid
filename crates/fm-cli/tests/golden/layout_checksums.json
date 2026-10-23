@@ -353,13 +353,13 @@
     },
     "sankey_basic": {
       "edge_count": 8,
-      "edges_checksum": "6823f1c8b5f12cc5",
+      "edges_checksum": "27807b4f2fed138d",
       "layout_algorithm": "auto",
-      "layout_checksum": "3ecbf53a79186af5",
-      "layout_height": 3802.0,
-      "layout_width": 744.924988,
+      "layout_checksum": "940b14aba6cd7f59",
+      "layout_height": 426.0,
+      "layout_width": 580.674988,
       "node_count": 7,
-      "nodes_checksum": "ed0ab205f17a153e"
+      "nodes_checksum": "6a4b403da6e08624"
     },
     "sequence_advanced": {
       "edge_count": 11,

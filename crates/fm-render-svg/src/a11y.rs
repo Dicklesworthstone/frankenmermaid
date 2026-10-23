@@ -478,7 +478,8 @@ pub(crate) fn describe_edge_labels(
 ///
 /// Semantic shapes carry local paint variables, so high contrast must reset those as well as
 /// the root palette. Keep the text rule at normal priority so author classDef and inline colors
-/// retain precedence over the default presentation attributes.
+/// retain precedence over the default presentation attributes. Edge widths can encode flow
+/// quantities, so contrast adjustments preserve their resolved widths.
 #[must_use]
 pub fn accessibility_css() -> &'static str {
     r"
@@ -497,7 +498,6 @@ pub fn accessibility_css() -> &'static str {
   }
   .fm-node-semantic text { fill: #000000; }
   .fm-node { stroke-width: 2px !important; }
-  .fm-edge { stroke-width: 2px !important; }
 }
 
 /* Reduced motion support */
