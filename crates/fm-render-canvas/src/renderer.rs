@@ -143,6 +143,102 @@ pub struct CanvasRenderResult {
 pub struct Canvas2dRenderer {
     config: CanvasRenderConfig,
     draw_calls: usize,
+    edge_label_layout: Option<CanvasEdgeLabelLayout>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanvasEdgeLabel {
+    position: fm_layout::LayoutPoint,
+    width: f64,
+    height: f64,
+    line_height: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CanvasEdgeLabelLayout {
+    labels: Vec<Option<CanvasEdgeLabel>>,
+    bounds: fm_layout::LayoutRect,
+}
+
+/// Measure the labels the browser will actually draw before fitting the diagram. Placement is
+/// shared with SVG, while font measurement belongs to the Canvas context and honours linkStyle.
+fn measure_graph_edge_labels<C: Canvas2dContext>(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    ctx: &mut C,
+    config: &CanvasRenderConfig,
+) -> Option<CanvasEdgeLabelLayout> {
+    if !matches!(
+        ir.diagram_type,
+        DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
+    ) || !layout.edges.iter().any(|path| {
+        !path.bundled
+            && path.points.len() >= 2
+            && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                edge.arrow != ArrowType::Invisible
+                    && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
+            })
+    }) {
+        return None;
+    }
+
+    let mut result = CanvasEdgeLabelLayout {
+        labels: vec![None; ir.edges.len()],
+        bounds: layout.bounds,
+    };
+    let mut placer =
+        fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding as f32);
+    let default_font = secondary_label_font_css(config);
+    ctx.save();
+    for path in &layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        if path.bundled || path.points.len() < 2 || edge.arrow == ArrowType::Invisible {
+            continue;
+        }
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let declared_font = resolve_edge_label_font(ir, path.edge_index, config);
+        ctx.set_font(declared_font.as_deref().unwrap_or(&default_font));
+        let mut text_width = 0.0_f64;
+        let mut text_height = config.font_size * 0.85;
+        let mut line_count = 0;
+        for line in label.text.lines() {
+            let metrics = ctx.measure_text(line);
+            text_width = text_width.max(metrics.width);
+            text_height = text_height.max(metrics.height);
+            line_count += 1;
+        }
+        // Keep the usual secondary-label rhythm; an authored large face needs a taller plate
+        // and wider line spacing so its own next line cannot paint over it.
+        let line_height = (config.font_size * 1.2).max(text_height * 1.2);
+        let width = text_width + 8.0;
+        let height = line_count.max(1) as f64 * line_height + 4.0;
+        if !width.is_finite() || !height.is_finite() {
+            continue;
+        }
+        let position = placer.place(path, width as f32, height as f32);
+        result.labels[path.edge_index] = Some(CanvasEdgeLabel {
+            position,
+            width,
+            height,
+            line_height,
+        });
+        let left = result.bounds.x.min(position.x - width as f32 / 2.0);
+        let top = result.bounds.y.min(position.y - height as f32 / 2.0);
+        let right = (result.bounds.x + result.bounds.width).max(position.x + width as f32 / 2.0);
+        let bottom = (result.bounds.y + result.bounds.height).max(position.y + height as f32 / 2.0);
+        result.bounds = fm_layout::LayoutRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        };
+    }
+    ctx.restore();
+    Some(result)
 }
 
 const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
@@ -203,6 +299,7 @@ impl Canvas2dRenderer {
         Self {
             config,
             draw_calls: 0,
+            edge_label_layout: None,
         }
     }
 
@@ -217,12 +314,17 @@ impl Canvas2dRenderer {
 
         let canvas_width = ctx.width();
         let canvas_height = ctx.height();
+        self.edge_label_layout = measure_graph_edge_labels(ir, layout, ctx, &self.config);
+        let render_bounds = self
+            .edge_label_layout
+            .as_ref()
+            .map_or(layout.bounds, |labels| labels.bounds);
 
         // Compute viewport to fit diagram
-        let viewport = if self.config.auto_fit {
+        let mut viewport = if self.config.auto_fit {
             fit_to_viewport(
-                f64::from(layout.bounds.width),
-                f64::from(layout.bounds.height),
+                f64::from(render_bounds.width),
+                f64::from(render_bounds.height),
                 canvas_width,
                 canvas_height,
                 self.config.padding,
@@ -253,11 +355,11 @@ impl Canvas2dRenderer {
         // (screen space). Adding `padding` again here (diagram space) causes the diagram
         // to be mis-centered and margins to become asymmetric, especially when zoom != 1.
         let (offset_x, offset_y) = if self.config.auto_fit {
-            (-f64::from(layout.bounds.x), -f64::from(layout.bounds.y))
+            (-f64::from(render_bounds.x), -f64::from(render_bounds.y))
         } else {
             (
-                self.config.padding - f64::from(layout.bounds.x),
-                self.config.padding - f64::from(layout.bounds.y),
+                self.config.padding - f64::from(render_bounds.x),
+                self.config.padding - f64::from(render_bounds.y),
             )
         };
 
@@ -343,6 +445,12 @@ impl Canvas2dRenderer {
             labels_drawn += 1;
         }
         labels_drawn += self.draw_c4_legend(ctx, ir, canvas_width, canvas_height);
+
+        // The public entrypoint folds the original layout origin into this viewport. Account
+        // here only for the extra origin shift introduced by labels outside that layout, so
+        // pointer hit regions and selection overlays still follow the nodes that were drawn.
+        viewport.offset_x += f64::from(layout.bounds.x - render_bounds.x) * viewport.zoom;
+        viewport.offset_y += f64::from(layout.bounds.y - render_bounds.y) * viewport.zoom;
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -2347,7 +2455,7 @@ impl Canvas2dRenderer {
             let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
             // A `~~~` link has placed its nodes; it is not drawn, nor is its label.
-            if arrow == ArrowType::Invisible {
+            if edge_path.bundled || arrow == ArrowType::Invisible {
                 continue;
             }
 
@@ -2628,12 +2736,26 @@ impl Canvas2dRenderer {
                     Cow::Borrowed(&label.text)
                 };
                 let label_offset = self.config.font_size * 0.8;
-                // The anchor rule is fm-layout's, shared with the SVG renderer.
-                let anchor = fm_layout::edge_label_position(edge_path);
-                let (lx, ly) = (
-                    f64::from(anchor.x) + offset_x,
-                    f64::from(anchor.y) + offset_y - label_offset,
-                );
+                let planned = self
+                    .edge_label_layout
+                    .as_ref()
+                    .and_then(|plan| plan.labels.get(edge_path.edge_index))
+                    .copied()
+                    .flatten();
+                // Generic graph labels use the same collision solver as SVG. Sequence messages
+                // and chart annotations keep their existing specialized anchor and offset.
+                let (lx, ly) = if let Some(label) = planned {
+                    (
+                        f64::from(label.position.x) + offset_x,
+                        f64::from(label.position.y) + offset_y,
+                    )
+                } else {
+                    let anchor = fm_layout::edge_label_position(edge_path);
+                    (
+                        f64::from(anchor.x) + offset_x,
+                        f64::from(anchor.y) + offset_y - label_offset,
+                    )
+                };
 
                 // A declared `font-size` takes a side path so the hoisted secondary-label font
                 // is still what every undeclared edge draws under — same reasoning as the node
@@ -2649,7 +2771,8 @@ impl Canvas2dRenderer {
                     }
                 }
 
-                let line_height = self.config.font_size * 1.2;
+                let line_height =
+                    planned.map_or(self.config.font_size * 1.2, |label| label.line_height);
 
                 // The common single-line edge label (`:has`, `-->|x|`, …) draws exactly `label.text` at
                 // `ly`, so measure it directly and skip the `Vec<&str>` collect. Only a genuinely
@@ -2657,8 +2780,11 @@ impl Canvas2dRenderer {
                 // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
                 // `total_height == line_height`, and `start_y == ly`.
                 if !label_text.contains('\n') {
-                    let label_width = ctx.measure_text(&label_text).width + 8.0;
-                    let label_height = line_height + 4.0;
+                    let label_width = planned.map_or_else(
+                        || ctx.measure_text(&label_text).width + 8.0,
+                        |label| label.width,
+                    );
+                    let label_height = planned.map_or(line_height + 4.0, |label| label.height);
 
                     ctx.set_fill_style(&self.config.node_fill);
                     ctx.fill_rect(
@@ -2688,15 +2814,18 @@ impl Canvas2dRenderer {
                 } else {
                     // Background for label
                     let lines: Vec<&str> = label_text.lines().collect();
-                    let mut max_text_width = 0.0_f64;
-                    for line in &lines {
-                        let text_metrics = ctx.measure_text(line);
-                        max_text_width = max_text_width.max(text_metrics.width);
-                    }
-
-                    let label_width = max_text_width + 8.0;
+                    let label_width = planned.map_or_else(
+                        || {
+                            lines
+                                .iter()
+                                .map(|line| ctx.measure_text(line).width)
+                                .fold(0.0_f64, f64::max)
+                                + 8.0
+                        },
+                        |label| label.width,
+                    );
                     let total_height = lines.len() as f64 * line_height;
-                    let label_height = total_height + 4.0;
+                    let label_height = planned.map_or(total_height + 4.0, |label| label.height);
 
                     ctx.set_fill_style(&self.config.node_fill);
                     ctx.fill_rect(
@@ -2773,6 +2902,11 @@ impl Canvas2dRenderer {
         };
 
         for node_box in &layout.nodes {
+            // Referenced composite states share their cluster's box. The cluster was already
+            // painted behind its children; drawing the duplicate node here would cover them.
+            if fm_layout::is_composite_state_node(ir, node_box) {
+                continue;
+            }
             let ir_node = ir.nodes.get(node_box.node_index);
             let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
 
@@ -6161,6 +6295,232 @@ mod tests {
             * (CanvasRenderConfig::default().font_size * 0.85 * 0.57)
             + 8.0;
         assert!((label_background_width - expected_width).abs() < 1.0);
+    }
+
+    fn crossing_label_fixture(diagram_type: DiagramType) -> (MermaidDiagramIr, DiagramLayout) {
+        let source = match diagram_type {
+            DiagramType::Flowchart => {
+                "flowchart LR\nA[Alpha] -->|crossing| B[Beta]\nC[Blocker]\nD[Top] -->|secondary| E[Bottom]"
+            }
+            DiagramType::Class => {
+                "classDiagram\nclass A\nclass B\nclass C\nclass D\nclass E\nA --> B : crossing\nD --> E : secondary"
+            }
+            DiagramType::State => {
+                "stateDiagram-v2\nA --> B : crossing\nstate \"Blocker\" as C\nD --> E : secondary"
+            }
+            DiagramType::Er => {
+                "erDiagram\nA ||--|| B : crossing\nD ||--|| E : secondary\nC {\n string id\n}"
+            }
+            _ => unreachable!(),
+        };
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(
+            ir.edges.len(),
+            2,
+            "fixture parse failed for {diagram_type:?}"
+        );
+        let mut layout = layout_diagram(&ir);
+        for node in &mut layout.nodes {
+            let (x, y, width, height) = match ir.nodes[node.node_index].id.as_str() {
+                "A" => (20.0, 120.0, 60.0, 40.0),
+                "B" => (300.0, 120.0, 60.0, 40.0),
+                "C" => (150.0, 100.0, 80.0, 80.0),
+                "D" => (180.0, 20.0, 60.0, 40.0),
+                "E" => (180.0, 240.0, 60.0, 40.0),
+                id => panic!("unexpected fixture node {id}"),
+            };
+            node.bounds = LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            };
+        }
+        for edge in &mut layout.edges {
+            let points = if edge.edge_index == 0 {
+                [(80.0, 140.0), (300.0, 140.0)]
+            } else {
+                [(210.0, 60.0), (210.0, 240.0)]
+            };
+            edge.points = points
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+        }
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        (ir, layout)
+    }
+
+    fn drawn_edge_plate(ctx: &MockCanvas2dContext, label: &str) -> (f64, f64, f64, f64) {
+        let text_index = ctx
+            .operations()
+            .iter()
+            .position(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == label))
+            .unwrap_or_else(|| panic!("edge label {label} was not drawn"));
+        ctx.operations()[..text_index]
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .expect("edge text needs its backing plate")
+    }
+
+    #[test]
+    fn graph_edge_label_plates_avoid_nodes_foreign_routes_and_each_other() {
+        for diagram_type in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::State,
+            DiagramType::Er,
+        ] {
+            let (ir, layout) = crossing_label_fixture(diagram_type);
+            let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            });
+            renderer.render(&layout, &ir, &mut ctx);
+            let plan = renderer.edge_label_layout.as_ref().unwrap();
+            let plates = [
+                drawn_edge_plate(&ctx, "crossing"),
+                drawn_edge_plate(&ctx, "secondary"),
+            ];
+            for (edge_index, &(x, y, width, height)) in plates.iter().enumerate() {
+                // Convert the actual draw commands back from the expanded render frame.
+                let left = x + f64::from(plan.bounds.x);
+                let top = y + f64::from(plan.bounds.y);
+                let right = left + width;
+                let bottom = top + height;
+                for node in &layout.nodes {
+                    let rect = node.bounds;
+                    assert!(
+                        right <= f64::from(rect.x)
+                            || left >= f64::from(rect.x + rect.width)
+                            || bottom <= f64::from(rect.y)
+                            || top >= f64::from(rect.y + rect.height),
+                        "{diagram_type:?} label {edge_index} overlaps node {}",
+                        node.node_id,
+                    );
+                }
+                let foreign_path = &layout.edges[1 - edge_index];
+                let a = foreign_path.points[0];
+                let b = foreign_path.points[1];
+                let crosses = if a.x == b.x {
+                    left < f64::from(a.x)
+                        && f64::from(a.x) < right
+                        && top < f64::from(a.y.max(b.y))
+                        && f64::from(a.y.min(b.y)) < bottom
+                } else {
+                    top < f64::from(a.y)
+                        && f64::from(a.y) < bottom
+                        && left < f64::from(a.x.max(b.x))
+                        && f64::from(a.x.min(b.x)) < right
+                };
+                assert!(!crosses, "{diagram_type:?} label covers an unrelated route");
+            }
+            let (a, b) = (plates[0], plates[1]);
+            assert!(
+                a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1,
+                "{diagram_type:?} label plates overlap",
+            );
+        }
+    }
+
+    #[test]
+    fn graph_edge_label_plate_measures_authored_multiline_font() {
+        let ir =
+            fm_parser::parse("flowchart LR\nA -->|first<br/>second| B\nlinkStyle 0 font-size:36px")
+                .ir;
+        assert_eq!(
+            ir.labels[ir.edges[0].label.unwrap().0].text,
+            "first\nsecond"
+        );
+        let layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        renderer.render(&layout, &ir, &mut ctx);
+        let (_, _, width, height) = drawn_edge_plate(&ctx, "first");
+        assert!(width >= 6.0 * 36.0 * 0.57 + 8.0 - 0.001);
+        assert!(height >= 2.0 * 36.0 * 1.2 + 4.0 - 0.001);
+        let rows: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::FillText(text, _, y) if text == "first" || text == "second" => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1] - rows[0] >= 36.0 * 1.2 - 0.001);
+    }
+
+    #[test]
+    fn bundled_and_invisible_edges_do_not_reserve_or_draw_label_plates() {
+        let (mut ir, mut layout) = crossing_label_fixture(DiagramType::Flowchart);
+        ir.edges[1].arrow = ArrowType::Invisible;
+        layout.edges[0].bundled = true;
+        let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let result = renderer.render(&layout, &ir, &mut ctx);
+        assert_eq!(result.edges_drawn, 0);
+        assert!(renderer.edge_label_layout.is_none());
+        assert!(!ctx.operations().iter().any(|op| matches!(
+            op,
+            DrawOperation::FillText(text, _, _) if text == "crossing" || text == "secondary"
+        )));
+    }
+
+    #[test]
+    fn nested_composite_states_keep_internal_labels_and_do_not_overpaint_children() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n [*] --> Inner\n state Inner {\n  A --> B : ready\n }\n Inner --> Finished : complete\n}\nOuter --> [*]",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let composite_count = layout
+            .nodes
+            .iter()
+            .filter(|node| fm_layout::is_composite_state_node(&ir, node))
+            .count();
+        assert_eq!(composite_count, 2, "fixture must reference both containers");
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let result = renderer.render(&layout, &ir, &mut ctx);
+        assert_eq!(result.nodes_drawn, layout.nodes.len() - composite_count);
+        for title in ["Outer", "Inner"] {
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == title))
+                    .count(),
+                1,
+                "a composite title belongs to its cluster, with no overlaid node",
+            );
+        }
+        let inner = layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.title.as_deref() == Some("Inner"))
+            .expect("nested cluster exists")
+            .bounds;
+        let plan = renderer.edge_label_layout.as_ref().unwrap();
+        let (x, y, width, height) = drawn_edge_plate(&ctx, "ready");
+        let left = x + f64::from(plan.bounds.x);
+        let top = y + f64::from(plan.bounds.y);
+        assert!(left >= f64::from(inner.x));
+        assert!(left + width <= f64::from(inner.x + inner.width));
+        assert!(top >= f64::from(inner.y));
+        assert!(top + height <= f64::from(inner.y + inner.height));
     }
 
     #[test]

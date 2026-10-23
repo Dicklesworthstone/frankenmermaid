@@ -55,8 +55,8 @@ use fm_layout::{
     MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
     TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
-    format_xychart_tick_value, resolve_xychart_y_domain, try_relayout_directed_path_suffix,
-    xychart_categories, xychart_value_to_y, xychart_y_ticks,
+    format_xychart_tick_value, is_composite_state_node, resolve_xychart_y_domain,
+    try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
 /// Node fill gradient mode.
@@ -13184,22 +13184,6 @@ fn write_packet_field_continuation_into(
     out.push_str("</g>");
 }
 
-fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
-    if ir.diagram_type != DiagramType::State {
-        return false;
-    }
-    let node_id = ir
-        .nodes
-        .get(node_box.node_index)
-        .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
-    ir.clusters.iter().any(|cluster| {
-        cluster
-            .title
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .is_some_and(|label| label.text == node_id)
-    })
-}
-
 pub(crate) fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
     node.id.starts_with("__space_")
         || node
@@ -15541,8 +15525,7 @@ fn resolve_graph_edge_label_positions(
         return None;
     }
     let mut positions = vec![None; ir.edges.len()];
-    let mut plates = Vec::new();
-    let route_obstacles = graph_edge_label_route_obstacles(ir, layout);
+    let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding);
     for path in &layout.edges {
         if path.bundled || path.points.len() < 2 || !detail.show_edge_labels {
             continue;
@@ -15559,351 +15542,14 @@ fn resolve_graph_edge_label_positions(
         let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
         let (width, height, _) =
             edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
-        let foreign_routes: Vec<_> = route_obstacles
-            .iter()
-            .filter(|(edge_index, obstacle)| {
-                *edge_index != path.edge_index
-                    && !matches!(obstacle, EdgeLabelObstacle::Segment(from, to)
-                        if path.points.windows(2).any(|pair|
-                            edge_label_routes_share_line(pair[0], pair[1], *from, *to)))
-            })
-            .map(|(_, obstacle)| *obstacle)
-            .collect();
-        let position = clear_edge_label_position(
-            fm_layout::edge_label_position(path),
-            width,
-            height,
-            layout,
-            config.padding,
-            &plates,
-            &foreign_routes,
-        );
+        let position = placer.place(path, width, height);
         positions[path.edge_index] = Some(position);
-        plates.push(fm_layout::LayoutRect {
-            x: position.x - width / 2.0,
-            y: position.y - height / 2.0,
-            width,
-            height,
-        });
     }
     Some(positions)
 }
 
-#[derive(Clone, Copy)]
-enum EdgeLabelObstacle {
-    Bounds(fm_layout::LayoutRect),
-    Segment(fm_layout::LayoutPoint, fm_layout::LayoutPoint),
-}
-
-type EdgeLabelInterval = Option<(f32, f32)>;
-
-/// Branches commonly share only part of a straight trunk. That centerline is already the
-/// label's own route; treating it as a foreign obstacle needlessly disconnects the label.
-fn edge_label_routes_share_line(
-    a: fm_layout::LayoutPoint,
-    b: fm_layout::LayoutPoint,
-    from: fm_layout::LayoutPoint,
-    to: fm_layout::LayoutPoint,
-) -> bool {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let length_squared = dx * dx + dy * dy;
-    let cross_from = (from.x - a.x) * dy - (from.y - a.y) * dx;
-    let cross_to = (to.x - a.x) * dy - (to.y - a.y) * dx;
-    let along_from = (from.x - a.x) * dx + (from.y - a.y) * dy;
-    let along_to = (to.x - a.x) * dx + (to.y - a.y) * dy;
-    length_squared > f32::EPSILON
-        && cross_from == 0.0
-        && cross_to == 0.0
-        && along_from.min(along_to) < length_squared
-        && along_from.max(along_to) > 0.0
-}
-
-/// Clip a segment to the label's cross-axis slab before projecting its forbidden interval.
-/// Using the whole diagonal segment's bounding box would displace labels from empty space.
-fn edge_label_segment_interval(
-    from: (f32, f32),
-    to: (f32, f32),
-    cross_position: f32,
-    cross_clearance: f32,
-    along_clearance: f32,
-) -> EdgeLabelInterval {
-    let delta = to.1 - from.1;
-    let (lo, hi) = if delta.abs() <= f32::EPSILON {
-        if from.1 <= cross_position - cross_clearance || from.1 >= cross_position + cross_clearance
-        {
-            return None;
-        }
-        (0.0, 1.0)
-    } else {
-        let a = (cross_position - cross_clearance - from.1) / delta;
-        let b = (cross_position + cross_clearance - from.1) / delta;
-        let (lo, hi) = (a.min(b).max(0.0), a.max(b).min(1.0));
-        if lo > hi {
-            return None;
-        }
-        (lo, hi)
-    };
-    let a = from.0 + (to.0 - from.0) * lo;
-    let b = from.0 + (to.0 - from.0) * hi;
-    Some((a.min(b) - along_clearance, a.max(b) + along_clearance))
-}
-
-impl EdgeLabelObstacle {
-    fn exclusion_intervals(
-        self,
-        anchor: fm_layout::LayoutPoint,
-        clearance_x: f32,
-        clearance_y: f32,
-    ) -> (EdgeLabelInterval, EdgeLabelInterval) {
-        match self {
-            Self::Bounds(bounds) => {
-                let x = (
-                    bounds.x - clearance_x,
-                    bounds.x + bounds.width + clearance_x,
-                );
-                let y = (
-                    bounds.y - clearance_y,
-                    bounds.y + bounds.height + clearance_y,
-                );
-                (
-                    (y.0 < anchor.y && anchor.y < y.1).then_some(x),
-                    (x.0 < anchor.x && anchor.x < x.1).then_some(y),
-                )
-            }
-            Self::Segment(from, to) => {
-                // Include the stroke and the rounded elbow's <=1.5px departure from its route.
-                let x = clearance_x + 3.0;
-                let y = clearance_y + 3.0;
-                (
-                    edge_label_segment_interval((from.x, from.y), (to.x, to.y), anchor.y, y, x),
-                    edge_label_segment_interval((from.y, from.x), (to.y, to.x), anchor.x, x, y),
-                )
-            }
-        }
-    }
-}
-
-/// Visible foreign routes can overpaint a label even when every node and earlier plate is clear.
-/// Cache their segments once, including the actual ER glyph envelope at each endpoint. The
-/// glyph description is shared with the raster renderers and pinned against the SVG marker defs.
-fn graph_edge_label_route_obstacles(
-    ir: &MermaidDiagramIr,
-    layout: &DiagramLayout,
-) -> Vec<(usize, EdgeLabelObstacle)> {
-    let mut obstacles = Vec::new();
-    for path in &layout.edges {
-        let Some(edge) = ir.edges.get(path.edge_index) else {
-            continue;
-        };
-        if path.bundled || edge.arrow == fm_core::ArrowType::Invisible || path.points.len() < 2 {
-            continue;
-        }
-        for pair in path.points.windows(2) {
-            if pair[0] != pair[1] {
-                obstacles.push((
-                    path.edge_index,
-                    EdgeLabelObstacle::Segment(pair[0], pair[1]),
-                ));
-            }
-        }
-        let Some(notation) = edge.er_notation() else {
-            continue;
-        };
-        let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-        let first = path.points[0];
-        let last = path.points[path.points.len() - 1];
-        for (endpoint, neighbor, kind, start) in [
-            (
-                first,
-                path.points.iter().copied().find(|point| *point != first),
-                left.map(|form| fm_layout::MarkerKind::er_pair(form).0),
-                true,
-            ),
-            (
-                last,
-                path.points
-                    .iter()
-                    .copied()
-                    .rev()
-                    .find(|point| *point != last),
-                right.map(|form| fm_layout::MarkerKind::er_pair(form).1),
-                false,
-            ),
-        ] {
-            let (Some(neighbor), Some(glyph)) = (neighbor, kind.and_then(|kind| kind.er_glyph()))
-            else {
-                continue;
-            };
-            let direction = if start {
-                (neighbor.x - endpoint.x, neighbor.y - endpoint.y)
-            } else {
-                (endpoint.x - neighbor.x, endpoint.y - neighbor.y)
-            };
-            let length = direction.0.hypot(direction.1);
-            if !length.is_finite() || length <= f32::EPSILON {
-                continue;
-            }
-            let (dx, dy) = (direction.0 / length, direction.1 / length);
-            let mut lo = f32::INFINITY;
-            let mut hi = f32::NEG_INFINITY;
-            for x in &glyph.bars {
-                lo = lo.min(*x);
-                hi = hi.max(*x);
-            }
-            if glyph.foot {
-                lo = lo.min(-fm_layout::ErMarkerGlyph::FOOT_HALF_LENGTH);
-                hi = hi.max(fm_layout::ErMarkerGlyph::FOOT_HALF_LENGTH);
-            }
-            if let Some(x) = glyph.bubble {
-                lo = lo.min(x - fm_layout::ErMarkerGlyph::BUBBLE_RADIUS);
-                hi = hi.max(x + fm_layout::ErMarkerGlyph::BUBBLE_RADIUS);
-            }
-            let half_height = if glyph.foot || !glyph.bars.is_empty() {
-                fm_layout::ErMarkerGlyph::BAR_HALF_HEIGHT
-            } else {
-                fm_layout::ErMarkerGlyph::BUBBLE_RADIUS
-            };
-            let mut bounds = fm_layout::LayoutRect {
-                x: f32::INFINITY,
-                y: f32::INFINITY,
-                width: 0.0,
-                height: 0.0,
-            };
-            let (mut right, mut bottom) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-            for (x, y) in [
-                (lo, -half_height),
-                (lo, half_height),
-                (hi, -half_height),
-                (hi, half_height),
-            ] {
-                let (x, y) = (endpoint.x + dx * x - dy * y, endpoint.y + dy * x + dx * y);
-                bounds.x = bounds.x.min(x);
-                bounds.y = bounds.y.min(y);
-                right = right.max(x);
-                bottom = bottom.max(y);
-            }
-            bounds.width = right - bounds.x;
-            bounds.height = bottom - bounds.y;
-            obstacles.push((path.edge_index, EdgeLabelObstacle::Bounds(bounds)));
-        }
-    }
-    obstacles
-}
-
-/// The endpoints of the connected forbidden interval containing `position`. Merging projections
-/// handles chains of obstacles without an iterative nudge that can oscillate between nodes.
-fn edge_label_exclusion_interval(mut intervals: Vec<(f32, f32)>, position: f32) -> (f32, f32) {
-    intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    let mut merged: Option<(f32, f32)> = None;
-    for (start, end) in intervals {
-        if let Some((left, right)) = merged {
-            if start < right {
-                merged = Some((left, right.max(end)));
-                continue;
-            }
-            if left < position && position < right {
-                return (left, right);
-            }
-        }
-        merged = Some((start, end));
-    }
-    merged
-        .filter(|(left, right)| *left < position && position < *right)
-        .unwrap_or((position, position))
-}
-
-/// Keep the padded label clear of nodes, earlier plates and foreign routes, starting at its midpoint.
-/// Project into the frame before testing collisions, including for an otherwise clear label.
-/// Prefer the nearest free +/- X/Y position inside that frame. If none fits, retain the nearest
-/// clear outside position; `svg_geometry` includes it in the exported frame.
-fn clear_edge_label_position(
-    anchor: fm_layout::LayoutPoint,
-    width: f32,
-    height: f32,
-    layout: &DiagramLayout,
-    padding: f32,
-    placed_labels: &[fm_layout::LayoutRect],
-    foreign_routes: &[EdgeLabelObstacle],
-) -> fm_layout::LayoutPoint {
-    let half_width = width / 2.0;
-    let half_height = height / 2.0;
-    let min_x = layout.bounds.x - padding + half_width + 2.0;
-    let max_x = layout.bounds.x + layout.bounds.width + padding - half_width - 2.0;
-    let min_y = layout.bounds.y - padding + half_height + 2.0;
-    let max_y = layout.bounds.y + layout.bounds.height + padding - half_height - 2.0;
-    let routed_anchor = anchor;
-    let project = |value: f32, low: f32, high: f32| {
-        if low <= high {
-            value.clamp(low, high)
-        } else {
-            (low + high) / 2.0
-        }
-    };
-    let anchor = fm_layout::LayoutPoint {
-        x: project(anchor.x, min_x, max_x),
-        y: project(anchor.y, min_y, max_y),
-    };
-    // Includes the backing-plate stroke and a visible gap to the node's stroke.
-    let clearance_x = half_width + 2.0;
-    let clearance_y = half_height + 2.0;
-    let obstacles = || {
-        layout
-            .nodes
-            .iter()
-            .map(|node| EdgeLabelObstacle::Bounds(node.bounds))
-            .chain(
-                layout
-                    .extensions
-                    .state_notes
-                    .iter()
-                    .map(|note| EdgeLabelObstacle::Bounds(note.bounds)),
-            )
-            .chain(placed_labels.iter().copied().map(EdgeLabelObstacle::Bounds))
-            .chain(foreign_routes.iter().copied())
-    };
-    if !obstacles().any(|obstacle| {
-        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
-        x.is_some_and(|(lo, hi)| lo < anchor.x && anchor.x < hi)
-            && y.is_some_and(|(lo, hi)| lo < anchor.y && anchor.y < hi)
-    }) {
-        return anchor;
-    }
-    let mut x_intervals = Vec::new();
-    let mut y_intervals = Vec::new();
-    for obstacle in obstacles() {
-        let (x, y) = obstacle.exclusion_intervals(anchor, clearance_x, clearance_y);
-        x_intervals.extend(x);
-        y_intervals.extend(y);
-    }
-    let (left, right) = edge_label_exclusion_interval(x_intervals, anchor.x);
-    let (top, bottom) = edge_label_exclusion_interval(y_intervals, anchor.y);
-    let mut closest_inside = None;
-    let mut inside_distance = f32::INFINITY;
-    let mut closest = anchor;
-    let mut distance = f32::INFINITY;
-    for (x, y) in [
-        (anchor.x, bottom),
-        (anchor.x, top),
-        (right, anchor.y),
-        (left, anchor.y),
-    ] {
-        let candidate_distance = (x - routed_anchor.x).abs() + (y - routed_anchor.y).abs();
-        if candidate_distance < distance {
-            closest = fm_layout::LayoutPoint { x, y };
-            distance = candidate_distance;
-        }
-        if x >= min_x
-            && x <= max_x
-            && y >= min_y
-            && y <= max_y
-            && candidate_distance < inside_distance
-        {
-            closest_inside = Some(fm_layout::LayoutPoint { x, y });
-            inside_distance = candidate_distance;
-        }
-    }
-    closest_inside.unwrap_or(closest)
-}
+#[cfg(test)]
+use fm_layout::edge_labels::{EdgeLabelObstacle, clear_edge_label_position};
 
 /// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
 /// `out`. Shared by `render_edge` (into a fresh String wrapped in `Element::raw_svg`) and
@@ -18250,10 +17896,6 @@ mod tests {
 
     #[test]
     fn label_clearance_merges_obstacle_chains_and_respects_the_existing_frame() {
-        assert_eq!(
-            edge_label_exclusion_interval(vec![(40.0, 60.0), (10.0, 30.0), (20.0, 50.0)], 25.0),
-            (10.0, 60.0)
-        );
         let mut layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
         layout
             .nodes
