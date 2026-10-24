@@ -447,12 +447,31 @@ impl Canvas2dRenderer {
         // Draw nodes
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
+        if let Some(journey) = &layout.extensions.journey {
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            for row in journey.title.iter().chain(&journey.legend) {
+                let center = row.bounds.center();
+                ctx.set_font(&format!("{}px {}", row.font_size, self.config.font_family));
+                ctx.fill_text(
+                    &row.text,
+                    f64::from(center.x) + offset_x,
+                    f64::from(center.y) + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+        }
+
         if self.config.debug_overlay {
             self.draw_debug_overlay_world(layout, ctx, offset_x, offset_y);
         }
 
         ctx.restore();
-        if self.draw_generic_diagram_title(ctx, ir, canvas_width) {
+        if layout.extensions.journey.is_none()
+            && self.draw_generic_diagram_title(ctx, ir, canvas_width)
+        {
             labels_drawn += 1;
         }
         labels_drawn += self.draw_c4_legend(ctx, ir, canvas_width, canvas_height);
@@ -1832,7 +1851,9 @@ impl Canvas2dRenderer {
                     // diagram type instead, which is what actually decides the meaning: in a
                     // sequence diagram a Lane IS a lifeline and its name is already drawn as a
                     // head/foot header.
-                    if !band.label.is_empty() && diagram_type != fm_core::DiagramType::Sequence {
+                    if !band.label.is_empty()
+                        && !matches!(diagram_type, DiagramType::Sequence | DiagramType::Journey)
+                    {
                         ctx.set_fill_style(&self.config.label_color);
                         ctx.set_font(section_label_font.get_or_insert_with(|| {
                             format!(
@@ -3032,7 +3053,17 @@ impl Canvas2dRenderer {
             let text_color = declared_text_color
                 .as_deref()
                 .and_then(sanitize_canvas_paint);
-            let label_fill = text_color.as_deref().unwrap_or(&self.config.label_color);
+            let label_fill = text_color.as_deref().unwrap_or_else(|| {
+                if ir.diagram_type == DiagramType::Journey {
+                    fm_core::readable_label_color(
+                        fill.as_deref().unwrap_or(&self.config.node_fill),
+                        &self.config.label_color,
+                        &self.config.node_fill,
+                    )
+                } else {
+                    &self.config.label_color
+                }
+            });
             // The border WIDTH is the third channel of the same declaration and was the last one
             // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
             // half landed, while every node border was drawn at the config width whatever the
@@ -3120,8 +3151,32 @@ impl Canvas2dRenderer {
             }
             self.draw_calls += 1;
 
+            if let Some(step) = layout
+                .extensions
+                .journey
+                .as_ref()
+                .and_then(|journey| journey.step(node_box.node_index))
+            {
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for row in &step.rows {
+                    let center = row.bounds.center();
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(row.font_size),
+                        None,
+                        &self.config.font_family,
+                    ));
+                    ctx.fill_text(
+                        &row.text,
+                        f64::from(center.x) + offset_x,
+                        f64::from(center.y) + offset_y,
+                    );
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                }
             // Check for class diagram three-compartment rendering.
-            if let Some(node) = ir_node
+            } else if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
                 && meta.has_compartments()
             {
@@ -4138,6 +4193,12 @@ pub(crate) fn resolve_node_colors_with_defaults(
     config: &CanvasRenderConfig,
 ) -> (Option<String>, Option<String>) {
     let (fill, stroke) = resolve_node_colors(ir, node_index);
+    if ir.diagram_type == DiagramType::Journey {
+        return (
+            fill.or_else(|| fm_layout::journey_score_fill(ir, node_index).map(str::to_owned)),
+            stroke,
+        );
+    }
     if config.semantic_colors
         && ir.diagram_type == DiagramType::Flowchart
         && ir.meta.theme_overrides.theme.as_deref().is_none_or(|name| {

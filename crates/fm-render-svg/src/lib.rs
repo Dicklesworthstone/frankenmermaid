@@ -2056,7 +2056,12 @@ fn render_scene_document_with_ir(
     ir: Option<&MermaidDiagramIr>,
 ) -> String {
     let padding = config.padding;
-    let visible_title = ir.and_then(|diagram_ir| diagram_ir.meta.title.as_deref());
+    let planned_journey_title = scene.root.children.iter().any(|item| {
+        matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("journey-title"))
+    });
+    let visible_title = ir
+        .and_then(|diagram_ir| diagram_ir.meta.title.as_deref())
+        .filter(|_| !planned_journey_title);
     let title_height = if visible_title.is_some() {
         config.font_size + 22.0
     } else {
@@ -2567,6 +2572,23 @@ fn render_scene_text(
         .build();
 
     elem = apply_fill_style(elem, &text.fill);
+    if let Some(ir) = ir
+        && ir.diagram_type == DiagramType::Journey
+    {
+        let theme = resolve_theme(Some(ir), config);
+        let color = if let RenderSource::Node(index) = text.source {
+            let declared = ir.resolved_node_style(index);
+            let fill = declared
+                .get("fill")
+                .map(String::as_str)
+                .or_else(|| fm_layout::journey_score_fill(ir, index))
+                .unwrap_or("#ffffff");
+            fm_core::readable_label_color(fill, &theme.colors.text, &theme.colors.background)
+        } else {
+            &theme.colors.text
+        };
+        elem = elem.fill(color).attr("xml:space", "preserve");
+    }
     if let Some(ir) = ir
         && let RenderSource::Node(index) = text.source
         && let Some(style) = resolve_scene_node_inline_styles(ir, index).1
@@ -3390,7 +3412,14 @@ fn resolve_scene_node_inline_styles(
             fm_core::sanitize_style_value(&value).map(|value| (property, value))
         })
         .collect();
-    let (shape, text) = split_style_properties(&properties);
+    let (shape, mut text) = split_style_properties(&properties);
+    // Journey rows occupy a separate layer in both SVG backends. Preserve node opacity there
+    // instead of relying on inheritance from the shape's group.
+    if ir.diagram_type == DiagramType::Journey
+        && let Some(opacity) = shape.get("opacity")
+    {
+        text.insert("opacity".to_owned(), opacity.clone());
+    }
     (style_map_to_css(&shape), style_map_to_css(&text))
 }
 
@@ -4354,7 +4383,7 @@ fn svg_geometry(
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let title_height = if generic_title_for(ir).is_none() {
+    let title_height = if layout.extensions.journey.is_some() || generic_title_for(ir).is_none() {
         0.0
     } else {
         config.font_size + 22.0
@@ -4452,13 +4481,16 @@ fn render_layout_to_svg(
 ) -> String {
     let SvgGeometry {
         frame,
-        detail,
+        mut detail,
         label_positions: preserved_label_positions,
     } = svg_geometry(ir, layout, config);
+    if layout.extensions.journey.is_some() {
+        detail.show_node_labels = false;
+    }
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let generic_title = generic_title_for(ir);
+    let generic_title = generic_title_for(ir).filter(|_| layout.extensions.journey.is_none());
     let width = frame.viewbox_width;
     let height = frame.viewbox_height;
 
@@ -4813,29 +4845,13 @@ fn render_layout_to_svg(
         }
     }
 
-    // The journey ACTOR LEGEND, which mermaid draws and we drew nowhere (bd-mq273).
-    //
-    // Measured on the pinned 11.15.0 bundle, `journey_basic` gives the run order
-    // ["System","User","Browse","Visit homepage",…,"User Shopping Journey"] — the actors come FIRST,
-    // each exactly once, and SORTED rather than in source order: `One: 3: Zed` then `Two: 4: Alpha`
-    // draws ["Alpha","Zed"]. A step naming several actors contributes each of them separately, so
-    // `One: 3: Bob, Ann` draws ["Ann","Bob"].
-    //
-    // ⚠️ FROM `journey_meta`, NOT FROM THE `journey-actor-*` CLASSES. Those are CSS-normalized, so a
-    // legend built from them would draw `Big_Corp` for an author who wrote `Big Corp` — the same
-    // defect the accessible name carried until this change.
-    for actor in journey_actor_legend(ir) {
-        doc = doc.child(
-            TextBuilder::new(&actor.name)
-                .x(padding + actor.offset_x)
-                .y(padding + config.font_size * 2.0 + 12.0)
-                .anchor(TextAnchor::Start)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(config.font_size - 2.0)
-                .fill(&theme.colors.text)
-                .class("fm-journey-actor")
-                .build(),
-        );
+    if let Some(journey) = &layout.extensions.journey {
+        for row in journey.title.iter().chain(&journey.legend) {
+            let mut text = row.to_render_text(RenderSource::Diagram, &theme.colors.text);
+            text.x += offset_x;
+            text.y += offset_y;
+            doc = doc.child(render_scene_text(&text, config, Some(ir)));
+        }
     }
 
     // The `info` diagram (bd-a3tmn): one text run, the renderer's own version.
@@ -5691,6 +5707,17 @@ fn render_layout_to_svg(
                     &centrality_map,
                 );
             }
+            if let Some(journey) = &layout.extensions.journey {
+                write_journey_steps_into(
+                    out,
+                    ir,
+                    journey,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
+            }
             // Sequence mirror headers (participant boxes repeated at the bottom) sit AFTER the nodes in the
             // slow path's child order; stream each straight into `out` in the same position instead of
             // building it as a `doc.child` the final `to_string` copies a second time. Byte-identical: the
@@ -5915,6 +5942,20 @@ fn render_layout_to_svg(
         if !node_svg.is_empty() {
             doc = doc.child(Element::raw_svg(node_svg));
         }
+    }
+
+    if let Some(journey) = &layout.extensions.journey {
+        let mut rows = String::new();
+        write_journey_steps_into(
+            &mut rows,
+            ir,
+            journey,
+            offset_x,
+            offset_y,
+            config,
+            &theme.colors,
+        );
+        doc = doc.child(Element::raw_svg(rows));
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
@@ -7343,63 +7384,6 @@ fn write_gantt_bar_into(
     }
 }
 
-/// WCAG relative luminance of a `#rgb`/`#rrggbb` colour, or `None` for anything else.
-///
-/// `None` rather than a guess: a `var(...)`, a gradient reference or a named colour cannot be
-/// measured here, and the caller falls back to its previous behaviour instead of picking a colour
-/// from arithmetic it did not actually do.
-fn relative_luminance(colour: &str) -> Option<f64> {
-    let hex = colour.trim().strip_prefix('#')?;
-    let expanded: String = match hex.len() {
-        3 => hex.chars().flat_map(|c| [c, c]).collect(),
-        6 => hex.to_string(),
-        _ => return None,
-    };
-    let mut channels = [0.0_f64; 3];
-    for (index, channel) in channels.iter_mut().enumerate() {
-        let start = index * 2;
-        let raw = u8::from_str_radix(expanded.get(start..start + 2)?, 16).ok()?;
-        let value = f64::from(raw) / 255.0;
-        *channel = if value <= 0.03928 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        };
-    }
-    Some(0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2])
-}
-
-/// WCAG contrast ratio between two colours, or `None` if either cannot be measured.
-fn contrast_ratio(a: &str, b: &str) -> Option<f64> {
-    let (x, y) = (relative_luminance(a)?, relative_luminance(b)?);
-    Some((x.max(y) + 0.05) / (x.min(y) + 0.05))
-}
-
-/// The theme colour that reads best ON `background` (bd-u0x67).
-///
-/// Gantt task bars are FIXED pastels — `#93c5fd` normal, `#fca5a5` critical, `#86efac` done,
-/// `#94a3b8` active — the same in every theme. The label, however, used `colors.text`, which flips
-/// to near-white on a dark theme. So every task label in every gantt chart measured 1.34–2.45:1
-/// against its own bar in dark mode, against 6.65–12.15:1 in light. All four task types, not an
-/// edge case.
-///
-/// Chooses between the theme's own TEXT and BACKGROUND colours rather than hardcoding black or
-/// white: both stay theme-derived, the light theme keeps exactly the colour it already had (so its
-/// output is unchanged), and a user-restyled bar — which may be dark — gets the right answer instead
-/// of an assumption that bars are always pale.
-///
-/// Falls back to `text` when either colour cannot be measured, which keeps an unparseable fill on
-/// its previous behaviour rather than inventing one.
-fn readable_label_colour<'a>(background: &str, colors: &'a ThemeColors) -> &'a str {
-    match (
-        contrast_ratio(&colors.text, background),
-        contrast_ratio(&colors.background, background),
-    ) {
-        (Some(on_text), Some(on_background)) if on_background > on_text => &colors.background,
-        _ => &colors.text,
-    }
-}
-
 /// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
 /// `x y text-anchor="middle" dominant-baseline="central" font-size [font-family] fill class`.
 #[allow(clippy::too_many_arguments)]
@@ -7799,7 +7783,11 @@ fn render_gantt_svg(
                         None => (x + w / 2.0, "middle", true),
                     };
                 let label_fill = if inside {
-                    readable_label_colour(fill, &theme.colors)
+                    fm_core::readable_label_color(
+                        fill,
+                        &theme.colors.text,
+                        &theme.colors.background,
+                    )
                 } else {
                     &theme.colors.text
                 };
@@ -9084,44 +9072,52 @@ fn write_xychart_mark_accessible_name(
     }
 }
 
-/// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
-pub(crate) struct JourneyLegendEntry {
-    pub(crate) name: String,
-    pub(crate) offset_x: f32,
-}
-
-/// The actors a journey declares, deduplicated and sorted, as mermaid lists them (bd-mq273).
-///
-/// Empty for every other diagram type, and for a journey whose steps name no actor — an empty legend
-/// row must not reserve space or draw a stray separator.
-fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
-    if ir.diagram_type != DiagramType::Journey {
-        return Vec::new();
+/// Emit the same measured title, score, and actor rows used by the other graphical backends.
+#[allow(clippy::too_many_arguments)]
+fn write_journey_steps_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    journey: &fm_layout::LayoutJourney,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for step in &journey.steps {
+        let declared = ir.resolved_node_style(step.node_index);
+        let fill = declared
+            .get("fill")
+            .map(String::as_str)
+            .or_else(|| fm_layout::journey_score_fill(ir, step.node_index))
+            .unwrap_or(&colors.node_fill);
+        let color = fm_core::readable_label_color(fill, &colors.text, &colors.background);
+        let (_, text_style) = resolve_scene_node_inline_styles(ir, step.node_index);
+        for row in &step.rows {
+            let center = row.bounds.center();
+            let mut text = TextBuilder::new(&row.text)
+                .x(center.x + offset_x)
+                .y(center.y + offset_y)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(row.font_size)
+                .anchor(TextAnchor::Middle)
+                .baseline(text::DominantBaseline::Middle)
+                .fill(color)
+                .class("fm-journey-row")
+                .build()
+                .attr("pointer-events", "none")
+                .attr("xml:space", "preserve");
+            if let Some(style) = &text_style {
+                text = text.attr("style", style);
+            }
+            apply_source_metadata(
+                text,
+                RenderSource::Node(step.node_index),
+                config.include_source_spans,
+                Some(ir),
+            )
+            .write_to_string(out);
+        }
     }
-    let mut names: Vec<&str> = ir
-        .nodes
-        .iter()
-        .filter_map(|node| node.journey_meta.as_deref())
-        .flat_map(|meta| meta.actors.iter().map(String::as_str))
-        .collect();
-    // Sorted then deduped, which is the order mermaid draws them in and NOT source order.
-    names.sort_unstable();
-    names.dedup();
-
-    let mut offset = 0.0_f32;
-    names
-        .into_iter()
-        .map(|name| {
-            let entry = JourneyLegendEntry {
-                name: name.to_string(),
-                offset_x: offset,
-            };
-            // Advance by the name's own width so entries do not overlap; the constant is the same
-            // average-character estimate the rest of this renderer sizes text with.
-            offset += (name.chars().count() as f32).mul_add(8.0, 24.0);
-            entry
-        })
-        .collect()
 }
 
 /// Look up a node's centrality tier by index (O(1) via HashMap).
@@ -10693,6 +10689,23 @@ fn render_node_into(
 ) {
     use fm_core::NodeShape;
 
+    if ir.diagram_type == DiagramType::Journey {
+        render_node(
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+            false,
+        )
+        .write_to_string(out);
+        return;
+    }
+
     // A composite state IS its container: `anchor_composite_state_nodes` gave this node its
     // cluster's bounds so transitions attach to the container's boundary. Drawing it again here
     // would stack a second labelled box on the container — the duplicate this removes (bd-9w54).
@@ -11304,7 +11317,19 @@ fn render_node(
         palette
     });
     let colors = flowchart_colors.as_ref().unwrap_or(colors);
-    let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
+    let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey {
+        resolve_scene_node_inline_styles(ir, node_box.node_index)
+    } else {
+        resolve_node_inline_styles(ir, node_box.node_index)
+    };
+    let shape_style = if let Some(fill) = fm_layout::journey_score_fill(ir, node_box.node_index) {
+        Some(format!(
+            "fill: {fill};{}",
+            shape_style.as_deref().unwrap_or("")
+        ))
+    } else {
+        shape_style
+    };
     let node_id = ir_node
         .map(|node| node.id.as_str())
         .unwrap_or_else(|| node_box.node_id.as_str());
@@ -11384,6 +11409,7 @@ fn render_node(
     // `requirement_meta`/icon/centrality already gated below).
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
+        && ir.diagram_type != DiagramType::Journey
         && matches!(
             shape,
             NodeShape::Rect

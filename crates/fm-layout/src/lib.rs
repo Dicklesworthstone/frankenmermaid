@@ -2314,6 +2314,8 @@ pub struct NodeCentrality {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
+    /// Measured Journey task content and actor overview, shared by graphical renderers.
+    pub journey: Option<LayoutJourney>,
     /// Squarified `treemap` rectangles, outermost first (bd-9ghyo).
     pub treemap_tiles: Vec<LayoutTreemapTile>,
     /// The resolved `radar-beta` wheel, when this is a radar (bd-sk4dv).
@@ -2348,6 +2350,94 @@ pub struct LayoutExtensions {
     /// Empty for every other diagram type and for a state diagram that declares no notes, in which
     /// case nothing about the layout changes.
     pub state_notes: Vec<LayoutStateNote>,
+}
+
+/// Semantic role of a measured Journey text row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JourneyTextRole {
+    DiagramTitle,
+    Title,
+    Score,
+    /// Index in the task's original actor list, before wrapping.
+    Actor(usize),
+    Legend,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutJourneyText {
+    pub text: String,
+    pub bounds: LayoutRect,
+    pub font_size: f32,
+    pub role: JourneyTextRole,
+}
+
+impl LayoutJourneyText {
+    #[must_use]
+    pub fn to_render_text(&self, source: RenderSource, color: &str) -> RenderText {
+        let center = self.bounds.center();
+        RenderText {
+            source,
+            text: self.text.clone(),
+            x: center.x,
+            y: center.y,
+            font_size: self.font_size,
+            align: TextAlign::Middle,
+            baseline: TextBaseline::Middle,
+            fill: FillStyle::Solid {
+                color: color.to_owned(),
+                opacity: 1.0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutJourneyStep {
+    pub node_index: usize,
+    pub rows: Vec<LayoutJourneyText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LayoutJourney {
+    /// Sorted by node index; actors never become synthetic graph nodes.
+    pub steps: Vec<LayoutJourneyStep>,
+    pub title: Vec<LayoutJourneyText>,
+    pub legend: Vec<LayoutJourneyText>,
+}
+
+impl LayoutJourney {
+    #[must_use]
+    pub fn step(&self, node_index: usize) -> Option<&LayoutJourneyStep> {
+        self.steps
+            .binary_search_by_key(&node_index, |step| step.node_index)
+            .ok()
+            .and_then(|index| self.steps.get(index))
+    }
+}
+
+/// The exact parsed score. Missing and invalid values do not acquire a default score.
+#[must_use]
+pub fn journey_score(node: &IrNode) -> Option<u8> {
+    node.classes.iter().find_map(|class| {
+        class
+            .strip_prefix("journey-score-")
+            .and_then(|score| score.parse().ok())
+    })
+}
+
+#[must_use]
+pub fn journey_score_fill(ir: &MermaidDiagramIr, node_index: usize) -> Option<&'static str> {
+    if ir.diagram_type != DiagramType::Journey {
+        return None;
+    }
+    match journey_score(ir.nodes.get(node_index)?)? {
+        1 => Some("#fca5a5"),
+        2 => Some("#fdba74"),
+        3 => Some("#fde68a"),
+        4 => Some("#bef264"),
+        5 => Some("#86efac"),
+        _ => None,
+    }
 }
 
 /// Which side of its target state a [`LayoutStateNote`] was placed on.
@@ -3455,6 +3545,18 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
         .push(RenderItem::Group(build_node_layer(ir, layout)));
     root.children
         .push(RenderItem::Group(build_label_layer(ir, layout)));
+    if let Some(journey) = &layout.extensions.journey
+        && !journey.title.is_empty()
+    {
+        let mut title = RenderGroup::new(Some(String::from("journey-title")));
+        title.children.extend(
+            journey
+                .title
+                .iter()
+                .map(|row| RenderItem::Text(row.to_render_text(RenderSource::Diagram, "#0f172a"))),
+        );
+        root.children.push(RenderItem::Group(title));
+    }
 
     RenderScene { bounds, root }
 }
@@ -3869,7 +3971,9 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             source: RenderSource::Node(node_box.node_index),
             commands: node_path(node_box.bounds, shape),
             fill: Some(FillStyle::Solid {
-                color: String::from("#ffffff"),
+                color: journey_score_fill(ir, node_box.node_index)
+                    .unwrap_or("#ffffff")
+                    .to_owned(),
                 opacity: 1.0,
             }),
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.5)),
@@ -3904,7 +4008,28 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
     let mut layer =
         RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
 
+    if let Some(journey) = &layout.extensions.journey {
+        layer.children.extend(
+            journey
+                .legend
+                .iter()
+                .map(|row| RenderItem::Text(row.to_render_text(RenderSource::Diagram, "#0f172a"))),
+        );
+    }
     for node_box in &layout.nodes {
+        if let Some(step) = layout
+            .extensions
+            .journey
+            .as_ref()
+            .and_then(|journey| journey.step(node_box.node_index))
+        {
+            layer.children.extend(step.rows.iter().map(|row| {
+                RenderItem::Text(
+                    row.to_render_text(RenderSource::Node(node_box.node_index), "#0f172a"),
+                )
+            }));
+            continue;
+        }
         let Some(node) = ir.nodes.get(node_box.node_index) else {
             continue;
         };
@@ -4207,6 +4332,18 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .clone()
                 .unwrap_or_else(fm_core::FontMetrics::default_metrics)
         });
+    // Generic algorithms remain valid Journey overrides. Their task boxes and text rows must
+    // use the same metrics; the force layout currently always uses the default font metrics.
+    let journey_metrics = (ir.diagram_type == DiagramType::Journey).then(|| {
+        if guarded_dispatch.selected == LayoutAlgorithm::Force {
+            fm_core::FontMetrics::default_metrics()
+        } else {
+            config
+                .font_metrics
+                .clone()
+                .unwrap_or_else(fm_core::FontMetrics::default_metrics)
+        }
+    });
 
     let mut traced = match guarded_dispatch.selected {
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Auto => {
@@ -4224,7 +4361,13 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
         LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
-        LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
+        LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+        ),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
         LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
         LayoutAlgorithm::Sequence => layout_diagram_sequence_traced_with_metrics(
@@ -4246,6 +4389,9 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Wardley => layout_diagram_wardley_traced(ir),
         LayoutAlgorithm::EventModeling => layout_diagram_event_model_traced(ir),
     };
+    if let Some(metrics) = journey_metrics {
+        attach_journey_content(ir, &mut traced, &metrics);
+    }
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
     // and guardrails, and the placement only needs final node boxes, which every arm has produced by
@@ -6239,6 +6385,12 @@ pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out with force-directed algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut traced = layout_diagram_force_traced_impl(ir);
+    attach_journey_content(ir, &mut traced, &fm_core::FontMetrics::default_metrics());
+    traced
+}
+
+fn layout_diagram_force_traced_impl(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
     let metrics = fm_core::FontMetrics::default_metrics();
@@ -6378,6 +6530,15 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 }
 
 fn layout_diagram_tree_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
+    let mut traced = layout_diagram_tree_traced_impl(ir, metrics);
+    attach_journey_content(ir, &mut traced, metrics);
+    traced
+}
+
+fn layout_diagram_tree_traced_impl(
     ir: &MermaidDiagramIr,
     metrics: &fm_core::FontMetrics,
 ) -> TracedLayout {
@@ -8374,6 +8535,7 @@ fn layout_diagram_sequence_traced_with_metrics(
             stats,
             extensions: LayoutExtensions {
                 bands: lifeline_bands,
+                journey: None,
                 treemap_tiles: Vec::new(),
                 radar: None,
                 gantt_day_axis: None,
@@ -11223,9 +11385,254 @@ fn kanban_lane_columns(ir: &MermaidDiagramIr) -> Option<Vec<Vec<usize>>> {
     columns.iter().any(|c| !c.is_empty()).then_some(columns)
 }
 
-fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+const JOURNEY_TEXT_WIDTH: f32 = 240.0;
+const JOURNEY_PADDING_X: f32 = 16.0;
+const JOURNEY_PADDING_Y: f32 = 12.0;
+const JOURNEY_FOOTER_GAP: f32 = 6.0;
+
+fn journey_text_rows(
+    text: &str,
+    role: JourneyTextRole,
+    font_size: f32,
+    max_width: f32,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutJourneyText> {
+    let scale = font_size / metrics.font_size();
+    let mut lines = Vec::new();
+    for authored in text.split('\n') {
+        let wrapped = metrics.wrap_to_width(authored, max_width / scale / 1.25);
+        let mut cursor = 0;
+        for (index, line) in wrapped.iter().enumerate() {
+            let start = cursor;
+            // The shared wrapper chooses grapheme-safe breaks but normalizes spaces. Recover
+            // each original substring so repeated spaces and Unicode actor names stay intact.
+            for word in line.split_whitespace() {
+                if let Some(offset) = authored[cursor..].find(word) {
+                    cursor += offset + word.len();
+                }
+            }
+            if index + 1 == wrapped.len() {
+                cursor = authored.len();
+            }
+            lines.push(authored[start..cursor].to_owned());
+        }
+    }
+    lines
+        .into_iter()
+        .map(|text| LayoutJourneyText {
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: metrics.estimate_preserved_width(&text, font_size, metrics.avg_char_width()),
+                height: metrics.line_height_px().max(metrics.font_size()) * scale,
+            },
+            text,
+            font_size,
+            role,
+        })
+        .collect()
+}
+
+fn measure_journey_step(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    metrics: &fm_core::FontMetrics,
+) -> (LayoutJourneyStep, (f32, f32)) {
+    let node = &ir.nodes[node_index];
+    let declared = ir.resolved_node_style(node_index);
+    let declared_size = declared.get("font-size").and_then(|size| {
+        size.trim()
+            .trim_end_matches("px")
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+    });
+    let title_size = declared_size.unwrap_or(metrics.font_size());
+    let footer_size = declared_size.unwrap_or(metrics.font_size() * 0.85);
+    let mut rows = journey_text_rows(
+        ir.node_display_text(node),
+        JourneyTextRole::Title,
+        title_size,
+        JOURNEY_TEXT_WIDTH,
+        metrics,
+    );
+    if let Some(score) = journey_score(node) {
+        rows.extend(journey_text_rows(
+            &format!("Score: {score}"),
+            JourneyTextRole::Score,
+            footer_size,
+            JOURNEY_TEXT_WIDTH,
+            metrics,
+        ));
+    }
+    if let Some(meta) = node.journey_meta.as_deref() {
+        for (index, actor) in meta
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| !actor.is_empty())
+        {
+            rows.extend(journey_text_rows(
+                &format!("Actor: {actor}"),
+                JourneyTextRole::Actor(index),
+                footer_size,
+                JOURNEY_TEXT_WIDTH,
+                metrics,
+            ));
+        }
+    }
+    let width = (rows.iter().map(|row| row.bounds.width).fold(0.0, f32::max)
+        + JOURNEY_PADDING_X * 2.0)
+        .max(144.0);
+    let mut y = JOURNEY_PADDING_Y;
+    let mut in_footer = false;
+    for row in &mut rows {
+        if row.role != JourneyTextRole::Title && !in_footer {
+            y += JOURNEY_FOOTER_GAP;
+            in_footer = true;
+        }
+        row.bounds.x = (width - row.bounds.width) * 0.5;
+        row.bounds.y = y;
+        y += row.bounds.height;
+    }
+    (
+        LayoutJourneyStep { node_index, rows },
+        (width, (y + JOURNEY_PADDING_Y).max(44.0)),
+    )
+}
+
+fn attach_journey_content(
+    ir: &MermaidDiagramIr,
+    traced: &mut TracedLayout,
+    metrics: &fm_core::FontMetrics,
+) {
+    if ir.diagram_type == DiagramType::Journey && traced.layout.extensions.journey.is_none() {
+        let steps = (0..ir.nodes.len())
+            .map(|index| measure_journey_step(ir, index, metrics).0)
+            .collect();
+        place_journey_content(ir, Arc::make_mut(&mut traced.layout), steps, metrics);
+    }
+}
+
+fn place_journey_content(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    mut steps: Vec<LayoutJourneyStep>,
+    metrics: &fm_core::FontMetrics,
+) {
+    for node in &layout.nodes {
+        if let Some(step) = steps.get_mut(node.node_index) {
+            for row in &mut step.rows {
+                row.bounds.x += node.bounds.x;
+                row.bounds.y += node.bounds.y;
+            }
+        }
+    }
+    let mut actors: Vec<&str> = ir
+        .nodes
+        .iter()
+        .filter_map(|node| node.journey_meta.as_deref())
+        .flat_map(|meta| meta.actors.iter().map(String::as_str))
+        .filter(|actor| !actor.is_empty())
+        .collect();
+    actors.sort_unstable();
+    actors.dedup();
+    let mut legend = Vec::new();
+    let available_width = layout.bounds.width.max(144.0);
+    let (mut x, mut y, mut line_height, mut legend_width) = (0.0, 0.0, 0.0_f32, 0.0_f32);
+    for actor in actors {
+        let mut rows = journey_text_rows(
+            actor,
+            JourneyTextRole::Legend,
+            metrics.font_size() * 0.85,
+            available_width.min(JOURNEY_TEXT_WIDTH),
+            metrics,
+        );
+        let width = rows.iter().map(|row| row.bounds.width).fold(0.0, f32::max);
+        let height: f32 = rows.iter().map(|row| row.bounds.height).sum();
+        if x > 0.0 && x + width > available_width {
+            x = 0.0;
+            y += line_height + JOURNEY_FOOTER_GAP;
+            line_height = 0.0;
+        }
+        let mut row_y = y;
+        for row in &mut rows {
+            row.bounds.x = layout.bounds.x + x + (width - row.bounds.width) * 0.5;
+            row.bounds.y = row_y;
+            row_y += row.bounds.height;
+        }
+        legend_width = legend_width.max(x + width);
+        x += width + 24.0;
+        line_height = line_height.max(height);
+        legend.extend(rows);
+    }
+    if !legend.is_empty() {
+        let reserved = y + line_height + JOURNEY_PADDING_Y;
+        let top = layout.bounds.y - reserved;
+        for row in &mut legend {
+            row.bounds.y += top;
+        }
+        layout.bounds.y = top;
+        layout.bounds.height += reserved;
+        layout.bounds.width = layout.bounds.width.max(legend_width);
+    }
+    let mut title = ir
+        .meta
+        .title
+        .as_deref()
+        .filter(|title| !title.is_empty())
+        .map(|title| {
+            journey_text_rows(
+                title,
+                JourneyTextRole::DiagramTitle,
+                metrics.font_size() + 4.0,
+                layout.bounds.width.max(144.0),
+                metrics,
+            )
+        })
+        .unwrap_or_default();
+    if !title.is_empty() {
+        let height: f32 = title.iter().map(|row| row.bounds.height).sum();
+        let top = layout.bounds.y - height - JOURNEY_PADDING_Y;
+        let mut y = top;
+        let width = title
+            .iter()
+            .map(|row| row.bounds.width)
+            .fold(layout.bounds.width, f32::max);
+        for row in &mut title {
+            row.bounds.x = layout.bounds.x + (width - row.bounds.width) * 0.5;
+            row.bounds.y = y;
+            y += row.bounds.height;
+        }
+        layout.bounds.y = top;
+        layout.bounds.height += height + JOURNEY_PADDING_Y;
+        layout.bounds.width = width;
+    }
+    layout.extensions.journey = Some(LayoutJourney {
+        steps,
+        title,
+        legend,
+    });
+}
+
+fn layout_diagram_kanban_traced(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let journey = ir.diagram_type == DiagramType::Journey;
+    // Measure complete task content here, bypassing the generic label-only size cache.
+    let (steps, mut node_sizes): (Vec<_>, Vec<_>) = if journey {
+        (0..node_count)
+            .map(|index| measure_journey_step(ir, index, metrics))
+            .unzip()
+    } else {
+        (
+            Vec::new(),
+            compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics()),
+        )
+    };
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -11275,12 +11682,26 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let column_gap = spacing.rank_spacing + 170.0;
     let row_gap = spacing.node_spacing + 22.0;
+    let mut column_left = 0.0;
     for (rank, nodes) in nodes_by_rank.iter().enumerate() {
+        let column_width = nodes
+            .iter()
+            .map(|index| node_sizes[*index].0)
+            .fold(0.0, f32::max);
+        let mut row_top = 0.0;
         for (order_index, node_index) in nodes.iter().enumerate() {
-            centers[*node_index] = (rank as f32 * column_gap, order_index as f32 * row_gap);
+            centers[*node_index] = if journey {
+                let height = node_sizes[*node_index].1;
+                let center = (column_left + column_width * 0.5, row_top + height * 0.5);
+                row_top += height + row_gap;
+                center
+            } else {
+                (rank as f32 * column_gap, order_index as f32 * row_gap)
+            };
             rank_by_node[*node_index] = rank;
             order_by_node[*node_index] = order_index;
         }
+        column_left += column_width + spacing.rank_spacing + 40.0;
     }
 
     let mut traced = finalize_specialized_layout(
@@ -11374,6 +11795,9 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             })
         })
         .collect();
+    if journey {
+        place_journey_content(ir, layout, steps, metrics);
+    }
     traced
 }
 
@@ -13775,6 +14199,13 @@ pub fn compute_node_sizes(
     ir: &MermaidDiagramIr,
     metrics: &fm_core::FontMetrics,
 ) -> Vec<(f32, f32)> {
+    // Journey tasks include score and actor rows, which the generic label-only cache does not
+    // describe. Measure the whole task for every supported algorithm, including forced layouts.
+    if ir.diagram_type == DiagramType::Journey {
+        return (0..ir.nodes.len())
+            .map(|index| measure_journey_step(ir, index, metrics).1)
+            .collect();
+    }
     ACTIVE_INCREMENTAL_STATE.with(|slot| {
         let mut state = slot.borrow_mut();
         let Some(state) = state.as_mut() else {

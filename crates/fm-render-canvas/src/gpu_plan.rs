@@ -1168,6 +1168,10 @@ pub enum GpuTextSource {
     /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
     /// than an IR node.
     Band,
+    /// Actor overview row; `node_index` indexes the measured legend, not IR nodes.
+    JourneyLegend,
+    /// Diagram-title row; `node_index` indexes the measured Journey title.
+    JourneyTitle,
     /// A wrapped packet field's repeated label.
     ///
     /// `node_index` is the packet field node index carried by the continuation extension.
@@ -1840,7 +1844,9 @@ impl GpuRenderPlan {
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
         let semantic_defaults = matches!(
             ir.diagram_type,
-            fm_core::DiagramType::Flowchart | fm_core::DiagramType::Mindmap
+            fm_core::DiagramType::Flowchart
+                | fm_core::DiagramType::Mindmap
+                | fm_core::DiagramType::Journey
         )
         .then(crate::renderer::CanvasRenderConfig::default);
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
@@ -2123,6 +2129,14 @@ impl GpuRenderPlan {
         };
         let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
         for (position, node) in layout.nodes.iter().enumerate() {
+            if layout
+                .extensions
+                .journey
+                .as_ref()
+                .is_some_and(|journey| journey.step(node.node_index).is_some())
+            {
+                continue;
+            }
             if let Some(Some(label)) = sankey_labels.get(position) {
                 let font_px = crate::renderer::resolve_declared_node_font(ir, node.node_index)
                     .size
@@ -2175,6 +2189,55 @@ impl GpuRenderPlan {
             })
             .collect();
 
+        // Use the measured task content without inventing graph nodes for actor annotations.
+        let mut journey_rows = Vec::new();
+        if let Some(journey) = &layout.extensions.journey {
+            let defaults = crate::renderer::CanvasRenderConfig::default();
+            for step in &journey.steps {
+                let (fill, _) = crate::renderer::resolve_node_colors_with_defaults(
+                    ir,
+                    step.node_index,
+                    &defaults,
+                );
+                let fallback = fm_core::readable_label_color(
+                    fill.as_deref().unwrap_or(&defaults.node_fill),
+                    &defaults.label_color,
+                    &defaults.node_fill,
+                );
+                let mut color = crate::renderer::resolve_node_text_color(ir, step.node_index)
+                    .as_deref()
+                    .and_then(parse_paint_rgba)
+                    .or_else(|| parse_paint_rgba(fallback))
+                    .unwrap_or(DEFAULT_LABEL_RGBA);
+                color[3] *= crate::renderer::resolve_node_opacity(ir, step.node_index)
+                    .unwrap_or(1.0) as f32;
+                for row in &step.rows {
+                    journey_rows.push((
+                        row,
+                        GpuTextSource::Node,
+                        u32::try_from(step.node_index).unwrap_or(u32::MAX),
+                        color,
+                    ));
+                }
+            }
+            for (index, row) in journey.legend.iter().enumerate() {
+                journey_rows.push((
+                    row,
+                    GpuTextSource::JourneyLegend,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    DEFAULT_LABEL_RGBA,
+                ));
+            }
+            for (index, row) in journey.title.iter().enumerate() {
+                journey_rows.push((
+                    row,
+                    GpuTextSource::JourneyTitle,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    DEFAULT_LABEL_RGBA,
+                ));
+            }
+        }
+
         // ⚠️ THE ATLAS MUST GROW WITH THE LARGEST LABEL, or this renders BLURRY rather than wrong --
         // a failure that survives review because the geometry is right and only the raster is soft.
         // The default cell is 32px for a 14px glyph, so the headroom ratio is what scales; smaller
@@ -2183,6 +2246,7 @@ impl GpuRenderPlan {
         let max_font_px = run_font_px
             .iter()
             .copied()
+            .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
             .fold(DEFAULT_FONT_SIZE_PX, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
@@ -2234,6 +2298,7 @@ impl GpuRenderPlan {
                 labelled
                     .iter()
                     .map(|(_, _, text)| *text)
+                    .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
                     .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
                     .chain(
                         layout
@@ -2299,7 +2364,7 @@ impl GpuRenderPlan {
                     .chain(layout.extensions.bands.iter().filter_map(|band| {
                         let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
                             || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
-                                && ir.diagram_type != fm_core::DiagramType::Sequence);
+                                && !matches!(ir.diagram_type, fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey));
                         draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
                     }))
                     .chain(
@@ -2399,6 +2464,39 @@ impl GpuRenderPlan {
                 node_index: *node_index,
                 first_quad,
                 quad_count,
+            });
+        }
+
+        for (row, source, node_index, color) in journey_rows {
+            let center = row.bounds.center();
+            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
+            let run_index = u32::try_from(text_runs.len()).unwrap_or(u32::MAX);
+            let width: f32 = row
+                .text
+                .chars()
+                .filter(|c| !c.is_control())
+                .map(|c| glyph_advance(c, row.font_size))
+                .sum();
+            let mut pen_x = center.x - width * 0.5;
+            for glyph in row.text.chars().filter(|c| !c.is_control()) {
+                let advance = glyph_advance(glyph, row.font_size);
+                if let Some(cell) = glyph_atlas.cell(glyph) {
+                    text_quads.push(GpuTextQuad {
+                        center: [pen_x + advance * 0.5, center.y],
+                        half_extent: [row.font_size * 0.5, row.font_size * 0.5],
+                        uv_min: cell.uv_min,
+                        uv_max: cell.uv_max,
+                        color,
+                        run_index,
+                    });
+                }
+                pen_x += advance;
+            }
+            text_runs.push(GpuTextRun {
+                source,
+                node_index,
+                first_quad,
+                quad_count: u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad,
             });
         }
 
@@ -2601,7 +2699,10 @@ impl GpuRenderPlan {
         for (index, band) in layout.extensions.bands.iter().enumerate() {
             let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
                 || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
-                    && ir.diagram_type != fm_core::DiagramType::Sequence);
+                    && !matches!(
+                        ir.diagram_type,
+                        fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey
+                    ));
             if !draw_label || band.label.is_empty() {
                 continue;
             }

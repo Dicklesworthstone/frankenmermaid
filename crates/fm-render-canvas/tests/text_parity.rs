@@ -1118,6 +1118,639 @@ mod sankey {
     }
 }
 
+mod journey {
+    use fm_core::{DiagramType, IrNodeId, IrStyleRef, IrStyleTarget, MermaidDiagramIr};
+    use fm_layout::{DiagramLayout, JourneyTextRole, LayoutRect};
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GpuRenderPlan, GpuTextSource,
+        MockCanvas2dContext,
+    };
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemeColors, ThemePreset};
+
+    const SOURCE: &str = "journey\n title Checkout\n section Discover\n  Browse: 1: Big Corp, Zoë\n  Compare: 2: Zoë\n section Purchase\n  Choose: 3: Big_Corp\n  Pay: 4: Big Corp\n  Receive: 5: 客户\n";
+
+    #[derive(Debug)]
+    struct PaintedText {
+        text: String,
+        x: f64,
+        y: f64,
+        color: String,
+        font: String,
+        opacity: f64,
+    }
+
+    fn canvas(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        config: CanvasRenderConfig,
+    ) -> (Vec<PaintedText>, Vec<String>) {
+        let mut context = MockCanvas2dContext::new(2400.0, 1200.0);
+        let result = Canvas2dRenderer::new(CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..config
+        })
+        .render(layout, ir, &mut context);
+        assert_eq!(result.nodes_drawn, ir.nodes.len());
+        assert_eq!(result.edges_drawn, ir.edges.len());
+        let (mut color, mut font, mut opacity) = (String::new(), String::new(), 1.0);
+        let (mut text, mut paints) = (Vec::new(), Vec::new());
+        for operation in context.operations() {
+            match operation {
+                DrawOperation::SetFillStyle(value) => color.clone_from(value),
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => opacity = *value,
+                DrawOperation::Fill | DrawOperation::FillRect(..) => paints.push(color.clone()),
+                DrawOperation::FillText(value, x, y) => text.push(PaintedText {
+                    text: value.clone(),
+                    x: *x,
+                    y: *y,
+                    color: color.clone(),
+                    font: font.clone(),
+                    opacity,
+                }),
+                _ => {}
+            }
+        }
+        (text, paints)
+    }
+
+    fn gpu_text(plan: &GpuRenderPlan, run: &fm_render_canvas::GpuTextRun) -> String {
+        plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+            .iter()
+            .map(|quad| {
+                plan.glyph_atlas
+                    .cells
+                    .iter()
+                    .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                    .expect("planned glyph belongs to atlas")
+                    .glyph
+            })
+            .collect()
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.02, "{actual} != {expected}");
+    }
+
+    fn contains(outer: LayoutRect, inner: LayoutRect) {
+        assert!(
+            inner.x >= outer.x - 0.001 && inner.y >= outer.y - 0.001,
+            "{inner:?} starts outside {outer:?}"
+        );
+        assert!(
+            inner.x + inner.width <= outer.x + outer.width + 0.001,
+            "{inner:?} exceeds {outer:?} horizontally"
+        );
+        assert!(
+            inner.y + inner.height <= outer.y + outer.height + 0.001,
+            "{inner:?} exceeds {outer:?} vertically"
+        );
+    }
+
+    fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        let prefix = format!("{name}=\"");
+        tag.strip_prefix(&prefix)
+            .or_else(|| tag.split_once(&format!(" {prefix}")).map(|(_, tail)| tail))?
+            .split_once('"')
+            .map(|(value, _)| value)
+    }
+
+    fn svg_text(svg: &str) -> Vec<(&str, String)> {
+        svg.split("<text ")
+            .skip(1)
+            .filter_map(|tail| {
+                let (tag, rest) = tail.split_once('>')?;
+                let (body, _) = rest.split_once("</text>")?;
+                (!body.contains('<')).then(|| {
+                    (
+                        tag,
+                        body.replace("&amp;", "&")
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">"),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_scores_and_task_actors_share_geometry_across_graphical_backends() {
+        let ir = fm_parser::parse(SOURCE).ir;
+        assert_eq!(ir.diagram_type, DiagramType::Journey);
+        assert_eq!((ir.nodes.len(), ir.edges.len()), (5, 4));
+        let layout = fm_layout::layout_diagram(&ir);
+        let journey = layout.extensions.journey.as_ref().unwrap();
+        let (drawn, paints) = canvas(&ir, &layout, CanvasRenderConfig::default());
+        let gpu = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_eq!(gpu.node_instances.len(), ir.nodes.len());
+        for (index, fill) in ["#fca5a5", "#fdba74", "#fde68a", "#bef264", "#86efac"]
+            .iter()
+            .enumerate()
+        {
+            assert!(paints.iter().any(|paint| paint == fill));
+            assert_eq!(
+                gpu.node_instances[index].fill,
+                fm_render_canvas::parse_paint_rgba(fill).unwrap()
+            );
+        }
+        for step in &journey.steps {
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == step.node_index)
+                .unwrap();
+            assert!(
+                step.rows
+                    .iter()
+                    .any(|row| row.text == format!("Score: {}", step.node_index + 1))
+            );
+            for (index, actor) in ir.nodes[step.node_index]
+                .journey_meta
+                .as_ref()
+                .unwrap()
+                .actors
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    step.rows
+                        .iter()
+                        .any(|row| row.role == JourneyTextRole::Actor(index)
+                            && row.text == format!("Actor: {actor}"))
+                );
+            }
+            for row in &step.rows {
+                contains(node.bounds, row.bounds);
+                let center = row.bounds.center();
+                let text = drawn
+                    .iter()
+                    .find(|text| {
+                        text.text == row.text
+                            && (text.x - f64::from(center.x - layout.bounds.x)).abs() < 0.02
+                            && (text.y - f64::from(center.y - layout.bounds.y)).abs() < 0.02
+                    })
+                    .unwrap();
+                assert!(text.font.contains(&format!("{}px", row.font_size)));
+                let run = gpu
+                    .text_runs
+                    .iter()
+                    .find(|run| {
+                        run.source == GpuTextSource::Node
+                            && run.node_index as usize == step.node_index
+                            && gpu_text(&gpu, run) == row.text
+                    })
+                    .unwrap();
+                assert!(run.quad_count > 0);
+                for quad in &gpu.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                {
+                    close(f64::from(quad.center[1]), f64::from(center.y));
+                    close(
+                        f64::from(quad.half_extent[1] * 2.0),
+                        f64::from(row.font_size),
+                    );
+                }
+            }
+        }
+        for name in ["Checkout", "Discover", "Purchase"] {
+            assert_eq!(drawn.iter().filter(|row| row.text == name).count(), 1);
+            assert_eq!(
+                gpu.text_runs
+                    .iter()
+                    .filter(|run| gpu_text(&gpu, run) == name)
+                    .count(),
+                1
+            );
+        }
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    backend,
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+                let text = svg_text(&svg);
+                for step in &journey.steps {
+                    let index = step.node_index.to_string();
+                    for row in &step.rows {
+                        let matching: Vec<_> = text
+                            .iter()
+                            .filter(|(tag, body)| {
+                                body == &row.text
+                                    && attr(tag, "data-fm-source-index") == Some(index.as_str())
+                                    && attr(tag, "data-fm-source-kind") == Some("node")
+                            })
+                            .collect();
+                        assert_eq!(matching.len(), 1, "{backend:?}: {:?}", row.text);
+                        let tag = matching[0].0;
+                        let center = row.bounds.center();
+                        let (x, y) = if backend == SvgBackend::LegacyLayout {
+                            (
+                                center.x - layout.bounds.x + config.padding,
+                                center.y - layout.bounds.y + config.padding,
+                            )
+                        } else {
+                            (center.x, center.y)
+                        };
+                        close(attr(tag, "x").unwrap().parse().unwrap(), f64::from(x));
+                        close(attr(tag, "y").unwrap().parse().unwrap(), f64::from(y));
+                        close(
+                            attr(tag, "font-size").unwrap().parse().unwrap(),
+                            f64::from(row.font_size),
+                        );
+                    }
+                }
+                for name in ["Checkout", "Discover", "Purchase"] {
+                    assert_eq!(
+                        text.iter().filter(|(_, body)| body == name).count(),
+                        1,
+                        "{backend:?}: {name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_unicode_actors_keep_authored_spaces_and_reserved_bounds() {
+        let actor = "International  customer support team 客户体验团队 Zoë  Big Corp";
+        let source = format!(
+            "journey\n title A deliberately long journey title with Unicode 客户\n section Start\n  A deliberately long task name that must wrap: 5: {actor}, Big_Corp, Quality Assurance\n section Finish\n  Deliver: 2: Zed, Ann\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let journey = layout.extensions.journey.as_ref().unwrap();
+        let rows: Vec<_> = journey.steps[0]
+            .rows
+            .iter()
+            .filter(|row| row.role == JourneyTextRole::Actor(0))
+            .collect();
+        assert!(rows.len() > 1);
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<String>(),
+            format!("Actor: {actor}")
+        );
+        for step in &journey.steps {
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == step.node_index)
+                .unwrap();
+            contains(layout.bounds, node.bounds);
+            for row in &step.rows {
+                contains(node.bounds, row.bounds);
+            }
+            for pair in step.rows.windows(2) {
+                assert!(pair[0].bounds.y + pair[0].bounds.height <= pair[1].bounds.y + 0.001);
+            }
+        }
+        for (index, node) in layout.nodes.iter().enumerate() {
+            for other in layout.nodes.iter().skip(index + 1) {
+                assert!(
+                    node.bounds.x + node.bounds.width <= other.bounds.x
+                        || other.bounds.x + other.bounds.width <= node.bounds.x
+                );
+            }
+        }
+        let cluster_top = layout
+            .clusters
+            .iter()
+            .map(|cluster| cluster.bounds.y)
+            .fold(f32::INFINITY, f32::min);
+        for row in journey.title.iter().chain(&journey.legend) {
+            contains(layout.bounds, row.bounds);
+            assert!(row.bounds.y + row.bounds.height <= cluster_top);
+        }
+        for (index, row) in journey.legend.iter().enumerate() {
+            for other in journey.legend.iter().skip(index + 1) {
+                assert!(
+                    row.bounds.x + row.bounds.width <= other.bounds.x + 0.001
+                        || other.bounds.x + other.bounds.width <= row.bounds.x + 0.001
+                        || row.bounds.y + row.bounds.height <= other.bounds.y + 0.001
+                        || other.bounds.y + other.bounds.height <= row.bounds.y + 0.001
+                );
+            }
+        }
+        assert_eq!(layout, fm_layout::layout_diagram(&ir));
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = fm_render_svg::render_svg_with_layout(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            assert!(svg.contains("xml:space=\"preserve\""));
+        }
+    }
+
+    #[test]
+    fn missing_and_out_of_range_scores_do_not_acquire_invented_values() {
+        let ir =
+            fm_parser::parse("journey\n Mystery: nope: Alice\n Bare\n Zero: 0\n High: 9: Bob\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let journey = layout.extensions.journey.as_ref().unwrap();
+        let scores: Vec<_> = journey
+            .steps
+            .iter()
+            .flat_map(|step| &step.rows)
+            .filter(|row| row.role == JourneyTextRole::Score)
+            .map(|row| row.text.as_str())
+            .collect();
+        assert_eq!(scores, ["Score: 0", "Score: 9"]);
+        assert!(
+            journey.steps[0]
+                .rows
+                .iter()
+                .any(|row| row.text == "Actor: Alice")
+        );
+        assert_eq!(journey.steps[1].rows.len(), 1);
+        assert!(
+            (0..ir.nodes.len()).all(|index| fm_layout::journey_score_fill(&ir, index).is_none())
+        );
+        let bare = fm_layout::layout_diagram(&fm_parser::parse("journey\n Bare\n").ir);
+        let plan = bare.extensions.journey.as_ref().unwrap();
+        assert!(plan.title.is_empty() && plan.legend.is_empty());
+        assert_eq!(plan.steps[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn author_styles_preserve_fill_color_font_and_opacity_in_every_backend() {
+        let mut ir = fm_parser::parse("journey\n First: 1: Alice\n Second: 5: Bob\n").ir;
+        ir.nodes[0].classes.push("custom".to_owned());
+        ir.style_refs.extend([
+            IrStyleRef {
+                target: IrStyleTarget::Class("default".to_owned()),
+                style: "stroke:#123456".to_owned(),
+                span: Default::default(),
+            },
+            IrStyleRef {
+                target: IrStyleTarget::Class("custom".to_owned()),
+                style: "fill:#123456,color:#abcdef,font-size:24px,opacity:0.5".to_owned(),
+                span: Default::default(),
+            },
+        ]);
+        ir.populate_structured_styles();
+        let layout = fm_layout::layout_diagram(&ir);
+        let (drawn, paints) = canvas(&ir, &layout, CanvasRenderConfig::default());
+        assert!(paints.iter().any(|fill| fill == "#123456"));
+        assert!(paints.iter().any(|fill| fill == "#86efac"));
+        for name in ["First", "Score: 1", "Actor: Alice"] {
+            let row = drawn.iter().find(|row| row.text == name).unwrap();
+            assert_eq!(row.color, "#abcdef");
+            assert!(row.font.contains("24px"));
+            close(row.opacity, 0.5);
+        }
+        close(
+            drawn
+                .iter()
+                .find(|row| row.text == "Second")
+                .unwrap()
+                .opacity,
+            1.0,
+        );
+        let gpu = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_eq!(
+            gpu.node_instances[1].fill,
+            fm_render_canvas::parse_paint_rgba("#86efac").unwrap()
+        );
+        for run in gpu
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node && run.node_index == 0)
+        {
+            for quad in
+                &gpu.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+            {
+                close(f64::from(quad.color[3]), 0.5);
+            }
+        }
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            for embed_theme_css in [false, true] {
+                let svg = fm_render_svg::render_svg_with_layout(
+                    &ir,
+                    &layout,
+                    &SvgRenderConfig {
+                        backend,
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                let text = svg_text(&svg);
+                for name in ["First", "Score: 1", "Actor: Alice"] {
+                    let tag = text.iter().find(|(_, body)| body == name).unwrap().0;
+                    let style = attr(tag, "style").unwrap();
+                    assert!(style.contains("fill:#abcdef"));
+                    assert!(style.contains("font-size:24px"));
+                    assert!(style.contains("opacity:0.5"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dark_theme_text_remains_readable_on_pastel_and_authored_dark_fills() {
+        let mut ir = fm_parser::parse("journey\n First: 1: Alice\n Second: 5: Bob\n").ir;
+        ir.style_refs.push(IrStyleRef {
+            target: IrStyleTarget::Node(IrNodeId(1)),
+            style: "fill:#111827".to_owned(),
+            span: Default::default(),
+        });
+        ir.populate_structured_styles();
+        let layout = fm_layout::layout_diagram(&ir);
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let config = CanvasRenderConfig {
+            node_fill: colors.node_fill.clone(),
+            label_color: colors.text.clone(),
+            ..Default::default()
+        };
+        let (drawn, _) = canvas(&ir, &layout, config.clone());
+        for (score, fill) in [("Score: 1", "#fca5a5"), ("Score: 5", "#111827")] {
+            assert_eq!(
+                drawn.iter().find(|row| row.text == score).unwrap().color,
+                fm_core::readable_label_color(fill, &config.label_color, &config.node_fill)
+            );
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                let svg = fm_render_svg::render_svg_with_layout(
+                    &ir,
+                    &layout,
+                    &SvgRenderConfig {
+                        backend,
+                        theme: ThemePreset::Dark,
+                        ..Default::default()
+                    },
+                );
+                let text = svg_text(&svg);
+                let tag = text.iter().find(|(_, body)| body == score).unwrap().0;
+                assert_eq!(
+                    attr(tag, "fill"),
+                    Some(fm_core::readable_label_color(
+                        fill,
+                        &colors.text,
+                        &colors.background
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_algorithms_and_guardrails_keep_measured_journey_content() {
+        use fm_layout::{LayoutAlgorithm, LayoutConfig, LayoutGuardrails};
+
+        let ir = fm_parser::parse(
+            "journey\n title Flow\n First: 1: Alice, 客户\n Second: 3: Zoë\n Third: 5: Big Corp\n",
+        )
+        .ir;
+        let custom_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 22.0,
+            ..Default::default()
+        });
+        let defaults = fm_core::FontMetrics::default_metrics();
+        let config = LayoutConfig {
+            font_metrics: Some(custom_metrics.clone()),
+            ..Default::default()
+        };
+        let roomy = LayoutGuardrails {
+            max_layout_time_ms: usize::MAX,
+            max_layout_iterations: usize::MAX,
+            max_route_ops: usize::MAX,
+        };
+        let check = |layout: &DiagramLayout, metrics: &fm_core::FontMetrics| {
+            let journey = layout.extensions.journey.as_ref().unwrap();
+            assert_eq!(journey.steps.len(), ir.nodes.len());
+            let sizes = fm_layout::compute_node_sizes(&ir, metrics);
+            for node in &layout.nodes {
+                let (width, height) = sizes[node.node_index];
+                close(f64::from(node.bounds.width), f64::from(width));
+                close(f64::from(node.bounds.height), f64::from(height));
+                let step = journey.step(node.node_index).unwrap();
+                assert!(
+                    step.rows
+                        .iter()
+                        .any(|row| row.role == JourneyTextRole::Score)
+                );
+                assert!(
+                    step.rows
+                        .iter()
+                        .any(|row| matches!(row.role, JourneyTextRole::Actor(_)))
+                );
+                for row in &step.rows {
+                    contains(node.bounds, row.bounds);
+                    if row.role == JourneyTextRole::Title {
+                        close(f64::from(row.font_size), f64::from(metrics.font_size()));
+                    }
+                }
+            }
+            assert!(!journey.title.is_empty());
+            assert!(!journey.legend.is_empty());
+            for row in journey.title.iter().chain(&journey.legend) {
+                contains(layout.bounds, row.bounds);
+            }
+        };
+
+        for algorithm in [
+            LayoutAlgorithm::Sugiyama,
+            LayoutAlgorithm::Force,
+            LayoutAlgorithm::Tree,
+            LayoutAlgorithm::Kanban,
+        ] {
+            let traced = fm_layout::layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                algorithm,
+                config.clone(),
+                roomy,
+            );
+            assert_eq!(traced.trace.dispatch.selected, algorithm);
+            check(
+                &traced.layout,
+                if algorithm == LayoutAlgorithm::Force {
+                    &defaults
+                } else {
+                    &custom_metrics
+                },
+            );
+        }
+        // The direct public entry points include the tree path specialization as well.
+        check(&fm_layout::layout_diagram_force(&ir), &defaults);
+        check(&fm_layout::layout_diagram_tree(&ir), &defaults);
+
+        let guarded = fm_layout::layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Force,
+            config,
+            LayoutGuardrails {
+                max_layout_time_ms: 1,
+                max_layout_iterations: 1,
+                max_route_ops: 1,
+            },
+        );
+        assert!(guarded.trace.guard.fallback_applied);
+        assert_ne!(guarded.trace.dispatch.selected, LayoutAlgorithm::Force);
+        check(&guarded.layout, &custom_metrics);
+    }
+
+    #[test]
+    fn actor_only_edits_remeasure_incremental_layout() {
+        let mut ir = fm_parser::parse("journey\n One: 3: Alice\n Two: 4: Bob\n").ir;
+        let session = std::rc::Rc::new(std::cell::RefCell::new(
+            fm_layout::IncrementalLayoutSession::new(),
+        ));
+        let incremental = |ir: &MermaidDiagramIr| {
+            fm_layout::layout_diagram_incremental_traced_with_config_and_guardrails(
+                &session,
+                ir,
+                fm_layout::LayoutAlgorithm::Auto,
+                Default::default(),
+                Default::default(),
+            )
+            .traced
+            .layout
+        };
+        let before = incremental(&ir);
+        ir.nodes[0].journey_meta.as_mut().unwrap().actors.extend([
+            "A long international team requiring more measured rows".to_owned(),
+            "客户体验团队".to_owned(),
+        ]);
+        let after = incremental(&ir);
+        let fresh = fm_layout::layout_diagram(&ir);
+        assert!(after.nodes[0].bounds.height > before.nodes[0].bounds.height);
+        assert_eq!(after.nodes, fresh.nodes);
+        assert_eq!(after.bounds, fresh.bounds);
+        assert_eq!(after.extensions.journey, fresh.extensions.journey);
+    }
+
+    #[test]
+    fn journey_metadata_does_not_affect_other_diagram_families() {
+        for source in [
+            "flowchart LR\n A[Alpha] --> B[Beta]\n",
+            "kanban\n Todo\n  a[Alpha]\n  b[Beta]\n",
+            "gitGraph\n commit\n branch dev\n commit\n",
+        ] {
+            let mut ir = fm_parser::parse(source).ir;
+            let before = fm_layout::layout_diagram(&ir);
+            ir.nodes[0].classes.push("journey-score-1".to_owned());
+            ir.nodes[0].journey_meta = Some(Box::new(fm_core::IrJourneyNodeMeta {
+                actors: vec!["Do not display".to_owned()],
+            }));
+            let layout = fm_layout::layout_diagram(&ir);
+            assert_eq!(layout.nodes, before.nodes);
+            assert_eq!(layout.bounds, before.bounds);
+            assert!(layout.extensions.journey.is_none());
+            assert!(fm_layout::journey_score_fill(&ir, 0).is_none());
+            let (drawn, _) = canvas(&ir, &layout, CanvasRenderConfig::default());
+            assert!(
+                drawn
+                    .iter()
+                    .all(|row| !row.text.contains("Actor:") && !row.text.contains("Score:"))
+            );
+        }
+    }
+}
+
 mod xychart {
     use fm_render_canvas::{
         Canvas2dRenderer, CanvasRenderConfig, DrawOperation, MockCanvas2dContext, TextAlign,

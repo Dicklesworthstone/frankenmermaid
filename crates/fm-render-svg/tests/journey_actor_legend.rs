@@ -132,7 +132,7 @@ fn no_actors_means_no_legend() {
     let bare = runs(&journey("    One: 3\n"));
     assert!(
         bare.iter()
-            .all(|run| run == "T" || run == "S" || run == "One"),
+            .all(|run| run == "T" || run == "S" || run == "One" || run == "Score: 3"),
         "a journey with no declared actor drew a legend entry: {bare:?}"
     );
     let flow = runs("flowchart LR\n  A-->B\n");

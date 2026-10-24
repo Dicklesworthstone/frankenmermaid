@@ -2229,6 +2229,30 @@ fn shape_color_contrast(a: f64, b: f64) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// Choose the more readable theme paint for text on a fixed or author-supplied fill.
+///
+/// Opaque hexadecimal colors can be compared deterministically. Unknown paints retain the
+/// normal text color, and ties prefer it too. Callers should honor explicit author text colors
+/// before using this fallback.
+#[must_use]
+pub fn readable_label_color<'a>(fill: &str, text: &'a str, background: &'a str) -> &'a str {
+    let (Some(fill), Some(text_rgb), Some(background_rgb)) = (
+        mindmap::hex_rgb(fill),
+        mindmap::hex_rgb(text),
+        mindmap::hex_rgb(background),
+    ) else {
+        return text;
+    };
+    let fill_luminance = shape_color_luminance(fill);
+    if shape_color_contrast(fill_luminance, shape_color_luminance(background_rgb))
+        > shape_color_contrast(fill_luminance, shape_color_luminance(text_rgb))
+    {
+        background
+    } else {
+        text
+    }
+}
+
 /// The closed outline of a block arrow filling the box `(x, y, w, h)`, or `None` for any other
 /// shape. The shaft is the middle 60% across the arrow; each head is as long as the shaft is
 /// thick, capped at 40% of the length.
@@ -10188,6 +10212,53 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn readable_label_color_keeps_fixed_task_palettes_legible_in_both_themes() {
+        let light = "#f1f5f9";
+        let dark = "#0f172a";
+        for fill in [
+            "#fca5a5", "#fdba74", "#fde68a", "#bef264", "#86efac", "#93c5fd", "#94a3b8",
+        ] {
+            for (text, background) in [(light, dark), (dark, light)] {
+                let actual = super::readable_label_color(fill, text, background);
+                assert_eq!(actual, dark, "pastel {fill} requires dark text");
+                let contrast = super::shape_color_contrast(
+                    super::shape_color_luminance(super::mindmap::hex_rgb(fill).unwrap()),
+                    super::shape_color_luminance(super::mindmap::hex_rgb(actual).unwrap()),
+                );
+                assert!(contrast >= 4.5, "{fill}/{actual}: {contrast}");
+            }
+        }
+        assert_eq!(super::readable_label_color("#123", dark, light), light);
+        assert_eq!(super::readable_label_color("#FFF", light, dark), dark);
+    }
+
+    #[test]
+    fn readable_label_color_preserves_unknown_paints_and_ties() {
+        for fill in [
+            "none",
+            "transparent",
+            "var(--fill)",
+            "#abcd",
+            "#ffffffff",
+            "#xxffff",
+        ] {
+            assert_eq!(super::readable_label_color(fill, "#fff", "#000"), "#fff");
+        }
+        assert_eq!(
+            super::readable_label_color("#fff", "currentColor", "#000"),
+            "currentColor"
+        );
+        assert_eq!(
+            super::readable_label_color("#fff", "#eee", "var(--bg)"),
+            "#eee"
+        );
+        assert_eq!(
+            super::readable_label_color("#fff", "#123456", "#123456"),
+            "#123456"
+        );
+    }
 
     /// The two slant constants must stay separate literals, and must keep the exact values the
     /// renderers had before adopting them.
