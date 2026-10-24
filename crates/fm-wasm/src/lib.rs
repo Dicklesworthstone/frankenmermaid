@@ -289,9 +289,12 @@ pub struct IrLensEditResponse {
 /// Re-emit a supported IR edit through the diagram family's formatting-preserving lens.
 ///
 /// Start with the IR returned by `parseLens`, change existing label text, and pass the complete
-/// edited IR with the original source. Each family reparses the candidate and verifies the entire
-/// requested graph before returning it. Flowcharts also accept the independent declaration-order
-/// permutations supported by [`FlowchartParseLens`]. Other structural changes are rejected.
+/// edited IR with the original source. New plain labels can also be attached to existing unlabeled
+/// edges/messages in all five families, and to bare flowchart nodes, by appending an `IrLabel` and
+/// setting the target's previously absent label reference. Reusing an existing plain label is
+/// supported too. Each family reparses the candidate and verifies the entire requested graph
+/// before returning it. Flowcharts also accept the independent declaration-order permutations
+/// supported by [`FlowchartParseLens`]. Other structural changes are rejected.
 ///
 /// Labels are interned: changing one label's text changes every node or edge referring to that
 /// label ID. The family lens must be able to update all those occurrences faithfully. The response

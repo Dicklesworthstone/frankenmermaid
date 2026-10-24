@@ -4,6 +4,117 @@ use fm_core::DiagramType;
 use fm_parser::{SequenceParseLens, SequenceParseLensError, parse};
 use proptest::prelude::*;
 
+#[test]
+fn public_declaration_reorder_preserves_sequence_metadata_and_rejects_stale_indices() {
+    let source = concat!(
+        "sequenceDiagram\nbox Purple Group\n",
+        "participant A as Shared\nparticipant B as Shared\nend\n",
+        "Note over A,B: Keep note\nA->>+B: request\nB-->>-A: response\n",
+        "destroy B\nA-xB: bye\n",
+    );
+    let expected = source.replace(
+        "participant A as Shared\nparticipant B as Shared",
+        "participant B as Shared\nparticipant A as Shared",
+    );
+    let snapshot = fm_parser::build_parse_lens(source);
+    let edited = parse(&expected).ir;
+    assert_eq!(snapshot.parsed.ir.labels, edited.labels);
+    let metadata = edited.sequence_meta.as_ref().unwrap();
+    assert_eq!(metadata.notes.len(), 1);
+    assert_eq!(metadata.activations.len(), 1);
+    assert_eq!(metadata.participant_groups.len(), 1);
+    assert_eq!(metadata.lifecycle_events.len(), 1);
+    assert_eq!(snapshot.put_ir(&edited).unwrap(), expected);
+    assert_eq!(
+        fm_parser::DiagramParseLens::parse(source)
+            .unwrap()
+            .put(&edited)
+            .unwrap(),
+        expected
+    );
+    let before = snapshot.parsed.ir.sequence_meta.as_ref().unwrap();
+    let mut stale = edited.clone();
+    stale.sequence_meta.as_mut().unwrap().notes[0].participants =
+        before.notes[0].participants.clone();
+    assert!(snapshot.put_ir(&stale).is_err());
+    stale = edited.clone();
+    stale.sequence_meta.as_mut().unwrap().activations[0].participant =
+        before.activations[0].participant;
+    assert!(snapshot.put_ir(&stale).is_err());
+    stale = edited;
+    stale.sequence_meta.as_mut().unwrap().lifecycle_events[0].participant =
+        before.lifecycle_events[0].participant;
+    assert!(snapshot.put_ir(&stale).is_err());
+}
+
+#[test]
+fn attach_message_labels_preserves_activation_numbering_notes_and_repeated_edits() {
+    for ending in ["", ":  "] {
+        let source = format!(
+            "sequenceDiagram\r\n  autonumber 10 2\r\n  participant A as Client\r\n  participant B as Server\r\n  %% retained comment\r\n  A->>+B{ending}\r\n  B-->>-A: response\r\n  Note right of A: retained note\r\n"
+        );
+        let lens = SequenceParseLens::parse(&source).unwrap();
+        let original = lens.ir();
+        assert!(original.edges[0].label.is_none());
+        let mut edited = original.clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: "Request naïve 🦀".to_owned(),
+            span: original.edges[0].span,
+        });
+        edited.edges[0].label = Some(label);
+        let updated = lens.put(&edited).unwrap();
+        let insertion = if ending.is_empty() {
+            ": \"Request naïve 🦀\""
+        } else {
+            ": \"Request naïve 🦀\"  "
+        };
+        assert_eq!(
+            updated,
+            source.replace(&format!("A->>+B{ending}"), &format!("A->>+B{insertion}"))
+        );
+        let actual = parse(&updated);
+        assert_eq!(actual.warnings, parse(&source).warnings);
+        assert_eq!(actual.ir.sequence_meta, original.sequence_meta);
+        assert_eq!(actual.ir.edges[0].extras, original.edges[0].extras);
+        let next = SequenceParseLens::parse(&updated).unwrap();
+        let mut renamed = next.ir().clone();
+        renamed.labels[renamed.edges[0].label.unwrap().0].text = "Accepted".to_owned();
+        assert_eq!(
+            next.put(&renamed).unwrap(),
+            updated.replace("Request naïve 🦀", "Accepted")
+        );
+    }
+}
+
+#[test]
+fn message_attachments_reject_syntax_unused_labels_and_unrequested_metadata() {
+    let lens = SequenceParseLens::parse("sequenceDiagram\nA->>B:\n").unwrap();
+    for text in ["", "changed\"\nB->>A: injected"] {
+        let mut edited = lens.ir().clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: text.to_owned(),
+            span: edited.edges[0].span,
+        });
+        edited.edges[0].label = Some(label);
+        assert!(lens.put(&edited).is_err());
+    }
+    let mut edited = lens.ir().clone();
+    let label = fm_core::IrLabelId(edited.labels.len());
+    edited.labels.push(fm_core::IrLabel {
+        text: "Request".to_owned(),
+        span: edited.edges[0].span,
+    });
+    assert!(
+        lens.put(&edited).is_err(),
+        "unused appended labels are not source edits"
+    );
+    edited.edges[0].label = Some(label);
+    edited.sequence_meta.as_mut().unwrap().autonumber_start = 9;
+    assert!(lens.put(&edited).is_err());
+}
+
 fn collect_mmd_sources(directory: &Path, sources: &mut Vec<String>) {
     for entry in fs::read_dir(directory).expect("fixture directory is readable") {
         let path = entry.expect("fixture entry").path();

@@ -230,6 +230,129 @@ for (const { name, source, before, after, check } of LENS_CASES) {
   console.log(`${name.padEnd(26)} ${verdict}`);
 }
 
+// Real snapshots exercise both the new label table entry and its previously absent reference.
+const LABEL_ATTACHMENT_CASES = [
+  {
+    name: "flowchart label attachment",
+    source: "flowchart LR\r\n  %% retain the bare graph\r\n  A --> B\r\n",
+    nodeLabel: "Client naïve 🦀",
+    check: ir => assert.equal(ir.nodes[0].shape, "Rect"),
+  },
+  {
+    name: "sequence label attachment",
+    source: "sequenceDiagram\r\n  autonumber 10 2\r\n  A->>+B:  \r\n  B-->>-A: response\r\n  Note right of A: retained note\r\n",
+    check: ir => assert.equal(ir.sequence_meta.autonumber_start, 10),
+  },
+  {
+    name: "class label attachment",
+    source: 'classDiagram\r\n  A : +String name\r\n  A : +send() bool\r\n  A "1" *-- "many" B\r\n',
+    check: ir => {
+      assert.equal(ir.nodes[0].class_meta.attributes.length, 1);
+      assert.equal(ir.nodes[0].class_meta.methods.length, 1);
+      assert.equal(ir.edges[0].extras.source_cardinality, "1");
+      assert.equal(ir.edges[0].extras.target_cardinality, "many");
+    },
+  },
+  {
+    name: "state label attachment",
+    source: 'stateDiagram-v2\r\n  state "Session" as A\r\n  state "Done" as B\r\n  A --> B:\r\n  note right of A: retained note\r\n',
+    check: ir => assert.equal(ir.state_notes.length, 1),
+  },
+  {
+    name: "ER label attachment",
+    source: "erDiagram\r\n  A {\r\n    int id PK\r\n  }\r\n  A ||--o{ B :  \r\n",
+    check: ir => {
+      assert.equal(ir.nodes[0].members.length, 1);
+      assert.equal(ir.edges[0].extras.er_notation, "||--o{");
+    },
+  },
+];
+
+for (const { name, source, nodeLabel, check } of LABEL_ATTACHMENT_CASES) {
+  let verdict;
+  try {
+    const original = fm.parseLens(source);
+    const edited = structuredClone(original.parsed.ir);
+    check(edited);
+    assert.equal(edited.edges[0].label == null, true, "fixture must have no edge label");
+    if (nodeLabel) {
+      assert.equal(edited.nodes[0].label == null, true, "fixture must have no node label");
+      edited.nodes[0].label = edited.labels.length;
+      edited.labels.push({ text: nodeLabel, span: structuredClone(edited.nodes[0].span_primary) });
+    }
+    edited.edges[0].label = edited.labels.length;
+    edited.labels.push({
+      text: "Added naïve 🦀 relationship",
+      span: structuredClone(edited.edges[0].span),
+    });
+    const unchangedInput = structuredClone(edited);
+    const result = fm.applyIrLensEdit(source, edited);
+    assert.deepEqual(edited, unchangedInput);
+    assert.deepEqual(result.snapshot, fm.parseLens(result.updatedSource));
+    const actual = result.snapshot.parsed.ir;
+    assert.equal(actual.nodes.length, original.parsed.ir.nodes.length);
+    assert.equal(actual.edges.length, original.parsed.ir.edges.length);
+    assert.deepEqual(actual.edges[0].from, original.parsed.ir.edges[0].from);
+    assert.deepEqual(actual.edges[0].to, original.parsed.ir.edges[0].to);
+    assert.equal(actual.edges[0].arrow, original.parsed.ir.edges[0].arrow);
+    assert.deepEqual(actual.edges[0].extras, original.parsed.ir.edges[0].extras);
+    assert.equal(actual.labels[actual.edges[0].label].text, "Added naïve 🦀 relationship");
+    if (nodeLabel) {
+      assert.equal(actual.nodes[0].id, original.parsed.ir.nodes[0].id);
+      assert.equal(actual.labels[actual.nodes[0].label].text, nodeLabel);
+      assert.ok(result.updatedSource.includes("  %% retain the bare graph\r\n"));
+    }
+    assert.equal(
+      (result.updatedSource.match(/\r\n/g) ?? []).length,
+      (source.match(/\r\n/g) ?? []).length,
+      "attachment must retain line endings and statement lines",
+    );
+    check(actual);
+    const renamed = structuredClone(actual);
+    renamed.labels[renamed.edges[0].label].text = "Edited again";
+    const next = fm.applyIrLensEdit(result.updatedSource, renamed);
+    assert.equal(next.snapshot.parsed.ir.labels[next.snapshot.parsed.ir.edges[0].label].text, "Edited again");
+    verdict = "ok   new labels, metadata, bindings, and subsequent edits survived";
+  } catch (error) {
+    failures += 1;
+    verdict = `FAIL ${String(error).slice(0, 160)}`;
+  }
+  console.log(`${name.padEnd(26)} ${verdict}`);
+}
+
+try {
+  const source = "flowchart LR\nA[Shared] --> B\n";
+  const edited = structuredClone(fm.parseLens(source).parsed.ir);
+  edited.edges[0].label = edited.nodes[0].label;
+  const result = fm.applyIrLensEdit(source, edited);
+  const actual = result.snapshot.parsed.ir;
+  assert.equal(actual.edges[0].label, actual.nodes[0].label);
+  assert.equal(actual.labels[actual.edges[0].label].text, "Shared");
+  assert.equal(actual.labels.length, edited.labels.length);
+  console.log("shared label attachment   ok   an existing interned label can label an edge");
+} catch (error) {
+  failures += 1;
+  console.log(`shared label attachment   FAIL ${String(error).slice(0, 160)}`);
+}
+
+try {
+  const source = "sequenceDiagram\nA->>B:\n";
+  const injected = structuredClone(fm.parseLens(source).parsed.ir);
+  injected.edges[0].label = injected.labels.length;
+  injected.labels.push({ text: 'changed"\nB->>A: injected', span: injected.edges[0].span });
+  assert.throws(() => fm.applyIrLensEdit(source, injected), /re-emit/);
+  const unused = structuredClone(fm.parseLens(source).parsed.ir);
+  unused.labels.push({ text: "Unreferenced", span: unused.edges[0].span });
+  assert.throws(() => fm.applyIrLensEdit(source, unused), /re-emit/);
+  const invalidReference = structuredClone(fm.parseLens(source).parsed.ir);
+  invalidReference.edges[0].label = 9999;
+  assert.throws(() => fm.applyIrLensEdit(source, invalidReference), /re-emit/);
+  console.log("label attachment refusals ok   injected, unused, and invalid references rejected");
+} catch (error) {
+  failures += 1;
+  console.log(`label attachment refusals FAIL ${String(error).slice(0, 160)}`);
+}
+
 try {
   const source = "sequenceDiagram\nA->>B: request\n";
   const edited = structuredClone(fm.parseLens(source).parsed.ir);

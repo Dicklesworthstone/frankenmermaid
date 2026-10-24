@@ -4,6 +4,82 @@ use fm_core::DiagramType;
 use fm_parser::{ErParseLens, ErParseLensError, parse};
 use proptest::prelude::*;
 
+#[test]
+fn attach_er_relationship_labels_preserves_word_notation_attributes_and_styles() {
+    for (operator, notation) in [
+        ("||--o{", "||--o{"),
+        ("one or more to zero or more", "}|--o{"),
+    ] {
+        for ending in ["", " :  "] {
+            let source = format!(
+                "erDiagram\r\n  direction LR\r\n  %% retained comment\r\n  A[Account] {{\r\n    int id PK, UK \"identifier\"\r\n    string owner FK\r\n  }}\r\n  A {operator} B{ending}\r\n  classDef hot fill:#ff8800\r\n  class A hot\r\n"
+            );
+            let lens = ErParseLens::parse(&source).unwrap();
+            let original = lens.ir();
+            assert!(original.edges[0].label.is_none());
+            assert_eq!(original.edges[0].er_notation(), Some(notation));
+            let mut edited = original.clone();
+            let label = fm_core::IrLabelId(edited.labels.len());
+            edited.labels.push(fm_core::IrLabel {
+                text: "Possède 🦀".to_owned(),
+                span: original.edges[0].span,
+            });
+            edited.edges[0].label = Some(label);
+            let updated = lens.put(&edited).unwrap();
+            let insertion = if ending.is_empty() {
+                ": \"Possède 🦀\""
+            } else {
+                " : \"Possède 🦀\"  "
+            };
+            assert_eq!(
+                updated,
+                source.replace(
+                    &format!("A {operator} B{ending}"),
+                    &format!("A {operator} B{insertion}")
+                )
+            );
+            let actual = parse(&updated);
+            assert_eq!(actual.warnings, parse(&source).warnings);
+            assert_eq!(actual.ir.edges[0].extras, original.edges[0].extras);
+            assert_eq!(actual.ir.nodes[0].members, original.nodes[0].members);
+            assert_eq!(actual.ir.nodes[0].classes, original.nodes[0].classes);
+            assert_eq!(actual.ir.direction, original.direction);
+            let next = ErParseLens::parse(&updated).unwrap();
+            let mut renamed = next.ir().clone();
+            renamed.labels[renamed.edges[0].label.unwrap().0].text = "Contains".to_owned();
+            assert_eq!(
+                next.put(&renamed).unwrap(),
+                updated.replace("Possède 🦀", "Contains")
+            );
+        }
+    }
+}
+
+#[test]
+fn er_label_attachments_reject_injected_syntax_unused_entries_and_metadata_changes() {
+    let lens = ErParseLens::parse("erDiagram\nA ||--o{ B :\n").unwrap();
+    for text in ["", "changed\"\nC ||--o{ D : injected"] {
+        let mut edited = lens.ir().clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: text.to_owned(),
+            span: edited.edges[0].span,
+        });
+        edited.edges[0].label = Some(label);
+        assert!(lens.put(&edited).is_err());
+    }
+    let mut edited = lens.ir().clone();
+    let label = fm_core::IrLabelId(edited.labels.len());
+    edited.labels.push(fm_core::IrLabel {
+        text: "Owns".to_owned(),
+        span: edited.edges[0].span,
+    });
+    assert!(lens.put(&edited).is_err(), "unused appended label");
+    edited.edges[0].label = Some(label);
+    edited.edges[0].arrow = fm_core::ArrowType::ThickArrow;
+    assert!(lens.put(&edited).is_err());
+}
+
 fn collect_mmd_sources(directory: &Path, sources: &mut Vec<String>) {
     for entry in fs::read_dir(directory).expect("fixture directory is readable") {
         let path = entry.expect("fixture entry").path();

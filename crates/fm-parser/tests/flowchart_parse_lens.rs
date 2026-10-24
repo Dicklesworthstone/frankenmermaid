@@ -4,6 +4,297 @@ use fm_core::DiagramType;
 use fm_parser::{FlowchartParseLens, FlowchartParseLensError, parse};
 use proptest::prelude::*;
 
+mod label_attachments {
+    use super::*;
+    use fm_core::{IrLabel, IrLabelId, MermaidDiagramIr, Span};
+    use fm_parser::{DiagramParseLens, build_parse_lens};
+
+    fn append(ir: &mut MermaidDiagramIr, text: &str, span: Span) -> IrLabelId {
+        let id = IrLabelId(ir.labels.len());
+        ir.labels.push(IrLabel {
+            text: text.to_owned(),
+            span,
+        });
+        id
+    }
+
+    #[test]
+    fn bare_nodes_and_edges_acquire_labels_without_losing_source_or_metadata() {
+        let source = concat!(
+            "%%{init: {'theme':'forest'}}%%\r\n",
+            "flowchart LR\r\n",
+            "  %% retain this comment\r\n",
+            "  A e1@--> B  %% retain the edge comment\r\n",
+            "  style A fill:#ffeedd\r\n",
+            "  linkStyle 0 stroke:#123456\r\n",
+        );
+        let lens = FlowchartParseLens::parse(source).unwrap();
+        let original = lens.ir();
+        assert!(original.labels.is_empty());
+        let mut edited = original.clone();
+        let edge = append(&mut edited, "request 🦀", original.edges[0].span);
+        let start = append(&mut edited, "Départ", original.nodes[0].span_primary);
+        let finish = append(&mut edited, "Finish", original.nodes[1].span_primary);
+        edited.edges[0].label = Some(edge);
+        edited.nodes[0].label = Some(start);
+        edited.nodes[1].label = Some(finish);
+        let updated = lens.put(&edited).expect("bare graph can acquire labels");
+        assert_eq!(
+            updated,
+            source.replace(
+                "A e1@--> B",
+                "A[\"Départ\"] e1@-->|\"request 🦀\"| B[\"Finish\"]"
+            )
+        );
+        let reparsed = parse(&updated);
+        assert_eq!(reparsed.warnings, parse(source).warnings);
+        assert_eq!(reparsed.ir.edges[0].extras, original.edges[0].extras);
+        assert_eq!(
+            reparsed.ir.edges[0].inline_style,
+            original.edges[0].inline_style
+        );
+        assert_eq!(reparsed.ir.nodes[0].implicit, original.nodes[0].implicit);
+        assert_eq!(reparsed.ir.nodes[0].shape, original.nodes[0].shape);
+        assert_eq!(
+            reparsed.ir.nodes[0].inline_style,
+            original.nodes[0].inline_style
+        );
+        let next = FlowchartParseLens::parse(&updated).unwrap();
+        assert_eq!(next.put(next.ir()).unwrap(), updated);
+        let mut renamed = next.ir().clone();
+        renamed.labels[renamed.edges[0].label.unwrap().0].text = "accepted".to_owned();
+        assert_eq!(
+            next.put(&renamed).unwrap(),
+            updated.replace("request 🦀", "accepted")
+        );
+        assert_eq!(lens.original_source(), source);
+        assert!(lens.ir().labels.is_empty());
+    }
+
+    #[test]
+    fn existing_and_duplicate_labels_can_be_reused_alongside_a_rename() {
+        let source = "flowchart TB\nA[Shared]\nB --> C\n";
+        let lens = FlowchartParseLens::parse(source).unwrap();
+        let mut edited = lens.ir().clone();
+        let existing = edited.nodes[0].label.unwrap();
+        edited.labels[existing.0].text = "En commun 🦀".to_owned();
+        edited.nodes[1].label = Some(existing);
+        edited.edges[0].label = Some(existing);
+        let span = edited.nodes[2].span_primary;
+        let duplicate = append(&mut edited, "En commun 🦀", span);
+        edited.nodes[2].label = Some(duplicate);
+        let updated = lens.put(&edited).unwrap();
+        assert_eq!(
+            updated,
+            "flowchart TB\nA[En commun 🦀]\nB[\"En commun 🦀\"] -->|\"En commun 🦀\"| C[\"En commun 🦀\"]\n"
+        );
+        let actual = parse(&updated).ir;
+        assert_eq!(actual.labels.len(), 1);
+        assert!(
+            actual
+                .nodes
+                .iter()
+                .all(|node| node.label == actual.edges[0].label)
+        );
+    }
+
+    #[test]
+    fn parallel_and_chained_edge_tokens_are_inserted_once() {
+        let source = "flowchart TB\nA & B --> C & D\nC --> A --> D\n";
+        let lens = FlowchartParseLens::parse(source).unwrap();
+        let original = lens.ir();
+        assert_eq!(original.edges.len(), 6);
+        let mut edited = original.clone();
+        let shared = append(&mut edited, "Shared", original.edges[0].span);
+        for edge in &mut edited.edges[..4] {
+            edge.label = Some(shared);
+        }
+        for (index, text) in [(4, "First"), (5, "Next")] {
+            let label = append(&mut edited, text, original.edges[index].span);
+            edited.edges[index].label = Some(label);
+        }
+        assert_eq!(
+            lens.put(&edited).unwrap(),
+            "flowchart TB\nA & B -->|\"Shared\"| C & D\nC -->|\"First\"| A -->|\"Next\"| D\n"
+        );
+    }
+
+    #[test]
+    fn complete_arrow_tokens_are_preserved() {
+        for operator in [
+            "-->", "--->", "<-->", "---", "----", "-.->", "-..->", "-.-", "==>", "===>", "<==>",
+            "o--o", "x--x", "--o", "--x", "~~~",
+        ] {
+            let source = format!("flowchart LR\nA[Alpha]\nB[Beta]\nA {operator} B\n");
+            let lens = FlowchartParseLens::parse(&source).unwrap();
+            let mut edited = lens.ir().clone();
+            assert_eq!(edited.edges.len(), 1, "{operator}");
+            assert!(edited.edges[0].label.is_none(), "{operator}");
+            let span = edited.edges[0].span;
+            let label = append(&mut edited, "Link", span);
+            edited.edges[0].label = Some(label);
+            assert_eq!(
+                lens.put(&edited),
+                Ok(source.replace(
+                    &format!("A {operator} B"),
+                    &format!("A {operator}|\"Link\"| B")
+                )),
+                "{operator} must retain its complete arrow token"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_or_conflicting_shared_token_requests_are_rejected() {
+        let lens = FlowchartParseLens::parse("flowchart TB\nA & B --> C & D\n").unwrap();
+        let mut edited = lens.ir().clone();
+        let span = edited.edges[0].span;
+        let first = append(&mut edited, "First", span);
+        edited.edges[0].label = Some(first);
+        assert!(lens.put(&edited).is_err());
+        for edge in &mut edited.edges {
+            edge.label = Some(first);
+        }
+        let second = append(&mut edited, "Different", span);
+        edited.edges[1].label = Some(second);
+        assert!(lens.put(&edited).is_err());
+    }
+
+    #[test]
+    fn bare_declarations_repeated_references_and_self_loops_can_be_labeled() {
+        for source in ["flowchart LR\nA\nA --> B\n", "flowchart LR\nA --> A\n"] {
+            let lens = FlowchartParseLens::parse(source).unwrap();
+            let mut edited = lens.ir().clone();
+            let span = edited.nodes[0].span_primary;
+            let label = append(&mut edited, "Alpha", span);
+            edited.nodes[0].label = Some(label);
+            let updated = lens.put(&edited).unwrap();
+            assert_eq!(updated.matches("[\"Alpha\"]").count(), 1);
+            let actual = parse(&updated).ir;
+            assert_eq!(actual.nodes.len(), edited.nodes.len());
+            assert_eq!(actual.edges.len(), edited.edges.len());
+            assert_eq!(
+                actual.labels[actual.nodes[0].label.unwrap().0].text,
+                "Alpha"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_empty_delimiters_cannot_be_left_as_ignored_source_junk() {
+        for source in ["flowchart LR\nA[] --> B\n", "flowchart LR\nA[\"\"] --> B\n"] {
+            let lens = FlowchartParseLens::parse(source).unwrap();
+            let mut edited = lens.ir().clone();
+            let span = edited.nodes[0].span_primary;
+            let label = append(&mut edited, "Alpha", span);
+            edited.nodes[0].label = Some(label);
+            assert!(lens.put(&edited).is_err());
+        }
+        let lens = FlowchartParseLens::parse("flowchart LR\nA -->|| B\n").unwrap();
+        let mut edited = lens.ir().clone();
+        let span = edited.edges[0].span;
+        let label = append(&mut edited, "Link", span);
+        edited.edges[0].label = Some(label);
+        assert!(lens.put(&edited).is_err());
+    }
+
+    #[test]
+    fn unused_invalid_metadata_and_syntax_edits_are_rejected() {
+        let lens = FlowchartParseLens::parse("flowchart LR\nA --> B\n").unwrap();
+        // Arrow-looking text inside the complete quoted node label is literal content. It
+        // must remain accepted when the parser proves that it creates no additional graph.
+        let text = "changed\"| C --> D |\"extra";
+        let mut literal = lens.ir().clone();
+        let span = literal.nodes[0].span_primary;
+        let label = append(&mut literal, text, span);
+        literal.nodes[0].label = Some(label);
+        let actual = parse(&lens.put(&literal).unwrap()).ir;
+        assert_eq!((actual.nodes.len(), actual.edges.len()), (2, 1));
+        assert_eq!(actual.labels[actual.nodes[0].label.unwrap().0].text, text);
+        for text in [
+            "",
+            "changed\"] --> Injected[\"extra",
+            "changed\"]\nC --> D\nE[\"extra",
+        ] {
+            let mut edited = lens.ir().clone();
+            let span = edited.nodes[0].span_primary;
+            let label = append(&mut edited, text, span);
+            edited.nodes[0].label = Some(label);
+            assert!(lens.put(&edited).is_err(), "{text:?}");
+        }
+        let mut edited = lens.ir().clone();
+        let span = edited.edges[0].span;
+        append(&mut edited, "Unused", span);
+        assert!(lens.put(&edited).is_err());
+        edited = lens.ir().clone();
+        edited.edges[0].label = Some(IrLabelId(9999));
+        assert!(lens.put(&edited).is_err());
+        edited = lens.ir().clone();
+        let label = append(&mut edited, "Link", span);
+        edited.edges[0].label = Some(label);
+        edited.meta.title = Some("unrequested title".to_owned());
+        assert!(lens.put(&edited).is_err());
+    }
+
+    #[test]
+    fn public_diagram_and_snapshot_paths_share_the_guarded_attachment_writer() {
+        for source in [
+            "flowchart LR\nA --> B\n",
+            "sequenceDiagram\nA->>B:\n",
+            "classDiagram\nA --> B\n",
+            "stateDiagram-v2\nA --> B:\n",
+            "erDiagram\nA ||--o{ B :\n",
+        ] {
+            let snapshot = build_parse_lens(source);
+            let lens = DiagramParseLens::parse(source).unwrap();
+            let mut edited = snapshot.parsed.ir.clone();
+            assert!(edited.edges[0].label.is_none(), "{source}");
+            let span = edited.edges[0].span;
+            let label = append(&mut edited, "Added 🦀", span);
+            edited.edges[0].label = Some(label);
+            let updated = snapshot.put_ir(&edited).expect(source);
+            assert_eq!(lens.put(&edited).unwrap(), updated);
+            let next = build_parse_lens(&updated);
+            let mut renamed = next.parsed.ir.clone();
+            let label = renamed.edges[0].label.unwrap();
+            renamed.labels[label.0].text = "Renamed".to_owned();
+            assert_eq!(
+                next.put_ir(&renamed).unwrap(),
+                updated.replace("Added 🦀", "Renamed")
+            );
+            renamed.labels[label.0].text = "bad\"\nC --> D".to_owned();
+            assert!(next.put_ir(&renamed).is_err(), "{source}");
+            edited.meta.title = Some("unrequested title".to_owned());
+            assert!(snapshot.put_ir(&edited).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn public_node_rename_and_declaration_reorder_cannot_bypass_full_ir_validation() {
+        let source = "flowchart LR\nA[First]\nB[Second]\nA --> B\n";
+        let snapshot = build_parse_lens(source);
+        let mut edited = snapshot.parsed.ir.clone();
+        edited.labels[edited.nodes[0].label.unwrap().0].text = "First] --> C[Injected".to_owned();
+        assert!(snapshot.put_ir(&edited).is_err());
+        let expected = "flowchart LR\nB[Second]\nA[First]\nA --> B\n";
+        let reordered = parse(expected).ir;
+        assert_eq!(snapshot.put_ir(&reordered).unwrap(), expected);
+        let mut mutated = reordered;
+        mutated.meta.title = Some("unrequested title".to_owned());
+        assert!(snapshot.put_ir(&mutated).is_err());
+
+        let class = build_parse_lens("classDiagram\nclass A\nclass B\n");
+        let mut edited = class.parsed.ir.clone();
+        edited.nodes.swap(0, 1);
+        assert_eq!(
+            class.put_ir(&edited).unwrap(),
+            "classDiagram\nclass B\nclass A\n"
+        );
+        edited.nodes[0].classes.push("unrequested".to_owned());
+        assert!(class.put_ir(&edited).is_err());
+    }
+}
+
 fn flowchart_corpus() -> Vec<String> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fm-cli/tests/golden");
     let mut sources: Vec<_> = fs::read_dir(golden_dir)

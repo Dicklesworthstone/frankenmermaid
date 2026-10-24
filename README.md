@@ -616,12 +616,32 @@ the candidate source to verify the complete requested IR before accepting it.
 | `applyParseLensInsertLineAfter(source, elementId, text)` | Insert a line using the target's indentation and line ending, then refresh the snapshot. |
 | `applyIrLensEdit(source, editedIr)` | Validate a supported IR edit and return `{ updatedSource, snapshot }`. |
 
-The semantic API supports existing node labels and edge/message labels in flowchart, sequence,
-class, state, and ER diagrams. Flowcharts also support safe permutations of independent node
-declarations through the Rust ordering lens. Label IDs are interned: editing a label changes every
-node or edge referring to that ID. Keep the rest of the IR unchanged, and use the returned snapshot
-for subsequent edits. Topology changes, stale source references, changes to relationship metadata,
-and source forms that cannot be rewritten faithfully return an error. Source-span operations remain
+The semantic API supports renaming existing node labels and edge/message labels in flowchart,
+sequence, class, state, and ER diagrams. It also attaches nonempty plain labels to existing unlabeled
+edges/messages in all five families and to bare flowchart nodes. To attach a new label, append an
+`{ text, span }` entry to `ir.labels` and set the target's previously absent `label` to that index;
+the target's `span_primary` (node) or `span` (edge) supplies the original source coordinates. An
+existing plain label ID can also be reused. For example:
+
+```ts
+const source = 'flowchart LR\nA-->B';
+const editedIr = structuredClone(parseLens(source).parsed.ir);
+const node = editedIr.nodes.find(node => node.id === 'A')!;
+node.label = editedIr.labels.length;
+editedIr.labels.push({ text: 'Start', span: node.span_primary });
+const edge = editedIr.edges[0];
+edge.label = editedIr.labels.length;
+editedIr.labels.push({ text: 'request', span: edge.span });
+const result = applyIrLensEdit(source, editedIr);
+```
+
+Flowcharts also support safe permutations of independent node declarations through the Rust
+ordering lens. Label IDs are interned: editing a label changes every node or edge referring to that
+ID. Keep the rest of the IR unchanged, and use the returned snapshot for subsequent edits.
+Topology changes, removal or rebinding of existing labels, unused appended labels, stale source
+references, changes to relationship metadata, and source forms that cannot be rewritten faithfully
+return an error. Attaching node aliases in the other four families or labels inside empty explicit
+flowchart shapes is outside this semantic API's supported forms. Source-span operations remain
 available when the editor explicitly intends to replace Mermaid syntax.
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
