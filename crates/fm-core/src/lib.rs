@@ -10,6 +10,7 @@ mod font_metrics;
 pub mod leapfrog;
 #[cfg(test)]
 mod lens_tests;
+pub mod mindmap;
 pub mod quotient_filter;
 pub mod reuse_proof;
 pub mod succinct;
@@ -333,6 +334,21 @@ pub enum DiagramType {
     Treemap,
     Radar,
     Info,
+    /// mermaid's `ishikawa` (fishbone / cause-and-effect) diagram: an indentation tree whose first
+    /// line is the EFFECT (the fish head) and whose deeper lines are causes and sub-causes.
+    Ishikawa,
+    /// mermaid's `treeView-beta`: a file-explorer style indented tree of quoted names under an
+    /// implicit `/` root.
+    TreeView,
+    /// mermaid's `venn-beta`: sets drawn as area-proportional circles, the regions where they
+    /// overlap, and text placed inside a region.
+    Venn,
+    /// mermaid's `wardley-beta`: a Wardley map — components placed by evolution (x) and
+    /// visibility (y), their value-chain links, evolution trends, pipelines and annotations.
+    Wardley,
+    /// mermaid's `eventmodeling`: numbered timeframes (UI, command, event, read model,
+    /// processor) laid out left to right in type swimlanes, with the flow between them.
+    EventModeling,
     #[default]
     Unknown,
 }
@@ -368,6 +384,11 @@ impl DiagramType {
             Self::Treemap => "treemap",
             Self::Radar => "radar-beta",
             Self::Info => "info",
+            Self::Ishikawa => "ishikawa",
+            Self::TreeView => "treeView-beta",
+            Self::Venn => "venn-beta",
+            Self::Wardley => "wardley-beta",
+            Self::EventModeling => "eventmodeling",
             Self::Unknown => "unknown",
         }
     }
@@ -411,6 +432,11 @@ impl DiagramType {
             Self::Treemap => "treemap",
             Self::Radar => "radar",
             Self::Info => "info",
+            Self::Ishikawa => "ishikawa",
+            Self::TreeView => "treeView",
+            Self::Venn => "venn",
+            Self::Wardley => "wardley",
+            Self::EventModeling => "eventmodeling",
             Self::GitGraph => "gitGraph",
             // Nothing upstream to match; the generic term is better than a guess at a family name.
             Self::Unknown => "diagram",
@@ -446,7 +472,12 @@ impl DiagramType {
             | Self::Treemap
             | Self::Radar
             | Self::Info
-            | Self::Sequence => MermaidSupportLevel::Supported,
+            | Self::Ishikawa
+            | Self::TreeView
+            | Self::Venn
+            | Self::Wardley
+            | Self::EventModeling => MermaidSupportLevel::Supported,
+            Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
     }
@@ -480,7 +511,12 @@ impl DiagramType {
             | Self::Treemap
             | Self::Radar
             | Self::Info
-            | Self::Sequence => "full",
+            | Self::Ishikawa
+            | Self::TreeView
+            | Self::Venn
+            | Self::Wardley
+            | Self::EventModeling => "full",
+            Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
     }
@@ -496,7 +532,14 @@ impl DiagramType {
     #[must_use]
     pub const fn parity_level(self) -> MermaidParityLevel {
         match self {
-            Self::Treemap | Self::Radar | Self::Info => MermaidParityLevel::NotApplicable,
+            Self::Treemap
+            | Self::Radar
+            | Self::Info
+            | Self::Ishikawa
+            | Self::TreeView
+            | Self::Venn
+            | Self::Wardley
+            | Self::EventModeling => MermaidParityLevel::NotApplicable,
             Self::Unknown => MermaidParityLevel::Missing,
             // Every reference-defined family currently adjudicates Partial (see the
             // generated table in FEATURE_PARITY.md for the per-family evidence notes).
@@ -1142,6 +1185,61 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             parity: MermaidParityLevel::NotApplicable,
             notes: "Title banner; routes through the general graph selector",
         },
+        FamilyParityRow {
+            family: "ishikawa",
+            diagram_type: Some(DiagramType::Ishikawa),
+            detection: true,
+            dedicated_parser: true,
+            layout: "ishikawa",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Fishbone cause-and-effect: effect head, alternating cause bones, nested sub-causes; new family with no FrankenTUI reference counterpart",
+        },
+        FamilyParityRow {
+            family: "treeView-beta",
+            diagram_type: Some(DiagramType::TreeView),
+            detection: true,
+            dedicated_parser: true,
+            layout: "treeview",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart",
+        },
+        FamilyParityRow {
+            family: "venn-beta",
+            diagram_type: Some(DiagramType::Venn),
+            detection: true,
+            dedicated_parser: true,
+            layout: "venn",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Area-proportional set circles placed from pairwise overlaps, region labels at the point of largest margin, text grids, set styles; new family with no FrankenTUI reference counterpart",
+        },
+        FamilyParityRow {
+            family: "wardley-beta",
+            diagram_type: Some(DiagramType::Wardley),
+            detection: true,
+            dedicated_parser: true,
+            layout: "wardley",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Evolution × visibility map with stage dividers, anchors, components, sourcing rings, inertia, links with flows, trends, pipelines, notes, annotations and (de)accelerators; new family with no FrankenTUI reference counterpart",
+        },
+        FamilyParityRow {
+            family: "eventmodeling",
+            diagram_type: Some(DiagramType::EventModeling),
+            detection: true,
+            dedicated_parser: true,
+            layout: "eventmodeling",
+            svg_render: true,
+            runtime: MermaidSupportLevel::Supported,
+            parity: MermaidParityLevel::NotApplicable,
+            notes: "Timeframes in type swimlanes (namespaced lanes included), staircase placement, explicit and implied flow arrows, inline and referenced data rendered under bold names; new family with no FrankenTUI reference counterpart",
+        },
     ];
     ROWS
 }
@@ -1570,6 +1668,11 @@ pub const fn documented_diagram_types() -> &'static [DiagramType] {
         DiagramType::Treemap,
         DiagramType::Radar,
         DiagramType::Info,
+        DiagramType::Ishikawa,
+        DiagramType::TreeView,
+        DiagramType::Venn,
+        DiagramType::Wardley,
+        DiagramType::EventModeling,
     ];
     DOCUMENTED
 }
@@ -2025,6 +2128,153 @@ pub enum NodeShape {
     /// A third handler in the registry rather than a flag on either brace, and it renders three
     /// paths where the single braces render two.
     Braces,
+    /// block-beta `id<["label"]>(right)`: a fat arrow with the label in its shaft, pointing right.
+    /// The outline is [`block_arrow_outline`], shared by every renderer and the layout boundary.
+    BlockArrowRight,
+    /// block-beta `<["…"]>(left)`.
+    BlockArrowLeft,
+    /// block-beta `<["…"]>(up)`.
+    BlockArrowUp,
+    /// block-beta `<["…"]>(down)`.
+    BlockArrowDown,
+    /// block-beta `<["…"]>(x)`: heads at both horizontal ends.
+    BlockArrowX,
+    /// block-beta `<["…"]>(y)`: heads at both vertical ends.
+    BlockArrowY,
+}
+
+/// Theme-derived default paints for a flowchart shape with a recognizable role.
+///
+/// Renderers apply these as fallbacks independently for each paint channel. Authored fills,
+/// borders, and theme-variable overrides take precedence; hollow shape details stay hollow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeShapeStyle {
+    pub fill: String,
+    pub stroke: String,
+}
+
+/// Differentiate decisions, terminals, storage, and annotations without coloring arbitrary IDs.
+///
+/// The same concrete paints serve SVG, raster exports, and Canvas. Integer sRGB mixing avoids
+/// browser-only `color-mix()` behavior. Tints retain at least 4.5:1 text contrast and borders at
+/// least 3:1 against the resulting surface. Custom paints that cannot be measured are left alone.
+/// Callers choose whether their theme opts into semantic shape styling; classic Mermaid and
+/// explicitly monochrome themes can retain their original paints.
+#[must_use]
+pub fn semantic_shape_style(
+    diagram_type: DiagramType,
+    shape: NodeShape,
+    base_fill: &str,
+    base_stroke: &str,
+    text: &str,
+    accents: &[String; 8],
+) -> Option<NodeShapeStyle> {
+    if diagram_type != DiagramType::Flowchart {
+        return None;
+    }
+    let accent_index = match shape {
+        NodeShape::Diamond | NodeShape::Hexagon | NodeShape::Note => 4,
+        NodeShape::Stadium | NodeShape::Circle | NodeShape::DoubleCircle => 2,
+        NodeShape::Cylinder
+        | NodeShape::HorizontalCylinder
+        | NodeShape::LinedCylinder
+        | NodeShape::DataStore => 0,
+        NodeShape::Cloud => 1,
+        _ => return None,
+    };
+    let base_fill = mindmap::hex_rgb(base_fill)?;
+    let base_stroke = mindmap::hex_rgb(base_stroke)?;
+    let text = mindmap::hex_rgb(text)?;
+    let accent = mindmap::hex_rgb(&accents[accent_index])?;
+    let text_luminance = shape_color_luminance(text);
+    let fill = (0..=14)
+        .rev()
+        .map(|weight| mix_shape_colors(base_fill, accent, weight))
+        .find(|&fill| shape_color_contrast(text_luminance, shape_color_luminance(fill)) >= 4.5)?;
+    let fill_luminance = shape_color_luminance(fill);
+    // Blend the accent with the theme's outline first, keeping the different roles part of
+    // one visual system. Darken/lighten toward the readable text color only when needed.
+    let border_accent = mix_shape_colors(base_stroke, accent, 70);
+    let stroke = (0..=10)
+        .map(|step| mix_shape_colors(border_accent, text, step * 10))
+        .find(|&stroke| {
+            shape_color_contrast(shape_color_luminance(stroke), fill_luminance) >= 3.0
+        })?;
+    Some(NodeShapeStyle {
+        fill: format!("#{:02x}{:02x}{:02x}", fill[0], fill[1], fill[2]),
+        stroke: format!("#{:02x}{:02x}{:02x}", stroke[0], stroke[1], stroke[2]),
+    })
+}
+
+fn mix_shape_colors(base: [u8; 3], accent: [u8; 3], weight: u16) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        ((u16::from(base[index]) * (100 - weight) + u16::from(accent[index]) * weight + 50) / 100)
+            as u8
+    })
+}
+
+fn shape_color_luminance(rgb: [u8; 3]) -> f64 {
+    let channels = rgb.map(|channel| {
+        let srgb = f64::from(channel) / 255.0;
+        if srgb <= 0.04045 {
+            srgb / 12.92
+        } else {
+            ((srgb + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+fn shape_color_contrast(a: f64, b: f64) -> f64 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The closed outline of a block arrow filling the box `(x, y, w, h)`, or `None` for any other
+/// shape. The shaft is the middle 60% across the arrow; each head is as long as the shaft is
+/// thick, capped at 40% of the length.
+#[must_use]
+pub fn block_arrow_outline(
+    shape: NodeShape,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<Vec<(f32, f32)>> {
+    // (vertical, pointing toward the low end, heads at both ends)
+    let (vertical, reversed, both) = match shape {
+        NodeShape::BlockArrowRight => (false, false, false),
+        NodeShape::BlockArrowLeft => (false, true, false),
+        NodeShape::BlockArrowX => (false, false, true),
+        NodeShape::BlockArrowDown => (true, false, false),
+        NodeShape::BlockArrowUp => (true, true, false),
+        NodeShape::BlockArrowY => (true, false, true),
+        _ => return None,
+    };
+    let (len, thick) = if vertical { (h, w) } else { (w, h) };
+    let head = (thick * 0.6).min(len * 0.4);
+    let tail = if both { head } else { 0.0 };
+    // One arrow along +x as (along, across), `across` running 0..1 over the thickness.
+    let mut points: Vec<(f32, f32)> = vec![
+        (tail, 0.2),
+        (len - head, 0.2),
+        (len - head, 0.0),
+        (len, 0.5),
+        (len - head, 1.0),
+        (len - head, 0.8),
+        (tail, 0.8),
+    ];
+    if both {
+        points.extend([(head, 1.0), (0.0, 0.5), (head, 0.0)]);
+    }
+    for point in &mut points {
+        let along = if reversed { len - point.0 } else { point.0 };
+        *point = if vertical {
+            (point.1.mul_add(w, x), y + along)
+        } else {
+            (x + along, point.1.mul_add(h, y))
+        };
+    }
+    Some(points)
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -2232,6 +2482,12 @@ pub enum ArrowType {
     Lollipop,
     /// UML lollipop written target-first (`A --() B`), putting the socket at the target end.
     LollipopReverse,
+    /// Flowchart `~~~` (three or more tildes): a link that shapes the layout and is not drawn.
+    ///
+    /// Authors use it to place nodes — keep two in one rank order, pull one below another —
+    /// without a visible connection, so it must reach the layout as an ordinary edge while every
+    /// renderer leaves it out.
+    Invisible,
 }
 
 impl ArrowType {
@@ -2285,6 +2541,7 @@ impl ArrowType {
             Self::InheritanceReverse => "--|>",
             Self::Lollipop => "()--",
             Self::LollipopReverse => "--()",
+            Self::Invisible => "~~~",
         }
     }
 }
@@ -2477,11 +2734,11 @@ impl IrEntityAttribute {
     }
 }
 
-/// One space-ish gutter between attribute columns, matching the single space the fused row carried.
+/// Visible separation between attribute columns, including at compact font sizes.
 /// Layout and every cell-drawing renderer must pass this same value into [`er_cell_columns`].
 #[must_use]
 pub fn er_cell_gutter(attr_font_size: f32) -> f32 {
-    attr_font_size * 0.5
+    (attr_font_size * 0.9).max(10.0)
 }
 
 /// Column geometry for one entity's attribute cells: the x offset of each of the four columns
@@ -2508,6 +2765,18 @@ pub fn er_cell_columns(
 ) -> ([f32; 4], f32) {
     let mut widths = [0.0_f32; 4];
     for attr in members {
+        // The deterministic metrics approximate unweighted glyph advances. Browser system fonts
+        // need some slack, and SVG emphasizes every cell of a key row in bold. Measured at the
+        // default 12px size, `string` occupied 34.45px normally and 40.05px in bold against a
+        // 30.36px estimate; the old 6px gutter was entirely consumed before the next column.
+        // Fixed-width fonts retain their exact advances, including when drawn in bold.
+        let width_allowance = if metrics.config().preset == FontPreset::Monospace {
+            1.0
+        } else if attr.keys.is_empty() {
+            1.15
+        } else {
+            1.15 * 1.18
+        };
         let key = attr.key_cell();
         let cells: [&str; 4] = [
             attr.data_type.as_str(),
@@ -2517,7 +2786,8 @@ pub fn er_cell_columns(
         ];
         for (index, cell) in cells.iter().enumerate() {
             if !cell.is_empty() {
-                widths[index] = widths[index].max(metrics.estimate_width(cell) * scale);
+                widths[index] =
+                    widths[index].max(metrics.estimate_width(cell) * scale * width_allowance);
             }
         }
     }
@@ -2796,6 +3066,30 @@ pub struct IrClassNodeMeta {
     pub generics: Vec<String>,
 }
 
+impl IrClassNodeMeta {
+    /// Whether this class needs its header and compartment renderer, even without members.
+    #[must_use]
+    pub fn has_compartments(&self) -> bool {
+        !self.attributes.is_empty()
+            || !self.methods.is_empty()
+            || self.stereotype.is_some()
+            || !self.generics.is_empty()
+    }
+
+    /// The displayed class name, including generic parameters in declaration order.
+    ///
+    /// Layout and every renderer use the same header so a generic declaration is both measured
+    /// and drawn in full. A name without type parameters stays borrowed.
+    #[must_use]
+    pub fn display_header<'a>(&self, class_name: &'a str) -> Cow<'a, str> {
+        if self.generics.is_empty() {
+            Cow::Borrowed(class_name)
+        } else {
+            Cow::Owned(format!("{class_name}<{}>", self.generics.join(", ")))
+        }
+    }
+}
+
 /// C4-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrC4NodeMeta {
@@ -3051,6 +3345,15 @@ pub struct IrEdgeExtras {
     /// Requested direction of a C4 relationship such as `Rel_Up(a, b, "uses")`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_direction: Option<C4RelationshipDirection>,
+    /// The subgraph the source end NAMED, for a flowchart edge written to a subgraph's id
+    /// (`one --> two`). The endpoint itself is one of the subgraph's members, which is what the
+    /// layout ranks against; this is what lets the edge be drawn to the subgraph's border, the
+    /// way mermaid draws it, instead of into the member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_subgraph: Option<IrSubgraphId>,
+    /// The subgraph the target end named. See [`Self::from_subgraph`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_subgraph: Option<IrSubgraphId>,
 }
 
 /// How fast an opted-in edge marches, from mermaid 11's `edgeId@{ animate: … }` statement.
@@ -3237,6 +3540,14 @@ impl IrEdge {
     #[must_use]
     pub fn co_arrow(&self) -> Option<ArrowType> {
         self.extras.as_ref().and_then(|e| e.co_arrow)
+    }
+
+    /// The subgraph each end named, `(source, target)`; see [`IrEdgeExtras::from_subgraph`].
+    #[must_use]
+    pub fn named_subgraphs(&self) -> (Option<IrSubgraphId>, Option<IrSubgraphId>) {
+        self.extras
+            .as_ref()
+            .map_or((None, None), |e| (e.from_subgraph, e.to_subgraph))
     }
 
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
@@ -6507,7 +6818,13 @@ pub struct MermaidDiagramMeta {
     pub direction: GraphDirection,
     pub support_level: MermaidSupportLevel,
     pub parse_mode: MermaidParseMode,
+    /// The TOP-LEVEL block-beta `columns N`.
     pub block_beta_columns: Option<usize>,
+    /// `columns N` written inside a block-beta group, as `(subgraph index, N)`: it shapes only
+    /// that group's own grid. Folding it into [`Self::block_beta_columns`] let a nested
+    /// `columns 2` resize the whole diagram.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_beta_group_columns: Vec<(usize, usize)>,
     /// Requested minimum gap between nodes within a rank, in layout units.
     ///
     /// A source-level HINT that overrides the engine default when present; `None` means "use the
@@ -6910,6 +7227,20 @@ pub struct FragmentAlternative {
     pub end_edge: usize,
 }
 
+/// One step of a sequence diagram in SOURCE order (see [`IrSequenceMeta::timeline`]).
+///
+/// The steps carry no indices because order implies them: the k-th `Message` is `ir.edges[k]`, the
+/// k-th `Note` is `notes[k]`, and the k-th `Close` is `fragments[k]` (fragments are stored in the
+/// order they close); an `Else` belongs to the innermost open fragment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IrSequenceStep {
+    Message,
+    Note,
+    Open,
+    Else,
+    Close,
+}
+
 /// A combined-fragment (interaction operand) spanning a range of messages.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrSequenceFragment {
@@ -7163,6 +7494,163 @@ pub struct IrXySeries {
 ///   240, 300).
 ///
 /// Note `radar-beta` is the only spelling: a bare `radar` is REJECTED upstream.
+/// A `venn-beta` diagram: its sets, the overlap regions it declares, and text placed in regions.
+///
+/// Read from the pinned mermaid 11.15.0 `vennDB`, whose rules this carries:
+///
+/// * a set's SIZE is the area its circle should have — `set A:20`, default 10;
+/// * a `union` names two or more ALREADY-DECLARED sets and the area their overlap should have,
+///   defaulting to `10 / k²` for a k-way union; its set ids are kept SORTED, as upstream sorts them,
+///   so `union B,A` and `union A,B` name one region;
+/// * a pair of sets that no union names is meant to be DISJOINT — upstream hands venn.js no area for
+///   it, which venn.js lays out as zero overlap.
+///
+/// Each set is a circle node in `ir.nodes` and each labelled union / text entry a text-block node;
+/// the indices here tie them back to their region, which is what the layout needs to place them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrVennMeta {
+    /// Every `set`, in declaration order.
+    pub sets: Vec<IrVennSet>,
+    /// Every `union`, in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unions: Vec<IrVennUnion>,
+    /// Every `text` entry, in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<IrVennText>,
+}
+
+/// One `venn-beta` set: a circle whose area is `size`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennSet {
+    /// The identifier the source used (`A` in `set A["Alpha"]`).
+    pub id: String,
+    /// Index of the set's circle in `ir.nodes`.
+    pub node: usize,
+    pub size: f64,
+}
+
+/// One `venn-beta` union: the region where every one of `sets` overlaps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennUnion {
+    /// Member set ids, sorted.
+    pub sets: Vec<String>,
+    pub size: f64,
+    /// Index in `ir.nodes` of the region's label, when the union declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_node: Option<usize>,
+}
+
+/// One `venn-beta` text entry, drawn inside the region `sets` names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrVennText {
+    /// The region's set ids, sorted.
+    pub sets: Vec<String>,
+    /// The entry's own identifier (`id` in `text A id["label"]`).
+    pub id: String,
+    /// Index of the entry's text-block node in `ir.nodes`.
+    pub node: usize,
+}
+
+/// A `wardley-beta` map, read with the pinned mermaid 11.15.0 `wardleyDb` rules.
+///
+/// Every drawn piece is an ordinary IR node — component dots, pipeline squares, sourcing rings,
+/// inertia bars, labels, notes, annotation markers, stage and axis captions — and links, trends,
+/// pipeline evolution links and (de)accelerators are ordinary edges, so every backend draws the map
+/// from node boxes and edge routes alone. This meta is only what the LAYOUT needs to put each piece
+/// where upstream's `wardleyRenderer` does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrWardleyMeta {
+    /// Canvas size: `size [w, h]`, else upstream's 900 × 600.
+    pub width: f32,
+    pub height: f32,
+    /// Map positions: evolution (`x`) and visibility (`y`) as percentages, 0–100.
+    pub points: Vec<IrWardleyPoint>,
+    /// Every placed node, and the point it hangs off.
+    pub marks: Vec<IrWardleyMark>,
+    /// Stage captions in order, with each stage's span along evolution as fractions 0–1.
+    pub stages: Vec<IrWardleyStage>,
+    /// Pipelines; upstream re-centres the parent over its members.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipelines: Vec<IrWardleyPipeline>,
+    /// Index in `ir.clusters` of the chart frame.
+    pub frame_cluster: usize,
+    /// Indices in `ir.nodes` of the `Evolution` and `Visibility` axis captions.
+    pub axis_nodes: [usize; 2],
+}
+
+/// A position on a `wardley-beta` map, in percent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// One node placed relative to a [`IrWardleyPoint`]; `dx`/`dy` are pixel offsets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyMark {
+    pub node: usize,
+    pub point: usize,
+    pub kind: IrWardleyMarkKind,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+/// How a [`IrWardleyMark`] sits on its point.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IrWardleyMarkKind {
+    /// A component dot (radius 6), centred.
+    Dot,
+    /// A pipeline parent's square, centred.
+    Square,
+    /// A sourcing-strategy ring (radius 12), centred.
+    Ring,
+    /// The market symbol inside its ring, centred.
+    Market,
+    /// An inertia bar, centred `dx` to the right.
+    Inertia,
+    /// Text whose START sits at the offset point, on its baseline.
+    Label,
+    /// Text CENTRED on the offset point.
+    Caption,
+    /// A numbered annotation marker (radius 10), centred.
+    Annotation,
+    /// The annotations list box: top-left at the point, kept inside the chart.
+    AnnotationsBox,
+    /// An invisible edge endpoint at the offset point.
+    Ghost,
+    /// An evolution trend's end: invisible, and its arrow stops 8px short, as upstream's does.
+    Target,
+}
+
+/// One `wardley-beta` evolution stage caption.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyStage {
+    pub node: usize,
+    pub start: f32,
+    pub end: f32,
+}
+
+/// An `eventmodeling` diagram, read with the pinned mermaid 11.15.0 `eventmodeling` db rules.
+///
+/// Every timeframe is a box node and every swimlane a cluster; the flow between frames is ordinary
+/// edges. This meta carries what the LAYOUT needs: the lanes top to bottom and, per frame in
+/// source order, its box and lane — upstream places each box from the previous one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrEventModelMeta {
+    /// Swimlane clusters (indices into `ir.clusters`), top to bottom.
+    pub lanes: Vec<usize>,
+    /// Timeframes in source order: `(box node, index into lanes)`.
+    pub frames: Vec<(usize, usize)>,
+}
+
+/// One `wardley-beta` pipeline: its parent's point, its members' points, and its box cluster.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrWardleyPipeline {
+    pub point: usize,
+    pub members: Vec<usize>,
+    pub cluster: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IrRadarMeta {
     /// Axis names in declaration order, which is also the order they are placed clockwise.
@@ -7395,6 +7883,11 @@ pub struct IrXyChartMeta {
     pub y_axis: IrXyAxis,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series: Vec<IrXySeries>,
+    /// `xychart-beta horizontal`: categories run DOWN the left side and values ACROSS, so bars grow
+    /// rightward. Upstream's horizontal orchestrator puts the category (x) axis on the left and the
+    /// value (y) axis along the top; every backend reads this one flag so they agree.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub horizontal: bool,
 }
 
 /// One directive-scoped range of numbered sequence messages.
@@ -7444,6 +7937,13 @@ pub struct IrSequenceMeta {
     pub participant_groups: Vec<IrParticipantGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle_events: Vec<IrLifecycleEvent>,
+    /// Messages, notes and fragment boundaries in source order, so a note gets its own row and a
+    /// fragment holding only notes still encloses them. Edge indices alone cannot say whether a
+    /// note between two messages sits inside a `rect` that closes there or the `critical` that
+    /// opens there. Empty when the diagram has no notes or fragments, or for a hand-built IR, in
+    /// which case layout falls back to one row per message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<IrSequenceStep>,
 }
 
 const fn default_sequence_autonumber_start() -> u32 {
@@ -7477,6 +7977,7 @@ impl Default for IrSequenceMeta {
             fragments: Vec::new(),
             participant_groups: Vec::new(),
             lifecycle_events: Vec::new(),
+            timeline: Vec::new(),
         }
     }
 }
@@ -7768,6 +8269,25 @@ pub struct IrQuadrantPoint {
     pub label: String,
     pub x: f32,
     pub y: f32,
+    /// Per-point styling: `A: [0.3, 0.6] radius: 12, color: #f30, stroke-color: #000,
+    /// stroke-width: 2px`, or the same keys from a `classDef` the point names with `:::class`.
+    /// `None` keeps the theme's appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<IrQuadrantPointStyle>,
+}
+
+/// The four styling keys a quadrant point accepts upstream. The point's own clause wins over its
+/// class, key by key, as upstream merges them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrQuadrantPointStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<f32>,
 }
 
 /// Quadrant-chart-specific metadata.
@@ -7886,6 +8406,15 @@ pub struct MermaidDiagramIr {
     /// The `radar-beta` wheel, when this is a radar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radar_meta: Option<IrRadarMeta>,
+    /// The `venn-beta` sets and regions, when this is a Venn diagram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venn_meta: Option<IrVennMeta>,
+    /// The `wardley-beta` map placements, when this is a Wardley map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wardley_meta: Option<Box<IrWardleyMeta>>,
+    /// The `eventmodeling` lanes and timeframe order, when this is an event model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_model_meta: Option<IrEventModelMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7935,6 +8464,10 @@ impl MermaidDiagramIr {
             | DiagramType::PacketBeta
             | DiagramType::Treemap
             | DiagramType::Radar
+            // `title …` is drawn above the circles upstream (`venn-title`).
+            | DiagramType::Venn
+            // Upstream draws it centred in the top padding (`wardley-title`).
+            | DiagramType::Wardley
             | DiagramType::Journey
             | DiagramType::Gantt
             | DiagramType::XyChart
@@ -7955,7 +8488,14 @@ impl MermaidDiagramIr {
             DiagramType::Mindmap
             | DiagramType::ArchitectureBeta
             | DiagramType::Sankey
-            | DiagramType::Info => false,
+            | DiagramType::Info
+            // The effect line IS the title upstream (`setDiagramTitle(root)`), drawn once inside the
+            // fish head; a second banner would repeat it.
+            | DiagramType::Ishikawa
+            // The grammar accepts `title …` and the renderer never draws it.
+            | DiagramType::TreeView
+            // Likewise: `eventmodeling`'s renderer draws swimlanes, boxes and arrows only.
+            | DiagramType::EventModeling => false,
             // Not a mermaid family — our own fallback when detection failed. An author who wrote a
             // title still gets it, the same best-effort contract the rest of this path keeps.
             DiagramType::Unknown => true,
@@ -7986,6 +8526,7 @@ impl MermaidDiagramIr {
                 support_level: diagram_type.support_level(),
                 parse_mode: MermaidParseMode::Compat,
                 block_beta_columns: None,
+                block_beta_group_columns: Vec::new(),
                 node_spacing: None,
                 rank_spacing: None,
                 edge_routing: None,
@@ -8004,6 +8545,9 @@ impl MermaidDiagramIr {
             xy_chart_meta: None,
             treemap_meta: None,
             radar_meta: None,
+            venn_meta: None,
+            wardley_meta: None,
+            event_model_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,
@@ -8141,9 +8685,16 @@ impl MermaidDiagramIr {
         if self.diagram_type == DiagramType::GitGraph {
             return false;
         }
+        // Every unlabelled node of a Wardley map is a mark — a dot, ring, bar or edge endpoint —
+        // whose generated id is plumbing; its text is a separate label node.
+        if self.diagram_type == DiagramType::Wardley {
+            return node.label.is_none();
+        }
         match node.shape {
             NodeShape::FilledCircle | NodeShape::HorizontalBar => true,
             NodeShape::DoubleCircle => node.label.is_none(),
+            // A state diagram's `<<choice>>`: mermaid draws a bare diamond, not the state's id.
+            NodeShape::Diamond => self.diagram_type == DiagramType::State && node.label.is_none(),
             _ => false,
         }
     }
@@ -8214,6 +8765,63 @@ impl MermaidDiagramIr {
         neighbors
     }
 
+    /// Resolve a node's author styles, from least to most specific: the `default` class,
+    /// explicitly assigned classes, `style` directives, then the node's own inline properties.
+    ///
+    /// The implicit default applies to nodes, including nodes with named classes. It does not
+    /// style edges or clusters. Raw class references are a fallback for callers that construct
+    /// IR without running [`Self::populate_structured_styles`].
+    #[must_use]
+    pub fn resolved_node_style(&self, node_index: usize) -> BTreeMap<String, String> {
+        let mut merged = self.declared_node_style(node_index);
+        if let Some(inline) = self
+            .nodes
+            .get(node_index)
+            .and_then(|node| node.inline_style.as_ref())
+        {
+            merged.extend(inline.properties.clone());
+        }
+        merged
+    }
+
+    // Excludes inline_style because populate_structured_styles stores its own derived result
+    // there. Re-populating after a declaration changes must not reapply the previous result.
+    fn declared_node_style(&self, node_index: usize) -> BTreeMap<String, String> {
+        let mut merged = BTreeMap::new();
+        let Some(node) = self.nodes.get(node_index) else {
+            return merged;
+        };
+
+        let mut merge_class = |name: &str| {
+            if let Some(def) = self.style_defs.iter().find(|def| def.name == name) {
+                merged.extend(def.properties.clone());
+            } else {
+                for reference in &self.style_refs {
+                    if let IrStyleTarget::Class(class_name) = &reference.target
+                        && class_name == name
+                    {
+                        merged.extend(parse_style_string(&reference.style).properties);
+                    }
+                }
+            }
+        };
+        // Mermaid 11.15.0 flowDb compiles ['default', 'node', ...vertex.classes]. The default
+        // remains a base layer when a named class overrides only some of its properties.
+        merge_class("default");
+        for class_name in &node.classes {
+            merge_class(class_name);
+        }
+
+        for reference in &self.style_refs {
+            if let IrStyleTarget::Node(target) = reference.target
+                && target == IrNodeId(node_index)
+            {
+                merged.extend(parse_style_string(&reference.style).properties);
+            }
+        }
+        merged
+    }
+
     /// Populate [`style_defs`](Self::style_defs) and per-node/edge
     /// [`inline_style`](IrNode::inline_style) fields from the raw
     /// [`style_refs`](Self::style_refs).
@@ -8239,37 +8847,13 @@ impl MermaidDiagramIr {
         }
         self.style_defs = defs.into_values().collect();
 
-        // 2. Apply per-node styles (cascade: classDef default → classDef → style directive).
-        let default_node_style = self
-            .style_defs
-            .iter()
-            .find(|d| d.name == "default")
-            .map(|d| d.properties.clone())
-            .unwrap_or_default();
-
-        for (node_idx, node) in self.nodes.iter_mut().enumerate() {
-            let node_id = IrNodeId(node_idx);
-            let mut merged = default_node_style.clone();
-
-            // Layer 1: classDef properties via node.classes.
-            for class_name in &node.classes {
-                if let Some(def) = self.style_defs.iter().find(|d| d.name == *class_name) {
-                    merged.extend(def.properties.clone());
-                }
-            }
-
-            // Layer 2: direct `style nodeId` overrides.
-            for sr in &self.style_refs {
-                if let IrStyleTarget::Node(target_id) = sr.target
-                    && target_id == node_id
-                {
-                    let parsed = parse_style_string(&sr.style);
-                    merged.extend(parsed.properties);
-                }
-            }
-
+        // 2. Apply declarations in the same order used by renderers: default class, named
+        // classes, then direct node styles. Do not merge the previous derived inline result.
+        for node_idx in 0..self.nodes.len() {
+            let merged = self.declared_node_style(node_idx);
             if !merged.is_empty() {
-                node.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
+                self.nodes[node_idx].inline_style =
+                    Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
 
@@ -9880,6 +10464,115 @@ mod tests {
         parse_mermaid_js_config_value, parse_style_string, parse_style_string_with_rejections,
         resolve_span_text_range, sanitize_style_value, scale_budget, to_init_parse,
     };
+
+    #[test]
+    fn semantic_shape_styles_leave_other_families_and_neutral_processes_alone() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        for diagram_type in [
+            DiagramType::State,
+            DiagramType::Class,
+            DiagramType::Er,
+            DiagramType::Mindmap,
+            DiagramType::C4Context,
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    diagram_type,
+                    NodeShape::Diamond,
+                    "#f8fafc",
+                    "#7c8da5",
+                    "#1e293b",
+                    &accents,
+                )
+                .is_none()
+            );
+        }
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Rounded,
+            NodeShape::Subroutine,
+            NodeShape::FilledCircle,
+            NodeShape::HorizontalBar,
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    DiagramType::Flowchart,
+                    shape,
+                    "#f8fafc",
+                    "#7c8da5",
+                    "#1e293b",
+                    &accents,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_shape_styles_preserve_unmeasurable_author_paints() {
+        let accents = super::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from);
+        for (fill, stroke, text) in [
+            ("navy", "#7c8da5", "#fff"),
+            ("var(--surface)", "#7c8da5", "#1e293b"),
+            ("#f8fafc", "currentColor", "#1e293b"),
+            ("#f8fafc", "#7c8da5", "rgb(30, 41, 59)"),
+            ("#é12", "#7c8da5", "#1e293b"),
+            ("#ffffff00", "#7c8da5", "#1e293b"),
+        ] {
+            assert!(
+                super::semantic_shape_style(
+                    DiagramType::Flowchart,
+                    NodeShape::Diamond,
+                    fill,
+                    stroke,
+                    text,
+                    &accents,
+                )
+                .is_none(),
+                "unmeasurable custom paints must not be replaced: {fill}/{stroke}/{text}"
+            );
+        }
+        let mut custom_accents = accents;
+        custom_accents[4] = "var(--decision)".to_owned();
+        assert!(
+            super::semantic_shape_style(
+                DiagramType::Flowchart,
+                NodeShape::Diamond,
+                "#f8fafc",
+                "#7c8da5",
+                "#1e293b",
+                &custom_accents,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn semantic_shape_tint_recedes_when_text_contrast_needs_the_original_surface() {
+        let accents = std::array::from_fn(|_| "#000000".to_owned());
+        let style = super::semantic_shape_style(
+            DiagramType::Flowchart,
+            NodeShape::Diamond,
+            "#fff",
+            "#767676",
+            "#767676",
+            &accents,
+        )
+        .expect("readable base surface must remain usable");
+        assert_eq!(style.fill, "#ffffff");
+        assert!(
+            super::semantic_shape_style(
+                DiagramType::Flowchart,
+                NodeShape::Diamond,
+                "#777777",
+                "#777777",
+                "#777777",
+                &accents,
+            )
+            .is_none(),
+            "a low-contrast custom palette must not receive a misleading semantic restyle"
+        );
+    }
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
         Span::new(
@@ -13444,6 +14137,71 @@ mod tests {
     }
 
     #[test]
+    fn er_columns_leave_space_for_measured_default_key_rows() {
+        let members = vec![
+            IrEntityAttribute {
+                data_type: "string".to_string(),
+                name: "customer_id".to_string(),
+                keys: vec![IrAttributeKey::Pk],
+                comment: None,
+            },
+            IrEntityAttribute {
+                data_type: "string".to_string(),
+                name: "display_name".to_string(),
+                ..Default::default()
+            },
+        ];
+        let metrics = super::FontMetrics::default_metrics();
+        let (columns, right_edge) = super::er_cell_columns(
+            &members,
+            &metrics,
+            12.0 / metrics.font_size(),
+            super::er_cell_gutter(12.0),
+        );
+        // Chromium system-ui glyph bounds from the actual default SVG, independent of the
+        // estimator being tested. Type/name/key must remain distinct readable cells.
+        assert!(columns[1] - columns[0] - 40.046_875 >= 8.0);
+        assert!(columns[2] - columns[1] - 82.640_625 >= 8.0);
+        assert!(right_edge + 8.0 - columns[2] >= 18.794_922);
+        let mut reversed = members.clone();
+        reversed.reverse();
+        assert_eq!(
+            (columns, right_edge),
+            super::er_cell_columns(
+                &reversed,
+                &metrics,
+                12.0 / metrics.font_size(),
+                super::er_cell_gutter(12.0),
+            ),
+            "column widths come from every row, independent of attribute order"
+        );
+    }
+
+    #[test]
+    fn er_columns_keep_exact_monospace_advances_and_skip_empty_columns() {
+        let metrics = super::FontMetrics::monospace(12.0);
+        let gutter = super::er_cell_gutter(12.0);
+        let mut members = vec![IrEntityAttribute {
+            data_type: "int".to_string(),
+            name: "customer_id".to_string(),
+            ..Default::default()
+        }];
+        let (plain, right_edge) = super::er_cell_columns(&members, &metrics, 1.0, gutter);
+        assert_eq!(plain[1], metrics.estimate_width("int") + gutter);
+        assert_eq!(right_edge, plain[1] + metrics.estimate_width("customer_id"));
+        assert_eq!(plain[2], plain[3], "absent keys do not allocate a column");
+
+        members[0].keys = vec![IrAttributeKey::Pk, IrAttributeKey::Fk];
+        let (keyed, _) = super::er_cell_columns(&members, &metrics, 1.0, gutter);
+        assert_eq!(plain[1], keyed[1], "monospace bold does not widen glyphs");
+        assert_eq!(plain[2], keyed[2]);
+        assert!(
+            keyed[3] > keyed[2],
+            "composite keys reserve one complete cell"
+        );
+    }
+
+    #[test]
     fn ir_node_members_support_er_attributes() {
         let node = IrNode {
             id: "User".to_string(),
@@ -14164,9 +14922,14 @@ mod tests {
         // parity change a conscious, evidence-carrying edit rather than doc drift.
         for family in documented_diagram_types() {
             let expected = match family {
-                DiagramType::Treemap | DiagramType::Radar | DiagramType::Info => {
-                    MermaidParityLevel::NotApplicable
-                }
+                DiagramType::Treemap
+                | DiagramType::Radar
+                | DiagramType::Info
+                | DiagramType::Ishikawa
+                | DiagramType::TreeView
+                | DiagramType::Venn
+                | DiagramType::Wardley
+                | DiagramType::EventModeling => MermaidParityLevel::NotApplicable,
                 _ => MermaidParityLevel::Partial,
             };
             assert_eq!(
@@ -14350,6 +15113,13 @@ mod tests {
                 participant: IrNodeId(3),
                 at_edge: 5,
             }],
+            timeline: vec![
+                super::IrSequenceStep::Open,
+                super::IrSequenceStep::Message,
+                super::IrSequenceStep::Note,
+                super::IrSequenceStep::Else,
+                super::IrSequenceStep::Close,
+            ],
         };
 
         let json = serde_json::to_string(&meta).expect("serialize");
@@ -14507,6 +15277,7 @@ mod tests {
     #[test]
     fn xy_chart_meta_serde_round_trip() {
         let meta = IrXyChartMeta {
+            horizontal: false,
             title: Some("Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -14543,6 +15314,7 @@ mod tests {
     fn ir_with_xy_chart_meta_round_trip() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             x_axis: IrXyAxis {
                 categories: vec!["Q1".to_string(), "Q2".to_string()],
                 ..Default::default()
@@ -15590,57 +16362,194 @@ mod tests {
     }
 
     #[test]
-    fn populate_structured_styles_classdef_default_and_overrides() {
+    fn populate_structured_styles_default_named_and_direct_precedence() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for (id, classes) in [
+            ("plain", vec![]),
+            ("named", vec!["accent".to_string()]),
+            ("direct", vec!["accent".to_string()]),
+            ("undefined", vec!["missing".to_string()]),
+        ] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                classes,
+                ..Default::default()
+            });
+        }
+        // The named class precedes default both alphabetically and in source order.
+        // Neither ordering may let default erase its more specific properties.
+        for (target, style) in [
+            (IrStyleTarget::Class("accent".to_string()), "fill:#f80"),
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#ddd,stroke:#123,color:#456,stroke-width:2px",
+            ),
+            (IrStyleTarget::Node(IrNodeId(2)), "fill:#0af,color:#fff"),
+            (IrStyleTarget::Class("default".to_string()), "stroke:#789"),
+        ] {
+            ir.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+
+        ir.populate_structured_styles();
+
+        for (index, fill, color) in [
+            (0, "#ddd", "#456"),
+            (1, "#f80", "#456"),
+            (2, "#0af", "#fff"),
+            (3, "#ddd", "#456"),
+        ] {
+            let expected = BTreeMap::from([
+                ("fill".to_string(), fill.to_string()),
+                ("stroke".to_string(), "#789".to_string()),
+                ("color".to_string(), color.to_string()),
+                ("stroke-width".to_string(), "2px".to_string()),
+            ]);
+            assert_eq!(
+                ir.nodes[index].inline_style.as_ref().unwrap().properties,
+                expected,
+                "node {index}"
+            );
+            assert_eq!(ir.resolved_node_style(index), expected);
+        }
+        assert!(ir.nodes[0].classes.is_empty());
+        assert_eq!(ir.nodes[1].classes, ["accent"]);
+        assert_eq!(ir.nodes[3].classes, ["missing"]);
+    }
+
+    #[test]
+    fn populate_structured_styles_default_repopulates_after_edits() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
             id: "A".to_string(),
+            classes: vec!["accent".to_string()],
             ..Default::default()
         });
-        ir.nodes.push(IrNode {
-            id: "B".to_string(),
-            classes: vec!["highlight".to_string()],
+        for (target, style) in [
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#111,stroke:#222",
+            ),
+            (IrStyleTarget::Class("accent".to_string()), "fill:#333"),
+            (IrStyleTarget::Node(IrNodeId(0)), "color:#444"),
+        ] {
+            ir.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+        ir.populate_structured_styles();
+
+        ir.style_refs[0].style = "fill:#aaa,stroke-width:3px".to_string();
+        ir.style_refs[1].style = "fill:#bbb".to_string();
+        ir.style_refs[2].style = "color:#ccc".to_string();
+        ir.populate_structured_styles();
+
+        // The prior derived inline values must not override edited declarations or
+        // retain properties that were removed from them.
+        assert_eq!(
+            ir.resolved_node_style(0),
+            BTreeMap::from([
+                ("fill".to_string(), "#bbb".to_string()),
+                ("color".to_string(), "#ccc".to_string()),
+                ("stroke-width".to_string(), "3px".to_string()),
+            ])
+        );
+        let styles = ir.style_defs.clone();
+        let inline = ir.nodes[0].inline_style.clone();
+        ir.populate_structured_styles();
+        assert_eq!(ir.style_defs, styles);
+        assert_eq!(ir.nodes[0].inline_style, inline);
+    }
+
+    #[test]
+    fn populate_structured_styles_default_does_not_style_edges_or_clusters() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes = vec![IrNode::default(), IrNode::default()];
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
             ..Default::default()
         });
-        ir.nodes.push(IrNode {
-            id: "C".to_string(),
-            classes: vec!["highlight".to_string()],
+        ir.clusters.push(IrCluster {
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            classes: vec!["boundary".to_string()],
             ..Default::default()
         });
         ir.style_refs.push(IrStyleRef {
             target: IrStyleTarget::Class("default".to_string()),
-            style: "fill:#eee,stroke:#333,stroke-width:2px".to_string(),
+            style: "fill:#abc,stroke:#123".to_string(),
             span: Span::default(),
         });
-        ir.style_refs.push(IrStyleRef {
-            target: IrStyleTarget::Class("highlight".to_string()),
-            style: "fill:#ff0,stroke:#f00".to_string(),
-            span: Span::default(),
-        });
-        ir.style_refs.push(IrStyleRef {
-            target: IrStyleTarget::Node(IrNodeId(2)),
-            style: "fill:#0f0".to_string(),
-            span: Span::default(),
-        });
+        let clusters = ir.clusters.clone();
+        let refs = ir.style_refs.clone();
 
         ir.populate_structured_styles();
 
-        // Node A gets classDef default
-        let style_a = ir.nodes[0].inline_style.as_ref().unwrap();
-        assert_eq!(style_a.properties.get("fill").unwrap(), "#eee");
-        assert_eq!(style_a.properties.get("stroke").unwrap(), "#333");
-        assert_eq!(style_a.properties.get("stroke-width").unwrap(), "2px");
+        let expected = BTreeMap::from([
+            ("fill".to_string(), "#abc".to_string()),
+            ("stroke".to_string(), "#123".to_string()),
+        ]);
+        assert_eq!(ir.resolved_node_style(0), expected);
+        assert_eq!(ir.resolved_node_style(1), expected);
+        assert!(ir.edges[0].inline_style.is_none());
+        assert_eq!(ir.clusters, clusters);
+        assert_eq!(ir.style_refs, refs);
+    }
 
-        // Node B gets classDef default overridden by classDef highlight
-        let style_b = ir.nodes[1].inline_style.as_ref().unwrap();
-        assert_eq!(style_b.properties.get("fill").unwrap(), "#ff0");
-        assert_eq!(style_b.properties.get("stroke").unwrap(), "#f00");
-        assert_eq!(style_b.properties.get("stroke-width").unwrap(), "2px");
+    #[test]
+    fn populate_structured_styles_resolver_raw_fallback_and_inline_priority() {
+        let mut raw = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        raw.nodes.push(IrNode {
+            id: "A".to_string(),
+            classes: vec!["accent".to_string()],
+            ..Default::default()
+        });
+        for (target, style) in [
+            (
+                IrStyleTarget::Class("default".to_string()),
+                "fill:#abc,stroke:#123,stroke-width:2px,position:absolute",
+            ),
+            (
+                IrStyleTarget::Class("accent".to_string()),
+                "fill:#def,color:#456",
+            ),
+            (
+                IrStyleTarget::Node(IrNodeId(0)),
+                "fill:#fed,color:url(https://example.com/unsafe)",
+            ),
+        ] {
+            raw.style_refs.push(IrStyleRef {
+                target,
+                style: style.to_string(),
+                span: Span::default(),
+            });
+        }
+        let mut populated = raw.clone();
+        populated.populate_structured_styles();
+        assert_eq!(raw.resolved_node_style(0), populated.resolved_node_style(0));
 
-        // Node C gets classDef default + classDef highlight + style C override
-        let style_c = ir.nodes[2].inline_style.as_ref().unwrap();
-        assert_eq!(style_c.properties.get("fill").unwrap(), "#0f0");
-        assert_eq!(style_c.properties.get("stroke").unwrap(), "#f00");
-        assert_eq!(style_c.properties.get("stroke-width").unwrap(), "2px");
+        let inline = IrInlineStyle {
+            properties: BTreeMap::from([
+                ("fill".to_string(), "#000".to_string()),
+                ("color".to_string(), "#789".to_string()),
+            ]),
+        };
+        raw.nodes[0].inline_style = Some(Box::new(inline.clone()));
+        populated.nodes[0].inline_style = Some(Box::new(inline));
+        let expected = BTreeMap::from([
+            ("fill".to_string(), "#000".to_string()),
+            ("color".to_string(), "#789".to_string()),
+            ("stroke".to_string(), "#123".to_string()),
+            ("stroke-width".to_string(), "2px".to_string()),
+        ]);
+        assert_eq!(raw.resolved_node_style(0), expected);
+        assert_eq!(populated.resolved_node_style(0), expected);
+        assert!(raw.resolved_node_style(usize::MAX).is_empty());
     }
 
     #[test]

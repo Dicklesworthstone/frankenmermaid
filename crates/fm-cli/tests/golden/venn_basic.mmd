@@ -1,0 +1,10 @@
+venn-beta
+  title Who ships what
+  set Frontend
+  set Backend["Backend team"]
+  set Ops:8
+  union Frontend,Backend["APIs"]
+  union Backend,Ops["Deploys"]
+    text pipelines["CI pipelines"]
+  union Frontend,Ops:1
+  style Ops fill: #2f9e72

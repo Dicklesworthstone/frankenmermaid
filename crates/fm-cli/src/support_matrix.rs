@@ -88,6 +88,11 @@ const fn family_fixture_case(family: DiagramType) -> Option<&'static str> {
         DiagramType::Treemap => Some("treemap_basic"),
         DiagramType::Radar => Some("radar_basic"),
         DiagramType::Info => Some("info_basic"),
+        DiagramType::Ishikawa => Some("ishikawa_basic"),
+        DiagramType::TreeView => Some("treeview_basic"),
+        DiagramType::Venn => Some("venn_basic"),
+        DiagramType::Wardley => Some("wardley_basic"),
+        DiagramType::EventModeling => Some("eventmodeling_basic"),
         DiagramType::Unknown => None,
     }
 }

@@ -5,8 +5,9 @@
 ((root) => {
   "use strict";
   const MAX_INPUT_BYTES = 2 * 1024 * 1024;
+  const READ_METHODS = ["renderSvg", "parseLens", "parse"];
   const EDIT_METHODS = ["applyParseLensEdit", "applyParseLensDelete", "applyParseLensInsertLineAfter"];
-  const METHODS = ["renderSvg", "parseLens", "parse", ...EDIT_METHODS];
+  const METHODS = [...READ_METHODS, ...EDIT_METHODS];
   const encoder = new TextEncoder();
   const abortError = () => Object.assign(new Error("Diagram operation cancelled."), { name: "AbortError" });
   const errorText = (error) => String(error?.message || error).slice(0, 16000);
@@ -19,6 +20,73 @@
   // Keep diagnostics and bindings, not a second full graph IR on the UI thread.
   function inspected(parsed) {
     return { warnings: parsed?.warnings || [], ir: { diagnostics: parsed?.ir?.diagnostics || [] } };
+  }
+
+  // Retain serialized, immutable read results, never live source-edit receipts or DOM. A hit
+  // gets a fresh object graph; a caller mutating its diagnostics/bindings cannot poison later
+  // renders. Only lossless JSON trees qualify: Maps, undefined, -0, aliases, etc. pass through
+  // uncached rather than silently changing their structured-clone semantics.
+  function readResultJson(value, maxUnits) {
+    const queue = [{ value, depth: 0 }], seen = new Set();
+    let units = 0, entries = 0;
+    while (queue.length) {
+      const { value: item, depth } = queue.pop();
+      if (++entries > 100000 || depth > 32) return null;
+      if (typeof item === "string") units += item.length;
+      else if (item === null || typeof item === "boolean") { /* JSON primitives. */ }
+      else if (typeof item === "number") {
+        if (!Number.isFinite(item) || Object.is(item, -0)) return null;
+      } else {
+        if (!item || typeof item !== "object" || seen.has(item)) return null;
+        const array = Array.isArray(item);
+        if (Object.getPrototypeOf(item) !== (array ? Array.prototype : Object.prototype)) return null;
+        seen.add(item);
+        const keys = Reflect.ownKeys(item);
+        if (keys.length + entries + queue.length > 100000) return null;
+        if (array && keys.length !== item.length + 1) return null;
+        for (const key of keys) {
+          if (array && key === "length") continue;
+          const descriptor = Object.getOwnPropertyDescriptor(item, key);
+          if (typeof key !== "string" || !descriptor.enumerable || !("value" in descriptor)
+            || (array && !/^(?:0|[1-9][0-9]*)$/u.test(key))) return null;
+          units += key.length;
+          queue.push({ value: descriptor.value, depth: depth + 1 });
+        }
+      }
+      if (units > maxUnits) return null;
+    }
+    const json = JSON.stringify(value);
+    return typeof json === "string" && json.length <= maxUnits ? json : null;
+  }
+
+  function createReadCache(maxBytes, maxEntries) {
+    const entries = new Map();
+    let bytes = 0;
+    return {
+      get(key) {
+        const entry = entries.get(key);
+        if (!entry) return undefined;
+        entries.delete(key); entries.set(key, entry); // Least recently used first.
+        return { value: JSON.parse(entry.json) };
+      },
+      put(key, value) {
+        if (!maxEntries || !maxBytes) return;
+        // Budget UTF-16 key + serialized-value storage, plus a separate entry-count bound.
+        // This is a retained-payload bound, not a claim about the engine's total heap size.
+        const available = Math.floor(maxBytes / 2) - key.length;
+        if (available < 1) return;
+        const json = readResultJson(value, available);
+        if (json === null) return;
+        const cost = 2 * (key.length + json.length);
+        if (entries.has(key)) { bytes -= entries.get(key).cost; entries.delete(key); }
+        while (entries.size && (entries.size >= maxEntries || bytes + cost > maxBytes)) {
+          const oldest = entries.keys().next().value;
+          bytes -= entries.get(oldest).cost; entries.delete(oldest);
+        }
+        entries.set(key, { json, cost }); bytes += cost;
+      },
+      clear() { entries.clear(); bytes = 0; },
+    };
   }
   function attach(scope, engine) {
     let initialization;
@@ -64,11 +132,22 @@
   function create({ moduleUrl, binaryUrl, workerUrl, fetchFile = root.fetch.bind(root),
     WorkerType = root.Worker, BlobType = root.Blob, urls = root.URL,
     setTimer = root.setTimeout.bind(root), clearTimer = root.clearTimeout.bind(root), timeoutMs = 15000,
+    maxCachedBytes = 32 * 1024 * 1024, maxCachedEntries = 192,
   }) {
     if (typeof WorkerType !== "function") throw new Error("This preview requires Web Worker support.");
+    if (typeof root.structuredClone !== "function") throw new Error("This preview requires structured-clone support.");
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error("Invalid engine time budget.");
+    if (!Number.isSafeInteger(maxCachedBytes) || maxCachedBytes < 0 || maxCachedBytes > 128 * 1024 * 1024
+      || !Number.isSafeInteger(maxCachedEntries) || maxCachedEntries < 0 || maxCachedEntries > 2048) {
+      throw new Error("Invalid engine read-cache limits.");
+    }
     let resources, loading, state, downloads;
     let epoch = 0, nextId = 0, disposed = false;
+    // One immutable engine asset set per client. Exact source AND method are the key: document
+    // line numbers, node indexes and hashes are not identities. Completed reads survive source
+    // invalidation/worker restart, but never leave this client or survive its destruction.
+    const readCache = createReadCache(maxCachedBytes, maxCachedEntries);
+    const inFlightReads = new Map(), readSubscribers = new Set();
     const api = { default: initialize, renderSvg: (source) => call("renderSvg", { source }), cancelPending, destroy };
     function assertLive(generation) { if (disposed || generation !== epoch) throw abortError(); }
     async function loadResources() {
@@ -183,14 +262,65 @@
         if (!checkedText(payload.elementId, 4096, "Element ID")) throw new Error("Missing element ID.");
         if (method !== "applyParseLensDelete") checkedText(payload.replacement, MAX_INPUT_BYTES, "Replacement");
       }
+      const key = READ_METHODS.includes(method) ? `${method}:${payload.source}` : null;
+      if (key !== null) {
+        // Keep even a cache hit behind the same synchronous cancellation/disposal fence as
+        // a worker request. It must not revive an obsolete render in a later microtask.
+        await Promise.resolve(); assertLive(generation);
+        const cached = readCache.get(key);
+        if (cached) return cached.value;
+        if (readSubscribers.size >= 256) throw new Error("Too many engine read subscribers.");
+        let job = inFlightReads.get(key);
+        if (!job) {
+          if (inFlightReads.size >= 64) throw new Error("Too many queued engine operations.");
+          job = { key, method, payload, generation };
+          const cancelled = new Promise((_, reject) => {
+            job.cancel = () => { job.payload = null; reject(abortError()); };
+          });
+          inFlightReads.set(key, job);
+          job.promise = Promise.race([executeRead(job), cancelled]).finally(() => {
+            // A cancelled generation may already have been replaced by the SAME source.
+            // Its cleanup must not remove the new generation's pending operation.
+            if (inFlightReads.get(job.key) === job) inFlightReads.delete(job.key);
+            job.key = null; job.payload = null;
+          });
+        }
+        const ticket = {};
+        readSubscribers.add(ticket);
+        try {
+          const value = await job.promise;
+          assertLive(generation);
+          // No subscriber sees the promise's private response object. Use structuredClone,
+          // not JSON coercion: native Maps, aliases, cycles and undefined remain intact even
+          // when their result is deliberately ineligible for completed-result retention.
+          return root.structuredClone(value);
+        } finally { readSubscribers.delete(ticket); }
+      }
       const loaded = await loadResources(); assertLive(generation);
       const workerState = ensureWorker(loaded);
       const capabilities = await workerState.ready; assertLive(generation);
       if (!capabilities.includes(method)) throw new Error(`Engine has no ${method} export.`);
-      return request(workerState, method, payload);
+      const value = await request(workerState, method, payload);
+      assertLive(generation);
+      return value;
+    }
+    async function executeRead(job) {
+      const loaded = await loadResources(); assertLive(job.generation);
+      const workerState = ensureWorker(loaded);
+      const capabilities = await workerState.ready; assertLive(job.generation);
+      if (!capabilities.includes(job.method)) throw new Error(`Engine has no ${job.method} export.`);
+      const value = await request(workerState, job.method, job.payload);
+      assertLive(job.generation);
+      readCache.put(job.key, value);
+      return value;
+    }
+    function releaseReads() {
+      for (const job of inFlightReads.values()) job.cancel();
+      inFlightReads.clear(); readSubscribers.clear();
     }
     function cancelPending() {
       epoch += 1;
+      releaseReads(); // Settle subscribers even when asset initialization is still pending.
       // Synchronous WASM cannot process cancellation messages while executing. Termination
       // interrupts the computation itself, not just the eventual display of its obsolete reply.
       if (state?.pending.size) stop(abortError());
@@ -198,6 +328,8 @@
     function destroy() {
       if (disposed) return;
       disposed = true; epoch += 1; downloads?.abort(); stop(abortError());
+      releaseReads();
+      readCache.clear();
       if (resources) urls.revokeObjectURL(resources.url);
       resources = undefined;
     }

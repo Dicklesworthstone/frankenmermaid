@@ -750,9 +750,10 @@ pub struct ParseLensEditResponse {
 /// A flowchart-specific text/IR lens.
 ///
 /// The parser owns the original source as the format complement. [`Self::put`] accepts an IR with
-/// node-label text changed and splices only those label bytes back into that original source. This
-/// deliberately refuses graph-structure edits: changing an identifier without changing all of its
-/// edge references is not a faithful text-to-IR round trip.
+/// node/edge-label text changed, or an existing-node declaration-order permutation, and splices only
+/// those source tokens. Reordering requires independent, single-line node declarations outside
+/// subgraphs. Every changed source is reparsed to prove that it represents the requested IR;
+/// topology changes and labels that would introduce Mermaid syntax are refused.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowchartParseLens {
@@ -773,7 +774,8 @@ impl std::fmt::Display for FlowchartParseLensError {
                 formatter.write_str("ParseLens currently supports flowcharts only")
             }
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit node-label text changes only; graph structure is unchanged",
+                "ParseLens can re-emit faithful node/edge-label edits and independent node declaration \
+                 reorders only; graph topology and other source content must stay unchanged",
             ),
             Self::MissingSourceLabel(node_id) => {
                 write!(
@@ -810,14 +812,546 @@ impl FlowchartParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only changed flowchart node-label text.
+    /// Re-emits changed label text or a permutation of independent node declarations.
+    ///
+    /// A declaration reorder preserves line indentation, trailing whitespace, comments, directives,
+    /// edge statements, and line endings. Nodes first mentioned in an edge, declarations sharing a
+    /// line, and subgraphs are deliberately unsupported. Declaration order is a layout hint, not
+    /// a promise that an algorithm will preserve dragged pixel coordinates.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
-        self.snapshot.put_with_label_finder(
-            DiagramType::Flowchart,
+        if edited.diagram_type != DiagramType::Flowchart {
+            return Err(FlowchartParseLensError::NotFlowchart);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(FlowchartParseLensError::UnsupportedIrChange);
+        }
+
+        // First prove that every IR field except label text stayed unchanged. This keeps the
+        // initial lens honest: a node/edge/style mutation cannot be rendered as though it had
+        // round-tripped when only label source spans are available.
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return self.put_node_order(edited);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(FlowchartParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_flowchart_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| FlowchartParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+
+        collect_edge_label_replacements(
+            &self.snapshot,
             edited,
-            find_flowchart_label_text_range,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
         )
+        .ok_or(FlowchartParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(FlowchartParseLensError::UnsupportedIrChange);
+        }
+
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(FlowchartParseLensError::UnsupportedIrChange)?;
+
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(FlowchartParseLensError::UnsupportedIrChange)
     }
+
+    fn put_node_order(&self, edited: &MermaidDiagramIr) -> Result<String, FlowchartParseLensError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let unsupported = || FlowchartParseLensError::UnsupportedIrChange;
+        let original = self.ir();
+        if original.nodes.len() != edited.nodes.len()
+            || !original.clusters.is_empty()
+            || !original.graph.subgraphs.is_empty()
+            || original
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .eq(edited.nodes.iter().map(|node| &node.id))
+        {
+            return Err(unsupported());
+        }
+
+        let original_indices: BTreeMap<_, _> = original
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.as_str(), index))
+            .collect();
+        let mut seen = BTreeSet::new();
+        let mut permutation = Vec::with_capacity(edited.nodes.len());
+        for node in &edited.nodes {
+            if !seen.insert(node.id.as_str()) {
+                return Err(unsupported());
+            }
+            permutation.push(
+                *original_indices
+                    .get(node.id.as_str())
+                    .ok_or_else(unsupported)?,
+            );
+        }
+        if !flowchart_permutation_preserves_semantics(original, edited, &permutation) {
+            return Err(unsupported());
+        }
+
+        let source = self.original_source();
+        let (line_offsets, _) = line_offsets_and_ending_style(source);
+        let mut declarations = Vec::with_capacity(original.nodes.len());
+        for node in &original.nodes {
+            // The primary span is the first mention. Requiring that whole line to parse as one
+            // node prevents moving an edge (and therefore changing edge order or linkStyle N).
+            let span = node.span_primary;
+            if span.start.line != span.end.line {
+                return Err(unsupported());
+            }
+            let line_index = (span.start.line as usize)
+                .checked_sub(1)
+                .ok_or_else(unsupported)?;
+            let line_start = *line_offsets.get(line_index).ok_or_else(unsupported)?;
+            let line_end = line_offsets
+                .get(line_index + 1)
+                .copied()
+                .unwrap_or(source.len());
+            let line = source.get(line_start..line_end).ok_or_else(unsupported)?;
+            let declaration = line.trim();
+            // Keep comments stationary and refuse multi-statement lines instead of guessing a
+            // token boundary. Quoted occurrences of these delimiters are conservatively refused.
+            if declaration.is_empty() || declaration.contains(';') || declaration.contains("%%") {
+                return Err(unsupported());
+            }
+            let isolated = parse(&format!("flowchart TB\n{declaration}\n"));
+            if isolated.ir.nodes.len() != 1
+                || isolated.ir.nodes[0].id != node.id
+                || !isolated.ir.edges.is_empty()
+                || !isolated.ir.clusters.is_empty()
+                || !isolated.ir.style_refs.is_empty()
+                || !isolated.warnings.is_empty()
+            {
+                return Err(unsupported());
+            }
+            let start_byte = line_start + line.len() - line.trim_start().len();
+            let range = MermaidTextRange {
+                start_byte,
+                end_byte: start_byte + declaration.len(),
+            };
+            if declarations
+                .last()
+                .is_some_and(|previous: &MermaidTextRange| previous.end_byte > range.start_byte)
+            {
+                return Err(unsupported());
+            }
+            declarations.push(range);
+        }
+
+        let mut updated = source.to_owned();
+        for (slot, &old_index) in permutation.iter().enumerate().rev() {
+            let target = &declarations[slot];
+            let replacement = &declarations[old_index];
+            updated.replace_range(
+                target.start_byte..target.end_byte,
+                &source[replacement.start_byte..replacement.end_byte],
+            );
+        }
+        // This also rejects a caller that reordered nodes without remapping their numeric edge,
+        // port, graph-mirror, or style references. Nothing except source locations and label
+        // interning order is normalized; the full graph and metadata must agree.
+        validate_ir_reemission(updated, edited).ok_or(FlowchartParseLensError::UnsupportedIrChange)
+    }
+}
+
+/// Locate existing edge-label text without maintaining a second copy of each diagram's grammar.
+/// A candidate must be the unique contiguous range whose replacement changes this edge's label;
+/// matching text in a node ID, another label, or a comment is not enough. Parallel edges can share
+/// one source token, so probe results are cached and duplicate replacements are coalesced later.
+fn collect_edge_label_replacements<'a>(
+    snapshot: &ParseLensSnapshot,
+    edited: &'a MermaidDiagramIr,
+    changed_labels: &[usize],
+    replacements: &mut Vec<(MermaidTextRange, &'a str)>,
+    covered_labels: &mut [bool],
+) -> Option<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let original = &snapshot.parsed.ir;
+    let source = snapshot.original_source();
+    let existing_labels: BTreeSet<_> = original
+        .labels
+        .iter()
+        .map(|label| label.text.as_str())
+        .collect();
+    let mut probe_index = 0_usize;
+    let probe = loop {
+        let candidate = format!("fmLensProbe{probe_index}");
+        if !existing_labels.contains(candidate.as_str()) {
+            break candidate;
+        }
+        probe_index += 1;
+    };
+    let mut probed_ranges: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+
+    for (edge_index, edge) in original.edges.iter().enumerate() {
+        let Some(label_id) = edge.label else {
+            continue;
+        };
+        if !changed_labels.contains(&label_id.0) {
+            continue;
+        }
+        let old_label = original.labels.get(label_id.0)?.text.as_str();
+        if old_label.is_empty() {
+            return None;
+        }
+        let source_entry =
+            snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Edge && entry.index == edge_index
+            })?;
+        let statement = resolve_span_text_range(source, source_entry.span)?;
+        let snippet = source.get(statement.start_byte..statement.end_byte)?;
+        let mut matched_range = None;
+        for (offset, _) in snippet.match_indices(old_label) {
+            let start = statement.start_byte + offset;
+            let end = start + old_label.len();
+            let affected_edges = probed_ranges.entry((start, end)).or_insert_with(|| {
+                let mut candidate = source.to_owned();
+                candidate.replace_range(start..end, &probe);
+                let candidate = parse(&candidate).ir;
+                if candidate.diagram_type != original.diagram_type
+                    || candidate.nodes.len() != original.nodes.len()
+                    || !candidate
+                        .nodes
+                        .iter()
+                        .zip(&original.nodes)
+                        .all(|(after, before)| after.id == before.id)
+                    || candidate.edges.len() != original.edges.len()
+                    || !candidate
+                        .edges
+                        .iter()
+                        .zip(&original.edges)
+                        .all(|(after, before)| {
+                            (after.from, after.to, after.arrow)
+                                == (before.from, before.to, before.arrow)
+                        })
+                {
+                    return Vec::new();
+                }
+                candidate
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, edge)| {
+                        edge.label
+                            .and_then(|label| candidate.labels.get(label.0))
+                            .is_some_and(|label| label.text == probe)
+                            .then_some(index)
+                    })
+                    .collect()
+            });
+            if affected_edges.contains(&edge_index) {
+                if matched_range.is_some() {
+                    return None;
+                }
+                matched_range = Some(MermaidTextRange {
+                    start_byte: start,
+                    end_byte: end,
+                });
+            }
+        }
+        replacements.push((matched_range?, edited.labels.get(label_id.0)?.text.as_str()));
+        *covered_labels.get_mut(label_id.0)? = true;
+    }
+    Some(())
+}
+
+/// Apply each source token exactly once, refusing conflicting or overlapping edits atomically.
+fn splice_label_replacements(
+    source: &str,
+    mut replacements: Vec<(MermaidTextRange, &str)>,
+) -> Option<String> {
+    replacements.sort_unstable_by_key(|(range, _)| (range.start_byte, range.end_byte));
+    let mut unique: Vec<(MermaidTextRange, &str)> = Vec::with_capacity(replacements.len());
+    for (range, replacement) in replacements {
+        source.get(range.start_byte..range.end_byte)?;
+        if range.start_byte == range.end_byte {
+            return None;
+        }
+        if let Some((previous, previous_replacement)) = unique.last() {
+            if *previous == range && *previous_replacement == replacement {
+                continue;
+            }
+            if previous.end_byte > range.start_byte {
+                return None;
+            }
+        }
+        unique.push((range, replacement));
+    }
+    let mut updated = source.to_owned();
+    for (range, replacement) in unique.into_iter().rev() {
+        updated.replace_range(range.start_byte..range.end_byte, replacement);
+    }
+    Some(updated)
+}
+
+/// Validate a label-only edit whose unchanged structure and formatting metadata were already
+/// checked against the original IR. Only the redundant text of a single Markdown run is derived.
+fn validate_label_reemission(
+    source: String,
+    original: &MermaidDiagramIr,
+    mut expected: MermaidDiagramIr,
+    changed_labels: &[usize],
+) -> Option<String> {
+    for label_index in changed_labels {
+        if let Some(markup) = expected
+            .label_markup
+            .get_mut(&fm_core::IrLabelId(*label_index))
+            && let [fm_core::IrLabelSegment::Text { text, .. }] = markup.as_mut_slice()
+            && *text == original.labels[*label_index].text
+        {
+            text.clone_from(&expected.labels[*label_index].text);
+        }
+    }
+    validate_ir_reemission(source, &expected)
+}
+
+fn validate_ir_reemission(source: String, expected: &MermaidDiagramIr) -> Option<String> {
+    let actual = parse(&source).ir;
+    match (comparable_lens_ir(&actual), comparable_lens_ir(expected)) {
+        (Some(actual), Some(expected)) if actual == expected => Some(source),
+        _ => None,
+    }
+}
+
+/// Prove the requested edit is a permutation before moving source tokens. Repeated declarations
+/// can make label or shape resolution depend on first mention, so candidate reparsing alone is
+/// insufficient: a caller must not smuggle those extra semantic changes into a reorder request.
+fn flowchart_permutation_preserves_semantics(
+    original: &MermaidDiagramIr,
+    edited: &MermaidDiagramIr,
+    new_to_old: &[usize],
+) -> bool {
+    use fm_core::{IrEndpoint, IrNodeId, IrStyleTarget};
+
+    let (Some(original), Some(mut edited)) =
+        (comparable_lens_ir(original), comparable_lens_ir(edited))
+    else {
+        return false;
+    };
+    let remap_node = |node: &mut IrNodeId| -> Option<()> {
+        node.0 = *new_to_old.get(node.0)?;
+        Some(())
+    };
+    let remap_endpoint = |endpoint: &mut IrEndpoint| -> Option<()> {
+        match endpoint {
+            IrEndpoint::Node(node) => remap_node(node),
+            IrEndpoint::Port(_) | IrEndpoint::Unresolved => Some(()),
+        }
+    };
+    for edge in &mut edited.edges {
+        if remap_endpoint(&mut edge.from).is_none() || remap_endpoint(&mut edge.to).is_none() {
+            return false;
+        }
+    }
+    for port in &mut edited.ports {
+        if remap_node(&mut port.node).is_none() {
+            return false;
+        }
+    }
+    for node in &mut edited.graph.nodes {
+        if remap_node(&mut node.node_id).is_none() {
+            return false;
+        }
+    }
+    edited.graph.nodes.sort_unstable_by_key(|node| node.node_id);
+    for edge in &mut edited.graph.edges {
+        if remap_endpoint(&mut edge.from).is_none() || remap_endpoint(&mut edge.to).is_none() {
+            return false;
+        }
+    }
+    for style in &mut edited.style_refs {
+        if let IrStyleTarget::Node(node) = &mut style.target
+            && remap_node(node).is_none()
+        {
+            return false;
+        }
+    }
+    let mut nodes: Vec<_> = edited.nodes.into_iter().enumerate().collect();
+    nodes.sort_unstable_by_key(|(index, _)| new_to_old[*index]);
+    edited.nodes = nodes.into_iter().map(|(_, node)| node).collect();
+    edited == original
+}
+
+/// Remove only source coordinates and label-interning accidents before checking PutGet.
+/// Node order and all numeric node references remain significant. A JSON-wide key scrub would
+/// also discard user configuration named `span`; enumerate the actual IR fields instead.
+fn comparable_lens_ir(ir: &MermaidDiagramIr) -> Option<MermaidDiagramIr> {
+    use fm_core::{IrConstraint, IrLabel, IrLabelId};
+    use std::collections::BTreeMap;
+
+    if !matches!(
+        ir.diagram_type,
+        DiagramType::Flowchart
+            | DiagramType::Sequence
+            | DiagramType::Class
+            | DiagramType::State
+            | DiagramType::Er
+    ) || ir
+        .label_markup
+        .keys()
+        .any(|label| label.0 >= ir.labels.len())
+    {
+        return None;
+    }
+    let mut normalized = ir.clone();
+    let label_keys: Vec<_> = ir
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            (
+                label.text.clone(),
+                ir.label_markup.get(&IrLabelId(index)).cloned(),
+            )
+        })
+        .collect();
+    let mut canonical: BTreeMap<_, _> = label_keys.iter().cloned().map(|key| (key, 0)).collect();
+    for (index, mapped) in canonical.values_mut().enumerate() {
+        *mapped = index;
+    }
+    let label_indices: Vec<_> = label_keys
+        .iter()
+        .map(|key| canonical.get(key).copied())
+        .collect::<Option<_>>()?;
+    let remap_label = |label: &mut Option<IrLabelId>| -> Option<()> {
+        if let Some(label) = label {
+            label.0 = *label_indices.get(label.0)?;
+        }
+        Some(())
+    };
+    normalized.labels = canonical
+        .keys()
+        .map(|(text, _)| IrLabel {
+            text: text.clone(),
+            span: Span::default(),
+        })
+        .collect();
+    normalized.label_markup = canonical
+        .iter()
+        .filter_map(|((_, markup), index)| markup.clone().map(|markup| (IrLabelId(*index), markup)))
+        .collect();
+
+    for node in &mut normalized.nodes {
+        remap_label(&mut node.label)?;
+        node.span_primary = Span::default();
+    }
+    for edge in &mut normalized.edges {
+        remap_label(&mut edge.label)?;
+        edge.span = Span::default();
+    }
+    for port in &mut normalized.ports {
+        port.span = Span::default();
+    }
+    for cluster in &mut normalized.clusters {
+        remap_label(&mut cluster.title)?;
+        cluster.span = Span::default();
+    }
+    for edge in &mut normalized.graph.edges {
+        edge.span = Span::default();
+    }
+    for cluster in &mut normalized.graph.clusters {
+        remap_label(&mut cluster.title)?;
+        cluster.span = Span::default();
+    }
+    for subgraph in &mut normalized.graph.subgraphs {
+        remap_label(&mut subgraph.title)?;
+        subgraph.span = Span::default();
+    }
+    for constraint in &mut normalized.constraints {
+        let (IrConstraint::SameRank { span, .. }
+        | IrConstraint::MinLength { span, .. }
+        | IrConstraint::Pin { span, .. }
+        | IrConstraint::OrderInRank { span, .. }
+        | IrConstraint::NonOverlap { span, .. }) = constraint;
+        *span = Span::default();
+    }
+    for style in &mut normalized.style_refs {
+        style.span = Span::default();
+    }
+    for style in &mut normalized.style_defs {
+        style.span = Span::default();
+    }
+    if let Some(deck) = &mut normalized.deck {
+        deck.span = Span::default();
+        for slide in &mut deck.slides {
+            slide.span = Span::default();
+        }
+    }
+    for note in &mut normalized.state_notes {
+        note.span = Span::default();
+    }
+    for diagnostic in &mut normalized.diagnostics {
+        diagnostic.span = None;
+        for related in &mut diagnostic.related {
+            related.span = Span::default();
+        }
+    }
+    for warning in &mut normalized.meta.init.warnings {
+        warning.span = Span::default();
+    }
+    for error in &mut normalized.meta.init.errors {
+        let (fm_core::MermaidError::Parse { span, .. }
+        | fm_core::MermaidError::Validation { span, .. }
+        | fm_core::MermaidError::Unsupported { span, .. }) = error;
+        *span = Span::default();
+    }
+    Some(normalized)
 }
 
 /// A sequence-diagram text/IR lens that preserves the original source as its formatting
@@ -840,7 +1374,7 @@ impl std::fmt::Display for SequenceParseLensError {
         match self {
             Self::NotSequence => formatter.write_str("ParseLens currently supports sequence diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit participant-label text changes only; sequence structure is unchanged",
+                "ParseLens can re-emit participant/message-label text changes only; sequence structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -872,23 +1406,86 @@ impl SequenceParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit participant alias text.
+    /// Re-emits explicit participant aliases and existing message labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, SequenceParseLensError> {
-        self.snapshot
-            .put_with_label_finder(
-                DiagramType::Sequence,
-                edited,
-                find_sequence_participant_label_text_range,
+        if edited.diagram_type != DiagramType::Sequence {
+            return Err(SequenceParseLensError::NotSequence);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_sequence_participant_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
             )
-            .map_err(|err| match err {
-                FlowchartParseLensError::NotFlowchart => SequenceParseLensError::NotSequence,
-                FlowchartParseLensError::UnsupportedIrChange => {
-                    SequenceParseLensError::UnsupportedIrChange
-                }
-                FlowchartParseLensError::MissingSourceLabel(id) => {
-                    SequenceParseLensError::MissingSourceLabel(id)
-                }
-            })
+            .ok_or_else(|| SequenceParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(SequenceParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(SequenceParseLensError::UnsupportedIrChange)?;
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(SequenceParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -911,7 +1508,7 @@ impl std::fmt::Display for ClassParseLensError {
         match self {
             Self::NotClass => formatter.write_str("ParseLens currently supports class diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit class-label text changes only; class structure is unchanged",
+                "ParseLens can re-emit explicit class/relationship-label text changes only; class structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -943,19 +1540,86 @@ impl ClassParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit class-node label text.
+    /// Re-emits explicit class labels and existing relationship labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ClassParseLensError> {
-        self.snapshot
-            .put_with_label_finder(DiagramType::Class, edited, find_flowchart_label_text_range)
-            .map_err(|err| match err {
-                FlowchartParseLensError::NotFlowchart => ClassParseLensError::NotClass,
-                FlowchartParseLensError::UnsupportedIrChange => {
-                    ClassParseLensError::UnsupportedIrChange
-                }
-                FlowchartParseLensError::MissingSourceLabel(id) => {
-                    ClassParseLensError::MissingSourceLabel(id)
-                }
-            })
+        if edited.diagram_type != DiagramType::Class {
+            return Err(ClassParseLensError::NotClass);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(ClassParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(ClassParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(ClassParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(ClassParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_flowchart_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| ClassParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(ClassParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(ClassParseLensError::UnsupportedIrChange);
+        }
+
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(ClassParseLensError::UnsupportedIrChange)?;
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(ClassParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -978,7 +1642,7 @@ impl std::fmt::Display for StateParseLensError {
         match self {
             Self::NotState => formatter.write_str("ParseLens currently supports state diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit state-label text changes only; state structure is unchanged",
+                "ParseLens can re-emit explicit state/transition-label text changes only; state structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1010,19 +1674,86 @@ impl StateParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit `state Label as Id` label text.
+    /// Re-emits explicit `state Label as Id` text and existing transition labels when reparsing
+    /// preserves the requested IR. Shared labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, StateParseLensError> {
-        self.snapshot
-            .put_with_label_finder(DiagramType::State, edited, find_state_label_text_range)
-            .map_err(|err| match err {
-                FlowchartParseLensError::NotFlowchart => StateParseLensError::NotState,
-                FlowchartParseLensError::UnsupportedIrChange => {
-                    StateParseLensError::UnsupportedIrChange
-                }
-                FlowchartParseLensError::MissingSourceLabel(id) => {
-                    StateParseLensError::MissingSourceLabel(id)
-                }
-            })
+        if edited.diagram_type != DiagramType::State {
+            return Err(StateParseLensError::NotState);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_state_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| StateParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(StateParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(StateParseLensError::UnsupportedIrChange)?;
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(StateParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -1045,7 +1776,7 @@ impl std::fmt::Display for ErParseLensError {
         match self {
             Self::NotEr => formatter.write_str("ParseLens currently supports ER diagrams only"),
             Self::UnsupportedIrChange => formatter.write_str(
-                "ParseLens can re-emit explicit ER entity-label text changes only; ER structure is unchanged",
+                "ParseLens can re-emit explicit ER entity/relationship-label text changes only; ER structure is unchanged",
             ),
             Self::MissingSourceLabel(node_id) => write!(
                 formatter,
@@ -1077,19 +1808,86 @@ impl ErParseLens {
         self.snapshot.original_source()
     }
 
-    /// Re-emits `edited` by replacing only explicit ER entity-label text.
+    /// Re-emits explicit ER entity labels and existing relationship labels when reparsing preserves
+    /// the requested IR. Shared interned labels are updated at every supported source occurrence.
     pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ErParseLensError> {
-        self.snapshot
-            .put_with_label_finder(DiagramType::Er, edited, find_flowchart_label_text_range)
-            .map_err(|err| match err {
-                FlowchartParseLensError::NotFlowchart => ErParseLensError::NotEr,
-                FlowchartParseLensError::UnsupportedIrChange => {
-                    ErParseLensError::UnsupportedIrChange
-                }
-                FlowchartParseLensError::MissingSourceLabel(id) => {
-                    ErParseLensError::MissingSourceLabel(id)
-                }
-            })
+        if edited.diagram_type != DiagramType::Er {
+            return Err(ErParseLensError::NotEr);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_flowchart_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| ErParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        collect_edge_label_replacements(
+            &self.snapshot,
+            edited,
+            &changed_labels,
+            &mut replacements,
+            &mut covered_labels,
+        )
+        .ok_or(ErParseLensError::UnsupportedIrChange)?;
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+
+        let updated = splice_label_replacements(self.original_source(), replacements)
+            .ok_or(ErParseLensError::UnsupportedIrChange)?;
+        validate_label_reemission(updated, original, labels_only, &changed_labels)
+            .ok_or(ErParseLensError::UnsupportedIrChange)
     }
 }
 
@@ -1312,8 +2110,9 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
             confidence: 0.3,
             method: DetectionMethod::Fallback,
             warnings: vec![format!(
-                "'{kind}' is a mermaid diagram type this renderer does not implement yet. \
-                 Rendering it as a flowchart will not be meaningful."
+                "'{kind}' is the header mermaid requires for this diagram type, and the spelling \
+                 used here is rejected upstream; write '{kind}' to render it. Rendering it as a \
+                 flowchart will not be meaningful."
             )],
         };
     }
@@ -1327,7 +2126,12 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
     }
 }
 
-/// Diagram headers that upstream mermaid supports and this renderer does not.
+/// Header spellings that upstream mermaid's detectors match but its grammars REJECT, answered with
+/// the spelling that works.
+///
+/// This began as the list of upstream types this renderer did not implement; every one of them is
+/// implemented now, `eventmodeling` last, so what remains are the bare spellings of `-beta`-only
+/// families, whose `-beta` header renders here.
 ///
 /// Every entry is taken from the incumbent's OWN detector table, not from guesswork: the pinned
 /// 11.15.0 bundle carries 31 start-anchored detectors, and these are the ones with no `DiagramType`
@@ -1350,7 +2154,8 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 /// That is also why the warning below no longer tells the author their input "was not misspelled".
 /// For `radar-beta` that is true; for a bare `radar` it is false, because mermaid rejects it too —
 /// and confidently absolving a malformed document is worse than the generic message this replaced.
-/// The message now says only what is certain: this renderer does not implement the type.
+/// The message now says only what is certain: the header mermaid requires, and that this one is
+/// rejected.
 ///
 /// When one of these lands as a real `DiagramType`, DELETE its entry rather than leave a message
 /// claiming the feature is missing.
@@ -1390,15 +2195,21 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // ⚠️ `treemap` AND `info` WERE HERE AND ARE NOT ANY MORE (bd-9ghyo, bd-a3tmn). This list
         // means "your syntax is right, we have not built this type"; leaving an implemented type in
         // it tells an author their working diagram is unsupported. Same rule the shape tables live
-        // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it.
-        "eventmodeling" => Some("eventmodeling"),
-        // Accepted bare only, once it has content. Reported by BeigeHill and re-verified here.
-        "ishikawa" => Some("ishikawa"),
+        // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it. `eventmodeling`
+        // was the last such entry.
+        // ⚠️ `ishikawa` WAS HERE and is not any more: the family is implemented, and
+        // `an_implemented_type_is_never_named_as_unimplemented` pins that it is never reported as
+        // unimplemented again.
         // ONLY the `-beta` spelling is real mermaid. Naming the bare form here would tell an author
         // that `radar` is a diagram type they can use, and the incumbent rejects it.
         "radar" => Some("radar-beta"),
+        // Bare `venn` is rejected upstream; `venn-beta` is implemented, so only the bare spelling
+        // still lands here and is answered with the name that works.
         "venn" => Some("venn-beta"),
+        // Likewise `wardley-beta`: implemented, and only the rejected bare spelling lands here.
         "wardley" => Some("wardley-beta"),
+        // A bare `treeView` is rejected upstream; only `treeView-beta` (implemented) parses, so the
+        // bare spelling is still answered with the name that works.
         "treeview" => Some("treeView-beta"),
         _ => None,
     }
@@ -1496,6 +2307,37 @@ fn exact_diagram_type_with(
         // `block`/`block-beta`. Both spellings PARSE upstream and both report `treemap` from
         // `detectType`, measured against the pinned 11.15.0 bundle.
         Some(DiagramType::Treemap)
+    } else if line
+        .trim_start()
+        .get(..13)
+        .is_some_and(|head| head.eq_ignore_ascii_case("treeview-beta"))
+    {
+        // `treeView-beta` ONLY, for the reason `radar-beta` is: the incumbent's detector is
+        // `/^\s*treeView-beta/` and a bare `treeView` is rejected, which
+        // `unsupported_upstream_keyword` still answers by naming the spelling that works.
+        Some(DiagramType::TreeView)
+    } else if line
+        .trim_start()
+        .get(..9)
+        .is_some_and(|head| head.eq_ignore_ascii_case("venn-beta"))
+    {
+        // `venn-beta` ONLY: the incumbent's detector is `/^\s*venn-beta/` and a bare `venn` is
+        // rejected, which `unsupported_upstream_keyword` still answers by naming this spelling.
+        Some(DiagramType::Venn)
+    } else if line
+        .trim_start()
+        .get(..12)
+        .is_some_and(|head| head.eq_ignore_ascii_case("wardley-beta"))
+    {
+        // `wardley-beta` ONLY, for the same reason: a bare `wardley` is rejected upstream.
+        Some(DiagramType::Wardley)
+    } else if line.trim_start().starts_with("eventmodeling") {
+        // The incumbent's detector is `/^\s*eventmodeling/`: case-sensitive, no word boundary.
+        Some(DiagramType::EventModeling)
+    } else if matches(line, "ishikawa") {
+        // The incumbent's detector is `/^\s*ishikawa(-beta)?\b/i`; `matches` already accepts the
+        // `-beta` suffix, so both spellings land here, exactly as they both parse upstream.
+        Some(DiagramType::Ishikawa)
     } else {
         None
     }
@@ -1536,6 +2378,11 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("treemap", DiagramType::Treemap),
     ("info", DiagramType::Info),
     ("radar-beta", DiagramType::Radar),
+    ("ishikawa", DiagramType::Ishikawa),
+    ("treeview-beta", DiagramType::TreeView),
+    ("venn-beta", DiagramType::Venn),
+    ("wardley-beta", DiagramType::Wardley),
+    ("eventmodeling", DiagramType::EventModeling),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -4247,20 +5094,18 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         }
     }
 
-    /// A diagram type mermaid supports and we do not must SAY so.
+    /// A bare spelling of a `-beta`-only type must be NAMED, with the header that works.
     ///
-    /// The old message ("could not detect diagram type") sends the author to check syntax that is
-    /// perfectly correct. Naming the type is the difference between "you typed it wrong" and "we
-    /// have not built this yet", which have different fixes.
+    /// The generic message ("could not detect diagram type") sends the author hunting for a typo
+    /// in a header that is one suffix away from rendering. Every upstream type is implemented now,
+    /// so these are the only headers this strategy still answers.
     #[test]
     fn an_unimplemented_upstream_type_is_named_rather_than_blamed_on_syntax() {
         for (source, expected) in [
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
-            ("ishikawa\n  Problem\n", "ishikawa"),
-            ("eventmodeling\n  x\n", "eventmodeling"),
-            ("treeView-beta\n  root\n", "treeView"),
-            ("venn-beta\n  a\n", "venn"),
-            ("wardley-beta\n  a\n", "wardley"),
+            ("treeView\n  root\n", "treeView"),
+            ("venn\n  a\n", "venn"),
+            ("wardley\n  a\n", "wardley"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
@@ -4298,6 +5143,18 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 fm_core::DiagramType::Radar,
             ),
             ("info\n", fm_core::DiagramType::Info),
+            ("ishikawa\n  Problem\n", fm_core::DiagramType::Ishikawa),
+            ("ishikawa-beta\n  Problem\n", fm_core::DiagramType::Ishikawa),
+            ("treeView-beta\n  \"src\"\n", fm_core::DiagramType::TreeView),
+            ("venn-beta\n  set A\n", fm_core::DiagramType::Venn),
+            (
+                "wardley-beta\n  component A [0.5, 0.5]\n",
+                fm_core::DiagramType::Wardley,
+            ),
+            (
+                "eventmodeling\n  tf 01 ui Start\n",
+                fm_core::DiagramType::EventModeling,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);
@@ -4305,8 +5162,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 !detected
                     .warnings
                     .iter()
-                    .any(|w| w.contains("does not implement")),
-                "an implemented type was reported unimplemented: {:?}",
+                    .any(|w| w.contains("rejected upstream")),
+                "an implemented header was reported as rejected: {:?}",
                 detected.warnings
             );
         }
@@ -4328,9 +5185,9 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
             assert!(
-                !joined.contains("does not implement yet"),
-                "{source:?} was reported as unimplemented rather than as an unrecognised header: \
-                 {joined:?}"
+                !joined.contains("rejected upstream"),
+                "{source:?} was answered as a known spelling rather than as an unrecognised \
+                 header: {joined:?}"
             );
         }
     }
@@ -4354,11 +5211,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
             assert!(
-                !detected
-                    .warnings
-                    .join(" ")
-                    .contains("does not implement yet"),
-                "{source:?} was called unimplemented"
+                !detected.warnings.join(" ").contains("rejected upstream"),
+                "{source:?} was called a rejected spelling"
             );
         }
     }
@@ -4654,8 +5508,8 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             detected
                 .warnings
                 .iter()
-                .any(|w| w.contains("does not implement")),
-            "the unimplemented-type message was replaced: {:?}",
+                .any(|w| w.contains("rejected upstream") && w.contains("radar-beta")),
+            "the rejected-spelling message was replaced: {:?}",
             detected.warnings
         );
     }
@@ -4765,10 +5619,10 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn the_unimplemented_type_message_names_a_spelling_mermaid_accepts() {
         for (source, expected) in [
             ("radar\n  Item\n", "radar-beta"),
-            ("venn-beta\n  Item\n", "venn-beta"),
-            ("wardley-beta\n  Item\n", "wardley-beta"),
-            ("treeView-beta\n  Item\n", "treeView-beta"),
-            ("ishikawa\n  Item\n", "ishikawa"),
+            ("venn\n  Item\n", "venn-beta"),
+            ("wardley\n  Item\n", "wardley-beta"),
+            // Bare `treeView` is rejected upstream; the message must name the `-beta` spelling.
+            ("treeView\n  Item\n", "treeView-beta"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert!(

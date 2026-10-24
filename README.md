@@ -55,7 +55,7 @@ all seven.
 
 | Capability | What it does |
 |---|---|
-| **27 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, treemap, radar-beta, info, 5 C4 variants, requirement, kanban |
+| **32 diagram types** | Flowchart, sequence, class, state, ER, gantt, pie, gitGraph, journey, mindmap, timeline, sankey, quadrant, xyChart, block-beta, packet-beta, architecture-beta, treemap, radar-beta, info, 5 C4 variants, requirement, kanban, ishikawa, treeView-beta, venn-beta, wardley-beta, eventmodeling |
 | **Intent-aware parsing** | Best-effort recovery with structured diagnostics. Fuzzy keyword matching catches typos like `flowchar` or `seqeunceDiagram`; dangling edges auto-create placeholder nodes; never panics on malformed input |
 | **18 layout algorithms plus Auto** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet, architecture, treemap, radar — auto-selected per diagram type |
 | **4 cycle strategies** | Greedy, DFS back-edge, MFAS approximation, full cycle-aware with SCC detection and cluster collapse |
@@ -94,6 +94,11 @@ all seven.
 | `architecture` | Architecture-beta | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+| `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
+| `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
+| `venn` | Venn-beta | Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point |
+| `wardley` | Wardley-beta | Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links |
+| `eventmodeling` | EventModeling | Source-order timeframes in stacked type swimlanes, staircase placement across lane changes, two-thirds/one-third flow arrows |
 <!-- END GENERATED: layout-algorithms -->
 
 ## Quick example
@@ -210,6 +215,11 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | `treemap` | Implemented |
 | `radar-beta` | Implemented |
 | `info` | Implemented |
+| `ishikawa` | Implemented |
+| `treeView-beta` | Implemented |
+| `venn-beta` | Implemented |
+| `wardley-beta` | Implemented |
+| `eventmodeling` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
 The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md), generated from the same pinned Rust sources as the tables above. Runtime status and reference parity are separate axes there: a family can render end to end (`Runtime: Full`) while still owing documented reference behavior (`Parity: Partial`) — the two columns never collapse into one status.
@@ -222,7 +232,7 @@ The authoritative parity matrix against the FrankenTUI reference implementation 
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh" | bash
 ```
 
-The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.3.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
+The installer downloads the native GitHub Release archive, requires its SHA256 checksum, and verifies the pinned minisign signature when minisign is available. Use `--require-minisign` to require authenticity verification, `--version 0.4.0` to pin a release, and `--dest DIR` to choose the binary directory. Downloads and previous binaries are retained. Both `frankenmermaid` (canonical) and `fm-cli` (legacy alias) are installed.
 
 Use `--from-source` to build with `cargo install --locked`; this path installs a minimal Rust toolchain via `rustup` if needed. Explicit `FM_INSTALL_PATH` or `FM_INSTALL_GIT_*` selectors also choose source installation. Source builds require a C/C++ toolchain and CMake. Existing source-selector precedence is preserved.
 
@@ -505,6 +515,7 @@ import {
   applyLensEdit,
   parseLens,
   applyParseLensEdit,
+  applyIrLensEdit,
   Diagram,
 } from '@frankenmermaid/core';
 
@@ -526,13 +537,21 @@ const parsed = parse('classDiagram\nA <|-- B');
 // Generate a human-readable description (for screen readers, alt text)
 const description = describeDiagram('flowchart TD\nA-->B-->C');
 
-// Bidirectional structural lens for editor integrations
-const lens = diagramLens('flowchart LR\nA-->B');
-const edited = applyLensEdit(lens, { /* ... */ });
+// Source-span edits use a binding from the exact source being edited.
+const source = 'flowchart LR\nA[Start]\nA-->B';
+const binding = diagramLens(source).find(entry => entry.sourceId === 'A')!;
+const edited = applyLensEdit(source, binding.elementId, 'A[Begin]');
+const ptEdited = applyParseLensEdit(source, binding.elementId, 'A[Begin]');
+// ptEdited also contains a fresh snapshot with the updated spans.
 
-// Parse-tree-level lens for token-grained edits
-const ptLens = parseLens('flowchart LR\nA-->B');
-const ptEdited = applyParseLensEdit(ptLens, { /* ... */ });
+// Semantic edits validate the complete IR before re-emitting source.
+const sequence = 'sequenceDiagram\nClient->>Server: request';
+const snapshot = parseLens(sequence);
+const editedIr = structuredClone(snapshot.parsed.ir);
+editedIr.labels[editedIr.edges[0].label].text = 'authenticated request';
+const semanticEdit = applyIrLensEdit(sequence, editedIr);
+// semanticEdit.updatedSource preserves the arrow, endpoints, and formatting.
+// semanticEdit.snapshot supplies the next edit's IR and source bindings.
 
 // Imperative Diagram class with Canvas2D (or WebGPU fallback) renderer
 const diagram = new Diagram(
@@ -545,26 +564,65 @@ diagram.on('rendered', () => console.log('done'));
 diagram.destroy();
 ```
 
-The wasm-bindgen surface intentionally stays narrow: ten free functions (`init`, `renderSvg`, `renderDeck`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
+### SVG labels and detail levels
+
+Browser SVG rendering preserves complete node labels, edge labels, and subgraph titles by
+default, including explicit line breaks. Zoom enlarges the same complete text. These options
+apply to `init`, `renderSvg`, `renderDeck`, and worker render configuration:
+
+| Option | Browser default | Behavior |
+|---|---|---|
+| `preserveLabels` | `true` | Keeps authored text through detail changes, wrapping, and resource-pressure reductions. |
+| `detailTier` | `"auto"` | Requests `"auto"`, `"compact"`, `"normal"`, or `"rich"` typography and decoration. Resource guards can reduce the selected tier. |
+
+Options can be top-level or nested under `svg`; nested values take precedence. Compact
+typography still includes every label when `preserveLabels` is enabled. To deliberately
+produce an abbreviated overview with shortened node labels and hidden edge/subgraph labels:
+
+```ts
+const overview = renderSvg(source, {
+  detailTier: 'compact',
+  preserveLabels: false,
+});
+```
+
+`data-detail-tier` reports the selected presentation tier; `data-label-detail="full"`
+identifies SVGs with label preservation enabled. Layout budgets and decoration reductions
+remain active independently of this text policy.
+
+The wasm-bindgen surface includes rendering, parsing, source bindings, and guarded semantic
+editing through `applyIrLensEdit`, plus the interactive `Diagram` class. New exports are generated
+from `fm-wasm` when the WASM package is rebuilt. The capability matrix and source-span artifacts
+are produced by the CLI / Rust library surfaces; for browser-side capability introspection use
+the auto-generated metadata block at the top of this README or load the JSON emitted by
+`fm-cli capabilities`.
 
 The WASM build integrates the same `IncrementalLayoutEngine` used by the CLI, so successive renders of near-identical input skip stages whose dependency-graph inputs have not changed.
 
 ## The lens system — bidirectional editor integration
 
-`diagramLens` / `applyLensEdit` and `parseLens` / `applyParseLensEdit` together form a bidirectional bridge between source text and structured edits. The motivating constraint: when an editor performs a structural action ("rename node `A` to `Start`", "swap participant order", "add a new task to section `Backend`"), the resulting source text should preserve everything else exactly — comments, whitespace, ordering of unrelated declarations, even quote style.
-
-Naive parse → re-emit pipelines lose all of that. The lens system instead:
-
-1. Parses the input into an IR plus a **trivia map** that records the exact original spelling of every token (whitespace, comments, quote style, delimiter choice).
-2. Exposes structural edit operations that operate on the IR while preserving the trivia map for unchanged regions.
-3. Emits the edited source by walking the trivia map and substituting only the changed tokens.
+The lens system retains the original source alongside its IR and source bindings. Editors can
+replace a bound source span, insert or delete a source line, or submit a supported semantic edit.
+Semantic putback preserves unrelated comments, whitespace, quotes, and line endings, then reparses
+the candidate source to verify the complete requested IR before accepting it.
 
 | Function | Use case |
 |---|---|
-| `diagramLens(source)` | Diagram-level structural lens — edits at the node/edge level |
-| `applyLensEdit(lens, edit)` | Apply one structural edit, return the new source |
-| `parseLens(source)` | Lower-level parse lens — gives access to parse-tree node-level edits |
-| `applyParseLensEdit(lens, edit)` | Apply one parse-tree edit |
+| `diagramLens(source)` | Return node, edge, and cluster source bindings. |
+| `applyLensEdit(source, elementId, replacement)` | Replace a bound source span and return an edit receipt with `updatedSource`. |
+| `parseLens(source)` | Return the parsed IR, formatting complement, source map, and bindings. |
+| `applyParseLensEdit(source, elementId, replacement)` | Replace a bound span and return the receipt plus a fresh snapshot. |
+| `applyParseLensDelete(source, elementId)` | Delete the addressed source line and refresh the snapshot. |
+| `applyParseLensInsertLineAfter(source, elementId, text)` | Insert a line using the target's indentation and line ending, then refresh the snapshot. |
+| `applyIrLensEdit(source, editedIr)` | Validate a supported IR edit and return `{ updatedSource, snapshot }`. |
+
+The semantic API supports existing node labels and edge/message labels in flowchart, sequence,
+class, state, and ER diagrams. Flowcharts also support safe permutations of independent node
+declarations through the Rust ordering lens. Label IDs are interned: editing a label changes every
+node or edge referring to that ID. Keep the rest of the IR unchanged, and use the returned snapshot
+for subsequent edits. Topology changes, stale source references, changes to relationship metadata,
+and source forms that cannot be rewritten faithfully return an error. Source-span operations remain
+available when the editor explicitly intends to replace Mermaid syntax.
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
 
@@ -836,7 +894,7 @@ frankenmermaid/
                     ▼
       ┌──────────────────────────────┐
       │ fm-parser                    │
-      │  • type detection            │  27 diagram types
+      │  • type detection            │  32 diagram types
       │  • fuzzy matching            │  Levenshtein + heuristics
       │  • recovery + warnings       │  best-effort, never crashes
       │  • IR builder (interning)    │
@@ -1018,8 +1076,8 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 
 | Strategy | How it works | When to use |
 |---|---|---|
-| **Greedy** | Repeatedly remove sinks (out-degree 0) and sources (in-degree 0). Order remaining nodes by `max(out_degree − in_degree)`. Reverse edges that violate the resulting order | Fast default. Good enough for most graphs |
-| **DFS back-edge** | Standard DFS with three-color marking. Edges to nodes in the "visiting" state are back-edges and get reversed. Linear O(V+E) and reproducible | Predictable results, identical DFS order → identical reversed-edge set. Iterative implementation — no stack-overflow risk on deep graphs |
+| **Greedy** | Repeatedly remove sinks (out-degree 0) and sources (in-degree 0). Order remaining nodes by `max(out_degree − in_degree)`. Reverse edges that violate the resulting order. The DFS back-edge choice (mermaid's) is kept unless greedy needs under half as many reversals, so the edge that closes a loop as written is the one reversed | Fast default. Good enough for most graphs |
+| **DFS back-edge** | Standard DFS with three-color marking, visiting nodes and their out-edges in declaration order (mermaid's own acyclicer). Edges to nodes in the "visiting" state are back-edges and get reversed. Linear O(V+E) and reproducible | Predictable results, identical DFS order → identical reversed-edge set. Iterative implementation — no stack-overflow risk on deep graphs |
 | **MFAS approximation** | Operates per SCC. Sorts nodes by `(out_degree − in_degree)` descending; reverses edges that violate the position order. Falls back to DFS if no improvement | Minimum reversed edges → better visual quality |
 | **Cycle-aware** | Full SCC detection with optional cluster collapse. Records `cycle_count`, `cycle_node_count`, `max_cycle_size`, and `reversed_edge_total_length` | Best visual quality. Cycle clusters render as grouped boxes |
 
@@ -1291,7 +1349,7 @@ When `--embed-source-spans` is passed (or `accessibility = true` in config), eve
 
 ### `classDef` / `style` / `linkStyle`
 
-`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references and applied during SVG rendering. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
+`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references. SVG and Canvas2D apply author styling, and GPU node plans share the Canvas node-style resolver. A `classDef default` supplies base styles for ordinary nodes, including nodes with named classes: named classes override individual properties, and direct node styles override those. Edges and subgraph containers keep their separate style channels. Both SVG backends apply node styles, including the scene backend's individual shape and text primitives. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
 
 ## How terminal rendering works
 
@@ -1339,6 +1397,12 @@ For diagrams that exceed the terminal viewport, the renderer can produce a scale
 ## Canvas2D web rendering
 
 The Canvas2D renderer is an alternative to SVG for browser-based rendering, particularly suited for large diagrams and interactive use.
+
+XY charts have a dedicated Canvas2D path with numeric ticks and gridlines, category and axis
+labels, chart titles, grouped bars, connected line points, and area fills. Vertical and
+horizontal charts share their domains, tick values, and category labels with SVG; data marks
+use the layout's exact rectangles and point centers, including negative values and zero
+baselines. The GPU scene does not yet carry these dedicated XY draws.
 
 ### Trait-based abstraction
 
@@ -1632,18 +1696,23 @@ Greedy word-fit wrapping by default; when a word is wider than the target width 
 
 ```
 node_width  = max(label_width + 72.0, 100.0)
-node_height = max(label_height + 44.0, 52.0)
+node_height = max(label_height + 24.0, 44.0)
 ```
 
-72px horizontal padding (36px per side) and 44px vertical padding (22px per side) give labels breathing room. Minimums (100×52) ensure even empty or single-character nodes are visually meaningful and clickable. Shape does not affect the bounding box; a diamond and a rectangle with the same label get the same allocated space.
+These base dimensions apply to ordinary process boxes. The horizontal allowance protects
+long labels; the shorter height avoids oversized boxes around a single line. Circular and
+diamond shapes grow to contain the text corners. Other shaped nodes and requirement metadata
+retain their larger insets, while icons and class, ER, or C4 content can grow the box further.
 
 ### Spacing constants
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `node_spacing` | 80 px | Horizontal gap between adjacent nodes in the same rank |
-| `rank_spacing` | 120 px | Vertical gap between ranks |
-| `cluster_padding` | 52 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+| `node_spacing` | 40 px | Gap between adjacent nodes in the same rank |
+| `rank_spacing` | 64 px | Gap between ranks, along the diagram's rank direction |
+| `cluster_padding` | 28 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+
+The default SVG canvas adds a 24 px margin.
 
 ## Security model
 
@@ -2034,7 +2103,7 @@ For richer reporting, the golden harness emits structured JSON evidence per scen
 The WASM API, the lens system, and source-span attributes between them cover the pieces an editor needs: render, structural edit, click-to-source.
 
 ```ts
-import { init, renderSvg, diagramLens, applyLensEdit } from '@frankenmermaid/core';
+import { init, renderSvg, parseLens, applyIrLensEdit } from '@frankenmermaid/core';
 await init();
 
 // Initial render with source spans
@@ -2047,10 +2116,15 @@ container.addEventListener('click', (e) => {
   if (span) editor.revealPosition(parsePosition(span));
 });
 
-// Structural edits via the lens — preserves formatting of unchanged regions
-const lens = diagramLens(source);
-const newSource = applyLensEdit(lens, { kind: 'rename-node', from: 'A', to: 'Start' });
-editor.setValue(newSource);
+// Change A's explicit display label while preserving its identifier and relationships.
+const snapshot = parseLens(source);
+const editedIr = structuredClone(snapshot.parsed.ir);
+const node = editedIr.nodes.find(node => node.id === 'A');
+if (node?.label != null) {
+  editedIr.labels[node.label].text = 'Start';
+  const result = applyIrLensEdit(source, editedIr);
+  editor.setValue(result.updatedSource);
+}
 ```
 
 ### Static-site documentation pipelines
@@ -2194,7 +2268,7 @@ A --> B
 
 - **Sequence diagrams** support participants, messages, activation boxes, notes, fragments (alt/opt/loop/par/critical/break), participant groups, and lifecycle events (create/destroy). Some edge cases in deeply nested fragments may still be refined; the conformance fixture corpus covers the common shapes.
 - **XyChart** has dedicated layout and SVG rendering, including axis ticks, bar/line/area series, and category padding. Mixed-series and dual-axis polish is still evolving.
-- **`classDef` / `style` directives** are fully applied in SVG. Terminal and Canvas backends still use theme defaults (the structured style system is wired into core; backend-specific application is incremental).
+- **`classDef` / `style` directives** apply to SVG and Canvas nodes, including the implicit default class, named-class overrides, and direct styles. GPU node plans use the same resolved node styles. Terminal output does not provide a CSS color channel.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
 - **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
@@ -2858,7 +2932,7 @@ The asymptotic complexity of every algorithm currently in `fm-layout`. Times in 
 | Five-tier detection pipeline (worst case fallback) | O(L) | Same |
 | IR builder (interning) | O(n + m) | `BTreeMap` keyed by ID |
 | Cycle removal (Greedy) | O(n + m) | Stable sink/source removal order |
-| Cycle removal (DFS back-edge) | O(n + m) | Iterative DFS in stable node order |
+| Cycle removal (DFS back-edge) | O(n + m) | Iterative DFS in declaration order |
 | Cycle removal (MFAS approximation) | O((n + m) log n) per SCC | Stable sort by `(out − in)` degree |
 | Cycle removal (cycle-aware + SCC) | O(n + m) for Tarjan, then per-component MFAS | Tarjan with index/lowlink |
 | Rank assignment (longest-path) | O(n + m) | Min-heap with stable priority |

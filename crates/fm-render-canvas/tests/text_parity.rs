@@ -93,6 +93,76 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+#[test]
+fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation};
+
+    let mut ir = fm_parser::parse("requirementDiagram\n    element Module {\n        type: service\n        docref: spec.md\n    }\n").ir;
+    let meta = ir.nodes[0].requirement_meta.as_mut().unwrap();
+    meta.req_id = Some("REQ-001".to_string());
+    meta.text = Some("Preserve every declared field".to_string());
+    meta.risk = Some("High".to_string());
+    meta.verify_method = Some("Test".to_string());
+    let font_size = 15.0;
+    let layout = fm_layout::layout_diagram_with_config(
+        &ir,
+        fm_layout::LayoutConfig {
+            font_metrics: Some(fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                line_height: 1.0,
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    );
+    let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+        font_size: f64::from(font_size),
+        auto_fit: false,
+        ..Default::default()
+    });
+    let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+    renderer.render(&layout, &ir, &mut context);
+    let operations = context.operations();
+    let (_, top, _, height) = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            DrawOperation::Rect(x, y, width, height)
+            | DrawOperation::StrokeRect(x, y, width, height)
+            | DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
+            _ => None,
+        })
+        .max_by(|left, right| left.2.total_cmp(&right.2))
+        .expect("requirement box must be drawn");
+
+    let mut previous_bottom = top;
+    for expected in [
+        "id: REQ-001",
+        "text: Preserve every declared field",
+        "type: service",
+        "doc: spec.md",
+        "risk: High",
+        "verify: Test",
+    ] {
+        let y = operations
+            .iter()
+            .find_map(|operation| match operation {
+                DrawOperation::FillText(text, _, y) if text == expected => Some(*y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("declared field was dropped: {expected}"));
+        let half_height = f64::from(font_size) * 0.9 / 2.0;
+        assert!(
+            y - half_height >= previous_bottom,
+            "{expected} overlaps the preceding row"
+        );
+        assert!(
+            y + half_height <= top + height,
+            "{expected} extends below its box"
+        );
+        previous_bottom = y + half_height;
+    }
+}
+
 /// Class CARDINALITIES must reach the canvas (bd-rk14).
 ///
 /// They live in `IrEdgeExtras`, not `edge.label`, and the canvas edge path drew the label and
@@ -745,4 +815,632 @@ fn a_class_with_only_a_stereotype_shows_it_on_both_the_canvas_and_the_svg() {
         texts.iter().any(|text| text == "Shape"),
         "the class name was lost when the stereotype was drawn: {texts:?}"
     );
+}
+
+mod sankey {
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, GpuRenderPlan, MockCanvas2dContext,
+    };
+
+    fn canvas(
+        ir: &fm_core::MermaidDiagramIr,
+        layout: &fm_layout::DiagramLayout,
+    ) -> MockCanvas2dContext {
+        let mut context = MockCanvas2dContext::new(1600.0, 1200.0);
+        let result = Canvas2dRenderer::new(CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        })
+        .render(layout, ir, &mut context);
+        assert_eq!(result.nodes_drawn, layout.nodes.len());
+        assert_eq!(result.edges_drawn, layout.edges.len());
+        assert_eq!(result.labels_drawn, texts(&context).len());
+        context
+    }
+
+    fn texts(context: &MockCanvas2dContext) -> Vec<(&str, f64, f64)> {
+        context
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, x, y) => Some((text.as_str(), *x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn gpu_texts(plan: &GpuRenderPlan) -> Vec<String> {
+        plan.text_runs
+            .iter()
+            .map(|run| {
+                assert!(run.quad_count > 0, "a displayed label must contain glyphs");
+                plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("every displayed glyph must be in the atlas")
+                            .glyph
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+    }
+
+    fn assert_ribbons(
+        context: &MockCanvas2dContext,
+        layout: &fm_layout::DiagramLayout,
+        plan: &GpuRenderPlan,
+        widths: &[f64],
+    ) {
+        let mut painted = Vec::new();
+        let mut points = Vec::new();
+        let mut width = 0.0;
+        for operation in context.operations() {
+            match operation {
+                DrawOperation::BeginPath => points.clear(),
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::SetLineWidth(value) => width = *value,
+                DrawOperation::Stroke if !points.is_empty() => {
+                    painted.push((points.clone(), width))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(layout.edges.len(), widths.len());
+        let expected_segments: usize = layout.edges.iter().map(|edge| edge.points.len() - 1).sum();
+        assert_eq!(plan.edge_segments.len(), expected_segments);
+        // The parser represents Sankey flows as ArrowType::Arrow, which the existing SVG and
+        // Canvas paths preserve. Changing quantities must not drop or invent those markers.
+        assert_eq!(plan.arrowheads.len(), layout.edges.len());
+        for (edge, expected) in layout.edges.iter().zip(widths) {
+            // Column separators are also stroked paths. Identify each flow by its full route,
+            // rather than mistaking chart furniture for an additional flow.
+            let matching: Vec<_> = painted
+                .iter()
+                .filter(|(points, _)| {
+                    points.len() == edge.points.len()
+                        && points.iter().zip(&edge.points).all(|((x, y), point)| {
+                            (*x - (f64::from(point.x) - f64::from(layout.bounds.x))).abs() < 0.001
+                                && (*y - (f64::from(point.y) - f64::from(layout.bounds.y))).abs()
+                                    < 0.001
+                        })
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "each flow must be drawn exactly once");
+            let (points, width) = matching[0];
+            close(*width, *expected);
+            assert_eq!(points.len(), edge.points.len());
+            for ((x, y), point) in points.iter().zip(&edge.points) {
+                close(*x, f64::from(point.x) - f64::from(layout.bounds.x));
+                close(*y, f64::from(point.y) - f64::from(layout.bounds.y));
+            }
+            let segments: Vec<_> = plan
+                .edge_segments
+                .iter()
+                .filter(|segment| segment.edge_index as usize == edge.edge_index)
+                .collect();
+            assert_eq!(segments.len(), edge.points.len() - 1);
+            for (segment, endpoints) in segments.iter().zip(edge.points.windows(2)) {
+                close(f64::from(segment.width), *expected);
+                assert_eq!(segment.from, [endpoints[0].x, endpoints[0].y]);
+                assert_eq!(segment.to, [endpoints[1].x, endpoints[1].y]);
+            }
+            let heads: Vec<_> = plan
+                .arrowheads
+                .iter()
+                .filter(|head| head.edge_index as usize == edge.edge_index)
+                .collect();
+            assert_eq!(heads.len(), 1);
+            let end = edge.points.last().unwrap();
+            assert_eq!(heads[0].position, [end.x, end.y]);
+        }
+    }
+
+    #[test]
+    fn unequal_flows_draw_proportional_ribbons_and_contained_node_totals() {
+        let ir = fm_parser::parse("sankey-beta\n\nA,B,100\nA,C,50\nA,D,10\n").ir;
+        assert_eq!(ir.diagram_type, fm_core::DiagramType::Sankey);
+        assert_eq!(ir.nodes.len(), 4);
+        assert_eq!(ir.edges.len(), 3);
+        let layout = fm_layout::layout_diagram(&ir);
+        let context = canvas(&ir, &layout);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_ribbons(&context, &layout, &plan, &[24.0, 12.0, 2.4]);
+
+        let labels = texts(&context);
+        assert_eq!(
+            labels.len(),
+            8,
+            "names and totals, with no extra link labels"
+        );
+        assert_eq!(
+            gpu_texts(&plan),
+            labels.iter().map(|label| label.0).collect::<Vec<_>>()
+        );
+        for (node, rows) in layout.nodes.iter().zip(labels.chunks_exact(2)) {
+            let name = ir.node_display_text(&ir.nodes[node.node_index]);
+            let total = match name {
+                "A" => "160",
+                "B" => "100",
+                "C" => "50",
+                "D" => "10",
+                _ => panic!("unexpected node {name}"),
+            };
+            assert_eq!(rows[0].0, name);
+            assert_eq!(rows[1].0, total);
+            close(rows[1].2 - rows[0].2, 22.5);
+            for (_, x, y) in rows {
+                close(
+                    *x,
+                    f64::from(node.bounds.x - layout.bounds.x + node.bounds.width * 0.5),
+                );
+                assert!(*y - 7.5 >= f64::from(node.bounds.y - layout.bounds.y));
+                assert!(
+                    *y + 7.5 <= f64::from(node.bounds.y - layout.bounds.y + node.bounds.height)
+                );
+            }
+        }
+        for (run, (_, _, canvas_y)) in plan.text_runs.iter().zip(&labels) {
+            for quad in &plan.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+            {
+                close(f64::from(quad.center[1] - layout.bounds.y), *canvas_y);
+            }
+        }
+
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &Default::default());
+        for width in ["24", "12", "2.40"] {
+            assert!(svg.contains(&format!("stroke-width=\"{width}\"")));
+        }
+        for total in ["160", "100", "50", "10"] {
+            assert!(svg.contains(&format!(">{total}</tspan>")));
+        }
+        assert!(!svg.contains("class=\"edge-label\""));
+    }
+
+    #[test]
+    fn unbalanced_and_decimal_throughput_uses_maximum_not_sum_or_raw_precision() {
+        for (source, expected) in [
+            (
+                "sankey-beta\n\nA,M,10\nM,B,3\n",
+                vec!["A", "10", "M", "10", "B", "3"],
+            ),
+            (
+                "sankey-beta\n\nA,B,1.5\nA,C,2.25\n",
+                vec!["A", "3.75", "B", "1.5", "C", "2.25"],
+            ),
+            (
+                "sankey-beta\n\nA,B,1234.5678\n",
+                vec!["A", "1234.57", "B", "1234.57"],
+            ),
+            ("sankey-beta\n\nA,B,1200\n", vec!["A", "1200", "B", "1200"]),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let context = canvas(&ir, &layout);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert_eq!(
+                texts(&context).iter().map(|row| row.0).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(gpu_texts(&plan), expected);
+        }
+    }
+
+    #[test]
+    fn tiny_flows_keep_a_visible_floor() {
+        let ir = fm_parser::parse("sankey-beta\n\nA,B,1000\nA,C,1\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let context = canvas(&ir, &layout);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_ribbons(&context, &layout, &plan, &[24.0, 1.5]);
+        assert_eq!(gpu_texts(&plan), ["A", "1001", "B", "1000", "C", "1"]);
+    }
+
+    #[test]
+    fn unusable_values_keep_finite_widths_without_inventing_totals_or_edges() {
+        let parsed = fm_parser::parse("sankey-beta\n\nA,B,10\nA,C,1\n").ir;
+        let layout = fm_layout::layout_diagram(&parsed);
+        // Keep a valid layout while testing programmatic IR values, including values the parser
+        // may reject. Rendering invalid data must not invent quantities or nonfinite geometry.
+        for invalid in ["0", "-5", "NaN", "inf", "not-a-number"] {
+            let mut ir = parsed.clone();
+            ir.labels[ir.edges[1].label.unwrap().0].text = invalid.to_owned();
+            let context = canvas(&ir, &layout);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert_ribbons(&context, &layout, &plan, &[24.0, 1.5]);
+            let expected = ["A", "10", "B", "10", "C"];
+            assert_eq!(
+                texts(&context).iter().map(|row| row.0).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(gpu_texts(&plan), expected);
+            ir.labels[ir.edges[0].label.unwrap().0].text = invalid.to_owned();
+            let context = canvas(&ir, &layout);
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert_ribbons(&context, &layout, &plan, &[1.5, 1.5]);
+            assert_eq!(gpu_texts(&plan), ["A", "B", "C"]);
+            assert_eq!(
+                texts(&context).iter().map(|row| row.0).collect::<Vec<_>>(),
+                ["A", "B", "C"]
+            );
+        }
+    }
+
+    #[test]
+    fn declared_edge_width_overrides_quantity_without_changing_node_totals() {
+        let mut ir = fm_parser::parse("sankey-beta\n\nA,B,100\nA,C,50\n").ir;
+        ir.style_refs.push(fm_core::IrStyleRef {
+            target: fm_core::IrStyleTarget::Link(1),
+            style: "stroke-width:7px".to_owned(),
+            span: Default::default(),
+        });
+        ir.populate_structured_styles();
+        let layout = fm_layout::layout_diagram(&ir);
+        let context = canvas(&ir, &layout);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert_ribbons(&context, &layout, &plan, &[24.0, 7.0]);
+        assert_eq!(gpu_texts(&plan), ["A", "150", "B", "100", "C", "50"]);
+    }
+
+    #[test]
+    fn ordinary_numeric_edge_labels_remain_visible_at_generic_width() {
+        let ir =
+            fm_parser::parse("flowchart LR\nA[Alpha] ---|100| B[Beta]\nB ---|50| C[Gamma]\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let context = canvas(&ir, &layout);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        assert!(plan.edge_segments.iter().all(|edge| edge.width == 1.5));
+        assert_eq!(
+            plan.edge_segments.len(),
+            layout
+                .edges
+                .iter()
+                .map(|edge| edge.points.len() - 1)
+                .sum::<usize>()
+        );
+        let mut actual: Vec<_> = texts(&context).iter().map(|row| row.0).collect();
+        actual.sort_unstable();
+        assert_eq!(actual, ["100", "50", "Alpha", "Beta", "Gamma"]);
+        let mut planned = gpu_texts(&plan);
+        planned.sort_unstable();
+        assert_eq!(planned, actual);
+        assert!(fm_layout::sankey_node_label(&ir, 0).is_none());
+        assert!(fm_layout::sankey_widest_flow(&ir).is_none());
+    }
+}
+
+mod xychart {
+    use fm_render_canvas::{
+        Canvas2dRenderer, CanvasRenderConfig, DrawOperation, MockCanvas2dContext, TextAlign,
+    };
+
+    fn render(
+        source: &str,
+    ) -> (
+        fm_core::MermaidDiagramIr,
+        fm_layout::DiagramLayout,
+        MockCanvas2dContext,
+    ) {
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(ir.diagram_type, fm_core::DiagramType::XyChart);
+        assert!(ir.xy_chart_meta.is_some());
+        let layout = fm_layout::layout_diagram(&ir);
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        });
+        let result = renderer.render(&layout, &ir, &mut context);
+        let label_count = context
+            .operations()
+            .iter()
+            .filter(|op| matches!(op, DrawOperation::FillText(..)))
+            .count();
+        assert_eq!(result.labels_drawn, label_count);
+        assert_eq!(result.nodes_drawn, layout.nodes.len());
+        (ir, layout, context)
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.0001, "{actual} != {expected}");
+    }
+
+    fn text(context: &MockCanvas2dContext, wanted: &str) -> (f64, f64, TextAlign, String) {
+        let mut align = TextAlign::Left;
+        let mut fill = String::new();
+        let mut found = Vec::new();
+        for op in context.operations() {
+            match op {
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::FillText(value, x, y) if value == wanted => {
+                    found.push((*x, *y, align, fill.clone()));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(found.len(), 1, "expected one {wanted:?}, got {found:?}");
+        found.pop().unwrap()
+    }
+
+    #[derive(Debug)]
+    struct PaintedPath {
+        points: Vec<(f64, f64)>,
+        closed: bool,
+        color: String,
+        alpha: f64,
+        width: f64,
+        filled: bool,
+    }
+
+    fn paths(context: &MockCanvas2dContext) -> Vec<PaintedPath> {
+        let mut result = Vec::new();
+        let (mut points, mut closed) = (Vec::new(), false);
+        let (mut fill, mut stroke) = (String::new(), String::new());
+        let (mut alpha, mut width) = (1.0, 1.0);
+        for op in context.operations() {
+            match op {
+                DrawOperation::BeginPath => {
+                    points.clear();
+                    closed = false;
+                }
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::ClosePath => closed = true,
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::SetStrokeStyle(value) => stroke.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::SetLineWidth(value) => width = *value,
+                DrawOperation::Fill | DrawOperation::Stroke if !points.is_empty() => {
+                    let filled = matches!(op, DrawOperation::Fill);
+                    result.push(PaintedPath {
+                        points: points.clone(),
+                        closed,
+                        color: if filled { fill.clone() } else { stroke.clone() },
+                        alpha,
+                        width,
+                        filled,
+                    });
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn value_axes_and_grouped_bars_use_the_layout_scale() {
+        let source = "xychart-beta\n title Orders\n x-axis \"Month\" [Jan, Feb, Mar]\n y-axis \"Units\" -20 --> 80\n bar \"Actual\" [-20, 40, 80]\n bar \"Target\" [20, 30, 60]\n";
+        let (ir, layout, context) = render(source);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        assert_eq!(meta.series.len(), 2);
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let config = CanvasRenderConfig::default();
+
+        // The ticks encode the declared numeric range, including zero and negative values.
+        // Checking a category name alone used to pass while the entire value scale was absent.
+        for value in (-20..=80).step_by(10) {
+            let (x, y, align, fill) = text(&context, &value.to_string());
+            close(x, f64::from(plot.x) - 10.0);
+            close(
+                y,
+                f64::from(plot.y + plot.height * (80 - value) as f32 / 100.0) + 4.0,
+            );
+            assert_eq!(align, TextAlign::Right);
+            assert_eq!(fill, config.label_color);
+        }
+        for (index, label) in ["Jan", "Feb", "Mar"].iter().enumerate() {
+            let (x, y, align, _) = text(&context, label);
+            close(
+                x,
+                f64::from(plot.x) + f64::from(plot.width) / 3.0 * (index as f64 + 0.5),
+            );
+            close(y, f64::from(plot.y + plot.height) + 24.0);
+            assert_eq!(align, TextAlign::Center);
+        }
+        for label in ["Orders", "Month", "Units"] {
+            text(&context, label);
+        }
+
+        // Every bar is painted once, in its series color, with exactly the layout's rectangle.
+        let (mut fill, mut alpha) = (String::new(), 1.0);
+        let mut bars = Vec::new();
+        for op in context.operations() {
+            match op {
+                DrawOperation::SetFillStyle(value) => fill.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::FillRect(x, y, w, h) if config.accents.contains(&fill) => {
+                    bars.push((fill.clone(), alpha, (*x, *y, *w, *h)));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(bars.len(), 6);
+        for (series_index, series) in meta.series.iter().enumerate() {
+            for (index, id) in series.nodes.iter().enumerate() {
+                let node = layout.nodes.iter().find(|n| n.node_index == id.0).unwrap();
+                let bar = &bars[series_index * 3 + index];
+                assert_eq!(bar.0, config.accents[series_index]);
+                close(bar.1, 0.78);
+                for (actual, expected) in [
+                    (bar.2.0, node.bounds.x),
+                    (bar.2.1, node.bounds.y),
+                    (bar.2.2, node.bounds.width),
+                    (bar.2.3, node.bounds.height),
+                ] {
+                    close(actual, f64::from(expected));
+                }
+            }
+        }
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &Default::default());
+        assert_eq!(svg.matches("class=\"fm-xychart-bar\"").count(), bars.len());
+        assert!(svg.contains("class=\"fm-xychart-x-label\">Month</text>"));
+        assert!(svg.contains("class=\"fm-xychart-y-label\">Units</text>"));
+        // The old generic node labels included data text inside every bar. No duplicate labels.
+        let texts: Vec<_> = context
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::FillText(value, ..) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 17);
+    }
+
+    #[test]
+    fn horizontal_lines_and_areas_keep_their_series_and_zero_baseline() {
+        let source = "xychart-beta horizontal\n title Revenue\n x-axis \"Quarter\" [Q1, Q2, Q3]\n y-axis \"Amount\" -10 --> 30\n line [0, 10, 20]\n area [-5, 5, 25]\n";
+        let (ir, layout, context) = render(source);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        assert!(meta.horizontal);
+        assert_eq!(meta.series[1].kind, fm_core::IrXySeriesKind::Area);
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let config = CanvasRenderConfig::default();
+        let paths = paths(&context);
+
+        for (series_index, series) in meta.series.iter().enumerate() {
+            let centers: Vec<_> = series
+                .nodes
+                .iter()
+                .map(|id| {
+                    let point = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == id.0)
+                        .unwrap()
+                        .bounds
+                        .center();
+                    (f64::from(point.x), f64::from(point.y))
+                })
+                .collect();
+            let lines: Vec<_> = paths
+                .iter()
+                .filter(|path| {
+                    !path.filled && path.color == config.accents[series_index] && path.width == 3.0
+                })
+                .collect();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].points, centers);
+            assert!(!lines[0].closed);
+            if series_index == 1 {
+                let fills: Vec<_> = paths
+                    .iter()
+                    .filter(|path| path.filled && path.color == config.accents[1])
+                    .collect();
+                assert_eq!(fills.len(), 1);
+                let area = fills[0];
+                assert!(area.closed);
+                close(area.alpha, 0.16);
+                assert_eq!(&area.points[1..4], centers.as_slice());
+                let zero_x = f64::from(plot.x + plot.width / 4.0);
+                assert_eq!(area.points[0], (zero_x, centers[0].1));
+                assert_eq!(area.points[4], (zero_x, centers[2].1));
+            }
+        }
+        assert_eq!(
+            context
+                .operations()
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                .count(),
+            6
+        );
+        let (zero_x, zero_y, zero_align, _) = text(&context, "0");
+        close(zero_x, f64::from(plot.x + plot.width / 4.0));
+        close(zero_y, f64::from(plot.y) - 11.0);
+        assert_eq!(zero_align, TextAlign::Center);
+        let (q_x, q_y, q_align, _) = text(&context, "Q1");
+        close(q_x, f64::from(plot.x) - 11.0);
+        close(
+            q_y,
+            f64::from(plot.y + plot.height / 6.0) + config.font_size * 0.74 * 0.35,
+        );
+        assert_eq!(q_align, TextAlign::Right);
+        for label in ["Revenue", "Quarter", "Amount"] {
+            text(&context, label);
+        }
+    }
+
+    #[test]
+    fn numeric_categories_and_degenerate_series_still_have_finite_geometry() {
+        for source in [
+            "xychart-beta\n x-axis 10 --> 30\n y-axis 0 --> 0\n area [0, 0, 0]\n",
+            "xychart-beta\n x-axis [only]\n line [4]\n",
+            "xychart-beta\n title Empty\n",
+        ] {
+            let (_, _, context) = render(source);
+            for op in context.operations() {
+                let numbers: Vec<f64> = match op {
+                    DrawOperation::MoveTo(x, y)
+                    | DrawOperation::LineTo(x, y)
+                    | DrawOperation::FillText(_, x, y) => vec![*x, *y],
+                    DrawOperation::FillRect(x, y, w, h) | DrawOperation::StrokeRect(x, y, w, h) => {
+                        vec![*x, *y, *w, *h]
+                    }
+                    DrawOperation::Arc(x, y, radius, start, end) => {
+                        vec![*x, *y, *radius, *start, *end]
+                    }
+                    _ => Vec::new(),
+                };
+                assert!(
+                    numbers.iter().all(|value| value.is_finite()),
+                    "non-finite operation: {op:?}"
+                );
+            }
+            if source.contains("10 --> 30") {
+                for label in ["10", "20", "30"] {
+                    text(&context, label);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chart_drawing_is_invariant_under_layout_origin_translation() {
+        let source = "xychart-beta\n title Sales\n x-axis [A, B]\n bar [10, 20]\n";
+        let (ir, layout, _) = render(source);
+        for auto_fit in [false, true] {
+            let config = CanvasRenderConfig {
+                auto_fit,
+                ..Default::default()
+            };
+            let draw = |layout: &fm_layout::DiagramLayout| {
+                let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+                Canvas2dRenderer::new(config.clone()).render(layout, &ir, &mut context);
+                context
+            };
+            let original = draw(&layout);
+            let mut moved = layout.clone();
+            moved.bounds.x += 512.0;
+            moved.bounds.y -= 256.0;
+            for node in &mut moved.nodes {
+                node.bounds.x += 512.0;
+                node.bounds.y -= 256.0;
+            }
+            for edge in &mut moved.edges {
+                for point in &mut edge.points {
+                    point.x += 512.0;
+                    point.y -= 256.0;
+                }
+            }
+            let shifted = draw(&moved);
+            for label in ["Sales", "A", "B", "0", "20"] {
+                let first = text(&original, label);
+                let second = text(&shifted, label);
+                close(first.0, second.0);
+                close(first.1, second.1);
+                assert_eq!(first.2, second.2);
+            }
+        }
+    }
 }

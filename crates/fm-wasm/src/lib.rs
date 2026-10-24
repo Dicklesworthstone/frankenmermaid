@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod canvas_selection;
+
 use std::sync::{LazyLock, RwLock};
-// `Diagram::last_layout` is the only `Arc` user and lives behind `#[cfg(target_arch = "wasm32")]`,
-// so an ungated import is an `unused_imports` warning — and a `-D warnings` failure — on the host.
+// The browser Diagram transfers its layout into the retained CanvasSession by Arc.
 #[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 // NOT `std::time::Instant`: wasm32-unknown-unknown std has no clock, so `Instant::now()`
@@ -14,9 +16,8 @@ use web_time::Instant;
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::MermaidGuardReport;
-// The CGA hit-test helpers below are reachable only from the wasm32 `Diagram` bindings and from
-// tests, so both they and this import are dead on a host non-test build.
-#[cfg(any(target_arch = "wasm32", test))]
+// Raw-layout CGA helpers remain test oracles; browser picking uses the draw viewport.
+#[cfg(test)]
 use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
@@ -35,11 +36,11 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
-    DiagramParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
-    apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
+    ClassParseLens, DiagramParseLens, ErParseLens, FlowchartParseLens, FlowchartParseLensError,
+    ParseLensSnapshot, SequenceParseLens, StateParseLens, apply_parse_lens_delete,
+    apply_parse_lens_edit, apply_parse_lens_insert_line_after, build_parse_lens,
+    detect_type_with_confidence, parse,
 };
-#[cfg(target_arch = "wasm32")]
-use fm_render_canvas::render_to_canvas_with_layout;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
@@ -173,10 +174,10 @@ struct RuntimeConfig {
 /// A source-to-layout lens for a flowchart editor.
 ///
 /// This composes the formatting-preserving parser lens with the ordering-preserving layout lens:
-/// label and source edits produce a new source snapshot and a freshly derived layout. A rank-order
-/// drag is intentionally refused until the parser lens can faithfully re-emit structural IR order;
-/// returning the original text for that edit would make an editor report a change that vanishes on
-/// the next parse.
+/// label edits and safe declaration-order permutations produce a new source snapshot and a freshly
+/// derived layout. Reordering requires standalone node declarations before their first references;
+/// ambiguous source forms and topology changes are refused. The source stores declaration order,
+/// not pixel coordinates: the selected layout algorithm still determines the resulting geometry.
 #[derive(Debug, Clone)]
 pub struct DiagramLens {
     parse: DiagramParseLens,
@@ -198,7 +199,7 @@ impl std::fmt::Display for DiagramLensError {
             Self::Parse(error) => error.fmt(formatter),
             Self::Layout(error) => error.fmt(formatter),
             Self::LayoutEditCannotBeReemitted => formatter.write_str(
-                "the formatting-preserving ParseLens cannot yet re-emit a structural layout edit",
+                "this layout edit cannot be safely re-emitted; use standalone node declarations before their first references",
             ),
         }
     }
@@ -249,7 +250,7 @@ impl DiagramLens {
         self.layout.get()
     }
 
-    /// Apply a label-only semantic edit, then derive a fresh source and positioned graph.
+    /// Apply a supported semantic edit, then derive a fresh source and positioned graph.
     pub fn put_ir(&self, edited: &MermaidDiagramIr) -> Result<Self, DiagramLensError> {
         let source = self.parse.put(edited)?;
         Self::from_source(&source, self.config.clone())
@@ -257,9 +258,10 @@ impl DiagramLens {
 
     /// Apply an in-rank diagram edit only when its resulting IR can be faithfully re-emitted.
     ///
-    /// `LayoutLens` itself can produce an order-adjusted IR, but the current `FlowchartParseLens`
-    /// deliberately rejects structural edits. Keep that boundary explicit rather than pretending a
-    /// source update occurred while returning the original source text.
+    /// The parser verifies that the rewritten source reparses to the requested declaration order
+    /// without changing graph meaning. Unsupported source forms fail without mutating this snapshot.
+    /// The returned geometry is recomputed from the new source; arbitrary dragged coordinates are
+    /// not persisted because Mermaid declarations do not encode them.
     pub fn put_layout(&self, edited: &LayoutLensSnapshot) -> Result<Self, DiagramLensError> {
         let edited_ir = self.layout.put(edited)?;
         match self.parse.put(&edited_ir) {
@@ -274,6 +276,60 @@ impl DiagramLens {
     fn layout_reemission_error() -> DiagramLensError {
         DiagramLensError::LayoutEditCannotBeReemitted
     }
+}
+
+/// A semantic edit's source and freshly parsed bindings, ready for the next editor operation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IrLensEditResponse {
+    pub updated_source: String,
+    pub snapshot: ParseLensSnapshot,
+}
+
+/// Re-emit a supported IR edit through the diagram family's formatting-preserving lens.
+///
+/// Start with the IR returned by `parseLens`, change existing label text, and pass the complete
+/// edited IR with the original source. Each family reparses the candidate and verifies the entire
+/// requested graph before returning it. Flowcharts also accept the independent declaration-order
+/// permutations supported by [`FlowchartParseLens`]. Other structural changes are rejected.
+///
+/// Labels are interned: changing one label's text changes every node or edge referring to that
+/// label ID. The family lens must be able to update all those occurrences faithfully. The response
+/// supplies new spans and bindings because even a label-only edit can move subsequent source text.
+///
+/// # Errors
+/// Returns the family lens's reason when an edit cannot be faithfully re-emitted, or an explicit
+/// unsupported-family error. It never falls back to replacing a whole source statement.
+pub fn apply_ir_lens_edit(
+    input: &str,
+    edited: &MermaidDiagramIr,
+) -> Result<IrLensEditResponse, String> {
+    let updated_source = match edited.diagram_type {
+        fm_core::DiagramType::Flowchart => FlowchartParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Sequence => SequenceParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Class => ClassParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::State => StateParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        fm_core::DiagramType::Er => ErParseLens::parse(input)
+            .and_then(|lens| lens.put(edited))
+            .map_err(|error| error.to_string()),
+        family => Err(format!(
+            "semantic IR edits are unsupported for {}; supported families are flowchart, sequence, class, state, and ER",
+            family.as_str()
+        )),
+    }?;
+    let snapshot = build_parse_lens(&updated_source);
+    Ok(IrLensEditResponse {
+        updated_source,
+        snapshot,
+    })
 }
 
 /// A browser-consumable description of the primitive sets prepared for WebGPU.
@@ -385,8 +441,14 @@ fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebG
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let svg = SvgRenderConfig::default();
-        let canvas = align_canvas_typography_with_svg(CanvasRenderConfig::default(), &svg);
+        let svg = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let canvas = align_canvas_typography_with_svg(
+            apply_canvas_theme_preset(CanvasRenderConfig::default(), svg.theme),
+            &svg,
+        );
         Self {
             renderer: WebRendererKind::Canvas2d,
             svg,
@@ -415,11 +477,14 @@ struct RuntimeInitConfig {
     shadows: Option<bool>,
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
+    semantic_colors: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
     debug_overlay: Option<bool>,
+    detail_tier: Option<String>,
+    preserve_labels: Option<bool>,
 }
 
 impl RuntimeInitConfig {
@@ -433,11 +498,14 @@ impl RuntimeInitConfig {
             rounded_corners: self.rounded_corners,
             embed_theme_css: self.embed_theme_css,
             theme: self.theme.clone(),
+            semantic_colors: self.semantic_colors,
             enable_links: self.enable_links,
             link_mode: self.link_mode.clone(),
             node_gradients: self.node_gradients,
             cluster_fill_opacity: self.cluster_fill_opacity,
             debug_overlay: self.debug_overlay,
+            detail_tier: self.detail_tier.clone(),
+            preserve_labels: self.preserve_labels,
         };
         if self.svg.responsive.is_some() {
             merged.responsive = self.svg.responsive;
@@ -463,6 +531,9 @@ impl RuntimeInitConfig {
         if self.svg.theme.is_some() {
             merged.theme = self.svg.theme.clone();
         }
+        if self.svg.semantic_colors.is_some() {
+            merged.semantic_colors = self.svg.semantic_colors;
+        }
         if self.svg.enable_links.is_some() {
             merged.enable_links = self.svg.enable_links;
         }
@@ -477,6 +548,12 @@ impl RuntimeInitConfig {
         }
         if self.svg.debug_overlay.is_some() {
             merged.debug_overlay = self.svg.debug_overlay;
+        }
+        if self.svg.detail_tier.is_some() {
+            merged.detail_tier = self.svg.detail_tier.clone();
+        }
+        if self.svg.preserve_labels.is_some() {
+            merged.preserve_labels = self.svg.preserve_labels;
         }
         merged
     }
@@ -493,11 +570,14 @@ struct SvgConfigOverrides {
     rounded_corners: Option<f32>,
     embed_theme_css: Option<bool>,
     theme: Option<String>,
+    semantic_colors: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
     debug_overlay: Option<bool>,
+    detail_tier: Option<String>,
+    preserve_labels: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1141,11 +1221,38 @@ fn merge_svg_config(
     if let Some(value) = overrides.accessible {
         merged.accessible = value;
     }
+    if let Some(value) = overrides.preserve_labels {
+        merged.preserve_labels = value;
+    }
+    if let Some(value) = overrides.semantic_colors {
+        merged.semantic_colors = value;
+    }
+    if let Some(value) = overrides.detail_tier.as_deref() {
+        merged.detail_tier = match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => fm_core::MermaidTier::Auto,
+            "compact" => fm_core::MermaidTier::Compact,
+            "normal" => fm_core::MermaidTier::Normal,
+            "rich" => fm_core::MermaidTier::Rich,
+            other => {
+                return Err(format!(
+                    "invalid detail tier '{other}': expected auto, compact, normal, or rich"
+                ));
+            }
+        };
+    }
     if let Some(value) = overrides.font_size
         && value.is_finite()
         && value > 0.0
     {
-        merged.font_size = value;
+        // Resize the existing calibration with the glyphs. Layout already measures at the new
+        // font size; leaving this width unchanged undersizes label plates and their clearance.
+        // Use a wider intermediate so a large change of scale cannot overflow the ratio alone.
+        let avg_char_width = (f64::from(merged.avg_char_width) * f64::from(value)
+            / f64::from(merged.font_size)) as f32;
+        if avg_char_width.is_finite() && avg_char_width > 0.0 {
+            merged.avg_char_width = avg_char_width;
+            merged.font_size = value;
+        }
     }
     if let Some(value) = overrides.padding
         && value.is_finite()
@@ -1239,6 +1346,8 @@ fn apply_canvas_theme_preset(
     canvas.cluster_fill = colors.cluster_fill;
     canvas.cluster_stroke = colors.cluster_stroke;
     canvas.label_color = colors.text;
+    canvas.accents = colors.accents;
+    canvas.semantic_colors = matches!(preset, ThemePreset::Default | ThemePreset::Dark);
     canvas
 }
 
@@ -1248,6 +1357,9 @@ fn align_canvas_typography_with_svg(
 ) -> CanvasRenderConfig {
     canvas.font_family.clone_from(&svg.font_family);
     canvas.font_size = f64::from(svg.font_size);
+    canvas.line_height = f64::from(svg.line_height);
+    canvas.semantic_colors =
+        svg.semantic_colors && matches!(svg.theme, ThemePreset::Default | ThemePreset::Dark);
     // The gantt today date rides along with the typography rather than being plumbed separately,
     // because the requirement is the same one: the two backends must not disagree. A canvas preview
     // that drew a today line on a different day from the SVG export -- or drew none while the export
@@ -1378,7 +1490,7 @@ fn compute_wasm_degradation_plan(
     })
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Option<&str> {
     if !(x.is_finite() && y.is_finite()) {
         return None;
@@ -1398,7 +1510,7 @@ fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Op
     })
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn hit_test_layout_edge(
     layout: &fm_layout::DiagramLayout,
     x: f64,
@@ -2064,6 +2176,18 @@ pub fn parse_lens_js(input: &str) -> Result<JsValue, JsValue> {
     to_js_value(&build_parse_lens(input))
 }
 
+/// Apply a complete edited IR through the semantic family lens and return fresh source bindings.
+///
+/// Unlike source-span replacement, this validates graph meaning before returning an edit. The
+/// `edited_ir` object has the same shape as `parseLens(input).parsed.ir`.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = applyIrLensEdit))]
+pub fn apply_ir_lens_edit_js(input: &str, edited_ir: JsValue) -> Result<JsValue, JsValue> {
+    let edited: MermaidDiagramIr = serde_wasm_bindgen::from_value(edited_ir)
+        .map_err(|error| js_error(format!("invalid edited diagram IR: {error}")))?;
+    let response = apply_ir_lens_edit(input, &edited).map_err(js_error)?;
+    to_js_value(&response)
+}
+
 /// One live render per worker, so a superseded typing update cannot publish over a newer one.
 static WORKER_COORDINATOR: LazyLock<RwLock<WorkerRenderCoordinator>> =
     LazyLock::new(|| RwLock::new(WorkerRenderCoordinator::default()));
@@ -2396,6 +2520,7 @@ fn parse_navigation_direction(
 #[wasm_bindgen]
 pub struct Diagram {
     canvas: Option<web_sys::HtmlCanvasElement>,
+    offscreen_canvas: Option<web_sys::OffscreenCanvas>,
     canvas_width: u32,
     canvas_height: u32,
     context: web_sys::CanvasRenderingContext2d,
@@ -2405,7 +2530,6 @@ pub struct Diagram {
     pressure_config: MermaidWasmPressureSignals,
     layout_engine: fm_layout::IncrementalLayoutEngine,
     session: fm_render_canvas::CanvasSession,
-    last_layout: Option<Arc<fm_layout::DiagramLayout>>,
     destroyed: bool,
 }
 
@@ -2420,6 +2544,7 @@ impl Diagram {
 
     fn from_canvas_context(
         canvas: Option<web_sys::HtmlCanvasElement>,
+        offscreen_canvas: Option<web_sys::OffscreenCanvas>,
         canvas_width: u32,
         canvas_height: u32,
         context: web_sys::CanvasRenderingContext2d,
@@ -2447,6 +2572,7 @@ impl Diagram {
 
         Ok(Self {
             canvas,
+            offscreen_canvas,
             canvas_width,
             canvas_height,
             context,
@@ -2456,7 +2582,6 @@ impl Diagram {
             pressure_config,
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
             session: fm_render_canvas::CanvasSession::default(),
-            last_layout: None,
             destroyed: false,
         })
     }
@@ -2479,7 +2604,14 @@ impl Diagram {
             .map_err(|_| js_error("failed to cast context to CanvasRenderingContext2d"))?;
         let canvas_width = canvas.width();
         let canvas_height = canvas.height();
-        Self::from_canvas_context(Some(canvas), canvas_width, canvas_height, context, config)
+        Self::from_canvas_context(
+            Some(canvas),
+            None,
+            canvas_width,
+            canvas_height,
+            context,
+            config,
+        )
     }
 
     /// Creates a renderer for an `OffscreenCanvas` transferred to a worker.
@@ -2502,11 +2634,24 @@ impl Diagram {
         let context = context_value
             .ok_or_else(|| js_error("offscreen canvas 2d context is unavailable"))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>();
-        Self::from_canvas_context(None, canvas_width, canvas_height, context, config)
+        Self::from_canvas_context(
+            None,
+            Some(canvas),
+            canvas_width,
+            canvas_height,
+            context,
+            config,
+        )
     }
 
     pub fn render(&mut self, input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
         self.ensure_alive()?;
+        self.sync_canvas_size();
+        if self.canvas_width == 0 || self.canvas_height == 0 {
+            return Err(js_error(
+                "canvas backing store must have nonzero dimensions",
+            ));
+        }
 
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
@@ -2580,27 +2725,14 @@ impl Diagram {
         let render_start = Instant::now();
         let canvas_result = match renderer.actual {
             WebRendererKind::Canvas2d => {
-                let mut web_canvas = WebCanvas2dContext::new(
-                    self.canvas_width,
-                    self.canvas_height,
-                    self.context.clone(),
-                );
+                // Drawing and subsequent interaction share the exact same matched pair.
                 self.session.set_diagram(
-                    parsed.ir.clone(),
+                    parsed.ir,
                     Arc::clone(&traced_layout.layout),
                     next_canvas.clone(),
                 );
-                self.session
-                    .redraw(&mut web_canvas)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        render_to_canvas_with_layout(
-                            &parsed.ir,
-                            &traced_layout.layout,
-                            &mut web_canvas,
-                            &next_canvas,
-                        )
-                    })
+                self.redraw_canvas()
+                    .ok_or_else(|| js_error("canvas backing store must have nonzero dimensions"))?
             }
             WebRendererKind::WebGpu => {
                 return Err(js_error(
@@ -2620,7 +2752,6 @@ impl Diagram {
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
         self.pressure_config = next_pressure;
-        self.last_layout = Some(Arc::clone(&traced_layout.layout));
 
         let output = DiagramRenderOutput::new(
             &traced_layout,
@@ -2633,37 +2764,28 @@ impl Diagram {
         to_js_value(&output)
     }
 
-    /// Return the laid-out node below a canvas-space pointer, if any.
-    ///
-    /// The query uses CGA rectangle containment against the latest render's layout, so it never
-    /// reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
-    /// return `None`.
+    /// Return the topmost node below a backing-store-pixel pointer, if any.
+    /// Uses the actual draw viewport, including fit, padding and origin normalization.
+    /// Resizing invalidates picking until redraw; this query never parses or lays out source.
     #[wasm_bindgen(js_name = hitTestNode)]
-    pub fn hit_test_node(&self, x: f64, y: f64) -> Result<Option<String>, JsValue> {
+    pub fn hit_test_node(&mut self, x: f64, y: f64) -> Result<Option<String>, JsValue> {
         self.ensure_alive()?;
-        Ok(self
-            .last_layout
-            .as_deref()
-            .and_then(|layout| hit_test_layout_node(layout, x, y))
-            .map(str::to_owned))
+        let size = self.sync_canvas_size();
+        Ok(self.session.hit_test_node(x, y, size).map(str::to_owned))
     }
 
-    /// Return the nearest rendered edge index within a canvas-space tolerance.
-    ///
-    /// The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
-    /// bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+    /// Return the nearest rendered edge within a backing-store-pixel tolerance.
+    /// Shares the draw viewport with node picking and excludes bundled-away paths.
     #[wasm_bindgen(js_name = hitTestEdge)]
     pub fn hit_test_edge(
-        &self,
+        &mut self,
         x: f64,
         y: f64,
         max_distance: f64,
     ) -> Result<Option<usize>, JsValue> {
         self.ensure_alive()?;
-        Ok(self
-            .last_layout
-            .as_deref()
-            .and_then(|layout| hit_test_layout_edge(layout, x, y, max_distance)))
+        let size = self.sync_canvas_size();
+        Ok(self.session.hit_test_edge(x, y, max_distance, size))
     }
 
     /// Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
@@ -2671,44 +2793,6 @@ impl Diagram {
     pub fn selected_node_id(&self) -> Result<Option<String>, JsValue> {
         self.ensure_alive()?;
         Ok(self.session.selected_node_id().map(str::to_owned))
-    }
-
-    /// Select a node by author ID without reparsing or relayout (`bd-g7sx9`).
-    #[wasm_bindgen(js_name = selectNode)]
-    pub fn select_node(&mut self, node_id: &str) -> Result<bool, JsValue> {
-        self.ensure_alive()?;
-        Ok(self.session.select_node(node_id))
-    }
-
-    /// Select a node at canvas-space coordinates `(x, y)` (`bd-g7sx9`).
-    #[wasm_bindgen(js_name = selectAt)]
-    pub fn select_at(&mut self, x: f64, y: f64) -> Result<bool, JsValue> {
-        self.ensure_alive()?;
-        let size = [f64::from(self.canvas_width), f64::from(self.canvas_height)];
-        Ok(self.session.select_at(x, y, size))
-    }
-
-    /// Navigate node selection spatially (`"up"`, `"down"`, `"left"`, `"right"`) (`bd-g7sx9`).
-    #[wasm_bindgen(js_name = navigateSelection)]
-    pub fn navigate_selection(&mut self, direction: &str) -> Result<bool, JsValue> {
-        self.ensure_alive()?;
-        let dir = parse_navigation_direction(direction).map_err(js_error)?;
-        Ok(self.session.navigate_selection(dir))
-    }
-
-    /// Clear the current node selection (`bd-g7sx9`).
-    #[wasm_bindgen(js_name = clearSelection)]
-    pub fn clear_selection(&mut self) -> Result<bool, JsValue> {
-        self.ensure_alive()?;
-        Ok(self.session.clear_selection())
-    }
-
-    /// Redraw the retained diagram and selection ring without reparsing or relayout (`bd-g7sx9`).
-    pub fn redraw(&mut self) -> Result<bool, JsValue> {
-        self.ensure_alive()?;
-        let mut web_canvas =
-            WebCanvas2dContext::new(self.canvas_width, self.canvas_height, self.context.clone());
-        Ok(self.session.redraw(&mut web_canvas).is_some())
     }
 
     #[wasm_bindgen(js_name = setTheme)]
@@ -2720,7 +2804,11 @@ impl Diagram {
             ..SvgConfigOverrides::default()
         };
         self.svg_config = merge_svg_config(&self.svg_config, &overrides, None).map_err(js_error)?;
-        self.canvas_config = apply_canvas_theme_preset(self.canvas_config.clone(), preset);
+        self.canvas_config = align_canvas_typography_with_svg(
+            apply_canvas_theme_preset(self.canvas_config.clone(), preset),
+            &self.svg_config,
+        );
+        self.session.set_render_config(self.canvas_config.clone());
         Ok(())
     }
 
@@ -2737,6 +2825,7 @@ impl Diagram {
         if self.destroyed {
             return;
         }
+        self.sync_canvas_size();
         self.context.clear_rect(
             0.0,
             0.0,
@@ -2744,7 +2833,7 @@ impl Diagram {
             f64::from(self.canvas_height),
         );
         self.session.clear();
-        self.last_layout = None;
+        self.layout_engine = fm_layout::IncrementalLayoutEngine::default();
         self.destroyed = true;
     }
 }
@@ -2819,12 +2908,12 @@ mod tests {
         WasmHitRegion, WebGpuPlanSummary, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, build_diagram_geometry, build_webgpu_plan, canvas_font_size_px,
-        collect_source_spans, config_schema_json, handle_worker_message, hit_test_layout_edge,
-        hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
-        merge_svg_config, parse_theme_preset, read_runtime_config, render, render_deck,
-        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        validate_config_json, validate_init_directives_js, write_runtime_config,
+        apply_canvas_theme_preset, apply_ir_lens_edit, build_diagram_geometry, build_webgpu_plan,
+        canvas_font_size_px, collect_source_spans, config_schema_json, handle_worker_message,
+        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
+        merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
+        render_deck, render_svg_js, render_worker_request, requested_theme_preset,
+        resolve_renderer, validate_config_json, validate_init_directives_js, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3347,18 +3436,115 @@ mod tests {
     #[test]
     fn merge_svg_config_rejects_invalid_numeric_overrides_by_ignoring_them() {
         let base = SvgRenderConfig::default();
-        let overrides = SvgConfigOverrides {
-            font_size: Some(f32::NAN),
-            padding: Some(-1.0),
-            rounded_corners: Some(f32::INFINITY),
-            ..SvgConfigOverrides::default()
+        for font_size in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                padding: Some(-1.0),
+                rounded_corners: Some(f32::INFINITY),
+                ..SvgConfigOverrides::default()
+            };
+
+            let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
+
+            assert_eq!(merged, base, "invalid font size {font_size}");
+        }
+    }
+
+    #[test]
+    fn merge_svg_config_preserves_font_calibration_across_resizes() {
+        let mut base = SvgRenderConfig::default();
+        for (font_size, expected_width) in [(30.0, 15.0), (11.0, 5.5), (22.0, 11.0), (15.0, 7.5)] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid font size");
+            assert_eq!(merged.font_size, font_size);
+            assert_eq!(merged.avg_char_width, expected_width);
+            base = merged;
+        }
+        assert_eq!(
+            merge_svg_config(&base, &SvgConfigOverrides::default(), None).unwrap(),
+            base,
+            "omitting a font override must preserve the existing calibration"
+        );
+    }
+
+    #[test]
+    fn merge_svg_config_preserves_custom_font_calibration() {
+        let mut base = SvgRenderConfig {
+            font_size: 28.0,
+            avg_char_width: 18.0,
+            ..Default::default()
         };
+        for (font_size, expected_width) in [(28.0, 18.0), (14.0, 9.0), (42.0, 27.0), (28.0, 18.0)] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid font size");
+            assert_eq!(merged.font_size, font_size);
+            assert_eq!(merged.avg_char_width, expected_width);
+            base = merged;
+        }
+    }
 
-        let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
+    #[test]
+    fn merge_svg_config_ignores_font_sizes_with_unrepresentable_metrics() {
+        for (base, font_size) in [
+            (
+                SvgRenderConfig {
+                    font_size: 1.0,
+                    avg_char_width: 2.0,
+                    ..Default::default()
+                },
+                f32::MAX,
+            ),
+            (SvgRenderConfig::default(), f32::from_bits(1)),
+        ] {
+            let overrides = SvgConfigOverrides {
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("merge should succeed");
+            assert_eq!(merged, base, "font metrics must remain finite and positive");
+        }
+    }
 
-        assert_eq!(merged.font_size, base.font_size);
-        assert_eq!(merged.padding, base.padding);
-        assert_eq!(merged.rounded_corners, base.rounded_corners);
+    #[test]
+    fn browser_detail_overrides_preserve_labels_unless_explicitly_disabled() {
+        let base = RuntimeConfig::default().svg;
+        assert!(base.preserve_labels);
+        for (name, expected) in [
+            ("auto", fm_core::MermaidTier::Auto),
+            ("compact", fm_core::MermaidTier::Compact),
+            ("normal", fm_core::MermaidTier::Normal),
+            ("RICH", fm_core::MermaidTier::Rich),
+        ] {
+            let overrides = SvgConfigOverrides {
+                detail_tier: Some(name.to_string()),
+                ..Default::default()
+            };
+            let merged = merge_svg_config(&base, &overrides, None).expect("valid detail tier");
+            assert_eq!(merged.detail_tier, expected);
+            assert!(merged.preserve_labels);
+        }
+        let abbreviated = SvgConfigOverrides {
+            detail_tier: Some("compact".to_string()),
+            preserve_labels: Some(false),
+            ..Default::default()
+        };
+        let merged = merge_svg_config(&base, &abbreviated, None).expect("explicit overview");
+        assert_eq!(merged.detail_tier, fm_core::MermaidTier::Compact);
+        assert!(!merged.preserve_labels);
+        let invalid = SvgConfigOverrides {
+            detail_tier: Some("missing".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_svg_config(&base, &invalid, None).expect_err("invalid tier must fail"),
+            "invalid detail tier 'missing': expected auto, compact, normal, or rich"
+        );
     }
 
     #[test]
@@ -3367,9 +3553,49 @@ mod tests {
         let themed = apply_canvas_theme_preset(base, ThemePreset::Dark);
 
         assert_eq!(themed.node_fill, "#1e293b");
-        assert_eq!(themed.node_stroke, "#334155");
+        assert_eq!(themed.node_stroke, "#64748b");
         assert_eq!(themed.edge_stroke, "#94a3b8");
         assert_eq!(themed.label_color, "#f8fafc");
+        assert_eq!(
+            themed.accents,
+            fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).accents
+        );
+    }
+
+    #[test]
+    fn semantic_colors_follow_public_options_across_theme_changes() {
+        let overrides: RuntimeInitConfig =
+            serde_json::from_str(r#"{"semanticColors":false,"svg":{"semanticColors":true}}"#)
+                .expect("public options");
+        assert_eq!(
+            overrides.effective_svg_overrides().semantic_colors,
+            Some(true)
+        );
+
+        let disabled: RuntimeInitConfig =
+            serde_json::from_str(r#"{"semanticColors":false}"#).expect("top-level option");
+        let svg = merge_svg_config(
+            &SvgRenderConfig::default(),
+            &disabled.effective_svg_overrides(),
+            None,
+        )
+        .expect("disable role colors");
+        assert!(!svg.semantic_colors);
+        for preset in [ThemePreset::Default, ThemePreset::Dark, ThemePreset::Forest] {
+            let mut themed_svg = svg.clone();
+            themed_svg.theme = preset;
+            let canvas = align_canvas_typography_with_svg(
+                apply_canvas_theme_preset(CanvasRenderConfig::default(), preset),
+                &themed_svg,
+            );
+            assert!(!canvas.semantic_colors, "opt-out must survive {preset:?}");
+            themed_svg.semantic_colors = true;
+            let canvas = align_canvas_typography_with_svg(canvas, &themed_svg);
+            assert_eq!(
+                canvas.semantic_colors,
+                matches!(preset, ThemePreset::Default | ThemePreset::Dark)
+            );
+        }
     }
 
     #[test]
@@ -3405,10 +3631,14 @@ mod tests {
                 "responsive": false,
                 "fontSize": 18.0,
                 "shadows": true,
+                "detailTier": "rich",
+                "preserveLabels": false,
                 "svg": {
                     "theme": "forest",
                     "fontSize": 21.0,
-                    "shadows": false
+                    "shadows": false,
+                    "detailTier": "compact",
+                    "preserveLabels": true
                 }
             }"#,
         )
@@ -3419,6 +3649,12 @@ mod tests {
         assert_eq!(effective.responsive, Some(false));
         assert_eq!(effective.font_size, Some(21.0));
         assert_eq!(effective.shadows, Some(false));
+        assert_eq!(effective.detail_tier.as_deref(), Some("compact"));
+        assert_eq!(effective.preserve_labels, Some(true));
+        let merged = merge_svg_config(&SvgRenderConfig::default(), &effective, None)
+            .expect("nested SVG options should merge");
+        assert_eq!(merged.font_size, 21.0);
+        assert_eq!(merged.avg_char_width, 10.5);
     }
 
     #[test]
@@ -3572,6 +3808,142 @@ mod tests {
         let insert_error = apply_parse_lens_insert_line_after(input, "fm-node-nope-9", "C-->D")
             .expect_err("an unknown id must not resolve");
         assert!(insert_error.to_string().contains("fm-node-nope-9"));
+    }
+
+    const IR_LENS_SOURCES: [&str; 5] = [
+        "flowchart LR\r\n  %% keep this comment\r\n  A[\"Original node\"] -->|Original relation| B[Target]\r\n",
+        "sequenceDiagram\r\n  %% keep this comment\r\n  participant A as \"Original node\"\r\n  participant B as Target\r\n  A->>B: Original relation\r\n",
+        "classDiagram\r\n  %% keep this comment\r\n  A[\"Original node\"]\r\n  B[Target]\r\n  A *-- B : Original relation\r\n",
+        "stateDiagram-v2\r\n  %% keep this comment\r\n  state \"Original node\" as A\r\n  state \"Target\" as B\r\n  A --> B: Original relation\r\n",
+        "erDiagram\r\n  %% keep this comment\r\n  A[\"Original node\"]\r\n  B[Target]\r\n  A ||--o{ B : Original relation\r\n",
+    ];
+
+    #[test]
+    fn ir_lens_noop_preserves_source_and_snapshot_for_every_supported_family() {
+        for source in IR_LENS_SOURCES {
+            let original = build_parse_lens(source);
+            let result = apply_ir_lens_edit(source, &original.parsed.ir).unwrap();
+            assert_eq!(result.updated_source, source);
+            assert_eq!(result.snapshot, original);
+            assert_eq!(result.snapshot.original_source(), source);
+        }
+    }
+
+    #[test]
+    fn ir_lens_edits_node_and_relationship_labels_through_every_family() {
+        for source in IR_LENS_SOURCES {
+            let mut edited = parse(source).ir;
+            let node_label = edited
+                .nodes
+                .iter()
+                .find(|node| node.id == "A")
+                .and_then(|node| node.label)
+                .expect("fixture has an explicit node label");
+            let edge_label = edited.edges[0].label.expect("fixture has a relationship");
+            edited.labels[node_label.0].text = "Renamed naïve 🦀 node".to_string();
+            edited.labels[edge_label.0].text = "Updated relationship text".to_string();
+
+            let result = apply_ir_lens_edit(source, &edited)
+                .unwrap_or_else(|error| panic!("{}: {error}", edited.diagram_type.as_str()));
+            assert_eq!(
+                result.updated_source,
+                source
+                    .replace("Original node", "Renamed naïve 🦀 node")
+                    .replace("Original relation", "Updated relationship text")
+            );
+            assert_eq!(
+                result.snapshot,
+                build_parse_lens(&result.updated_source),
+                "bindings must be rebuilt from the accepted source"
+            );
+            let reparsed = &result.snapshot.parsed.ir;
+            assert_eq!(reparsed.nodes.len(), edited.nodes.len());
+            assert_eq!(reparsed.edges.len(), edited.edges.len());
+            assert_eq!(reparsed.edges[0].arrow, edited.edges[0].arrow);
+            assert_eq!(reparsed.edges[0].extras, edited.edges[0].extras);
+            assert_eq!(
+                reparsed.labels[reparsed.edges[0].label.unwrap().0].text,
+                "Updated relationship text"
+            );
+        }
+    }
+
+    #[test]
+    fn ir_lens_response_supports_the_next_semantic_and_source_span_edits() {
+        let source = IR_LENS_SOURCES[1];
+        let mut edited = parse(source).ir;
+        let label = edited.edges[0].label.unwrap();
+        edited.labels[label.0].text = "A longer request message".to_string();
+        let first = apply_ir_lens_edit(source, &edited).unwrap();
+
+        let mut next_ir = first.snapshot.parsed.ir.clone();
+        let label = next_ir.edges[0].label.unwrap();
+        next_ir.labels[label.0].text = "Acknowledged".to_string();
+        let second = apply_ir_lens_edit(first.snapshot.original_source(), &next_ir).unwrap();
+        assert_eq!(
+            second.updated_source,
+            source.replace("Original relation", "Acknowledged")
+        );
+        let edge_binding = second
+            .snapshot
+            .bindings
+            .iter()
+            .find(|binding| binding.kind == fm_core::MermaidSourceMapKind::Edge)
+            .unwrap();
+        assert!(
+            edge_binding
+                .snippet
+                .as_ref()
+                .unwrap()
+                .contains("Acknowledged")
+        );
+        let unchanged = second
+            .snapshot
+            .apply_edit(&MermaidLensEdit {
+                element_id: edge_binding.element_id.clone(),
+                replacement: edge_binding.snippet.clone().unwrap(),
+            })
+            .unwrap();
+        assert_eq!(unchanged.updated_source, second.updated_source);
+
+        let serialized = serde_json::to_value(&second).unwrap();
+        assert_eq!(serialized["updatedSource"], second.updated_source);
+        assert!(serialized["snapshot"]["bindings"].is_array());
+    }
+
+    #[test]
+    fn ir_lens_rejects_topology_mutations_for_every_supported_family() {
+        for source in IR_LENS_SOURCES {
+            let mut edited = parse(source).ir;
+            let original_edge = edited.edges[0].clone();
+            edited.edges[0].to = edited.edges[0].from;
+            assert_ne!(edited.edges[0], original_edge);
+            assert!(
+                apply_ir_lens_edit(source, &edited).is_err(),
+                "{} must not silently discard a topology edit",
+                edited.diagram_type.as_str()
+            );
+            assert_eq!(parse(source).ir.edges[0], original_edge);
+        }
+    }
+
+    #[test]
+    fn ir_lens_rejects_syntax_injection_and_stale_or_unsupported_inputs() {
+        let source = IR_LENS_SOURCES[1];
+        let mut edited = parse(source).ir;
+        let label = edited.edges[0].label.unwrap();
+        edited.labels[label.0].text = "request\n  B->>A: injected".to_string();
+        assert!(apply_ir_lens_edit(source, &edited).is_err());
+
+        let stale_ir = parse(source).ir;
+        let changed_source = source.replace("A->>B", "B->>A");
+        assert!(apply_ir_lens_edit(&changed_source, &stale_ir).is_err());
+        assert!(apply_ir_lens_edit(IR_LENS_SOURCES[0], &stale_ir).is_err());
+
+        let pie_source = "pie\n  \"Share\": 10\n";
+        let error = apply_ir_lens_edit(pie_source, &parse(pie_source).ir).unwrap_err();
+        assert!(error.contains("unsupported for pie"), "{error}");
+        assert!(error.contains("supported families"), "{error}");
     }
 
     #[test]
@@ -3838,6 +4210,32 @@ mod tests {
         let runtime = RuntimeConfig::default();
         assert_eq!(runtime.canvas.font_family, runtime.svg.font_family);
         assert_eq!(runtime.canvas.font_size, f64::from(runtime.svg.font_size));
+        assert_eq!(
+            runtime.canvas.line_height,
+            f64::from(runtime.svg.line_height)
+        );
+        assert_eq!(
+            runtime
+                .canvas
+                .font_metrics()
+                .estimate_dimensions("First\nSecond"),
+            runtime
+                .svg
+                .font_metrics()
+                .estimate_dimensions("First\nSecond")
+        );
+    }
+
+    #[test]
+    fn runtime_default_canvas_colors_match_an_explicit_default_theme() {
+        let runtime = RuntimeConfig::default();
+        let explicit = apply_canvas_theme_preset(runtime.canvas.clone(), ThemePreset::Default);
+        assert_eq!(runtime.canvas.node_fill, explicit.node_fill);
+        assert_eq!(runtime.canvas.node_stroke, explicit.node_stroke);
+        assert_eq!(runtime.canvas.edge_stroke, explicit.edge_stroke);
+        assert_eq!(runtime.canvas.cluster_fill, explicit.cluster_fill);
+        assert_eq!(runtime.canvas.cluster_stroke, explicit.cluster_stroke);
+        assert_eq!(runtime.canvas.label_color, explicit.label_color);
     }
 
     #[test]
@@ -3846,11 +4244,13 @@ mod tests {
             padding: 12.0,
             node_fill: "#123456".to_string(),
             edge_stroke_width: 3.0,
+            line_height: 1.0,
             ..CanvasRenderConfig::default()
         };
         let svg = SvgRenderConfig {
             font_family: "Test Font".to_string(),
             font_size: 22.0,
+            line_height: 2.0,
             ..SvgRenderConfig::default()
         };
 
@@ -3858,6 +4258,7 @@ mod tests {
 
         assert_eq!(aligned.font_family, "Test Font");
         assert_eq!(aligned.font_size, 22.0);
+        assert_eq!(aligned.line_height, 2.0);
         assert_eq!(aligned.padding, 12.0);
         assert_eq!(aligned.node_fill, "#123456");
         assert_eq!(aligned.edge_stroke_width, 3.0);
@@ -3890,6 +4291,169 @@ mod tests {
         let budget_broker = fm_core::MermaidBudgetLedger::new(&pressure.into_report());
         apply_budget_svg_simplifications(&mut config, &budget_broker);
         assert!(!config.shadows);
+    }
+
+    const ISSUE14_SOURCE: &str =
+        include_str!("../../fm-render-svg/tests/fixtures/issue14_omnichannel.mmd");
+
+    fn assert_issue14_visible_labels(svg: &str) {
+        use std::collections::BTreeMap;
+
+        let parsed = parse(ISSUE14_SOURCE);
+        assert_eq!(parsed.ir.nodes.len(), 24);
+        assert_eq!(parsed.ir.edges.len(), 43);
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        let mut expected = BTreeMap::<String, usize>::new();
+        for id in parsed
+            .ir
+            .nodes
+            .iter()
+            .filter_map(|node| node.label)
+            .chain(parsed.ir.edges.iter().filter_map(|edge| edge.label))
+            .chain(
+                parsed
+                    .ir
+                    .clusters
+                    .iter()
+                    .filter_map(|cluster| cluster.title),
+            )
+        {
+            let text = fm_render_svg::escape_xml_text(&parsed.ir.labels[id.0].text);
+            let label = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            *expected.entry(label).or_default() += 1;
+        }
+        assert_eq!(expected.values().sum::<usize>(), 50);
+
+        let mut drawn = BTreeMap::<String, usize>::new();
+        // Only visible text counts: the reported broken artifact already contains complete
+        // labels in accessibility metadata, which must not satisfy a rendering regression test.
+        for element in svg.split("<text ").skip(1) {
+            let body = element.split_once('>').expect("text opening tag").1;
+            let body = body.split_once("</text>").expect("text closing tag").0;
+            let text = if body.contains("<tspan ") {
+                body.split("<tspan ")
+                    .skip(1)
+                    .map(|span| {
+                        span.split_once('>')
+                            .expect("tspan opening tag")
+                            .1
+                            .split_once("</tspan>")
+                            .expect("tspan closing tag")
+                            .0
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                body.to_string()
+            };
+            let label = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            *drawn.entry(label).or_default() += 1;
+        }
+        assert_eq!(drawn, expected);
+        assert!(svg.contains("data-label-detail=\"full\""));
+        assert_eq!(svg.matches("class=\"edge-label\"").count(), 24);
+        assert_eq!(svg.matches("class=\"fm-cluster-label\"").count(), 2);
+    }
+
+    #[test]
+    fn issue14_browser_render_paths_keep_all_text_under_resource_pressure() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        for pressured in [false, true] {
+            let mut runtime = RuntimeConfig::default();
+            if pressured {
+                runtime.svg.detail_tier = fm_core::MermaidTier::Compact;
+                runtime.pressure = MermaidWasmPressureSignals {
+                    frame_budget_ms: Some(16),
+                    frame_time_ms: Some(64),
+                    worker_saturation_permille: Some(1000),
+                    ..Default::default()
+                };
+            }
+            write_runtime_config(runtime);
+
+            let direct = render_svg_js(ISSUE14_SOURCE, None).expect("browser renderSvg");
+            assert_issue14_visible_labels(&direct);
+            let output = render(ISSUE14_SOURCE);
+            assert_issue14_visible_labels(&output.svg);
+            let deck = render_deck(ISSUE14_SOURCE, None).expect("browser renderDeck");
+            assert_issue14_visible_labels(&deck.svg);
+            match render_worker_request(&WorkerRenderRequest {
+                request_id: 14,
+                input: ISSUE14_SOURCE.to_string(),
+                config_json: None,
+            }) {
+                WorkerRenderResponse::Completed {
+                    svg,
+                    node_count,
+                    edge_count,
+                    ..
+                } => {
+                    assert_eq!(node_count, 24);
+                    assert_eq!(edge_count, 43);
+                    assert_issue14_visible_labels(&svg);
+                }
+                response => panic!("worker failed: {response:?}"),
+            }
+            if pressured {
+                assert!(direct.contains("data-detail-tier=\"compact\""));
+                assert_eq!(output.guard.pressure.tier, MermaidPressureTier::Critical);
+                assert!(!direct.contains("<filter id=\"drop-shadow\""));
+            }
+        }
+    }
+
+    #[test]
+    fn issue14_worker_font_overrides_keep_all_drawn_text() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        write_runtime_config(RuntimeConfig::default());
+        for config in [
+            r#"{"fontSize":11,"detailTier":"compact"}"#,
+            r#"{"fontSize":22,"detailTier":"compact"}"#,
+            r#"{"fontSize":30,"detailTier":"compact"}"#,
+            r#"{"fontSize":11,"svg":{"fontSize":22},"detailTier":"compact"}"#,
+        ] {
+            let response = render_worker_request(&WorkerRenderRequest {
+                request_id: 14,
+                input: ISSUE14_SOURCE.to_string(),
+                config_json: Some(config.to_string()),
+            });
+            let WorkerRenderResponse::Completed { svg, .. } = response else {
+                panic!("font override failed: {config}: {response:?}");
+            };
+            assert_issue14_visible_labels(&svg);
+        }
+    }
+
+    #[test]
+    fn issue14_abbreviated_browser_overview_requires_explicit_opt_out() {
+        let _serial = config_guard();
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 14,
+            input: ISSUE14_SOURCE.to_string(),
+            config_json: Some(r#"{"detailTier":"compact","preserveLabels":false}"#.to_string()),
+        });
+        let WorkerRenderResponse::Completed { svg, .. } = response else {
+            panic!("explicit overview failed: {response:?}");
+        };
+        assert!(svg.contains("data-detail-tier=\"compact\""));
+        assert!(!svg.contains("data-label-detail=\"full\""));
+        assert_eq!(svg.matches("<text ").count(), 24);
+        assert_eq!(svg.matches("class=\"edge-label\"").count(), 0);
+        assert_eq!(svg.matches("class=\"fm-cluster-label\"").count(), 0);
     }
 
     /// Serialises every test that reads or writes `RUNTIME_CONFIG` (bd-vca5l).
@@ -4036,7 +4600,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     #[test]
     fn capability_matrix_js_returns_matrix_payload() {
-        let value = capability_matrix_js().expect("capability matrix should serialize");
+        let value = super::capability_matrix_js().expect("capability matrix should serialize");
         let json = value
             .as_string()
             .expect("wasm tests should receive stringifiable payload");
@@ -4583,6 +5147,247 @@ mod tests {
         );
     }
 
+    fn reorderable_flowchart(direction: &str, first: &str, second: &str) -> String {
+        format!(
+            concat!(
+                "%%{{init: {{'theme':'forest'}}}}%%\r\n",
+                "flowchart {direction}\r\n",
+                "  A[Root]\r\n",
+                "  %% keep this comment at its source position\r\n",
+                "  {first}\r\n",
+                "\t{second}  \t\r\n",
+                "  A -->|accept| B\r\n",
+                "  A -->|reject| C\r\n",
+                "  classDef hot fill:#ff8800\r\n",
+                "  class B hot\r\n",
+                "  style C stroke:#224466\r\n"
+            ),
+            direction = direction,
+            first = first,
+            second = second,
+        )
+    }
+
+    fn lens_sibling_declaration(node_id: &str) -> &'static str {
+        match node_id {
+            "B" => "B[\"Branch B\"]",
+            "C" => "C[Branch C]",
+            _ => panic!("unexpected sibling {node_id}"),
+        }
+    }
+
+    fn lens_sibling_order(lens: &DiagramLens) -> [&'static str; 2] {
+        let nodes = &lens.positioned_graph().nodes;
+        let b = nodes.iter().find(|node| node.node_id == "B").unwrap();
+        let c = nodes.iter().find(|node| node.node_id == "C").unwrap();
+        assert_eq!(b.rank, c.rank, "fixture nodes must share a rank");
+        let (b_position, c_position) = if matches!(
+            lens.ir().direction,
+            fm_core::GraphDirection::LR | fm_core::GraphDirection::RL
+        ) {
+            (b.center.y, c.center.y)
+        } else {
+            (b.center.x, c.center.x)
+        };
+        assert_ne!(b_position, c_position, "fixture siblings must not overlap");
+        if b_position < c_position {
+            ["B", "C"]
+        } else {
+            ["C", "B"]
+        }
+    }
+
+    fn reorderable_diagram_lens(direction: &str) -> (DiagramLens, [&'static str; 2]) {
+        let initial = DiagramLens::from_source(
+            &reorderable_flowchart(direction, "B[\"Branch B\"]", "C[Branch C]"),
+            LayoutConfig::default(),
+        )
+        .unwrap();
+        // Auto layout may choose either visual order, independently of declaration order. Start
+        // with declarations matching that order so the explicit reverse is always a real edit.
+        let original_order = lens_sibling_order(&initial);
+        let source = reorderable_flowchart(
+            direction,
+            lens_sibling_declaration(original_order[0]),
+            lens_sibling_declaration(original_order[1]),
+        );
+        let lens = DiagramLens::from_source(&source, LayoutConfig::default()).unwrap();
+        assert_eq!(
+            lens_sibling_order(&lens),
+            original_order,
+            "the fixture must have a stable starting visual order"
+        );
+        (lens, [original_order[1], original_order[0]])
+    }
+
+    fn order_lens_siblings(
+        lens: &DiagramLens,
+        requested_order: [&str; 2],
+    ) -> fm_layout::layout_lens::LayoutLensSnapshot {
+        assert_ne!(lens_sibling_order(lens), requested_order);
+        let mut edited = lens.positioned_graph().clone();
+        for (index, node_id) in requested_order.iter().enumerate() {
+            let node = edited
+                .nodes
+                .iter_mut()
+                .find(|node| node.node_id == *node_id)
+                .unwrap();
+            let position = (index as f32) * 100.0;
+            if matches!(
+                lens.ir().direction,
+                fm_core::GraphDirection::LR | fm_core::GraphDirection::RL
+            ) {
+                node.center.y = position;
+            } else {
+                node.center.x = position;
+            }
+        }
+        edited
+    }
+
+    fn lens_edge_meanings(ir: &fm_core::MermaidDiagramIr) -> Vec<(String, String, String)> {
+        ir.edges
+            .iter()
+            .map(|edge| {
+                let from = ir.resolve_endpoint_node(edge.from).unwrap();
+                let to = ir.resolve_endpoint_node(edge.to).unwrap();
+                let label = edge
+                    .label
+                    .map_or("", |label| ir.labels[label.0].text.as_str());
+                (
+                    ir.nodes[from.0].id.clone(),
+                    ir.nodes[to.0].id.clone(),
+                    label.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn diagram_lens_reemits_standalone_sibling_declarations_in_every_direction() {
+        for direction in ["TB", "TD", "BT", "LR", "RL"] {
+            let (lens, requested_order) = reorderable_diagram_lens(direction);
+            let source = lens.source().to_string();
+            assert_eq!(
+                lens.put_layout(lens.positioned_graph()).unwrap().source(),
+                source
+            );
+            let dragged = order_lens_siblings(&lens, requested_order);
+
+            let updated = lens
+                .put_layout(&dragged)
+                .expect("standalone declarations can move");
+            assert_ne!(
+                updated.source(),
+                source,
+                "the requested permutation must change the source"
+            );
+            assert_eq!(
+                updated.source(),
+                reorderable_flowchart(
+                    direction,
+                    lens_sibling_declaration(requested_order[0]),
+                    lens_sibling_declaration(requested_order[1]),
+                ),
+                "only the declaration tokens should move ({direction})"
+            );
+            assert_eq!(
+                updated
+                    .ir()
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["A", requested_order[0], requested_order[1]]
+            );
+            assert_eq!(
+                lens_edge_meanings(lens.ir()),
+                lens_edge_meanings(updated.ir())
+            );
+            for original in &lens.ir().nodes {
+                let current = updated
+                    .ir()
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == original.id)
+                    .unwrap();
+                assert_eq!(current.shape, original.shape);
+                assert_eq!(current.classes, original.classes);
+                assert_eq!(current.inline_style, original.inline_style);
+                assert_eq!(
+                    current.label.map(|id| &updated.ir().labels[id.0].text),
+                    original.label.map(|id| &lens.ir().labels[id.0].text)
+                );
+            }
+            let fresh =
+                DiagramLens::from_source(updated.source(), LayoutConfig::default()).unwrap();
+            assert_eq!(updated.positioned_graph(), fresh.positioned_graph());
+            assert_eq!(
+                updated
+                    .put_layout(updated.positioned_graph())
+                    .unwrap()
+                    .source(),
+                updated.source()
+            );
+            assert_eq!(
+                lens.source(),
+                source,
+                "putback must leave the original snapshot immutable"
+            );
+        }
+    }
+
+    #[test]
+    fn diagram_lens_label_edit_after_reordering_uses_the_new_source_spans() {
+        let (lens, requested_order) = reorderable_diagram_lens("TB");
+        let reordered = lens
+            .put_layout(&order_lens_siblings(&lens, requested_order))
+            .unwrap();
+        assert_ne!(reordered.source(), lens.source());
+        let mut edited = reordered.ir().clone();
+        let label = edited
+            .nodes
+            .iter()
+            .find(|node| node.id == "B")
+            .unwrap()
+            .label
+            .unwrap();
+        edited.labels[label.0].text = "A much longer renamed branch".to_string();
+
+        let updated = reordered.put_ir(&edited).unwrap();
+        let declarations = requested_order.map(|node_id| match node_id {
+            "B" => "B[\"A much longer renamed branch\"]",
+            _ => lens_sibling_declaration(node_id),
+        });
+        assert_eq!(
+            updated.source(),
+            reorderable_flowchart("TB", declarations[0], declarations[1])
+        );
+        assert_eq!(
+            lens_edge_meanings(lens.ir()),
+            lens_edge_meanings(updated.ir())
+        );
+        assert_eq!(
+            updated.put_ir(updated.ir()).unwrap().source(),
+            updated.source()
+        );
+    }
+
+    #[test]
+    fn diagram_lens_rejects_cross_rank_drags_without_mutating_source() {
+        let source = reorderable_flowchart("LR", "B[\"Branch B\"]", "C[Branch C]");
+        let lens = DiagramLens::from_source(&source, LayoutConfig::default()).unwrap();
+        let mut dragged = lens.positioned_graph().clone();
+        dragged.nodes[0].center.x += 100.0;
+        assert!(matches!(
+            lens.put_layout(&dragged),
+            Err(DiagramLensError::Layout(
+                fm_layout::layout_lens::LayoutLensError::RankAxisMoved(_)
+            ))
+        ));
+        assert_eq!(lens.source(), source);
+    }
+
     #[test]
     fn diagram_lens_refuses_a_drag_that_the_parse_lens_cannot_reemit() {
         let lens = DiagramLens::from_source(
@@ -4837,7 +5642,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 895_977_376_170_986_110;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xa5af_f127_da97_efc8;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4865,22 +5670,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0xacae_5e20_6c6f_15e9,
+                0x9976_42a0_b5da_e927,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xc209_f15c_30b5_7f38,
+                0x094c_237f_ef93_2a5f,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x7ae5_446b_c48f_e3d0,
+                0x68a0_4950_3803_05e4,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x2960_0634_d767_b5c7,
+                0xd983_b73c_ca10_d621,
             ),
         ];
 

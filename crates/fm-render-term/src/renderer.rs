@@ -37,6 +37,130 @@ pub struct TermRenderResult {
     /// cannot see, so a caller can warn instead of presenting a clean, plausible, incomplete
     /// diagram. Zero whenever the diagram fits.
     pub occluded_node_count: usize,
+    /// Layout-quality metrics shown by the optional debug overlay.
+    ///
+    /// `None` is the default so existing callers and byte snapshots do not pay for diagnostics.
+    pub debug_metrics: Option<TermDebugMetrics>,
+}
+
+/// Deterministic layout-quality metrics for the terminal debug panel.
+///
+/// `symmetry_permille` measures horizontal center-of-mass balance: 1000 is perfectly balanced
+/// around the layout center and 0 is maximally one-sided. It is intentionally dimensionless so the
+/// value is stable across terminal sizes and render modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TermDebugMetrics {
+    pub crossings: usize,
+    pub bends: usize,
+    pub symmetry_permille: u16,
+    pub nodes: usize,
+    pub edges: usize,
+    pub ranks: usize,
+    pub cycles: usize,
+}
+
+impl TermDebugMetrics {
+    fn from_layout(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Self {
+        let bends = layout
+            .edges
+            .iter()
+            .filter(|edge| !edge.bundled && !is_invisible_edge(ir, edge))
+            .map(|edge| edge.points.len().saturating_sub(2))
+            .sum();
+        let ranks = layout
+            .nodes
+            .iter()
+            .map(|node| node.rank + 1)
+            .max()
+            .unwrap_or(0);
+        Self {
+            crossings: layout.stats.crossing_count,
+            bends,
+            symmetry_permille: horizontal_symmetry_permille(layout),
+            nodes: layout.nodes.len(),
+            edges: layout.edges.len(),
+            ranks,
+            cycles: layout.stats.cycle_count,
+        }
+    }
+}
+
+fn horizontal_symmetry_permille(layout: &DiagramLayout) -> u16 {
+    let center = f64::from(layout.bounds.x) + f64::from(layout.bounds.width) / 2.0;
+    if !center.is_finite() || !layout.bounds.width.is_finite() || layout.bounds.width <= 0.0 {
+        return 1000;
+    }
+
+    let mut left = 0.0_f64;
+    let mut right = 0.0_f64;
+    for node in &layout.nodes {
+        let node_center = f64::from(node.bounds.x) + f64::from(node.bounds.width) / 2.0;
+        if !node_center.is_finite() {
+            continue;
+        }
+        let offset = node_center - center;
+        if offset < 0.0 {
+            left += -offset;
+        } else {
+            right += offset;
+        }
+    }
+    let total = left + right;
+    if !total.is_finite() || total <= f64::EPSILON {
+        return 1000;
+    }
+    let score = (1.0 - (left - right).abs() / total).clamp(0.0, 1.0);
+    (score * 1000.0).round() as u16
+}
+
+fn overlay_debug_panel(
+    output: &mut String,
+    width: usize,
+    height: usize,
+    metrics: TermDebugMetrics,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut lines: Vec<Vec<char>> = output
+        .split('\n')
+        .map(|line| {
+            let mut chars: Vec<char> = line.chars().take(width).collect();
+            chars.resize(width, ' ');
+            chars
+        })
+        .collect();
+    lines.resize_with(height, || vec![' '; width]);
+    lines.truncate(height);
+
+    let labels = [
+        "[layout debug]".to_string(),
+        format!(
+            "crossings={} bends={} symmetry={}/1000",
+            metrics.crossings, metrics.bends, metrics.symmetry_permille
+        ),
+        format!(
+            "nodes={} edges={} ranks={} cycles={}",
+            metrics.nodes, metrics.edges, metrics.ranks, metrics.cycles
+        ),
+    ];
+    for (row, label) in labels.iter().take(height).enumerate() {
+        for (column, ch) in label.chars().take(width).enumerate() {
+            lines[row][column] = ch;
+        }
+    }
+
+    output.clear();
+    for (row, line) in lines.iter().enumerate() {
+        if row > 0 {
+            output.push('\n');
+        }
+        let end = line
+            .iter()
+            .rposition(|ch| *ch != ' ')
+            .map_or(0, |index| index + 1);
+        output.extend(line[..end].iter().copied());
+    }
 }
 
 /// Count nodes whose box is completely covered by nodes drawn after them.
@@ -109,9 +233,18 @@ fn compact_label_width(line: &str) -> usize {
     line.chars().count()
 }
 
+/// A `~~~` link shapes the layout and is never drawn, nor is its label.
+fn is_invisible_edge(ir: &MermaidDiagramIr, edge_path: &fm_layout::LayoutEdgePath) -> bool {
+    ir.edges
+        .get(edge_path.edge_index)
+        .is_some_and(|edge| edge.arrow == ArrowType::Invisible)
+}
+
 const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     match arrow {
-        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => (false, false),
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
+            (false, false)
+        }
         ArrowType::DoubleArrow
         | ArrowType::DoubleThickArrow
         | ArrowType::DoubleDottedArrow
@@ -275,9 +408,9 @@ impl TermRenderer {
         let (cell_width, cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
-        if matches!(self.config.fidelity, fm_core::MermaidFidelity::Outline) {
-            return self.render_outline_mode(ir, layout, cell_width, cell_height, scale_x, scale_y);
-        }
+        // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
+        // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The id-marker
+        // skeleton in `render_outline_mode` remains available for direct callers.
 
         // Use cell-based rendering for Compact tier or CellOnly mode.
         if matches!(self.config.tier, MermaidTier::Compact)
@@ -369,6 +502,10 @@ impl TermRenderer {
             (0, 0)
         };
 
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
         TermRenderResult {
             output,
             width: cell_width
@@ -387,6 +524,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            debug_metrics,
         }
     }
 
@@ -412,6 +550,9 @@ impl TermRenderer {
 
         // Render edges.
         for edge_path in &layout.edges {
+            if is_invisible_edge(ir, edge_path) {
+                continue;
+            }
             self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
         }
 
@@ -432,11 +573,30 @@ impl TermRenderer {
             && let Some(pie_meta) = &ir.pie_meta
             && !pie_meta.slices.is_empty()
         {
-            self::render_pie_cell(&mut buffer, pie_meta, cell_width, cell_height);
+            self::render_pie_cell(
+                &mut buffer,
+                pie_meta,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
-            render_gantt_cell(&mut buffer, ir, layout, cell_width, cell_height);
+            render_gantt_cell(
+                &mut buffer,
+                ir,
+                layout,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
-            render_xychart_cell(&mut buffer, ir, cell_width, cell_height);
+            render_xychart_cell(
+                &mut buffer,
+                ir,
+                cell_width,
+                cell_height,
+                self.config.show_labels,
+            );
         } else if ir.diagram_type == fm_core::DiagramType::QuadrantChart
             && ir.quadrant_meta.is_some()
         {
@@ -444,10 +604,10 @@ impl TermRenderer {
                 &mut buffer,
                 ir,
                 layout,
-                cell_width,
-                cell_height,
+                (cell_width, cell_height),
                 scale_x,
                 scale_y,
+                self.config.show_labels,
             );
         } else if ir.diagram_type == fm_core::DiagramType::Treemap {
             if let Some(meta) = ir.treemap_meta.as_ref() {
@@ -601,24 +761,29 @@ impl TermRenderer {
             }
         }
 
-        self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        if self.config.show_labels {
+            self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        }
         let mut output = buffer.to_output_string();
-        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
-        let (links_rows, links_width) =
-            append_footnote_links(&mut output, ir, self.config.link_mode);
-        let (debug_rows, debug_width) = if self.config.debug_overlay {
-            append_term_debug_overlay(&mut output, layout)
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
+        }
+        let (legend_rows, legend_width) = if self.config.show_labels {
+            append_c4_legend(&mut output, ir)
         } else {
             (0, 0)
         };
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
 
         TermRenderResult {
             output,
-            width: cell_width
-                .max(legend_width)
-                .max(links_width)
-                .max(debug_width),
-            height: cell_height + legend_rows + links_rows + debug_rows,
+            width: cell_width.max(legend_width).max(links_width),
+            height: cell_height + legend_rows + links_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -630,6 +795,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            debug_metrics,
         }
     }
 
@@ -728,8 +894,11 @@ impl TermRenderer {
             let lx1 = (note.leader_end.x * pixel_scale_x) as isize + padding_x as isize;
             let ly1 = (note.leader_end.y * pixel_scale_y) as isize + padding_y as isize;
             // `draw_line` takes isize and clips internally, so negatives are safe to pass and the
-            // guard would only drop leaders that are partly on-canvas.
-            canvas.draw_line(lx0, ly0, lx1, ly1);
+            // guard would only drop leaders that are partly on-canvas. A note on the whole diagram
+            // has no leader.
+            if note.leader_start != note.leader_end {
+                canvas.draw_line(lx0, ly0, lx1, ly1);
+            }
         }
 
         // STATE CONCURRENCY-REGION DIVIDERS (bd-dgnm4). `state Big { A --> B  --  C --> D }`
@@ -961,6 +1130,9 @@ impl TermRenderer {
 
         // Render edges.
         for edge_path in &layout.edges {
+            if is_invisible_edge(ir, edge_path) {
+                continue;
+            }
             self.render_edge_canvas(
                 &mut canvas,
                 edge_path,
@@ -1013,22 +1185,25 @@ impl TermRenderer {
             scale_x,
             scale_y,
         );
-        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
-        let (links_rows, links_width) =
-            append_footnote_links(&mut output, ir, self.config.link_mode);
-        let (debug_rows, debug_width) = if self.config.debug_overlay {
-            append_term_debug_overlay(&mut output, layout)
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
+        }
+        let (legend_rows, legend_width) = if self.config.show_labels {
+            append_c4_legend(&mut output, ir)
         } else {
             (0, 0)
         };
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
 
         TermRenderResult {
             output,
-            width: cell_width
-                .max(legend_width)
-                .max(links_width)
-                .max(debug_width),
-            height: cell_height + legend_rows + links_rows + debug_rows,
+            width: cell_width.max(legend_width).max(links_width),
+            height: cell_height + legend_rows + links_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -1040,6 +1215,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            debug_metrics,
         }
     }
 
@@ -1626,6 +1802,8 @@ impl TermRenderer {
                     buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
+            // No border: a text block is drawn as its label alone on every surface.
+            NodeShape::TextBlock => {}
             _ => {
                 // Standard rectangle (Rect and any unhandled shapes).
                 buffer.set(x, y, glyphs.top_left);
@@ -1916,6 +2094,10 @@ impl TermRenderer {
                 canvas.draw_line(right, bottom, left, bottom);
                 canvas.draw_line(left, bottom, left, top);
             }
+            // A text block is its label alone — no outline — exactly as fm-render-svg draws it
+            // (an empty group) and the canvas backend skips it. Outlining it here boxed every
+            // flowchart `text` node, every fishbone sub-cause and every tree-view entry.
+            NodeShape::TextBlock => {}
             _ => {
                 canvas.draw_rect(x, y, w.max(1), h.max(1));
             }
@@ -2605,9 +2787,7 @@ impl TermRenderer {
             // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty()
-                    || !meta.methods.is_empty()
-                    || meta.stereotype.is_some())
+                && meta.has_compartments()
             {
                 self.overlay_class_compartments(&mut lines, x, y, w, h, ir, node, meta, cell_width);
                 continue;
@@ -2769,7 +2949,7 @@ impl TermRenderer {
         // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
         let mut edge_label_rects = Vec::new();
         for edge_path in &layout.edges {
-            if edge_path.points.len() < 2 {
+            if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
             }
             if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
@@ -3156,6 +3336,9 @@ impl TermRenderer {
     }
 
     fn truncate_label(&self, text: &str) -> String {
+        if !self.config.show_labels {
+            return String::new();
+        }
         let max_chars = self.config.max_label_chars.max(1);
         let max_lines = self.config.max_label_lines.max(1);
         let bytes = text.as_bytes();
@@ -3275,7 +3458,9 @@ impl TermRenderer {
         fallback_id: &str,
     ) -> Option<String> {
         let node = ir_node?;
-        if is_block_beta_space_node(node) {
+        // A pure mark (state `[*]`, a fork bar, a Wardley dot) carries a generated id that the
+        // shared rule says is never displayed; falling back to it printed `__state_start`.
+        if is_block_beta_space_node(node) || ir.is_textless_ornament_node(node) {
             return None;
         }
 
@@ -3772,7 +3957,8 @@ impl TermRenderer {
             .and_then(|lid| ir.labels.get(lid.0))
             .map(|l| l.text.as_str())
             .unwrap_or(&node.id);
-        let name_text = self.truncate_label(class_name);
+        let display_name = meta.display_header(class_name);
+        let name_text = self.truncate_label(&display_name);
         let name_chars = name_text.chars().count();
         let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
         write_text(grid, row, name_x, &name_text, inner_w);
@@ -4225,6 +4411,7 @@ fn render_pie_cell(
     pie_meta: &fm_core::IrPieMeta,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     use std::f32::consts::PI;
 
@@ -4236,12 +4423,16 @@ fn render_pie_cell(
         .max(f32::EPSILON);
 
     // Reserve space for legend on the right.
-    let legend_width = slices
-        .iter()
-        .map(|s| s.label.len() + 8) // " X Label  "
-        .max()
-        .unwrap_or(10)
-        .min(cell_width / 3);
+    let legend_width = if show_labels {
+        slices
+            .iter()
+            .map(|s| s.label.len() + 8) // " X Label  "
+            .max()
+            .unwrap_or(10)
+            .min(cell_width / 3)
+    } else {
+        0
+    };
     let chart_width = cell_width.saturating_sub(legend_width + 2);
     let chart_height = cell_height.saturating_sub(2);
 
@@ -4250,7 +4441,7 @@ fn render_pie_cell(
     }
 
     // Title
-    if let Some(title) = &pie_meta.title {
+    if show_labels && let Some(title) = &pie_meta.title {
         let tx = chart_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4292,17 +4483,19 @@ fn render_pie_cell(
 
     // Render legend on the right side.
     let legend_x = chart_width + 2;
-    for (i, slice) in slices.iter().enumerate() {
-        let row = i + 2;
-        if row >= cell_height {
-            break;
+    if show_labels {
+        for (i, slice) in slices.iter().enumerate() {
+            let row = i + 2;
+            if row >= cell_height {
+                break;
+            }
+            let ch = slice_chars[i % slice_chars.len()];
+            let pct = (slice.value.max(0.0) / total) * 100.0;
+            let entry = format!("{ch} {:.0}% {}", pct, slice.label);
+            // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
+            let truncated: String = entry.chars().take(legend_width).collect();
+            buffer.set_string(legend_x, row, &truncated);
         }
-        let ch = slice_chars[i % slice_chars.len()];
-        let pct = (slice.value.max(0.0) / total) * 100.0;
-        let entry = format!("{ch} {:.0}% {}", pct, slice.label);
-        // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
-        let truncated: String = entry.chars().take(legend_width).collect();
-        buffer.set_string(legend_x, row, &truncated);
     }
 }
 
@@ -4313,19 +4506,24 @@ fn render_gantt_cell(
     layout: &DiagramLayout,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     let Some(gantt_meta) = &ir.gantt_meta else {
         return;
     };
 
-    let label_width = gantt_meta
-        .sections
-        .iter()
-        .map(|s| s.name.len())
-        .max()
-        .unwrap_or(0)
-        .min(cell_width / 3)
-        .max(8);
+    let label_width = if show_labels {
+        gantt_meta
+            .sections
+            .iter()
+            .map(|s| s.name.len())
+            .max()
+            .unwrap_or(0)
+            .min(cell_width / 3)
+            .max(8)
+    } else {
+        0
+    };
     let bar_area_width = cell_width.saturating_sub(label_width + 3);
     if bar_area_width < 4 {
         return;
@@ -4358,7 +4556,7 @@ fn render_gantt_cell(
         });
 
     // Title
-    if let Some(title) = &gantt_meta.title {
+    if show_labels && let Some(title) = &gantt_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4371,8 +4569,10 @@ fn render_gantt_cell(
             break;
         }
         // Section header (truncated by char count for UTF-8 safety).
-        let header: String = section.name.chars().take(label_width).collect();
-        buffer.set_string(0, row, &header);
+        if show_labels {
+            let header: String = section.name.chars().take(label_width).collect();
+            buffer.set_string(0, row, &header);
+        }
         // Separator line
         for col in label_width + 1..cell_width {
             buffer.set(col, row, '\u{2500}'); // ─
@@ -4397,8 +4597,10 @@ fn render_gantt_cell(
                         .or(Some(node.id.as_str()))
                 })
                 .unwrap_or("task");
-            let task_label: String = task_name.chars().take(label_width).collect();
-            buffer.set_string(0, row, &task_label);
+            if show_labels {
+                let task_label: String = task_name.chars().take(label_width).collect();
+                buffer.set_string(0, row, &task_label);
+            }
 
             let bar_origin = label_width + 2;
             let node_box = match &layout_nodes_by_index {
@@ -4444,12 +4646,13 @@ fn render_xychart_cell(
     ir: &MermaidDiagramIr,
     cell_width: usize,
     cell_height: usize,
+    show_labels: bool,
 ) {
     let Some(xy_meta) = &ir.xy_chart_meta else {
         return;
     };
 
-    let label_margin = 8_usize;
+    let label_margin = if show_labels { 8_usize } else { 0 };
     let chart_left = label_margin + 1;
     let chart_right = cell_width.saturating_sub(2);
     let chart_top = 2_usize;
@@ -4462,9 +4665,21 @@ fn render_xychart_cell(
     }
 
     // Title
-    if let Some(title) = &xy_meta.title {
+    if show_labels && let Some(title) = &xy_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
+    }
+
+    if xy_meta.horizontal {
+        render_xychart_horizontal_cell(
+            buffer,
+            xy_meta,
+            cell_width,
+            chart_top,
+            chart_bottom,
+            show_labels,
+        );
+        return;
     }
 
     // Y axis (vertical line).
@@ -4480,7 +4695,7 @@ fn render_xychart_cell(
 
     // Category labels along x axis.
     let categories = &xy_meta.x_axis.categories;
-    if !categories.is_empty() {
+    if show_labels && !categories.is_empty() {
         let cat_spacing = chart_w / categories.len().max(1);
         for (i, cat) in categories.iter().enumerate() {
             let x = chart_left + 1 + i * cat_spacing;
@@ -4515,15 +4730,91 @@ fn render_xychart_cell(
     }
 }
 
+/// A HORIZONTAL xychart in cells: one row band per category, its label left of the axis and each
+/// series' bar growing rightward from it, as `xychart-beta horizontal` draws upstream.
+fn render_xychart_horizontal_cell(
+    buffer: &mut CellBuffer,
+    xy_meta: &fm_core::IrXyChartMeta,
+    cell_width: usize,
+    chart_top: usize,
+    chart_bottom: usize,
+    show_labels: bool,
+) {
+    let categories = &xy_meta.x_axis.categories;
+    let rows = xy_meta
+        .series
+        .iter()
+        .map(|series| series.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(categories.len())
+        .max(1);
+    let label_width = if show_labels {
+        categories
+            .iter()
+            .map(|category| category.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(1, cell_width / 3)
+    } else {
+        0
+    };
+    let axis_x = label_width + 1;
+    let chart_right = cell_width.saturating_sub(2);
+    let chart_w = chart_right.saturating_sub(axis_x + 1);
+    if chart_w < 2 {
+        return;
+    }
+    for row in chart_top..=chart_bottom {
+        buffer.set(axis_x, row, '\u{2502}'); // │
+    }
+
+    let max_val = xy_meta
+        .series
+        .iter()
+        .flat_map(|series| series.values.iter().copied())
+        .fold(0.0_f32, f32::max)
+        .max(f32::EPSILON);
+    let series_count = xy_meta.series.len().max(1);
+    let band = (chart_bottom.saturating_sub(chart_top) + 1) / rows;
+    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
+    for index in 0..rows {
+        let band_top = chart_top + index * band.max(1);
+        if band_top > chart_bottom {
+            break;
+        }
+        if show_labels && let Some(category) = categories.get(index) {
+            let label: String = category.chars().take(label_width).collect();
+            let x = axis_x.saturating_sub(label.chars().count() + 1);
+            buffer.set_string(x, band_top, &label);
+        }
+        for (series_idx, series) in xy_meta.series.iter().enumerate() {
+            let Some(&value) = series.values.get(index) else {
+                continue;
+            };
+            let row = band_top + series_idx.min(band.saturating_sub(1).max(series_count - 1));
+            if row > chart_bottom {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let length = ((value.max(0.0) / max_val) * chart_w as f32) as usize;
+            let bar_ch = bar_chars[series_idx % bar_chars.len()];
+            for col in 0..length.min(chart_w) {
+                buffer.set(axis_x + 1 + col, row, bar_ch);
+            }
+        }
+    }
+}
+
 /// Render a quadrant chart with ASCII axes, quadrant labels, and data points.
 fn render_quadrant_cell(
     buffer: &mut CellBuffer,
     ir: &MermaidDiagramIr,
     layout: &fm_layout::DiagramLayout,
-    cell_width: usize,
-    cell_height: usize,
+    (cell_width, cell_height): (usize, usize),
     scale_x: f32,
     scale_y: f32,
+    show_labels: bool,
 ) {
     let Some(quad_meta) = &ir.quadrant_meta else {
         return;
@@ -4542,7 +4833,7 @@ fn render_quadrant_cell(
     let mid_y = margin_top + chart_h / 2;
 
     // Title.
-    if let Some(title) = &quad_meta.title {
+    if show_labels && let Some(title) = &quad_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
         buffer.set_string(tx, 0, title);
     }
@@ -4562,43 +4853,44 @@ fn render_quadrant_cell(
 
     // Quadrant labels in the four corners.
     let labels = &quad_meta.quadrant_labels;
-    if let Some(q1) = labels.first() {
-        // Q1: top-right
-        let x = mid_x + 2;
-        let y = margin_top + 1;
-        let label: String = q1.chars().take(chart_w / 2 - 3).collect();
-        buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
-    }
-    if let Some(q2) = labels.get(1) {
-        // Q2: top-left
-        let label: String = q2.chars().take(chart_w / 2 - 3).collect();
-        let x = mid_x.saturating_sub(2 + label.len());
-        buffer.set_string(x, margin_top + 1, &label);
-    }
-    if let Some(q3) = labels.get(2) {
-        // Q3: bottom-left
-        let label: String = q3.chars().take(chart_w / 2 - 3).collect();
-        let x = mid_x.saturating_sub(2 + label.len());
-        buffer.set_string(x, mid_y + 2, &label);
-    }
-    if let Some(q4) = labels.get(3) {
-        // Q4: bottom-right
-        let x = mid_x + 2;
-        let label: String = q4.chars().take(chart_w / 2 - 3).collect();
-        buffer.set_string(x.min(cell_width.saturating_sub(1)), mid_y + 2, &label);
-    }
+    if show_labels {
+        if let Some(q1) = labels.first() {
+            // Q1: top-right
+            let x = mid_x + 2;
+            let y = margin_top + 1;
+            let label: String = q1.chars().take(chart_w / 2 - 3).collect();
+            buffer.set_string(x.min(cell_width.saturating_sub(1)), y, &label);
+        }
+        if let Some(q2) = labels.get(1) {
+            // Q2: top-left
+            let label: String = q2.chars().take(chart_w / 2 - 3).collect();
+            let x = mid_x.saturating_sub(2 + label.len());
+            buffer.set_string(x, margin_top + 1, &label);
+        }
+        if let Some(q3) = labels.get(2) {
+            // Q3: bottom-left
+            let label: String = q3.chars().take(chart_w / 2 - 3).collect();
+            let x = mid_x.saturating_sub(2 + label.len());
+            buffer.set_string(x, mid_y + 2, &label);
+        }
+        if let Some(q4) = labels.get(3) {
+            // Q4: bottom-right
+            let x = mid_x + 2;
+            let label: String = q4.chars().take(chart_w / 2 - 3).collect();
+            buffer.set_string(x.min(cell_width.saturating_sub(1)), mid_y + 2, &label);
+        }
 
-    // X-axis labels.
-    if let Some(left) = &quad_meta.x_axis_left {
-        let label: String = left.chars().take(chart_w / 3).collect();
-        buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
+        // X-axis labels.
+        if let Some(left) = &quad_meta.x_axis_left {
+            let label: String = left.chars().take(chart_w / 3).collect();
+            buffer.set_string(margin_left, margin_top + chart_h + 1, &label);
+        }
+        if let Some(right) = &quad_meta.x_axis_right {
+            let label: String = right.chars().take(chart_w / 3).collect();
+            let x = (margin_left + chart_w).saturating_sub(label.len());
+            buffer.set_string(x, margin_top + chart_h + 1, &label);
+        }
     }
-    if let Some(right) = &quad_meta.x_axis_right {
-        let label: String = right.chars().take(chart_w / 3).collect();
-        let x = (margin_left + chart_w).saturating_sub(label.len());
-        buffer.set_string(x, margin_top + chart_h + 1, &label);
-    }
-
     // Data points: render from layout node positions.
     let point_chars: &[char] = &['\u{25cf}', '\u{25cb}', '\u{25c6}', '\u{25a0}']; // ● ○ ◆ ■
     for (i, node_box) in layout.nodes.iter().enumerate() {
@@ -4755,6 +5047,32 @@ mod tests {
             out.contains("Shape"),
             "the class name was lost when the stereotype was drawn:\n{out}"
         );
+    }
+
+    #[test]
+    fn generic_class_headers_reach_the_terminal_with_and_without_members() {
+        for members in ["", "  A : +go()\n"] {
+            let source = format!("classDiagram\n  class A~T~[\"Repository\"]\n{members}");
+            let ir = fm_parser::parse(&source).ir;
+            let meta = ir.nodes[0]
+                .class_meta
+                .as_deref()
+                .expect("generic class metadata");
+            assert_eq!(meta.generics, ["T"]);
+            assert_eq!(meta.methods.len(), usize::from(!members.is_empty()));
+
+            let out = crate::render_term(&ir);
+            assert!(
+                out.contains("Repository<T>"),
+                "the terminal lost the declared generic heading:\n{out}"
+            );
+            if !members.is_empty() {
+                assert!(
+                    out.contains("+go()"),
+                    "the class member was lost when its generic heading was drawn:\n{out}"
+                );
+            }
+        }
     }
 
     fn sample_ir() -> MermaidDiagramIr {
@@ -5719,15 +6037,24 @@ mod tests {
         });
 
         let default_res = render_diagram_with_config(&ir, &TermRenderConfig::default(), 60, 20);
-        assert!(!default_res.output.contains("[debug: nodes="));
+        assert!(!default_res.output.contains("[layout debug]"));
+        assert!(default_res.debug_metrics.is_none());
 
         let debug_cfg = TermRenderConfig {
             debug_overlay: true,
             ..TermRenderConfig::default()
         };
         let debug_res = render_diagram_with_config(&ir, &debug_cfg, 60, 20);
-        assert!(debug_res.output.contains("[debug: nodes=2 edges=0"));
-        assert_eq!(debug_res.height, default_res.height + 1);
+        assert!(debug_res.output.contains("[layout debug]"));
+        assert!(debug_res.output.contains("nodes=2"));
+        assert!(debug_res.output.contains("edges=0"));
+        assert_eq!(debug_res.height, default_res.height);
+        assert_eq!(debug_res.width, default_res.width);
+
+        let mut banner = String::new();
+        let (rows, _width) = append_term_debug_overlay(&mut banner, &layout_diagram(&ir));
+        assert_eq!(rows, 1);
+        assert!(banner.contains("[debug: nodes=2 edges=0"));
     }
 
     #[test]
@@ -5851,15 +6178,26 @@ mod tests {
 
         let outline_cfg = TermRenderConfig::outline().with_selection(&selection);
         let outline_res = render_diagram_with_config(&ir, &outline_cfg, 80, 24);
+        assert!(!outline_res.output.is_empty(), "{}", outline_res.output);
         assert!(
-            outline_res.output.contains("▶[Alpha]"),
-            "{}",
+            !outline_res.output.contains("Alpha"),
+            "outline cell renderer leaked a label: {}",
             outline_res.output
         );
         assert!(
-            outline_res.output.contains("[Beta]"),
-            "{}",
+            !outline_res.output.contains("Beta"),
+            "outline cell renderer leaked a label: {}",
             outline_res.output
         );
+
+        let resolved = ResolvedConfig::resolve(
+            &TermRenderConfig::outline().with_selection(&selection),
+            80,
+            24,
+        );
+        let skeleton =
+            TermRenderer::new(resolved).render_outline_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+        assert!(skeleton.output.contains("▶[Alpha]"), "{}", skeleton.output);
+        assert!(skeleton.output.contains("[Beta]"), "{}", skeleton.output);
     }
 }

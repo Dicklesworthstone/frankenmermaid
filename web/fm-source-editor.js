@@ -373,137 +373,196 @@ async function applyLocalSourceBatch(api, input, edits, live) {
   return response;
 }
 
-/** A bounded, latest-request-only client for fm-render.worker.js source authoring. */
+/** Latest-request-only source worker with bounded cancellation and isolated recovery.
+ * A cancel message cannot preempt synchronous WASM. Give it a short grace period, then
+ * terminate the worker. The grace deadline belongs to the running job, not to new requests:
+ * continuous typing must not keep an obsolete computation alive indefinitely.
+ */
 export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, workerUrl, moduleUrl,
-  config, initTimeoutMs = 10000, requestTimeoutMs = 60000 } = {}) {
-  if (![initTimeoutMs, requestTimeoutMs].every((value) => Number.isSafeInteger(value) && value > 0)) {
-    throw new RangeError("Worker timeouts must be positive safe integers.");
+  config, initTimeoutMs = 10000, requestTimeoutMs = 60000, cancelGraceMs = 100 } = {}) {
+  if (![initTimeoutMs, requestTimeoutMs, cancelGraceMs].every((value) =>
+    Number.isSafeInteger(value) && value > 0 && value <= 2147483647)) {
+    throw new RangeError("Worker timeouts must be positive safe integers no greater than 2147483647.");
   }
-  let worker;
-  try {
-    if (typeof WorkerClass !== "function") throw new Error("Worker API not supported");
-    worker = new WorkerClass(workerUrl || new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
-  } catch (error) { throw new SourceWorkerUnavailable(String(error.message || error)); }
-  let ready = false;
-  let deckRendering = false;
-  let sourceDeletion = false;
-  let sourceInsertion = false;
-  let sourceBatchEditing = false;
+  if (typeof WorkerClass !== "function") throw new SourceWorkerUnavailable("Worker API not supported");
+  // A replacement worker must use the same configuration as the original, even if the
+  // caller mutates its object while a request is running. Do not transfer caller-owned data.
+  const initialConfig = structuredClone(config);
+  const url = workerUrl || new URL("./fm-render.worker.js", import.meta.url);
+  let current = null;
   let closed = false;
-  let failure = null;
+  let bootstrapFailure = null;
+  let dispatched = false;
   let pending = null;
   let nextId = 1;
-  let initTimer;
 
-  function settle(error, value) {
-    if (!pending) return;
-    const operation = pending;
+  function interrupted(reason) {
+    const error = new Error(`${reason}. The worker was stopped; edit the source or retry in a fresh worker.`);
+    error.name = "SourceWorkerInterrupted";
+    return error;
+  }
+  function settle(operation, error, value) {
+    if (!operation || pending !== operation) return;
     pending = null;
-    clearTimeout(operation.timer);
     if (error) operation.reject(error);
     else operation.resolve(value);
   }
-  function fail(reason) {
-    if (closed || failure) return;
-    failure = new SourceWorkerUnavailable(String(reason));
-    clearTimeout(initTimer);
-    settle(failure);
-    worker.terminate();
+  function clearActive(generation) {
+    clearTimeout(generation.active?.timer);
+    clearTimeout(generation.cancelTimer);
+    generation.cancelTimer = null;
+    generation.active = null;
+  }
+  function retire(generation) {
+    if (current !== generation) return;
+    current = null; // Revoke callbacks BEFORE terminating or settling a caller's promise.
+    clearTimeout(generation.initTimer);
+    clearActive(generation);
+    generation.worker.onmessage = generation.worker.onerror = generation.worker.onmessageerror = null;
+    generation.worker.terminate();
+  }
+  function fail(generation, reason) {
+    if (closed || current !== generation) return;
+    const active = generation.active;
+    const cancelled = active && active.operation !== pending;
+    retire(generation);
+    // Only initial transport/bootstrap unavailability permits the existing local fallback.
+    // A crash, timeout, or broken protocol after dispatch must NEVER replay work on the UI.
+    const error = dispatched ? interrupted(reason) : new SourceWorkerUnavailable(String(reason));
+    if (!dispatched) bootstrapFailure = error;
+    if (cancelled) {
+      // The failed job was already revoked. Start only the newer, explicitly requested job.
+      if (pending) start();
+    } else {
+      settle(pending, error);
+    }
+  }
+  function validReply(operation, message) {
+    const kind = operation.message.kind;
+    if (kind === "sourceDeck") {
+      return message.kind === "sourceDeckRendered" && typeof message.svg === "string" &&
+        Array.isArray(message.warnings) && (message.manifest == null ||
+          (typeof message.manifest === "object" && !Array.isArray(message.manifest)));
+    }
+    if (kind === "sourceRender") {
+      return message.kind === "sourceRendered" && typeof message.svg === "string" &&
+        Array.isArray(message.snapshot?.bindings);
+    }
+    const reply = { sourceEdit: "sourceEdited", sourceDelete: "sourceDeleted",
+      sourceInsert: "sourceInserted", sourceBatch: "sourceBatchEdited" }[kind];
+    return message.kind === reply && typeof message.response?.result?.updatedSource === "string" &&
+      Array.isArray(message.response?.snapshot?.bindings) &&
+      (kind !== "sourceBatch" || Array.isArray(message.response.result.changes));
+  }
+  function receive(generation, message) {
+    if (closed || current !== generation) return;
+    if (!message || typeof message !== "object") { fail(generation, "Invalid source worker response"); return; }
+    if (message.kind === "ready") {
+      if (generation.ready) return;
+      if (message.sourceEditing !== true) { fail(generation, "Worker package lacks source-editing support"); return; }
+      clearTimeout(generation.initTimer);
+      generation.ready = true;
+      generation.capabilities = message;
+      sendPending();
+      return;
+    }
+    if (message.kind === "failed" && (!generation.ready || message.requestId == null)) {
+      fail(generation, message.reason || "Source worker initialization failed");
+      return;
+    }
+    const active = generation.active;
+    if (!active || message.requestId !== active.operation.message.requestId) return;
+    const operation = active.operation;
+    if (message.kind !== "noReply" && message.kind !== "failed" && !validReply(operation, message)) {
+      fail(generation, "Mismatched source worker response");
+      return;
+    }
+    clearActive(generation);
+    if (operation === pending) {
+      if (message.kind === "noReply") settle(operation, cancelledOperation());
+      else if (message.kind === "failed") settle(operation, new Error(message.reason || "Source operation failed"));
+      else if (operation.message.kind === "sourceDeck") {
+        settle(operation, null, { svg: message.svg, manifest: message.manifest ?? null, warnings: message.warnings });
+      } else {
+        settle(operation, null, operation.message.kind === "sourceRender"
+          ? { svg: message.svg, snapshot: message.snapshot } : message.response);
+      }
+    }
+    // A late terminal reply also acknowledges cancellation. Reuse the worker only now,
+    // rather than posting an unbounded sequence of jobs behind synchronous WASM.
+    sendPending();
   }
   function sendPending() {
-    if (!ready || !pending || pending.sent || closed || failure) return;
-    if (pending.message.kind === "sourceBatch" && !sourceBatchEditing) {
-      settle(new Error("The worker package lacks atomic batch editing; update the worker and WASM package."));
+    const generation = current;
+    if (closed || !generation?.ready || generation.active || !pending) return;
+    const operation = pending;
+    const capability = { sourceDeck: "deckRendering", sourceDelete: "sourceDeletion",
+      sourceInsert: "sourceInsertion", sourceBatch: "sourceBatchEditing" }[operation.message.kind];
+    if (capability && generation.capabilities[capability] !== true) {
+      const feature = { deckRendering: "graph-deck rendering", sourceBatchEditing: "atomic batch editing",
+        sourceDeletion: "this structural edit", sourceInsertion: "this structural edit" }[capability];
+      settle(operation, new Error(`The worker package lacks ${feature}; update the worker and WASM package.`));
       return;
     }
-    if (pending.message.kind === "sourceDeck" && !deckRendering) {
-      settle(new Error("The worker package lacks graph-deck rendering; update the worker and WASM package."));
+    const active = { operation, timer: null };
+    generation.active = active;
+    dispatched = true;
+    active.timer = setTimeout(() => {
+      if (current === generation && generation.active === active) fail(generation, "Source worker request timed out");
+    }, requestTimeoutMs);
+    try { generation.worker.postMessage(operation.message); }
+    catch (error) { fail(generation, error.message || error); }
+  }
+  function start() {
+    if (closed || current || bootstrapFailure) return;
+    let worker;
+    try { worker = new WorkerClass(url, { type: "module" }); }
+    catch (error) {
+      const failure = dispatched ? interrupted(error.message || error) : new SourceWorkerUnavailable(String(error.message || error));
+      if (!dispatched) bootstrapFailure = failure;
+      settle(pending, failure);
       return;
     }
-    if ((pending.message.kind === "sourceDelete" && !sourceDeletion) ||
-        (pending.message.kind === "sourceInsert" && !sourceInsertion)) {
-      settle(new Error("The worker package lacks this structural edit; update the worker and WASM package."));
-      return;
-    }
-    pending.sent = true;
-    pending.timer = setTimeout(() => fail("source worker request timed out"), requestTimeoutMs);
-    try { worker.postMessage(pending.message); }
-    catch (error) { fail(error.message || error); }
+    const generation = { worker, ready: false, capabilities: null, active: null, cancelTimer: null, initTimer: null };
+    current = generation;
+    worker.onmessage = ({ data }) => receive(generation, data);
+    worker.onerror = (event) => fail(generation, event.message || "Source worker crashed");
+    worker.onmessageerror = () => fail(generation, "Source worker response could not be decoded");
+    generation.initTimer = setTimeout(() => fail(generation, "Source worker initialization timed out"), initTimeoutMs);
+    try {
+      worker.postMessage({ kind: "init", moduleUrl, config: initialConfig,
+        capabilities: { worker: true, offscreenCanvas: false, canvasTransferred: false } });
+    } catch (error) { fail(generation, error.message || error); }
   }
   function cancel() {
     if (!pending) return;
     const operation = pending;
-    settle(cancelledOperation());
-    if (operation.sent && !closed && !failure) {
-      try { worker.postMessage({ kind: "cancel", requestId: operation.message.requestId }); }
-      catch (error) { fail(error.message || error); }
-    }
+    settle(operation, cancelledOperation());
+    const generation = current;
+    if (!generation || generation.active?.operation !== operation) return;
+    // Do not reset either watchdog when newer edits replace a waiting request.
+    generation.cancelTimer = setTimeout(() => {
+      if (current !== generation || generation.active?.operation !== operation) return;
+      retire(generation);
+      if (pending) start();
+    }, cancelGraceMs);
+    try { generation.worker.postMessage({ kind: "cancel", requestId: operation.message.requestId }); }
+    catch (error) { fail(generation, error.message || error); }
   }
-  worker.onmessage = ({ data: message }) => {
-    if (closed || failure) return;
-    if (!message || typeof message !== "object") { fail("invalid source worker response"); return; }
-    if (message.kind === "ready") {
-      if (ready) return;
-      if (message.sourceEditing !== true) { fail("worker package lacks source-editing support"); return; }
-      clearTimeout(initTimer);
-      ready = true;
-      deckRendering = message.deckRendering === true;
-      sourceDeletion = message.sourceDeletion === true;
-      sourceInsertion = message.sourceInsertion === true;
-      sourceBatchEditing = message.sourceBatchEditing === true;
-      sendPending();
-      return;
-    }
-    if (message.kind === "failed" && (!ready || message.requestId == null)) {
-      fail(message.reason || "source worker initialization failed");
-      return;
-    }
-    if (!pending || message.requestId !== pending.message.requestId) return;
-    if (message.kind === "noReply") { settle(cancelledOperation()); return; }
-    // Engine errors do not trigger synchronous fallback: retrying malformed input on the UI
-    // thread would do the same failing work again and defeat isolation.
-    if (message.kind === "failed") { settle(new Error(message.reason || "source operation failed")); return; }
-    if (pending.message.kind === "sourceDeck") {
-      if (message.kind !== "sourceDeckRendered" || typeof message.svg !== "string" ||
-          !Array.isArray(message.warnings) ||
-          (message.manifest != null && (typeof message.manifest !== "object" || Array.isArray(message.manifest)))) {
-        fail("mismatched graph-deck worker response");
-        return;
-      }
-      settle(null, { svg: message.svg, manifest: message.manifest ?? null, warnings: message.warnings });
-      return;
-    }
-    const rendering = pending.message.kind === "sourceRender";
-    const editReply = pending.message.kind === "sourceDelete" ? "sourceDeleted" :
-      pending.message.kind === "sourceInsert" ? "sourceInserted" :
-      pending.message.kind === "sourceBatch" ? "sourceBatchEdited" : "sourceEdited";
-    const valid = rendering
-      ? message.kind === "sourceRendered" && typeof message.svg === "string" && Array.isArray(message.snapshot?.bindings)
-      : message.kind === editReply && typeof message.response?.result?.updatedSource === "string" &&
-        Array.isArray(message.response?.snapshot?.bindings) &&
-        (pending.message.kind !== "sourceBatch" || Array.isArray(message.response.result.changes));
-    if (!valid) { fail("mismatched source worker response"); return; }
-    settle(null, rendering ? { svg: message.svg, snapshot: message.snapshot } : message.response);
-  };
-  worker.onerror = (event) => fail(event.message || "source worker crashed");
-  worker.onmessageerror = () => fail("source worker response could not be decoded");
-  initTimer = setTimeout(() => fail("source worker initialization timed out"), initTimeoutMs);
-  try {
-    worker.postMessage({ kind: "init", moduleUrl, config,
-      capabilities: { worker: true, offscreenCanvas: false, canvasTransferred: false } });
-  } catch (error) { fail(error.message || error); }
-
   function request(kind, input, extra = {}) {
     if (closed) return Promise.reject(cancelledOperation());
-    if (failure) return Promise.reject(failure);
+    if (bootstrapFailure) return Promise.reject(bootstrapFailure);
     cancel();
-    if (failure) return Promise.reject(failure);
+    if (bootstrapFailure) return Promise.reject(bootstrapFailure);
     if (!Number.isSafeInteger(nextId)) return Promise.reject(new Error("Worker request IDs exhausted; reopen the editor."));
     return new Promise((resolve, reject) => {
-      pending = { resolve, reject, sent: false, message: { kind, requestId: nextId++, input, ...extra } };
+      pending = { resolve, reject, message: { kind, requestId: nextId++, input, ...extra } };
+      start();
       sendPending();
     });
   }
+  start();
+  if (bootstrapFailure) throw bootstrapFailure;
   return {
     renderSource: (input) => request("sourceRender", input),
     renderDeck: (input) => request("sourceDeck", input),
@@ -521,14 +580,15 @@ export function createSourceWorkerClient({ WorkerClass = globalThis.Worker, work
     dispose() {
       if (closed) return;
       closed = true;
-      clearTimeout(initTimer);
-      settle(cancelledOperation());
-      worker.terminate();
+      if (current) retire(current);
+      settle(pending, cancelledOperation());
     },
   };
 }
 
-/** Worker-first authoring, with explicit synchronous fallback only for transport failures. */
+/** Worker-first authoring. Only initial worker unavailability permits synchronous fallback;
+ * dispatched work is never replayed on the UI thread after a crash or execution timeout.
+ */
 export function createSourceEditorBackend({ loadModule, ...workerOptions }) {
   let client = null;
   let localModule = null;
@@ -731,6 +791,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   let preparedEdit = null;
   let displayedSource = null;
   let renderedSvg = null;
+  let rendering = null;
   let elements = new Map();
   let originalTabIndices = new Map();
   let matchedBindings = [];
@@ -777,7 +838,10 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   const redo = make("button", "Redo source change", "source-editor-redo");
   const saveSource = make("button", "Save source (.mmd)", "source-editor-save-source");
   const saveSvg = make("button", "Save SVG", "source-editor-save-svg");
-  for (const button of [undo, redo, saveSource, saveSvg]) button.type = "button";
+  const stop = make("button", "Stop current operation", "source-editor-stop");
+  const renderCurrent = make("button", "Render current source", "source-editor-render");
+  stop.setAttribute("aria-keyshortcuts", "Escape");
+  for (const button of [undo, redo, saveSource, saveSvg, stop, renderCurrent]) button.type = "button";
   const searchLabel = make("label", "Find diagram elements (ID, label or source)", "source-editor-search-label");
   const search = make("input", "", "source-editor-search");
   search.type = "search";
@@ -851,6 +915,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     redo.disabled = disposed || !history.canRedo;
     saveSource.disabled = disposed;
     saveSvg.disabled = !current() || renderedSvg === null;
+    stop.disabled = disposed || (rendering === null && activeEdit === null);
+    renderCurrent.disabled = disposed || rendering !== null || activeEdit !== null;
     const editable = current() && selection !== null && activeEdit === null;
     for (const control of [apply, snippet, insert, remove, insertText]) control.disabled = !editable;
     // A single-span mutation would invalidate the staged batch. Require an explicit clear
@@ -1127,6 +1193,7 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     syncControls();
   }
   function invalidate() {
+    rendering = null;
     epoch += 1;
     backend.cancel();
     clearBatchPreview();
@@ -1236,8 +1303,9 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   listen(sourceEl, "input", () => {
     history.record(sourceEl.value);
     // Hosts normally call render on input. Also invalidate when this editor is mounted alone;
-    // do not cancel a render the host already started (its displayedSource is already null).
-    if (displayedSource !== null && sourceEl.value !== displayedSource) {
+    // do not cancel a render the host already started for this exact input.
+    if ((rendering !== null && sourceEl.value !== rendering.source) ||
+        (displayedSource !== null && sourceEl.value !== displayedSource)) {
       invalidate();
       outEl.setAttribute("aria-busy", "false");
       message.textContent = "Source changed; render again before editing a span.";
@@ -1252,6 +1320,32 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     }
     clearStructural();
     syncControls();
+  }
+  function stopOperation() {
+    if (disposed || (rendering === null && activeEdit === null)) return false;
+    if (rendering !== null) {
+      invalidate();
+    } else {
+      // A cancelled edit never commits source. Keep its selection and replacement draft,
+      // and keep all staged batch edits so the user can review or retry them.
+      activeEdit = null;
+      backend.cancel();
+      clearBatchPreview();
+      clearStructural();
+    }
+    outEl.setAttribute("aria-busy", "false");
+    syncControls();
+    message.textContent = "Operation stopped. Source and replacement drafts are unchanged; render or prepare the edits again to retry.";
+    return true;
+  }
+  listen(stop, "click", stopOperation);
+  listen(renderCurrent, "click", () => { void renderSource(sourceEl.value); });
+  for (const element of [sourceEl, outEl, panelEl]) {
+    listen(element, "keydown", (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey ||
+          event.altKey || event.key !== "Escape") return;
+      if (stopOperation()) { event.preventDefault(); event.stopPropagation(); }
+    });
   }
   listen(insertText, "input", discardPreview);
   listen(snippet, "input", discardPreview);
@@ -1303,8 +1397,8 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
     } finally {
       if (activeEdit === operation) {
         activeEdit = null;
-        outEl.setAttribute("aria-busy", "false");
         syncControls();
+        outEl.setAttribute("aria-busy", "false");
       }
     }
   }
@@ -1403,46 +1497,56 @@ export function mountSourceEditor({ sourceEl, outEl, panelEl, loadModule, onChan
   }
   invalidate();
 
+  async function renderSource(source) {
+    if (disposed || source !== sourceEl.value) return;
+    // Record edits before any asynchronous work: rapid typing and failed renders are undoable.
+    history.record(source);
+    invalidate();
+    const version = epoch;
+    const operation = { source, version };
+    rendering = operation;
+    syncControls();
+    message.textContent = `Building SVG and source map — ${backend.target}…`;
+    outEl.setAttribute("aria-busy", "true");
+    const live = () => !disposed && version === epoch && sourceEl.value === source;
+    try {
+      const { snapshot, svg } = await backend.renderSource(source);
+      if (!live()) return;
+      if (typeof svg !== "string") throw new Error("The renderer did not return SVG.");
+      const candidate = new SourceEditSession();
+      candidate.setSnapshot(source, snapshot);
+      session = candidate;
+      outEl.innerHTML = svg; // Only the renderer's sanitized SVG, never source or snippets.
+      const bindings = new Map(session.bindings.map((binding) => [binding.elementId, binding]));
+      for (const element of outEl.querySelectorAll("[id]")) {
+        if (!bindings.has(element.id)) continue;
+        elements.set(element.id, element);
+        originalTabIndices.set(element, element.getAttribute("tabindex"));
+        element.setAttribute("data-source-editable", "true");
+        renderedLabels.set(element.id, element.textContent);
+      }
+      displayedSource = source;
+      renderedSvg = svg;
+      rebuildMatches();
+      const warnings = snapshot.parsed?.warnings || [];
+      message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
+        (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
+    } catch (error) {
+      if (live()) message.textContent = `Source editor unavailable: ${error.message || error}`;
+    } finally {
+      if (rendering === operation) {
+        rendering = null;
+        outEl.setAttribute("aria-busy", "false");
+        syncControls();
+      }
+    }
+  }
+
   return {
     exportSource,
     exportSvg,
-    async render(source) {
-      if (disposed || source !== sourceEl.value) return;
-      // Record edits before any asynchronous work: rapid typing and failed renders are undoable.
-      history.record(source);
-      invalidate();
-      const version = epoch;
-      message.textContent = `Building SVG and source map — ${backend.target}…`;
-      outEl.setAttribute("aria-busy", "true");
-      const live = () => !disposed && version === epoch && sourceEl.value === source;
-      try {
-        const { snapshot, svg } = await backend.renderSource(source);
-        if (!live()) return;
-        if (typeof svg !== "string") throw new Error("The renderer did not return SVG.");
-        const candidate = new SourceEditSession();
-        candidate.setSnapshot(source, snapshot);
-        session = candidate;
-        outEl.innerHTML = svg; // Only the renderer's sanitized SVG, never source or snippets.
-        const bindings = new Map(session.bindings.map((binding) => [binding.elementId, binding]));
-        for (const element of outEl.querySelectorAll("[id]")) {
-          if (!bindings.has(element.id)) continue;
-          elements.set(element.id, element);
-          originalTabIndices.set(element, element.getAttribute("tabindex"));
-          element.setAttribute("data-source-editable", "true");
-          renderedLabels.set(element.id, element.textContent);
-        }
-        displayedSource = source;
-        renderedSvg = svg;
-        rebuildMatches();
-        const warnings = snapshot.parsed?.warnings || [];
-        message.textContent = `${bindings.size} editable source spans — ${backend.target}. ${warnings.join(" ")}` +
-          (backend.fallbackReason ? ` Worker unavailable: ${backend.fallbackReason}` : "");
-      } catch (error) {
-        if (live()) message.textContent = `Source editor unavailable: ${error.message || error}`;
-      } finally {
-        if (live()) outEl.setAttribute("aria-busy", "false");
-      }
-    },
+    render: renderSource,
+    cancel: stopOperation,
     dispose() {
       disposed = true;
       invalidate();

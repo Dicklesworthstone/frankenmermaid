@@ -5,7 +5,7 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 479.78,
+    "width": 475.65,
     "height": 623.5
   },
   "options": {
@@ -21,7 +21,7 @@
       "bounds": {
         "x": 92.0,
         "y": 92.0,
-        "width": 295.78,
+        "width": 291.65,
         "height": 66.5
       },
       "fitMargin": 150.0,
@@ -46,7 +46,7 @@
       "id": "systems",
       "title": "systems",
       "bounds": {
-        "x": 184.91,
+        "x": 168.41,
         "y": 278.5,
         "width": 134.7,
         "height": 253.0
@@ -108,13 +108,13 @@
   },
   "nodeGeometry": {
     "fm-node-admin-1": {
-      "x": 277.83,
+      "x": 273.7,
       "y": 92.0,
       "width": 109.95,
       "height": 66.5
     },
     "fm-node-db-3": {
-      "x": 184.91,
+      "x": 168.41,
       "y": 465.0,
       "width": 134.7,
       "height": 66.5
@@ -126,7 +126,7 @@
       "height": 66.5
     },
     "fm-node-web-2": {
-      "x": 184.91,
+      "x": 170.89,
       "y": 278.5,
       "width": 129.75,
       "height": 66.5

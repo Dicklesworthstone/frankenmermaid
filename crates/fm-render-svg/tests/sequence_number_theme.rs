@@ -9,10 +9,11 @@
 //! and the reason it asserts the RESOLVED colour rather than the presence of a class attribute:
 //! the class was present the whole time the defect existed.
 //!
-//! ⚠️ NOT `sequenceNumberColor` parity. mermaid computes a dedicated colour to CONTRAST with the
-//! line colour; this uses `colors.text`, the same colour every other label uses. That makes the
-//! number readable and theme-consistent, which is the bug being fixed — it does not make the
-//! palette identical to the incumbent's, and these tests do not claim it does.
+//! ⚠️ THE DIGITS SIT ON A DISC. mermaid draws them on a `sequencenumber` circle of the LINE colour
+//! and computes `sequenceNumberColor` to contrast with it. When the disc was added here the digits
+//! kept `colors.text`, the colour of every other label, and text colour on line colour was dark on
+//! dark: themed, present and unreadable. They now take the background colour, which contrasts with
+//! the disc in every theme. That is readability, not a claim of palette parity.
 
 use fm_render_svg::{SvgRenderConfig, render_svg_with_config};
 
@@ -90,13 +91,14 @@ fn the_sequence_number_colour_follows_the_theme() {
     );
 }
 
-/// The number is coloured like the diagram's other text, which is what makes it readable.
+/// The digits contrast with the disc they are drawn on, which is what makes them readable.
 ///
-/// Joined to a sibling text run in the SAME document rather than to a hardcoded hex value: pinning
-/// the literal colour would turn any future palette change into a failure here for no reason, and
-/// would not actually assert the property that matters — that the number matches its neighbours.
+/// Joined to the disc in the SAME document rather than to hardcoded hex values: pinning literals
+/// would turn any palette change into a failure here for no reason, and would not assert the
+/// property that matters. The digits take the diagram's background colour, so they are also
+/// asserted against the label colour they must NOT copy, which is the dark-on-dark defect.
 #[test]
-fn the_sequence_number_matches_the_other_text_in_its_diagram() {
+fn the_sequence_number_contrasts_with_its_disc() {
     for theme in [
         fm_render_svg::ThemePreset::Default,
         fm_render_svg::ThemePreset::Dark,
@@ -105,20 +107,24 @@ fn the_sequence_number_matches_the_other_text_in_its_diagram() {
         let number = number_element(&svg).expect("autonumber element");
         let number_fill = fill_of(number).expect("number fill");
 
-        // The message label is an ordinary themed text run in the same render.
+        let disc_fill = svg
+            .split("<circle")
+            .find(|chunk| chunk.contains("fm-sequence-number-background"))
+            .and_then(|chunk| fill_of(chunk))
+            .expect("CONTROL FAILED: no disc behind the number");
         let label_fill = svg
             .split("<text")
             .find(|chunk| chunk.contains(">Ping</text>"))
-            .and_then(|chunk| {
-                let start = chunk.find("fill=\"")? + "fill=\"".len();
-                let end = chunk[start..].find('"')? + start;
-                Some(&chunk[start..end])
-            })
+            .and_then(|chunk| fill_of(chunk))
             .expect("CONTROL FAILED: the message label carries no fill to compare against");
 
-        assert_eq!(
+        assert_ne!(
+            number_fill, disc_fill,
+            "{theme:?}: the digits are the colour of their own disc"
+        );
+        assert_ne!(
             number_fill, label_fill,
-            "{theme:?}: the number does not match the diagram's other text"
+            "{theme:?}: the digits copy the label colour, which is dark on the dark disc"
         );
     }
 }

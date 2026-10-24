@@ -1,0 +1,19 @@
+wardley-beta
+  title Tea Shop
+  anchor Business [0.95, 0.63]
+  component Cup of Tea [0.79, 0.61] label [19, -4]
+  component Hot Water [0.52, 0.80]
+  component Kettle [0.43, 0.35] label [-57, 4] (build) inertia
+  component Power [0.1, 0.7] label [-27, 20] (outsource)
+  pipeline Kettle {
+    component Campfire Kettle [0.20]
+    component Electric Kettle [0.55]
+  }
+  Business -> Cup of Tea
+  Cup of Tea -> Hot Water
+  Hot Water -> Kettle; limited by
+  Electric Kettle +> Power
+  evolve Power 0.89
+  note "Standardising power" [0.30, 0.49]
+  annotations [0.97, 0.03]
+  annotation 1,[0.48, 0.85] "Kettles evolve faster"

@@ -2,8 +2,72 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XML_NS = "http://www.w3.org/XML/1998/namespace";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
-const FORBIDDEN = new Set(["script", "foreignObject", "iframe", "object", "embed", "animate", "animateMotion", "animateTransform", "set"]);
+const FORBIDDEN = new Set(["script", "foreignobject", "iframe", "object", "embed", "animate", "animatemotion", "animatetransform", "set"]);
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u;
+const ARIA_REFERENCES = new Set(["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns",
+  "aria-flowto", "aria-details", "aria-errormessage", "aria-activedescendant"]);
+const TEXT_ATTRIBUTES = new Set(["class", "role", "lang", "title", "font-family"]);
+// Strings/comments are indivisible; the word alternative prevents matching `url` inside
+// `curl` or a non-ASCII identifier. CSSOM still owns CSS parsing, validity, and serialization.
+const CSS_VALUE_TOKENS = /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|url\s*\(\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^()'"\s]*)\s*\)|[-_A-Za-z0-9\u0080-\uFFFF]+/giu;
+const CSS_SELECTOR_TOKENS = /\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|#[-_A-Za-z0-9\u0080-\uFFFF]+|:root(?![-_A-Za-z0-9\u0080-\uFFFF])/giu;
+// FontSpec::default in fm-render-svg/src/theme.rs emits this optional stylesheet.
+// The host may preload Inter; embedding a diagram must never fetch it implicitly.
+const NATIVE_FONT_URL = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
+
+function nativeStylesheet(text, presentationWarnings) {
+  // Only this engine-owned font declaration may degrade to the existing system-font
+  // stack. Other imports, escaped CSS, and document-global font definitions still fail.
+  // Scan strings/comments rather than removing a matching substring: an import-looking
+  // label in a CSS string is data, and semicolons in the font URL are not rule boundaries.
+  if (text.includes("\\")) throw new Error("SVG contains unsupported external or escaped CSS.");
+  let depth = 0, parentheses = 0, brackets = 0, boundary = true, copied = 0, index = 0;
+  const chunks = [];
+  while (index < text.length) {
+    const character = text[index];
+    if (text.startsWith("/*", index)) {
+      const end = text.indexOf("*/", index + 2);
+      if (end === -1) throw new Error("SVG stylesheet has an unterminated comment.");
+      index = end + 2;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      const end = text.indexOf(character, index + 1);
+      if (end === -1 || /[\r\n\f]/u.test(text.slice(index + 1, end))) {
+        throw new Error("SVG stylesheet has an invalid string.");
+      }
+      index = end + 1;
+      if (depth === 0) boundary = false;
+      continue;
+    }
+    if (character === "@" && /^@(?:font-face|namespace)\b/iu.test(text.slice(index, index + 12))) {
+      throw new Error("SVG contains unsupported external or escaped CSS.");
+    }
+    if (character === "@" && /^@import\b/iu.test(text.slice(index, index + 8))) {
+      const match = /^@import\s+url\(\s*(['"])([^'"\r\n]*)\1\s*\)\s*;/iu.exec(text.slice(index));
+      if (depth !== 0 || parentheses !== 0 || brackets !== 0 || !boundary || !match || match[2] !== NATIVE_FONT_URL) {
+        throw new Error("SVG contains unsupported external or escaped CSS.");
+      }
+      chunks.push(text.slice(copied, index));
+      index += match[0].length;
+      copied = index;
+      presentationWarnings.add("The renderer's optional Inter stylesheet was omitted to keep the SVG network-free. Preload Inter in the host page or use the existing system-font fallback.");
+      continue;
+    }
+    if (character === "{") { depth += 1; boundary = false; }
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0 && parentheses === 0 && brackets === 0) boundary = true;
+    } else if (character === "(") { parentheses += 1; boundary = false; }
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") { brackets += 1; boundary = false; }
+    else if (character === "]") brackets -= 1;
+    else if (depth === 0 && parentheses === 0 && brackets === 0 && !/\s/u.test(character)) boundary = character === ";";
+    index += 1;
+  }
+  chunks.push(text.slice(copied));
+  return chunks.join("");
+}
 
 export function checkRenderId(id) {
   if (typeof id !== "string" || !ID_RE.test(id)) {
@@ -24,10 +88,23 @@ function localUrl(value, ids) {
 }
 
 function paintUrls(value, ids) {
-  if (!/url\s*\(/iu.test(value)) return value;
-  const pattern = /url\s*\(\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^()'"\s]*))\s*\)/giu;
-  if (/url\s*\(/iu.test(value.replace(pattern, ""))) throw new Error("SVG contains a malformed resource URL.");
-  return value.replace(pattern, (_, double, single, bare) => `url("${localUrl(double ?? single ?? bare, ids)}")`);
+  // Presentation attributes need the same escape/resource policy as CSS declarations.
+  // Inert labels and metadata do not enter this function.
+  if (value.includes("\\")) throw new Error("SVG contains unsupported escaped CSS.");
+  if (!/(?:url|image-set|cross-fade|paint)\s*\(/iu.test(value)) return value;
+  return value.replace(CSS_VALUE_TOKENS, (token, offset) => {
+    if (token[0] === '"' || token[0] === "'" || token.startsWith("/*")) return token;
+    if (/^url\s*\(/iu.test(token)) {
+      const match = /^url\s*\(\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^()'"\s]*))\s*\)$/iu.exec(token);
+      if (!match) throw new Error("SVG contains a malformed resource URL.");
+      return `url("${localUrl(match[1] ?? match[2] ?? match[3], ids)}")`;
+    }
+    if (/^\s*\(/u.test(value.slice(offset + token.length))) {
+      if (/^url$/iu.test(token)) throw new Error("SVG contains a malformed resource URL.");
+      if (/(?:^|-)(?:image-set|cross-fade|paint)$/iu.test(token)) throw new Error("SVG contains unsupported CSS resources.");
+    }
+    return token;
+  });
 }
 
 function linkUrl(value, ids, document) {
@@ -41,17 +118,37 @@ function linkUrl(value, ids, document) {
   return trimmed;
 }
 
+// Menu metadata becomes real hyperlinks when bindFunctions runs. Give it the SAME
+// admission policy as <a href>, including namespacing references into this diagram.
+function checkedMenuLinks(text, ids, document) {
+  if (text.length > 128 * 1024) throw new Error("SVG actor menu exceeds its 128 KiB limit.");
+  const links = JSON.parse(text);
+  if (!Array.isArray(links) || links.length > 128) throw new Error("SVG actor menu requires at most 128 links.");
+  return links.map(link => {
+    if (!link || Array.isArray(link) || typeof link !== "object"
+      || Object.keys(link).some(key => !["label", "url"].includes(key))
+      || typeof link.label !== "string" || !link.label.trim() || link.label.length > 2048
+      || typeof link.url !== "string" || !link.url.trim() || link.url.length > 8192) {
+      throw new Error("SVG actor menu requires bounded label/url pairs.");
+    }
+    for (const text of [link.label, link.url]) for (const character of text) {
+      const code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) throw new Error("SVG actor menu contains invalid Unicode.");
+    }
+    return { label: link.label, url: linkUrl(link.url, ids, document) };
+  });
+}
+
 // CSSOM, not a second CSS parser, handles selector lists, strings and nested media/supports
 // rules. Scope both the SVG root and descendants. Keyframe names need the same isolation as
 // element IDs: otherwise two independently themed diagrams share a document-global animation.
-function scopedStyles(styleNodes, ids, id, window) {
+function scopedStyles(styleNodes, ids, id, window, presentationWarnings) {
   if (styleNodes.length && typeof window.CSSStyleSheet !== "function") throw new Error("SVG styling requires browser CSSOM support.");
   const sheets = styleNodes.map((node) => {
     const sheet = new window.CSSStyleSheet();
-    const text = node.textContent;
-    // CSSOM drops @import in constructed stylesheets; reject it rather than silently change it.
-    // Rust emits no imports, escape-encoded identifiers, or document-global font definitions.
-    if (/\\|@import\b|@font-face\b|@namespace\b/iu.test(text)) throw new Error("SVG contains unsupported external or escaped CSS.");
+    const text = nativeStylesheet(node.textContent, presentationWarnings);
+    // Never attach the unvalidated stylesheet. CSSOM scopes the remaining local rules;
+    // nativeStylesheet has already rejected every import except the omitted font rule.
     sheet.replaceSync(text);
     if (text.trim() && !sheet.cssRules.length) throw new Error("SVG stylesheet cannot be parsed.");
     return sheet;
@@ -65,7 +162,7 @@ function scopedStyles(styleNodes, ids, id, window) {
   };
   sheets.forEach((sheet) => collect(sheet.cssRules));
   function declarations(style) {
-    if (/\\|(?:image-set|cross-fade|paint)\s*\(/iu.test(style.cssText)) throw new Error("SVG contains unsupported CSS resources.");
+    if (style.cssText.includes("\\")) throw new Error("SVG contains unsupported escaped CSS.");
     for (const property of [...style]) {
       let value = paintUrls(style.getPropertyValue(property), ids);
       if (property === "animation" || property === "animation-name") {
@@ -80,10 +177,12 @@ function scopedStyles(styleNodes, ids, id, window) {
         rule.name = animations.get(rule.name);
         transform(rule.cssRules, true);
       } else if (rule.type === 1) {
-        // Engine selectors use ASCII IDs. Match a complete token, never a prefix or a color.
-        let selector = rule.selectorText.replace(/#[A-Za-z_][A-Za-z0-9_-]*/gu,
-          (token) => ids.has(token.slice(1)) ? `#${ids.get(token.slice(1))}` : token);
-        selector = selector.replace(/:root\b/gu, `#${id}`);
+        // A hash/root token inside a quoted attribute selector is authored text, not an
+        // ID reference. Changing it would make source-ID selectors stop matching.
+        const selector = rule.selectorText.replace(CSS_SELECTOR_TOKENS, (token) => {
+          if (token.toLowerCase() === ":root") return `#${id}`;
+          return token[0] === "#" && ids.has(token.slice(1)) ? `#${ids.get(token.slice(1))}` : token;
+        });
         rule.selectorText = `#${id}:is(${selector}), #${id} :is(${selector})`;
         declarations(rule.style);
       } else if (inKeyframes && rule.type === 8) declarations(rule.style);
@@ -98,8 +197,16 @@ function scopedStyles(styleNodes, ids, id, window) {
   return declarations;
 }
 
-/** Namespace the exact engine SVG for insertion into a shared browser document. */
+/** Namespace the engine SVG for insertion into a shared browser document.
+ * presentationWarnings reports host-side font fallback separately from native diagnostics.
+ * Native geometry and text are retained; the optional remote font is never loaded here.
+ */
 export function prepareSvg(svg, id, document) {
+  const { ids, ...output } = prepareSvgDocument(svg, id, document, false);
+  return output;
+}
+
+function prepareSvgDocument(svg, id, document, deck = false) {
   checkRenderId(id);
   const window = document?.defaultView;
   if (!window?.DOMParser || !window.XMLSerializer) throw new Error("Rendering requires a browser Document with XML DOM support.");
@@ -111,37 +218,617 @@ export function prepareSvg(svg, id, document) {
   if (parsed.doctype || parsed.querySelector("parsererror") || root?.localName !== "svg" || root.namespaceURI !== SVG_NS) {
     throw new Error("Engine returned invalid SVG.");
   }
+  if (parsed.createTreeWalker(parsed, window.NodeFilter.SHOW_PROCESSING_INSTRUCTION).nextNode()) {
+    throw new Error("Engine SVG contains a processing instruction.");
+  }
   const elements = [root, ...root.querySelectorAll("*")];
   const ids = new Map();
   for (const element of elements) {
-    if (element.namespaceURI !== SVG_NS || FORBIDDEN.has(element.localName)) throw new Error("Engine SVG contains active or unsupported markup.");
+    const tag = element.localName.toLowerCase();
+    if (element.namespaceURI !== SVG_NS || FORBIDDEN.has(tag) || (tag === "style" && element.localName !== "style")) {
+      throw new Error("Engine SVG contains active or unsupported markup.");
+    }
     const original = element.getAttribute("id");
     if (original !== null) {
       if (!/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(original) || ids.has(original)) throw new Error("Engine SVG has invalid or duplicate IDs.");
-      ids.set(original, element === root ? id : `${id}--${ids.size}`);
+      // The deck runtime recognizes fm-node/edge/cluster prefixes and follower suffixes.
+      // Inject a length-delimited namespace AFTER the prefix, so a mirror-header still
+      // belongs to its base node and two different render IDs cannot alias each other.
+      const family = deck && /^(fm-(?:node|edge|cluster)-)(.*)$/u.exec(original);
+      const namespaced = family ? `${family[1]}deck-${id.length}_${id}--${family[2]}` :
+        deck ? `fm-deck-${id.length}_${id}--${ids.size}` : `${id}--${ids.size}`;
+      ids.set(original, element === root ? id : namespaced);
     }
   }
+  let menuLinkCount = 0;
   for (const element of elements) {
     for (const attr of [...element.attributes]) {
-      const name = attr.localName;
+      const name = attr.localName.toLowerCase();
       if (/^on/iu.test(name) || name === "base" || (attr.namespaceURI && ![XML_NS, XLINK_NS, "http://www.w3.org/2000/xmlns/"].includes(attr.namespaceURI))) {
         throw new Error("Engine SVG contains active attributes.");
+      }
+      // XML is case-sensitive; HTML insertion folds these names. Do not publish a second,
+      // unvalidated interpretation of an ID, URL, or inline stylesheet in result.svg.
+      if (["id", "href", "style", "data-menu-links"].includes(name) && attr.localName !== name) {
+        throw new Error("Engine SVG contains a non-canonical attribute name.");
       }
       let value = attr.value;
       if (name === "id") value = ids.get(value);
       else if (name === "href") value = element.localName === "a" ? linkUrl(value, ids, document) : localUrl(value, ids);
-      else if (["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns"].includes(name)) {
-        value = value.trim().split(/\s+/u).map((token) => {
+      else if (name === "data-menu-links") {
+        const links = checkedMenuLinks(value, ids, document);
+        menuLinkCount += links.length;
+        if (menuLinkCount > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
+        value = JSON.stringify(links);
+      }
+      else if (ARIA_REFERENCES.has(name)) {
+        value = value.trim();
+        value = value ? value.split(/\s+/u).map((token) => {
           if (!ids.has(token)) throw new Error("SVG accessibility reference is unresolved.");
           return ids.get(token);
-        }).join(" ");
-      } else if (name !== "style") value = paintUrls(value, ids);
+        }).join(" ") : "";
+      } else if (name !== "style" && !name.startsWith("data-") && !name.startsWith("aria-") && !TEXT_ATTRIBUTES.has(name)) {
+        value = paintUrls(value, ids);
+      }
       element.setAttributeNS(attr.namespaceURI, attr.name, value);
     }
     if (element.localName === "a" && element.getAttribute("target") === "_blank") element.setAttribute("rel", "noopener noreferrer");
   }
   root.setAttribute("id", id);
-  const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window);
+  const presentationWarnings = new Set();
+  const declarations = scopedStyles([...root.querySelectorAll("style")], ids, id, window, presentationWarnings);
   if (declarations) for (const element of elements) if (element.hasAttribute("style")) declarations(element.style);
-  return { svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true) };
+  return { ids, svg: new window.XMLSerializer().serializeToString(root), element: document.importNode(root, true),
+    presentationWarnings: [...presentationWarnings] };
+}
+
+/** Snapshot the paired native renderDeck result without lossy JSON coercion. Shared by
+ * worker transport and direct loaders. Maps from older wasm-bindgen builds become records;
+ * non-finite numbers, getters, cycles, sparse arrays and oversized payloads fail explicitly.
+ */
+export function snapshotDeckResult(result) {
+  const maximum = 16 * 1024 * 1024, encoder = new TextEncoder(), ancestors = new Set();
+  let entries = 0, bytes = 0;
+  function text(value) {
+    if (value.length > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+    bytes += encoder.encode(value).length;
+    if (bytes > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+    for (const character of value) {
+      const code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) throw new Error("Graph-deck result contains invalid Unicode.");
+    }
+    return value;
+  }
+  function copy(value, depth = 0) {
+    if (++entries > 200_000 || depth > 24) throw new Error("Graph-deck result exceeds its structural limit.");
+    if (typeof value === "string") return text(value);
+    if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return value;
+    if (!value || typeof value !== "object" || ancestors.has(value)) throw new Error("Graph-deck result must contain finite acyclic data.");
+    ancestors.add(value);
+    let output;
+    if (value instanceof Map) {
+      output = Object.create(null);
+      for (const [key, item] of Map.prototype.entries.call(value)) {
+        if (typeof key !== "string") throw new Error("Graph-deck map keys must be strings.");
+        output[text(key)] = copy(item, depth + 1);
+      }
+    } else {
+      const array = Array.isArray(value);
+      if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+        throw new Error("Graph-deck result must contain plain records.");
+      }
+      const keys = Reflect.ownKeys(value);
+      if (keys.length > 200_000 || (array && value.length > 200_000)) throw new Error("Graph-deck result exceeds its structural limit.");
+      output = array ? [] : Object.create(null);
+      for (const key of keys) {
+        if (array && key === "length") continue;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor.enumerable) continue;
+        if (typeof key !== "string" || descriptor.get || descriptor.set ||
+            (array && !/^(?:0|[1-9][0-9]*)$/u.test(key))) throw new Error("Graph-deck result contains unsupported properties.");
+        output[text(key)] = copy(descriptor.value, depth + 1);
+      }
+      if (array && (output.length !== value.length || Object.keys(output).length !== value.length)) {
+        throw new Error("Graph-deck result contains a sparse array.");
+      }
+    }
+    ancestors.delete(value);
+    return output;
+  }
+  const output = copy(result);
+  if (!output || typeof output.svg !== "string" ||
+      !Array.isArray(output.warnings) || output.warnings.some(warning => typeof warning !== "string" &&
+        (!warning || Array.isArray(warning) || typeof warning !== "object" || typeof warning.message !== "string")) ||
+      (output.manifest != null && (Array.isArray(output.manifest) || typeof output.manifest !== "object"))) {
+    throw new Error("Invalid graph-deck result: expected SVG, manifest or null, and warnings.");
+  }
+  // WasmDeckOutput skips a None manifest and carries Vec<Diagnostic>, not parse()'s
+  // string warnings. Preserve structured diagnostic fields; normalize absence explicitly.
+  if (!Object.hasOwn(output, "manifest")) output.manifest = null;
+  // Include JSON escaping in the bound, not just the unescaped strings counted above.
+  if (encoder.encode(JSON.stringify(output)).length > maximum) throw new Error("Graph-deck result exceeds the 16 MiB limit.");
+  return { svg: output.svg, manifest: output.manifest, warnings: output.warnings };
+}
+
+function freezeDeck(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeDeck);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Prepare one native SVG/manifest pair. Only DOM join keys change: source IDs, slide IDs,
+ * geometry, narrative and native reveal order are retained. No graph or layout is rebuilt.
+ */
+export function prepareDeck(result, id, document) {
+  const deck = snapshotDeckResult(result);
+  if (deck.manifest === null) return { ...prepareSvg(deck.svg, id, document), manifest: null, warnings: deck.warnings };
+  const { ids, ...output } = prepareSvgDocument(deck.svg, id, document, true);
+  const manifest = deck.manifest;
+  const invalid = reason => { throw new Error(`Invalid deck manifest: ${reason}.`); };
+  const record = value => value && typeof value === "object" && !Array.isArray(value);
+  const natural = value => Number.isSafeInteger(value) && value >= 0;
+  const rect = value => record(value) && [value.x, value.y, value.width, value.height].every(Number.isFinite) && value.width >= 0 && value.height >= 0;
+  const reference = original => {
+    if (typeof original !== "string" || !ids.has(original) || ids.get(original) === id) invalid("missing SVG element reference");
+    return ids.get(original);
+  };
+  // Unknown future schemas can introduce new ID-bearing fields; do not publish a half-
+  // namespaced manifest while pretending that those fields still refer to the paired SVG.
+  if (!["1.0.0", "1.1.0"].includes(manifest.schemaVersion)) invalid("unsupported schema version");
+  if (!rect(manifest.viewBox) || manifest.viewBox.width <= 0 || manifest.viewBox.height <= 0) invalid("viewBox");
+  const viewBox = (output.element.getAttribute("viewBox") || "").trim().split(/[\s,]+/u).map(Number);
+  if (viewBox.length !== 4 || viewBox.some((value, index) => !Number.isFinite(value) ||
+      Math.abs(value - [manifest.viewBox.x, manifest.viewBox.y, manifest.viewBox.width, manifest.viewBox.height][index]) > 0.011)) invalid("SVG/viewBox mismatch");
+  const options = manifest.options;
+  if (!record(options) || !Number.isFinite(options.fitMargin) || options.fitMargin < 0 ||
+      !Number.isFinite(options.zoomMax) || options.zoomMax <= 0 || !Number.isFinite(options.dimOpacity) ||
+      options.dimOpacity < 0 || options.dimOpacity > 1 || !natural(options.autoAdvanceMs) || options.autoAdvanceMs > 600_000) invalid("playback options");
+  if (!Array.isArray(manifest.slides) || !manifest.slides.length || manifest.slides.length > 1024) invalid("slide list");
+  if (manifest.title !== undefined && typeof manifest.title !== "string") invalid("title");
+  const slideIds = new Set(), nodeIds = new Set(), owners = new Map();
+  for (const slide of manifest.slides) {
+    if (!record(slide) || typeof slide.id !== "string" || !slide.id || slideIds.has(slide.id) ||
+        typeof slide.title !== "string" || (slide.caption !== undefined && typeof slide.caption !== "string") ||
+        !rect(slide.bounds) || !Number.isFinite(slide.fitMargin) || slide.fitMargin < 0 ||
+        !Number.isFinite(slide.zoomMax) || slide.zoomMax <= 0 || !natural(slide.maxStep) || slide.maxStep > 200_000 ||
+        !Array.isArray(slide.nodes)) invalid("slide geometry or identity");
+    slideIds.add(slide.id);
+    const members = new Map();
+    for (const kind of ["nodes", "edges", "clusters"]) {
+      const list = slide[kind] ?? [];
+      if (!Array.isArray(list)) invalid("membership list");
+      for (const member of list) {
+        if (!record(member) || !natural(member.step) || member.step > slide.maxStep || members.has(member.elementId)) invalid("membership or step");
+        const original = member.elementId;
+        members.set(original, member.step);
+        member.elementId = reference(original);
+        if (member.tooltip !== undefined && member.tooltip !== null && typeof member.tooltip !== "string") invalid("tooltip");
+        if ((member.index !== undefined && !natural(member.index)) ||
+            (member.sourceId !== undefined && typeof member.sourceId !== "string") ||
+            [member.touching, member.cameraContained].some(value => value !== undefined && typeof value !== "boolean")) invalid("member metadata");
+        if (kind === "nodes") {
+          nodeIds.add(original);
+          if (!owners.has(original)) owners.set(original, []);
+          owners.get(original).push(slide.id);
+        }
+      }
+    }
+    const steps = slide.steps ?? [], revealed = new Set();
+    if (!Array.isArray(steps) || steps.length !== slide.maxStep) invalid("reveal sequence");
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      if (!record(step) || step.step !== index + 1 || !Array.isArray(step.elementIds)) invalid("reveal sequence");
+      step.elementIds = step.elementIds.map(original => {
+        if (members.get(original) !== step.step || revealed.has(original)) invalid("reveal/membership mismatch");
+        revealed.add(original);
+        return reference(original);
+      });
+    }
+    for (const [original, step] of members) if (step > 0 && !revealed.has(original)) invalid("missing reveal member");
+  }
+  if (manifest.overview != null) {
+    const overview = manifest.overview;
+    if (!record(overview) || (overview.enabled !== undefined && typeof overview.enabled !== "boolean") ||
+        (overview.tour !== undefined && typeof overview.tour !== "boolean") ||
+        [overview.title, overview.caption].some(value => value !== undefined && typeof value !== "string")) invalid("overview");
+  }
+  const geometry = manifest.nodeGeometry ?? Object.create(null);
+  if (!record(geometry)) invalid("node geometry");
+  if (manifest.schemaVersion === "1.1.0") {
+    for (const original of nodeIds) if (!Object.hasOwn(geometry, original)) invalid("missing node geometry");
+  }
+  function remapRecord(value, check) {
+    if (!record(value)) invalid("reference record");
+    return Object.fromEntries(Object.entries(value).map(([original, item]) => {
+      check(original, item);
+      return [reference(original), item];
+    }));
+  }
+  if (manifest.nodeGeometry !== undefined) manifest.nodeGeometry = remapRecord(geometry, (_original, box) => { if (!rect(box)) invalid("node geometry"); });
+  if (manifest.edgeEndpoints !== undefined) manifest.edgeEndpoints = remapRecord(manifest.edgeEndpoints, (_original, ends) => {
+    if (!record(ends) || !Object.hasOwn(geometry, ends.fromElementId) || !Object.hasOwn(geometry, ends.toElementId)) invalid("edge endpoint geometry");
+    ends.fromElementId = reference(ends.fromElementId);
+    ends.toElementId = reference(ends.toElementId);
+  });
+  if (!record(manifest.nodeSlideIndex)) invalid("node/slide index");
+  manifest.nodeSlideIndex = remapRecord(manifest.nodeSlideIndex, (original, slides) => {
+    const expected = owners.get(original) || [];
+    if (!Array.isArray(slides) || slides.length !== expected.length || slides.some((slide, index) => slide !== expected[index])) invalid("node/slide membership mismatch");
+  });
+  for (const original of nodeIds) if (!Object.hasOwn(manifest.nodeSlideIndex, reference(original))) invalid("missing node/slide index");
+  return { ...output, manifest: freezeDeck(manifest), warnings: deck.warnings };
+}
+
+/** Callback names are opaque registry keys, never expressions or window property paths. */
+export function checkCallbackName(name) {
+  if (typeof name !== "string" || name.length > 128 ||
+      !/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(name) ||
+      name.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part))) {
+    throw new TypeError("Callback name must be a safe identifier or dotted registry key within 128 characters.");
+  }
+  return name;
+}
+
+let nextMenuId = 0;
+
+// One lazily created HTML menu per bound SVG; no foreignObject, external resources,
+// graph reparse, or node-geometry mutation. The host's bindFunctions cleanup owns it.
+function bindSvgLinkMenus(root, callbackPlans, isLive, report) {
+  const document = root.ownerDocument, window = document.defaultView, tree = root.getRootNode();
+  const ids = new Map([...root.querySelectorAll("[id]")].map(node => [node.id, node.id]));
+  ids.set(root.id, root.id);
+  const plans = new Map();
+  let count = 0;
+  for (const node of root.querySelectorAll("[data-menu-links]")) {
+    const raw = node.getAttribute("data-menu-links"), sourceId = node.getAttribute("data-id");
+    const links = checkedMenuLinks(raw, ids, document);
+    if (!links.length) continue;
+    if (!sourceId || node.localName !== "g" || node.closest("svg") !== root
+      || node.closest("defs, symbol, clipPath, mask")) throw new Error("Actor menu has no addressable source node.");
+    count += links.length;
+    if (count > 4096) throw new Error("SVG actor menus exceed the 4096-link limit.");
+    // Capture absolute destinations now. A later <base> edit must not redirect an
+    // already admitted link, and links must never become executable URL schemes.
+    const destinations = links.map(link => {
+      const href = new URL(link.url, document.baseURI);
+      if (!["http:", "https:", "mailto:", "tel:"].includes(href.protocol)) throw new Error("Unsafe actor menu hyperlink.");
+      return { label: link.label, href: href.href, local: link.url.startsWith("#") };
+    });
+    plans.set(node, { node, raw, sourceId, links: destinations });
+  }
+  if (!plans.size) return () => {};
+  const removals = [], attributes = new Map();
+  let disposed = false, active = null;
+  function attribute(node, name, value) {
+    if (!attributes.has(node)) attributes.set(node, new Map());
+    const entries = attributes.get(node);
+    if (!entries.has(name)) entries.set(name, { original: node.getAttribute(name), written: null });
+    entries.get(name).written = value;
+    if (value === null) node.removeAttribute(name); else node.setAttribute(name, value);
+  }
+  function usable(plan) {
+    const node = plan.node;
+    if (disposed || !isLive() || !root.isConnected || !node.isConnected || root.ownerDocument !== document
+      || root.getRootNode() !== tree || !root.contains(node) || node.closest("svg") !== root
+      || node.getAttribute("data-id") !== plan.sourceId || node.getAttribute("data-menu-links") !== plan.raw) return false;
+    for (let parent = node; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
+      if (parent.matches('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return false;
+      const style = window.getComputedStyle(parent);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+    }
+    const box = node.getBoundingClientRect();
+    return [box.x, box.y, box.width, box.height].every(Number.isFinite) && box.width > 0 && box.height > 0;
+  }
+  function target(event) {
+    if (event.defaultPrevented || disposed) return null;
+    let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+    if (node?.closest("svg") !== root) return null;
+    for (; node && node !== root; node = node.parentElement) {
+      const plan = plans.get(node);
+      if (plan) return usable(plan) ? plan : null;
+    }
+    return null;
+  }
+  const hasPrimary = plan => callbackPlans.has(plan.node)
+    || plan.node.closest("a[href], a[*|href]") !== null;
+  function close(restoreFocus = false) {
+    const job = active;
+    if (!job) return;
+    active = null;
+    job.observer.disconnect();
+    for (const remove of job.removals) remove();
+    if (job.node.getAttribute("aria-expanded") === "true") attribute(job.node, "aria-expanded", "false");
+    if (job.node.getAttribute("aria-controls") === job.menu.id) attribute(job.node, "aria-controls", null);
+    if (job.menu.matches(":popover-open")) job.menu.hidePopover();
+    job.menu.remove();
+    if (restoreFocus && usable(job.plan)) job.node.focus({ preventScroll: true });
+  }
+  function position() {
+    const job = active;
+    if (!job) return;
+    if (!usable(job.plan)) { close(); return; }
+    const box = job.node.getBoundingClientRect(), menu = job.menu;
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+    const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+    menu.style.maxWidth = `${Math.max(1, width - 16)}px`;
+    menu.style.maxHeight = `${Math.max(1, height - 16)}px`;
+    const rect = menu.getBoundingClientRect();
+    const x = Math.max(left + 8, Math.min(box.left, left + width - rect.width - 8));
+    const below = box.bottom + 4, above = box.top - rect.height - 4;
+    const y = below + rect.height <= top + height - 8 ? below : Math.max(top + 8, above);
+    menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+  }
+  function listen(target, type, fn, options, list = removals) {
+    const guarded = event => {
+      try { fn(event); } catch (error) { close(); report(error); }
+    };
+    target.addEventListener(type, guarded, options);
+    list.push(() => target.removeEventListener(type, guarded, options));
+  }
+  function open(plan, last = false) {
+    if (!usable(plan)) return;
+    close();
+    const menu = document.createElement("div");
+    do { menu.id = `${root.id}--actor-menu-${++nextMenuId}`; } while (tree.querySelector(`[id="${menu.id}"]`));
+    menu.className = "fm-actor-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `Links for ${plan.sourceId}`);
+    menu.style.cssText = "position:fixed;inset:auto;margin:0;padding:6px;box-sizing:border-box;overflow:auto;z-index:2147483647;border:1px solid GrayText;border-radius:6px;background:var(--fm-menu-background,Canvas);color:var(--fm-menu-color,CanvasText);font:14px/1.5 system-ui,sans-serif;min-width:0;width:max-content;max-width:calc(100vw - 16px);box-shadow:0 4px 16px #0003;";
+    const items = plan.links.map(link => {
+      const item = document.createElement("a");
+      item.textContent = link.label;
+      item.setAttribute("href", link.href);
+      item.setAttribute("target", link.local ? "_self" : "_blank");
+      item.setAttribute("rel", "noopener noreferrer");
+      item.setAttribute("role", "menuitem");
+      item.tabIndex = -1;
+      item.style.cssText = "display:block;padding:5px 10px;border-radius:3px;color:inherit;text-decoration:none;overflow-wrap:anywhere;outline-offset:-2px;";
+      menu.append(item); return item;
+    });
+    // A top-layer popover escapes clipped/translated diagram containers. Keep the
+    // menu in the same tree as its trigger so ARIA ID references also work in Shadow DOM.
+    if (typeof menu.showPopover === "function") menu.setAttribute("popover", "manual");
+    (tree.nodeType === 9 ? document.body || document.documentElement : tree).append(menu);
+    const observer = new window.MutationObserver(() => { try { position(); } catch (error) { close(); report(error); } });
+    active = { plan, node: plan.node, menu, items, observer, removals: [] };
+    const job = active;
+    function focus(index) {
+      if (active !== job) return;
+      for (const item of items) item.tabIndex = -1;
+      const item = items[(index + items.length) % items.length];
+      item.tabIndex = 0; item.focus({ preventScroll: true }); item.scrollIntoView({ block: "nearest" });
+    }
+    try {
+      if (menu.hasAttribute("popover")) menu.showPopover();
+      attribute(plan.node, "aria-expanded", "true"); attribute(plan.node, "aria-controls", menu.id);
+      position();
+      if (active !== job) return;
+      focus(last ? items.length - 1 : 0);
+      listen(menu, "keydown", event => {
+        if (event.defaultPrevented || event.isComposing) return;
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); return; }
+        if (event.key === "Tab") { close(true); return; } // Native Tab advances from the trigger.
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        const index = items.indexOf(tree.activeElement);
+        const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 }[event.key];
+        if (next !== undefined) { event.preventDefault(); focus(next); }
+        else if (event.key === " ") { event.preventDefault(); if (!event.repeat && index >= 0) items[index].click(); }
+        else if (event.key.length === 1) {
+          const key = event.key.toLocaleLowerCase();
+          for (let offset = 1; offset <= items.length; offset++) {
+            const next = (index + offset + items.length) % items.length;
+            if (items[next].textContent.trim().toLocaleLowerCase().startsWith(key)) { event.preventDefault(); focus(next); break; }
+          }
+        }
+      }, undefined, job.removals);
+      const guardLink = event => {
+        const item = event.target?.closest?.("a"), index = items.indexOf(item);
+        if (active !== job || !usable(plan) || index < 0
+          || item.getAttribute("href") !== plan.links[index].href
+          || item.getAttribute("target") !== (plan.links[index].local ? "_self" : "_blank")
+          || item.getAttribute("rel") !== "noopener noreferrer") {
+          event.preventDefault(); event.stopImmediatePropagation(); close();
+        }
+      };
+      listen(menu, "click", guardLink, true, job.removals);
+      listen(menu, "auxclick", guardLink, true, job.removals);
+      observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+      // Observe detachment, including removal of a ShadowRoot's host, only while open.
+      observer.observe(document, { childList: true, subtree: true });
+    } catch (error) { close(); throw error; }
+  }
+  function cleanup() {
+    if (disposed) return;
+    disposed = true; close();
+    for (const remove of removals) remove();
+    for (const [node, entries] of attributes) for (const [name, entry] of entries) {
+      if (node.getAttribute(name) !== entry.written) continue;
+      if (entry.original === null) node.removeAttribute(name); else node.setAttribute(name, entry.original);
+    }
+    plans.clear(); attributes.clear();
+  }
+  try {
+    if (!root.hasAttribute("tabindex")) attribute(root, "tabindex", "-1");
+    if (root.getAttribute("role") === "img") attribute(root, "role", "group");
+    for (const plan of plans.values()) {
+      attribute(plan.node, "role", "button"); attribute(plan.node, "tabindex", "0");
+      attribute(plan.node, "aria-haspopup", "menu"); attribute(plan.node, "aria-expanded", "false");
+      attribute(plan.node, "aria-keyshortcuts", "Enter Space ArrowDown ArrowUp");
+      if (!plan.node.hasAttribute("aria-label") && !plan.node.hasAttribute("aria-labelledby")) {
+        attribute(plan.node, "aria-label", plan.node.querySelector("title")?.textContent || plan.sourceId);
+      }
+    }
+    listen(root, "click", event => {
+      const plan = target(event);
+      if (!plan || hasPrimary(plan) || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      event.preventDefault(); open(plan);
+    });
+    listen(root, "keydown", event => {
+      if (event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+      const plan = target(event);
+      if (!plan) return;
+      const menuKey = ["ArrowDown", "ArrowUp", "ContextMenu"].includes(event.key) || (event.key === "F10" && event.shiftKey);
+      if (!menuKey && (hasPrimary(plan) || event.shiftKey || !["Enter", " "].includes(event.key))) return;
+      event.preventDefault(); open(plan, event.key === "ArrowUp");
+    });
+    listen(root, "contextmenu", event => { const plan = target(event); if (plan) { event.preventDefault(); open(plan); } });
+    listen(document, "pointerdown", event => {
+      if (active && !event.composedPath().includes(active.menu) && !event.composedPath().includes(active.node)) close();
+    }, true);
+    listen(document, "focusin", event => {
+      if (active && !event.composedPath().includes(active.menu) && !event.composedPath().includes(active.node)) close();
+    }, true);
+    listen(window, "resize", position); listen(window, "scroll", position, true);
+    if (window.visualViewport) {
+      listen(window.visualViewport, "resize", position); listen(window.visualViewport, "scroll", position);
+    }
+    listen(window, "blur", () => close());
+    listen(document, "visibilitychange", () => { if (document.hidden) close(); });
+  } catch (error) { cleanup(); throw error; }
+  return cleanup;
+}
+
+/** Capture an admitted SVG, then bind only an unchanged copy inside the caller's container.
+ * No global function lookup, evaluation, source parsing, or callback argument interpretation.
+ * The returned cleanup is idempotent; binding the same live root twice returns that cleanup.
+ */
+export function createSvgBinder(element, { resolveCallback = () => undefined,
+  isLive = () => true, reportError = () => {}, onBind = () => {} } = {}) {
+  if (![resolveCallback, isLive, reportError, onBind].every((fn) => typeof fn === "function")) {
+    throw new TypeError("SVG binding requires callback resolution and lifecycle functions.");
+  }
+  if (element?.namespaceURI !== SVG_NS || element.localName !== "svg") throw new TypeError("Binding requires a prepared SVG.");
+  const template = element.cloneNode(true), id = checkRenderId(template.id);
+  const bindings = new WeakMap();
+  const report = (error) => {
+    try { reportError(error); } catch { /* Reporting must not escape a DOM event or rejected callback. */ }
+  };
+  return function bindFunctions(container) {
+    if (!isLive()) throw new Error("This diagram's interaction owner has been disposed.");
+    if (container?.nodeType !== 1 || typeof container.querySelectorAll !== "function") {
+      throw new TypeError("bindFunctions requires the SVG or its containing element.");
+    }
+    const candidates = [...container.querySelectorAll(`[id="${id}"]`)];
+    if (container.id === id) candidates.unshift(container);
+    if (candidates.length !== 1 || candidates[0].namespaceURI !== SVG_NS || candidates[0].localName !== "svg") {
+      throw new Error("The container must contain exactly one SVG from this render result.");
+    }
+    const root = candidates[0], document = root.ownerDocument;
+    const existing = bindings.get(root);
+    if (existing) return existing;
+    if (!root.isEqualNode(template)) throw new Error("SVG changed before binding; insert this render result before binding its interactions.");
+
+    // Plan all bindings before touching the DOM. Nodes without registered handlers stay inert.
+    const plans = new Map(), missing = new Set();
+    for (const node of root.querySelectorAll("[data-callback]")) {
+      const name = node.getAttribute("data-callback"), sourceId = node.getAttribute("data-id");
+      try { checkCallbackName(name); }
+      catch (error) { report(error); continue; }
+      const callback = resolveCallback(name);
+      if (typeof callback !== "function") { missing.add(name); continue; }
+      if (!sourceId || node.localName !== "g" || node.closest("svg") !== root) {
+        throw new Error("Engine callback metadata has no addressable source node.");
+      }
+      plans.set(node, { name, sourceId, callback });
+    }
+    if (!isLive()) throw new Error("The interaction owner was disposed while preparing bindings.");
+    const restorations = [];
+    let disposed = false, pressed = null, cleanupMenus = () => {};
+    function attribute(node, name, value) {
+      const previous = node.getAttribute(name);
+      if (previous === value) return;
+      node.setAttribute(name, value);
+      restorations.push(() => {
+        // Do not undo a later host edit while removing our own accessibility decoration.
+        if (node.getAttribute(name) !== value) return;
+        if (previous === null) node.removeAttribute(name); else node.setAttribute(name, previous);
+      });
+    }
+    function target(event) {
+      if (disposed || !isLive() || !root.isConnected || root.ownerDocument !== document || event.defaultPrevented) return null;
+      let node = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+      if (!node || !root.contains(node) || node.closest("svg") !== root) return null;
+      if (node.closest('[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"]')) return null;
+      for (; node && node !== root; node = node.parentElement) {
+        // A nested hyperlink owns its normal browser click and Enter behavior.
+        if (node.localName === "a" && (node.hasAttribute("href") || node.hasAttributeNS(XLINK_NS, "href"))) return null;
+        const plan = plans.get(node);
+        if (plan && node.getAttribute("data-id") === plan.sourceId &&
+            node.getAttribute("data-callback") === plan.name && resolveCallback(plan.name) === plan.callback) return node;
+      }
+      return null;
+    }
+    function activate(node) {
+      const plan = plans.get(node);
+      try { Promise.resolve(plan.callback(plan.sourceId)).catch(report); }
+      catch (error) { report(error); }
+    }
+    const modified = (event) => event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
+    function click(event) {
+      if (event.button !== 0 || modified(event)) return;
+      const node = target(event);
+      if (node) { event.preventDefault(); activate(node); }
+    }
+    function keydown(event) {
+      if (modified(event) || event.isComposing || !["Enter", " "].includes(event.key)) return;
+      const node = target(event);
+      if (!node) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.key === "Enter") { pressed = null; activate(node); }
+      else pressed = node;
+    }
+    function keyup(event) {
+      if (event.key !== " ") return;
+      const node = pressed;
+      pressed = null;
+      if (!modified(event) && !event.isComposing && node && target(event) === node) {
+        event.preventDefault(); activate(node);
+      }
+    }
+    function blur() { pressed = null; }
+    function cleanup() {
+      if (disposed) return;
+      disposed = true;
+      pressed = null;
+      cleanupMenus();
+      root.removeEventListener("click", click);
+      root.removeEventListener("keydown", keydown);
+      root.removeEventListener("keyup", keyup);
+      root.removeEventListener("blur", blur, true);
+      for (const restore of restorations.reverse()) restore();
+      bindings.delete(root);
+    }
+    try {
+      if (plans.size) {
+        // Chromium otherwise adds an implicit Tab stop to an SVG with a click listener.
+        // The actionable node buttons, not the event-delegation root, own keyboard focus.
+        if (!root.hasAttribute("tabindex")) attribute(root, "tabindex", "-1");
+        // An outer role=img makes all descendants presentational to assistive technology.
+        // Expose the interactive children, retaining the engine's accessible name/description.
+        if (root.getAttribute("role") === "img") attribute(root, "role", "group");
+        for (const node of plans.keys()) {
+          attribute(node, "role", "button");
+          attribute(node, "tabindex", "0");
+          attribute(node, "aria-keyshortcuts", "Enter Space");
+          if (!node.hasAttribute("aria-label") && !node.hasAttribute("aria-labelledby")) {
+            attribute(node, "aria-label", node.getAttribute("title") || plans.get(node).sourceId);
+          }
+        }
+        root.addEventListener("click", click);
+        root.addEventListener("keydown", keydown);
+        root.addEventListener("keyup", keyup);
+        root.addEventListener("blur", blur, true);
+      }
+      cleanupMenus = bindSvgLinkMenus(root, plans, () => !disposed && isLive(), report);
+      bindings.set(root, cleanup);
+      onBind(root, cleanup);
+      if (!isLive()) throw new Error("The interaction owner was disposed while installing bindings.");
+    } catch (error) { cleanup(); throw error; }
+    for (const name of missing) report(new Error(`No callback registered for '${name}'; the diagram node remains inert.`));
+    return cleanup;
+  };
 }

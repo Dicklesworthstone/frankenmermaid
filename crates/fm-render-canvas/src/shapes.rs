@@ -68,14 +68,18 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Diamond => draw_diamond(ctx, x, y, width, height),
         NodeShape::Hexagon => draw_hexagon(ctx, x, y, width, height),
         NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
-            if shape == NodeShape::FilledCircle {
-                ctx.set_fill_style(stroke);
-            }
             draw_circle(ctx, x, y, width, height);
         }
         NodeShape::Cylinder => draw_cylinder(ctx, x, y, width, height),
         NodeShape::Trapezoid => draw_trapezoid(ctx, x, y, width, height),
-        NodeShape::HorizontalBar => draw_rect(ctx, x, y + height * 0.25, width, height * 0.5, 4.0),
+        NodeShape::HorizontalBar => draw_rect(
+            ctx,
+            x,
+            y + height * 0.25,
+            width,
+            (height * 0.5).max(8.0),
+            (height * 0.25).max(3.0),
+        ),
         NodeShape::Subroutine => draw_subroutine(ctx, x, y, width, height),
         NodeShape::Asymmetric => draw_asymmetric(ctx, x, y, width, height),
         NodeShape::Note => draw_note(ctx, x, y, width, height),
@@ -89,15 +93,21 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Cloud => draw_cloud(ctx, x, y, width, height),
         NodeShape::Tag => draw_tag(ctx, x, y, width, height),
         NodeShape::CrossedCircle => draw_crossed_circle(ctx, x, y, width, height),
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => draw_block_arrow(ctx, shape, x, y, width, height),
     }
 
-    // Draw double circle outer ring if needed
+    // Keep both rings inside the layout bounds, matching the SVG renderer.
     if shape == NodeShape::DoubleCircle {
         let cx = x + width / 2.0;
         let cy = y + height / 2.0;
         let r = width.min(height) / 2.0;
         ctx.begin_path();
-        ctx.arc(cx, cy, r + 4.0, 0.0, 2.0 * PI);
+        ctx.arc(cx, cy, (r - 4.0).max(r * 0.5), 0.0, 2.0 * PI);
         ctx.stroke();
     }
 }
@@ -613,6 +623,33 @@ fn draw_flag<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
 }
 
 /// Draw a lightning bolt — mermaid's `bolt` (bd-7ls21). Same six measured vertices as the SVG path.
+/// A block-beta arrow, from the outline fm-core shares with the SVG renderer and the layout.
+#[allow(clippy::cast_possible_truncation)]
+fn draw_block_arrow<C: Canvas2dContext>(
+    ctx: &mut C,
+    shape: NodeShape,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) {
+    let Some(outline) = fm_core::block_arrow_outline(shape, x as f32, y as f32, w as f32, h as f32)
+    else {
+        return;
+    };
+    ctx.begin_path();
+    for (index, &(px, py)) in outline.iter().enumerate() {
+        if index == 0 {
+            ctx.move_to(f64::from(px), f64::from(py));
+        } else {
+            ctx.line_to(f64::from(px), f64::from(py));
+        }
+    }
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
 fn draw_lightning_bolt<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
     ctx.begin_path();
     ctx.move_to(x + w, y);
@@ -1190,6 +1227,51 @@ mod tests {
             assert_near(*x, *expected_x);
             assert_near(*y, *expected_y);
         }
+    }
+
+    #[test]
+    fn double_circle_has_two_distinct_rings_inside_its_layout_bounds() {
+        for size in [8.0, 24.0, 100.0] {
+            let ops = recorded_shape(NodeShape::DoubleCircle, 10.0, 20.0, size, size);
+            let arcs: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::Arc(cx, cy, radius, _, _) => Some((*cx, *cy, *radius)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(arcs.len(), 2);
+            assert_near(arcs[0].2, size / 2.0);
+            assert!(arcs[1].2 > 0.0 && arcs[1].2 < arcs[0].2);
+            for (cx, cy, radius) in arcs {
+                assert_near(cx, 10.0 + size / 2.0);
+                assert_near(cy, 20.0 + size / 2.0);
+                assert!(cx - radius >= 10.0 && cx + radius <= 10.0 + size);
+                assert!(cy - radius >= 20.0 && cy + radius <= 20.0 + size);
+            }
+            assert_eq!(
+                ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+                1,
+                "the inner ring must remain hollow"
+            );
+        }
+    }
+
+    #[test]
+    fn filled_circle_keeps_the_resolved_author_fill() {
+        let ops = recorded_shape(NodeShape::FilledCircle, 10.0, 20.0, 24.0, 24.0);
+        let fills: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::SetFillStyle(fill) => Some(fill.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, ["rgba(20,40,60,0.5)"]);
+        assert_eq!(
+            ops.iter().filter(|op| **op == DrawOperation::Fill).count(),
+            1
+        );
     }
 
     #[test]

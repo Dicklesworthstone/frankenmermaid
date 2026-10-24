@@ -273,6 +273,11 @@ impl ArrowheadMarker {
     }
 
     /// Create a diamond marker.
+    ///
+    /// The shape is symmetric under a half turn but its anchor is not: `ref_x` is the far tip, so
+    /// the body lies on the -x side of the endpoint. With plain `auto` that is back along the path
+    /// at `marker-end` but INSIDE the owning node at `marker-start`, where the node box covers it.
+    /// `auto-start-reverse` flips only the start, so one def puts the body on the path at both ends.
     #[must_use]
     pub fn diamond_marker(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
@@ -289,7 +294,7 @@ impl ArrowheadMarker {
             marker_height: 8.0,
             ref_x: 8.0,
             ref_y: 4.0,
-            orient: MarkerOrient::Auto,
+            orient: MarkerOrient::AutoStartReverse,
             path,
             fill: fill.to_string(),
             stroke: None,
@@ -298,8 +303,8 @@ impl ArrowheadMarker {
     }
 
     /// Hollow diamond, the UML aggregation marker. Same geometry as [`Self::diamond_marker`] (the
-    /// filled composition diamond); only the fill differs, which is precisely what distinguishes
-    /// aggregation from composition in UML.
+    /// filled composition diamond, including its `auto-start-reverse` orientation); only the fill
+    /// differs, which is precisely what distinguishes aggregation from composition in UML.
     #[must_use]
     pub fn diamond_open_marker(id: &str, stroke: &str) -> Self {
         let path = PathBuilder::new()
@@ -316,7 +321,7 @@ impl ArrowheadMarker {
             marker_height: 8.0,
             ref_x: 8.0,
             ref_y: 4.0,
-            orient: MarkerOrient::Auto,
+            orient: MarkerOrient::AutoStartReverse,
             path,
             fill: "none".to_string(),
             stroke: Some(stroke.to_string()),

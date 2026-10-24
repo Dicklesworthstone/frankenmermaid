@@ -15,6 +15,98 @@
 //! `class="node-bkg node-no-border"`. That is why the Rust side needs a marker class and NOT a new
 //! `NodeShape` variant, which would have meant auditing 172 `NodeShape::` sites in this crate alone.
 
+const BRANCH_FIXTURE: &str = include_str!("fixtures/mindmap_branches.mmd");
+
+#[test]
+fn mindmap_branch_hierarchy_survives_themes_and_portable_exports() {
+    let ir = fm_parser::parse(BRANCH_FIXTURE).ir;
+    assert_eq!(ir.nodes.len(), 17);
+    assert_eq!(ir.edges.len(), 16);
+    for preset in [
+        fm_render_svg::ThemePreset::Default,
+        fm_render_svg::ThemePreset::Dark,
+        fm_render_svg::ThemePreset::Neutral,
+        fm_render_svg::ThemePreset::Monochrome,
+    ] {
+        let colors = fm_render_svg::ThemeColors::from_preset(preset);
+        for embed_theme_css in [true, false] {
+            let config = fm_render_svg::SvgRenderConfig {
+                theme: preset,
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = fm_render_svg::render_svg_with_config(&ir, &config);
+            for (id, branch, is_root) in [
+                ("root", 0, true),
+                ("Research", 1, false),
+                ("Interviews", 1, false),
+                ("Design", 2, false),
+                ("Engineering", 3, false),
+                ("Launch", 4, false),
+            ] {
+                let fill = fm_core::mindmap::branch_fill(
+                    &colors.node_fill,
+                    &colors.accents[branch],
+                    is_root,
+                );
+                if embed_theme_css {
+                    let selector = if is_root {
+                        ".fm-node-user-mindmap-root".to_owned()
+                    } else {
+                        format!(".fm-node-user-mindmap-branch-{branch}")
+                    };
+                    assert!(svg.contains(&format!("{selector}{{--fm-node-fill:{fill}")));
+                } else {
+                    let node = svg
+                        .split_once(&format!("data-id=\"{id}\""))
+                        .expect("fixture node must be rendered")
+                        .1
+                        .split_once("</g>")
+                        .expect("fixture node group must close")
+                        .0;
+                    assert!(node.contains(&format!("fill=\"{fill}\"")), "{id}: {node}");
+                    assert!(node.contains(&format!("stroke=\"{}\"", colors.accents[branch])));
+                    assert!(!node.contains("url(#fm-node-gradient)"));
+                    if is_root {
+                        assert!(node.contains("font-weight=\"600\""));
+                    }
+                }
+            }
+            assert!(svg.contains("fm-node-user-priority"));
+            assert!(svg.contains("fill:#fff4cc") || svg.contains("fill: #fff4cc"));
+            assert!(svg.contains("stroke:#b45309") || svg.contains("stroke: #b45309"));
+        }
+    }
+}
+
+#[test]
+fn mindmap_root_emphasis_and_borderless_defaults_yield_to_author_styles() {
+    let ir = fm_parser::parse(
+        "mindmap\n  root((Root))\n    Plain:::custom\n\
+         classDef custom fill:#fff4cc,stroke:#b45309\n\
+         style root font-weight:400,fill:#ffffff\n",
+    )
+    .ir;
+    for embed_theme_css in [true, false] {
+        let svg = fm_render_svg::render_svg_with_config(
+            &ir,
+            &fm_render_svg::SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            },
+        );
+        assert!(svg.contains("font-weight:400") || svg.contains("font-weight: 400"));
+        assert!(svg.contains("fill:#ffffff") || svg.contains("fill: #ffffff"));
+        assert!(svg.contains(".fm-node-user-custom .fm-node-shape"));
+        if embed_theme_css {
+            assert!(svg.contains(
+                ".fm-node.fm-node-user-mindmap-no-border :where(rect,path,polygon){stroke:none}"
+            ));
+            assert!(svg.contains(".fm-node-user-mindmap-root text{font-weight:600}"));
+        }
+    }
+}
+
 /// The two sources must stop rendering identically. This is the bead's own measurement, inverted.
 #[test]
 fn a_default_mindmap_node_no_longer_renders_identically_to_a_square_one() {

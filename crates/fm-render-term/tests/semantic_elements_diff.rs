@@ -429,6 +429,7 @@ fn packet_quadrant_state_notes_and_git_lanes_are_compared() {
             label: "A".into(),
             x: 0.1,
             y: 0.2,
+            style: None,
         }],
         ..Default::default()
     });

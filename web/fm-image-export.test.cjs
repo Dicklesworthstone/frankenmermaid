@@ -142,3 +142,100 @@ test('image format dispatch rejects unknown output types', async () => {
   const { imageArtifact } = await modulePromise;
   assert.throws(() => imageArtifact('<svg/>', { format: 'html' }), /Unsupported image format/);
 });
+
+test('PDF fits and centers the whole diagram, choosing the more legible orientation', async () => {
+  const { pdfPageLayout, imageFilename } = await modulePromise;
+  const wide = pdfPageLayout(2000, 1000, { paper: 'letter', scale: 2 });
+  assert.equal(wide.orientation, 'landscape');
+  assert.deepEqual([wide.width, wide.height], [792, 612]);
+  assert.equal(wide.pages.length, 1);
+  const page = wide.pages[0];
+  assert.deepEqual([page.x, page.y, page.width, page.height], [0, 0, 2000, 1000]);
+  assert.deepEqual([page.imageX, page.imageY, page.imageWidth, page.imageHeight], [24, 120, 744, 372]);
+  assert.deepEqual(page.pixels, { width: 1984, height: 992 });
+  assert.equal(pdfPageLayout(1000, 2000).orientation, 'portrait');
+  assert.equal(imageFilename('../雪 🙂.mmd', 'pdf'), '雪 🙂.pdf');
+});
+
+test('PDF respects explicit orientation and fits enormous diagrams without enormous canvases', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  for (const scale of [1, 2, 3, 4]) {
+    const layout = pdfPageLayout(10_000_000, 5_000_000, { paper: 'a4', orientation: 'portrait', margin: 0, scale });
+    assert.equal(layout.orientation, 'portrait');
+    const page = layout.pages[0];
+    assert.equal(page.imageX, 0);
+    assert.equal(page.imageWidth / page.imageHeight, 2);
+    assert.ok(page.pixels.width * page.pixels.height < 15_000_000);
+    assert.ok(Object.isFrozen(layout) && Object.isFrozen(layout.pages) && Object.isFrozen(page));
+  }
+});
+
+test('PDF validates dimensions, resolution, paper, orientation, and printable margins', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  for (const dimension of [NaN, Infinity, -1, 0, '10', null]) {
+    assert.throws(() => pdfPageLayout(dimension, 10), /positive finite/);
+    assert.throws(() => pdfPageLayout(10, dimension), /positive finite/);
+  }
+  for (const scale of [0, 1.5, 5, '2', Infinity]) assert.throws(() => pdfPageLayout(10, 10, { scale }), /scale/);
+  for (const margin of [-1, Infinity, NaN, 298, '24']) assert.throws(() => pdfPageLayout(10, 10, { margin }), /margin/);
+  assert.throws(() => pdfPageLayout(10, 10, { paper: 'a0' }), /paper/);
+  assert.throws(() => pdfPageLayout(10, 10, { paper: '__proto__' }), /paper/);
+  assert.throws(() => pdfPageLayout(10, 10, { orientation: 'sideways' }), /orientation/);
+  assert.throws(() => pdfPageLayout(Number.MAX_VALUE, 1), /representable/);
+});
+
+test('pre-aborted PDF operations and invalid options do not allocate browser resources', async () => {
+  const { pdfArtifact, imageArtifact } = await modulePromise;
+  const controller = new AbortController();
+  controller.abort();
+  const forbidden = new Proxy({}, { get() { throw new Error('browser resource accessed'); } });
+  await assert.rejects(pdfArtifact('<svg/>', {}, forbidden, controller.signal), { name: 'AbortError' });
+  await assert.rejects(imageArtifact('<svg/>', { format: 'pdf' }, forbidden, controller.signal), { name: 'AbortError' });
+  await assert.rejects(pdfArtifact('<svg/>', { timeoutMs: 0 }, forbidden), /Invalid PDF timeout/);
+  await assert.rejects(pdfArtifact('<svg/>', { background: 'red' }, forbidden), /Unsupported PDF background/);
+});
+
+test('poster pages cover the diagram once, in reading order, at original physical size', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const layout = pdfPageLayout(1504, 1984, { mode: 'tile', paper: 'letter', orientation: 'portrait', scale: 1 });
+  assert.deepEqual([layout.columns, layout.rows, layout.pages.length], [2, 2, 4]);
+  assert.deepEqual(layout.pages.map(page => [page.x, page.y]), [[0, 0], [752, 0], [0, 992], [752, 992]]);
+  for (const page of layout.pages) {
+    assert.deepEqual([page.width, page.height, page.imageX, page.imageY], [752, 992, 24, 24]);
+    assert.deepEqual([page.imageWidth, page.imageHeight], [564, 744]);
+    assert.deepEqual(page.pixels, { width: 752, height: 992 });
+  }
+});
+
+test('poster last row and column retain scale and alignment rather than enlarging the remainder', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  for (const scale of [1, 2, 3, 4]) {
+    const layout = pdfPageLayout(800, 1100, { mode: 'tile', paper: 'letter', orientation: 'portrait', scale });
+    assert.equal(layout.pages.length, 4);
+    const last = layout.pages.at(-1);
+    assert.deepEqual([last.x, last.y, last.width, last.height], [752, 992, 48, 108]);
+    assert.deepEqual([last.imageX, last.imageY, last.imageWidth, last.imageHeight], [24, 24, 36, 81]);
+    assert.deepEqual(last.pixels, { width: 48 * scale, height: 108 * scale });
+    assert.equal(layout.pages.reduce((sum, page) => sum + page.width * page.height, 0), 800 * 1100);
+  }
+});
+
+test('poster orientation minimizes sheet count and small diagrams are not enlarged', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const wide = pdfPageLayout(1600, 500, { mode: 'tile', paper: 'letter' });
+  assert.equal(wide.orientation, 'landscape');
+  assert.equal(wide.pages.length, 2);
+  const small = pdfPageLayout(20, 10, { mode: 'tile', paper: 'letter', scale: 1 }).pages[0];
+  assert.deepEqual([small.imageWidth, small.imageHeight], [15, 7.5]);
+  assert.deepEqual(small.pixels, { width: 20, height: 10 });
+});
+
+test('poster page and total-pixel limits reject excessive work during planning', async () => {
+  const { pdfPageLayout } = await modulePromise;
+  const options = { mode: 'tile', paper: 'letter', orientation: 'portrait', scale: 1 };
+  assert.equal(pdfPageLayout(752 * 8, 992 * 8, options).pages.length, 64);
+  assert.throws(() => pdfPageLayout(752 * 65, 100, options), /64-page/);
+  assert.throws(() => pdfPageLayout(Number.MAX_VALUE, 100, options), /64-page/);
+  assert.throws(() => pdfPageLayout(752 * 8, 992 * 8, { ...options, scale: 2 }), /128-megapixel/);
+  assert.throws(() => pdfPageLayout(100, 100, { mode: 'typo' }), /mode/);
+});

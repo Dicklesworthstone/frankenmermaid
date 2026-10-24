@@ -48,7 +48,7 @@ use std::{
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
-    MermaidLinkMode, MermaidSanitizeMode, MermaidTier, Span, is_safe_link_target,
+    MermaidLinkMode, MermaidSanitizeMode, MermaidTier, NodeShape, Span, is_safe_link_target,
     mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_node_element_id,
     mermaid_node_element_id_with_variant,
 };
@@ -58,7 +58,9 @@ use fm_layout::{
     MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
     TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
-    try_relayout_directed_path_suffix,
+    format_xychart_tick_value, is_composite_state_node, resolve_xychart_y_domain,
+    sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
+    try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
 /// Node fill gradient mode.
@@ -163,6 +165,9 @@ pub struct SvgRenderConfig {
     pub root_classes: Vec<String>,
     /// Theme preset to use (default if not specified).
     pub theme: ThemePreset,
+    /// Use restrained shape-role colors in default and dark flowcharts.
+    /// Explicit theme variables, class definitions, and node styles retain precedence.
+    pub semantic_colors: bool,
     /// Whether to embed theme CSS in the SVG.
     pub embed_theme_css: bool,
     /// Whether CSS-only diagram animations should be emitted.
@@ -183,6 +188,12 @@ pub struct SvgRenderConfig {
     pub custom_icons: BTreeMap<String, CustomSvgIcon>,
     /// Detail tier selection (`auto`, `compact`, `normal`, `rich`).
     pub detail_tier: MermaidTier,
+    /// Preserve complete authored labels independently of the selected detail tier.
+    ///
+    /// Interactive SVG hosts enable this so zoom can reveal every label without rerendering.
+    /// Typography and decoration still follow the detail tier and resource degradation plan.
+    /// The generic renderer defaults to adaptive labels for explicitly budgeted overviews.
+    pub preserve_labels: bool,
     /// Minimum readable font size in pixels.
     pub min_font_size: f32,
     /// Whether to embed print-optimized CSS rules.
@@ -272,13 +283,11 @@ impl Default for SvgRenderConfig {
             backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
-            font_family: String::from(
-                "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-            ),
+            font_family: String::from(theme::DEFAULT_FONT_FAMILY),
             font_size: 15.0,
             avg_char_width: 7.5,
             line_height: 1.5,
-            padding: 40.0,
+            padding: 24.0,
             shadows: true,
             shadow_offset_x: 1.5,
             shadow_offset_y: 1.5,
@@ -291,11 +300,12 @@ impl Default for SvgRenderConfig {
             glow_blur: 5.0,
             glow_opacity: 0.30,
             glow_color: String::from("#4f46e5"),
-            cluster_fill_opacity: 0.06,
+            cluster_fill_opacity: 1.0,
             inactive_opacity: 0.40,
             rounded_corners: 8.0,
             root_classes: Vec::new(),
             theme: ThemePreset::Default,
+            semantic_colors: true,
             embed_theme_css: true,
             animations_enabled: false,
             animation_duration_ms: 360,
@@ -306,6 +316,7 @@ impl Default for SvgRenderConfig {
             node_icon_position: NodeIconPosition::Above,
             custom_icons: BTreeMap::new(),
             detail_tier: MermaidTier::Auto,
+            preserve_labels: false,
             min_font_size: 8.0,
             print_optimized: true,
             a11y: A11yConfig::full(),
@@ -342,6 +353,7 @@ const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
 struct SvgBatchFragments {
     edge_svg: String,
     edge_ends: Vec<usize>,
+    edge_label_positions: Vec<Option<fm_layout::LayoutPoint>>,
     node_svg: String,
     node_ends: Vec<usize>,
     reused_edges: usize,
@@ -1642,27 +1654,49 @@ fn mermaid_default_c4_person_colors(
         ))
 }
 
-fn mermaid_default_c4_stereotype_color<'a>(
-    config: &SvgRenderConfig,
-    colors: &'a ThemeColors,
-) -> &'a str {
-    if config.theme == ThemePreset::Default {
+/// The text colour on a C4 card: Mermaid's white on the default theme's navy Person card, the
+/// theme's text colour on every other card.
+///
+/// It is decided by the CARD, not the theme: forcing white for the whole default theme put
+/// `<<system>>` white-on-white on every themed card, and leaving the Person card's name and
+/// description at the theme text colour put them dark-on-navy.
+fn c4_card_text_color(person_card: bool, colors: &ThemeColors) -> &str {
+    if person_card {
         MERMAID_DEFAULT_C4_STEREOTYPE_COLOR
     } else {
         colors.text.as_str()
     }
 }
 
+/// The inline restatement of the Person card's white, which `.fm-node text` would otherwise beat.
+fn write_c4_card_text_style(out: &mut String, person_card: bool) {
+    if person_card {
+        out.push_str(" style=\"fill:");
+        out.push_str(MERMAID_DEFAULT_C4_STEREOTYPE_COLOR);
+        out.push('"');
+    }
+}
+
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
-/// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
-/// calls the same `Element::write_to_string`.
-fn build_marker_defs_body(edge_color: &str, marker_mask: u32) -> String {
+/// both render backends add via `DefsBuilder::marker`. Ordinary markers remain byte-identical;
+/// Sankey's end marker uses a fixed user-space size instead of scaling with its ribbon width.
+fn build_marker_defs_body(edge_color: &str, marker_mask: u32, sankey: bool) -> String {
     use crate::defs::MarkerOrient;
     let mut s = String::new();
     let push = |s: &mut String, bit: u32, m: ArrowheadMarker| {
         if marker_mask & bit != 0 {
-            m.to_element().write_to_string(s);
+            let mut marker = m.to_element();
+            if sankey && bit == MARKER_END {
+                // Keep direction visible outside the widest 24px ribbon without multiplying
+                // the head by that ribbon's stroke. The original 8x7 chevron scales uniformly.
+                marker = marker
+                    .attr("markerUnits", "userSpaceOnUse")
+                    .attr("viewBox", "0 0 8 7")
+                    .attr_num("markerWidth", 32.0)
+                    .attr_num("markerHeight", 28.0);
+            }
+            marker.write_to_string(s);
         }
     };
     push(
@@ -1746,8 +1780,9 @@ fn build_marker_defs_body(edge_color: &str, marker_mask: u32) -> String {
     // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
     // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
     // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
-    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
-    // twin because a diamond looks identical either way round.
+    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no twin: their
+    // one def is already `auto-start-reverse` (see `ArrowheadMarker::diamond_marker`), and that one
+    // orientation keeps the diamond on the path at either end.
     push(
         &mut s,
         MARKER_START_TRIANGLE_OPEN,
@@ -1810,12 +1845,12 @@ fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u32) -> Cow<'static,
         // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
         if let Some(cell) = cell {
             return Cow::Borrowed(
-                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask))
+                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask, false))
                     .as_str(),
             );
         }
     }
-    Cow::Owned(build_marker_defs_body(edge_color, marker_mask))
+    Cow::Owned(build_marker_defs_body(edge_color, marker_mask, false))
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -1864,12 +1899,70 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
         .and_then(|t| t.parse::<ThemePreset>().ok())
         .unwrap_or(config.theme);
     let mut theme = Theme::from_preset(preset);
+    // Layout and text fitting use these same settings. A theme's independent font defaults
+    // must not override them when its stylesheet is embedded in the finished SVG.
+    theme.font.family.clone_from(&config.font_family);
+    theme.font.size = config.font_size;
     if let Some(i) = ir {
         theme
             .colors
             .apply_overrides(&i.meta.theme_overrides.theme_variables);
     }
     theme
+}
+
+/// Resolve visual roles before either SVG writer chooses its serialization path. The returned
+/// colors are ordinary paints, so standalone exports do not depend on CSS color-mix support.
+fn flowchart_shape_colors(
+    ir: &MermaidDiagramIr,
+    shape: fm_core::NodeShape,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Option<fm_core::NodeShapeStyle> {
+    if !config.semantic_colors || ir.diagram_type != DiagramType::Flowchart {
+        return None;
+    }
+    let preset = ir
+        .meta
+        .theme_overrides
+        .theme
+        .as_deref()
+        .and_then(|name| name.parse::<ThemePreset>().ok())
+        .unwrap_or(config.theme);
+    if !matches!(preset, ThemePreset::Default | ThemePreset::Dark) {
+        return None;
+    }
+    let mut style = fm_core::semantic_shape_style(
+        ir.diagram_type,
+        shape,
+        &colors.node_fill,
+        &colors.node_stroke,
+        &colors.text,
+        &colors.accents,
+    )?;
+    let variables = &ir.meta.theme_overrides.theme_variables;
+    if variables
+        .get("primaryColor")
+        .and_then(|value| sanitize_svg_paint(value))
+        .is_some()
+    {
+        style.fill.clone_from(&colors.node_fill);
+    }
+    if variables
+        .get("primaryBorderColor")
+        .and_then(|value| sanitize_svg_paint(value))
+        .is_some()
+    {
+        style.stroke.clone_from(&colors.node_stroke);
+    }
+    Some(style)
+}
+
+fn semantic_node_css(colors: &fm_core::NodeShapeStyle) -> String {
+    format!(
+        "--fm-node-fill:{};--fm-node-stroke:{}",
+        colors.fill, colors.stroke
+    )
 }
 
 /// Drop one exact stylesheet range, retaining its end marker. Marker pairs deliberately sit on
@@ -1888,6 +1981,13 @@ fn strip_css_range(css: &mut String, start: &str, end: &str) {
 /// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
+    if !ir.is_some_and(|ir| ir.diagram_type == DiagramType::Mindmap) {
+        strip_css_range(
+            css,
+            ".fm-node-user-mindmap-branch-0{",
+            ".fm-node.fm-node-shape-star ",
+        );
+    }
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
         strip_css_range(css, ".fm-cluster{", ".fm-label{");
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
@@ -1898,16 +1998,12 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         ir.nodes.iter().any(|node| {
             matches!(
                 node.shape,
-                fm_core::NodeShape::Note
-                    | fm_core::NodeShape::Cloud
-                    | fm_core::NodeShape::Cylinder
-                    | fm_core::NodeShape::Star
-                    | fm_core::NodeShape::Pentagon
+                fm_core::NodeShape::Star | fm_core::NodeShape::Pentagon
             )
         })
     });
     if !has_special_shapes {
-        strip_css_range(css, ".fm-node.fm-node-shape-note path,", ".fm-edge{");
+        strip_css_range(css, ".fm-node.fm-node-shape-star ", ".fm-edge{");
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -2034,6 +2130,9 @@ fn render_scene_document_with_ir(
         .data("groups", &group_count.to_string())
         .data("paths", &path_count.to_string())
         .data("texts", &text_count.to_string());
+    if config.preserve_labels {
+        doc = doc.data("label-detail", "full");
+    }
 
     let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
@@ -2049,6 +2148,9 @@ fn render_scene_document_with_ir(
         );
         strip_unused_theme_css(&mut theme_css, ir);
         css.push_str(&theme_css);
+        if config.preserve_labels {
+            css.push_str(r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#);
+        }
     }
     push_state_css(&mut css, config, effects_enabled, true);
     if config.animations_enabled {
@@ -2058,7 +2160,7 @@ fn render_scene_document_with_ir(
         css.push_str(accessibility_css());
     }
     if config.print_optimized {
-        css.push_str(&print_css(config.min_font_size, config.node_gradients));
+        css.push_str(&print_css(config.node_gradients));
     }
     if !classdef_css.is_empty() {
         css.push_str(&classdef_css);
@@ -2087,7 +2189,11 @@ fn render_scene_document_with_ir(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    let arrow_markers = marker_defs_body(edge_color, emit_fancy_markers);
+    let arrow_markers = if ir.is_some_and(|ir| ir.diagram_type == DiagramType::Sankey) {
+        Cow::Owned(build_marker_defs_body(edge_color, ALL_MARKER_MASK, true))
+    } else {
+        marker_defs_body(edge_color, emit_fancy_markers)
+    };
     // See the twin site in the main renderer: ER cardinality markers ride alongside the mask-driven
     // arrowhead defs rather than inside the mask.
     let er_markers = ir
@@ -2217,6 +2323,13 @@ fn render_scene_path(
         elem = apply_stroke_style(elem, stroke);
     } else {
         elem = elem.stroke("none");
+    }
+
+    if let Some(ir) = ir
+        && let RenderSource::Node(index) = path.source
+        && let Some(style) = resolve_scene_node_inline_styles(ir, index).0
+    {
+        elem = elem.attr("style", &style);
     }
 
     if path.marker_start != MarkerKind::None {
@@ -2454,6 +2567,12 @@ fn render_scene_text(
         .build();
 
     elem = apply_fill_style(elem, &text.fill);
+    if let Some(ir) = ir
+        && let RenderSource::Node(index) = text.source
+        && let Some(style) = resolve_scene_node_inline_styles(ir, index).1
+    {
+        elem = elem.attr("style", &style);
+    }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
 }
 
@@ -3207,21 +3326,45 @@ fn collect_classdef_css(ir: &MermaidDiagramIr) -> String {
         ir.style_defs.clone()
     };
 
-    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    // Default is a base layer for every node, including nodes with explicit classes. Emit it
+    // first even when a named class sorts before "default", so named properties take priority.
+    // With no default definition this preserves the existing alphabetical order exactly.
+    defs.sort_by(|a, b| (a.name != "default", &a.name).cmp(&(b.name != "default", &b.name)));
     for def in &defs {
         let class_slug = sanitize_css_token(&def.name);
         if class_slug.is_empty() || def.properties.is_empty() {
             continue;
         }
+        let selector = if def.name == "default" {
+            String::from("fm-node")
+        } else {
+            format!("fm-node-user-{class_slug}")
+        };
         let (shape_props, text_props) = split_style_properties(&def.properties);
         if let Some(shape_css) = style_map_to_css(&shape_props) {
-            css.push_str(&format!(
-                ".fm-node-user-{class_slug} .fm-node-shape, .fm-node-user-{class_slug} .fm-node-shape * {{ {shape_css}; }}\n"
-            ));
+            if shape_props.contains_key("opacity") || shape_props.contains_key("filter") {
+                // Group compositing must happen once. Applying opacity/filter to both a
+                // grouped shape and each child compounds the effect (0.5 becomes 0.25).
+                css.push_str(&format!(".{selector} .fm-node-shape {{ {shape_css}; }}\n"));
+                let descendant_props = shape_props
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "opacity" | "filter"))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if let Some(descendant_css) = style_map_to_css(&descendant_props) {
+                    css.push_str(&format!(
+                        ".{selector} .fm-node-shape * {{ {descendant_css}; }}\n"
+                    ));
+                }
+            } else {
+                css.push_str(&format!(
+                    ".{selector} .fm-node-shape, .{selector} .fm-node-shape * {{ {shape_css}; }}\n"
+                ));
+            }
         }
         if let Some(text_css) = style_map_to_css(&text_props) {
             css.push_str(&format!(
-                ".fm-node-user-{class_slug} .fm-node-label, .fm-node-user-{class_slug} .fm-node-label * {{ {text_css}; }}\n"
+                ".{selector} .fm-node-label, .{selector} .fm-node-label * {{ {text_css}; }}\n"
             ));
         }
     }
@@ -3229,16 +3372,47 @@ fn collect_classdef_css(ir: &MermaidDiagramIr) -> String {
     css
 }
 
+/// Scene paths and labels are separate layers, so they cannot inherit the legacy node group's
+/// CSS classes. Resolve the same author cascade and attach only the matching shape/text half.
+fn resolve_scene_node_inline_styles(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> (Option<String>, Option<String>) {
+    // Structured IR is also a public input. Validate its properties just as parser-originated
+    // declarations are validated, before exposing this channel as an SVG style attribute.
+    let properties = ir
+        .resolved_node_style(node_index)
+        .into_iter()
+        .filter_map(|(property, value)| {
+            if !fm_core::is_allowed_style_property(&property) || value.contains(';') {
+                return None;
+            }
+            fm_core::sanitize_style_value(&value).map(|value| (property, value))
+        })
+        .collect();
+    let (shape, text) = split_style_properties(&properties);
+    (style_map_to_css(&shape), style_map_to_css(&text))
+}
+
 /// Resolve inline styles for a node from `style` directives (shape, text).
 fn resolve_node_inline_styles(
     ir: &MermaidDiagramIr,
     node_index: usize,
 ) -> (Option<String>, Option<String>) {
+    use fm_core::IrStyleTarget;
     let node = ir.nodes.get(node_index);
-    let properties = if ir.style_refs.is_empty() {
-        node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
-    } else {
+    // `inline_style` is DERIVED from `Node` and `Class` refs (`populate_structured_styles`), and
+    // classDefs reach the SVG as CSS classes, so with such refs only the `style` directives are
+    // inlined. Without them the field is the parser's own — a Venn set's colour, a Wardley dot —
+    // and a ref aimed only at a cluster or a link must not erase it.
+    let derived = ir
+        .style_refs
+        .iter()
+        .any(|sr| matches!(sr.target, IrStyleTarget::Node(_) | IrStyleTarget::Class(_)));
+    let properties = if derived {
         collect_node_style_directives(ir, node_index)
+    } else {
+        node.and_then(|n| n.inline_style.as_ref().map(|s| s.properties.clone()))
     };
 
     if let Some(props) = properties {
@@ -3364,18 +3538,13 @@ fn resolve_detail_profile(
         MermaidTier::Compact => RenderDetailTier::Compact,
         MermaidTier::Normal => RenderDetailTier::Normal,
         MermaidTier::Rich => RenderDetailTier::Rich,
-        MermaidTier::Auto => {
-            if area < 12_000.0 {
-                RenderDetailTier::Compact
-            } else if area < 220_000.0 {
-                RenderDetailTier::Normal
-            } else {
-                RenderDetailTier::Rich
-            }
-        }
+        // An SVG's intrinsic area is not a display budget: it can be zoomed, printed, or
+        // embedded at any size. Keep authored labels and consistent typography by default.
+        // Explicit tiers and resource degradation still provide bounded overview rendering.
+        MermaidTier::Auto => RenderDetailTier::Rich,
     };
 
-    match tier {
+    let mut profile = match tier {
         RenderDetailTier::Rich => RenderDetailProfile {
             tier,
             show_node_labels: true,
@@ -3415,7 +3584,18 @@ fn resolve_detail_profile(
                 enable_shadows: false,
             }
         }
+    };
+    if config.preserve_labels {
+        // A detail downgrade is a presentation decision, not permission to remove information
+        // from an interactive document. In particular, a later CSS zoom cannot reconstruct text
+        // omitted during SVG generation (GH#14).
+        profile.show_node_labels = true;
+        profile.show_edge_labels = true;
+        profile.show_cluster_labels = true;
+        profile.node_label_max_chars = None;
+        profile.edge_label_max_chars = None;
     }
+    profile
 }
 
 fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient> {
@@ -3441,8 +3621,8 @@ fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient
 
 /// The default-preset theme's node fill + background — the memo key for [`node_gradient_svg`].
 /// Pinned by `default_node_gradient_colors_match_preset`.
-const DEFAULT_NODE_FILL: &str = "#ffffff";
-const DEFAULT_NODE_BG: &str = "#fafbfc";
+const DEFAULT_NODE_FILL: &str = "#f8fafc";
+const DEFAULT_NODE_BG: &str = "#ffffff";
 
 /// The node-gradient `<defs>` fragment for `(config, theme)` — the serialized `<linearGradient>`/
 /// `<radialGradient>` that [`node_gradient_for`] builds — memoized for the default theme + style.
@@ -3632,7 +3812,7 @@ fn animation_css(config: &SvgRenderConfig) -> String {
 /// `gradient_def_emitted` must be "does this document actually contain the `fm-node-gradient` def",
 /// not merely `config.node_gradients`: the dedicated chart renderers have the flag on yet never emit
 /// the def, and a neutralisation rule for an absent id is 79 dead bytes (bd-w5f7).
-fn print_css(min_font_size: f32, gradient_def_emitted: bool) -> String {
+fn print_css(gradient_def_emitted: bool) -> String {
     // Flatten the node gradient for print by neutralising its STOPS, not by overriding node fill.
     //
     // The gradient reaches nodes as an inline `fill="url(#fm-node-gradient)"` presentation
@@ -3656,16 +3836,33 @@ fn print_css(min_font_size: f32, gradient_def_emitted: bool) -> String {
     };
     format!(
         "@media print {{
-  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
-    font-size: {min_font_size:.1}px !important;
-    fill: #111 !important;
+  svg {{
+    --fm-bg: #fff !important;
+    --fm-node-fill: #fff !important;
+    --fm-node-stroke: #111 !important;
+    --fm-edge-color: #111 !important;
+    --fm-edge-muted: #111 !important;
+    --fm-edge-label-bg: #fff !important;
+    --fm-edge-label-text: #111 !important;
+    --fm-text-color: #111 !important;
+    background: #fff !important;
   }}
-  .fm-node path, .fm-node rect, .fm-node circle, .fm-edge {{
-    stroke: #111 !important;
+  .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
+    fill: #111;
+  }}
+  .fm-edge-labeled > rect {{
+    fill: #fff !important;
+  }}
+  .fm-node path, .fm-node rect, .fm-node circle, .fm-node ellipse, .fm-node polygon, .fm-node line, .fm-edge {{
+    stroke: #111;
   }}
   .fm-cluster {{
     fill: #fff !important;
     stroke: #666 !important;
+  }}
+  .fm-node-semantic {{
+    --fm-node-fill: #fff !important;
+    --fm-node-stroke: #111 !important;
   }}{gradient_reset}
 }}"
     )
@@ -3718,7 +3915,7 @@ fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
 fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
     use fm_core::ArrowType;
     match arrow {
-        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => 0,
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => 0,
         ArrowType::Arrow | ArrowType::DottedArrow => MARKER_END,
         ArrowType::OpenArrow | ArrowType::DottedOpenArrow => MARKER_OPEN,
         ArrowType::HalfArrowTop
@@ -4000,7 +4197,7 @@ fn render_edges_with_batch_reuse(
     layout: &DiagramLayout,
     reuse: &mut SvgBatchFragmentReuse<'_>,
 ) {
-    let common = reusable_edge_prefix_len(
+    let mut common = reusable_edge_prefix_len(
         reuse,
         context.ir,
         layout,
@@ -4013,6 +4210,28 @@ fn render_edges_with_batch_reuse(
             .previous
             .map_or(0, |previous| previous.edge_ends.len()),
     );
+    if let Some(positions) = context.preserved_label_positions {
+        // Node/frame changes and earlier labels can move a label with an unchanged route.
+        // Retain the actual placement, not a reference to geometry that suffix transplantation
+        // can mutate before reuse. The existing prefix proof certifies text/style/route identity.
+        if let Some(previous) = reuse.previous {
+            let position_bits = |positions: &[Option<fm_layout::LayoutPoint>], index: usize| {
+                positions
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|point| (point.x.to_bits(), point.y.to_bits()))
+            };
+            for (index, edge) in edges[..common].iter().enumerate() {
+                if position_bits(&previous.edge_label_positions, edge.edge_index)
+                    != position_bits(positions, edge.edge_index)
+                {
+                    common = index;
+                    break;
+                }
+            }
+        }
+        reuse.next.edge_label_positions.extend_from_slice(positions);
+    }
     let prefix_end = common
         .checked_sub(1)
         .and_then(|index| reuse.previous?.edge_ends.get(index).copied())
@@ -4114,6 +4333,23 @@ pub(crate) fn svg_frame(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
 ) -> SvgFrame {
+    svg_geometry(ir, layout, config).frame
+}
+
+struct SvgGeometry {
+    frame: SvgFrame,
+    detail: RenderDetailProfile,
+    label_positions: Option<Vec<Option<fm_layout::LayoutPoint>>>,
+}
+
+/// Resolve label placement before the document frame is fixed. An unusually wide label, or a
+/// crowded layout with no internal space, must extend the exported frame rather than disappear
+/// beyond it. Deck manifests use the same frame through `svg_frame`.
+fn svg_geometry(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+) -> SvgGeometry {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
@@ -4124,11 +4360,50 @@ pub(crate) fn svg_frame(
         config.font_size + 22.0
     };
 
-    SvgFrame {
+    let mut frame = SvgFrame {
         viewbox_width: (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
         viewbox_height: layout.bounds.height + padding * 2.0 + legend_height + title_height,
         offset_x: padding - layout.bounds.x,
         offset_y: padding - layout.bounds.y + title_height,
+    };
+    // The tier describes the layout's decoration budget; expanding a frame to retain text must
+    // not feed back into tier selection or change the font used to measure that same text.
+    let detail = resolve_detail_profile(frame.viewbox_width, frame.viewbox_height, config);
+    let label_positions = resolve_graph_edge_label_positions(ir, layout, config, detail);
+    if let Some(positions) = &label_positions {
+        let (mut left, mut top) = (0.0_f32, 0.0_f32);
+        let (mut right, mut bottom) = (frame.viewbox_width, frame.viewbox_height);
+        for (index, position) in positions.iter().enumerate() {
+            let Some(position) = position else { continue };
+            let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+                continue;
+            };
+            let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
+            let (width, height, _) =
+                edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+            let x = position.x + frame.offset_x;
+            let y = position.y + frame.offset_y;
+            left = left.min(x - width / 2.0 - 2.0);
+            // A flowchart title stays in its own fixed header band. Expanding only against SVG
+            // y=0 could place a clear but upward-displaced plate over that title.
+            let header_bottom = if title_height > 0.0 {
+                padding + title_height
+            } else {
+                0.0
+            };
+            top = top.min(y - height / 2.0 - 2.0 - header_bottom);
+            right = right.max(x + width / 2.0 + 2.0);
+            bottom = bottom.max(y + height / 2.0 + 2.0);
+        }
+        frame.viewbox_width = right - left;
+        frame.viewbox_height = bottom - top;
+        frame.offset_x -= left;
+        frame.offset_y -= top;
+    }
+    SvgGeometry {
+        frame,
+        detail,
+        label_positions,
     }
 }
 
@@ -4175,14 +4450,17 @@ fn render_layout_to_svg(
     cache_direct_minified_css: bool,
     mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
-    let frame = svg_frame(ir, layout, config);
+    let SvgGeometry {
+        frame,
+        detail,
+        label_positions: preserved_label_positions,
+    } = svg_geometry(ir, layout, config);
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
     let generic_title = generic_title_for(ir);
     let width = frame.viewbox_width;
     let height = frame.viewbox_height;
-    let detail = resolve_detail_profile(width, height, config);
 
     let mut doc = SvgDocument::new()
         .viewbox(0.0, 0.0, width, height)
@@ -4219,6 +4497,9 @@ fn render_layout_to_svg(
         .data("edges", &ir.edges.len().to_string())
         .data("type", ir.diagram_type.as_str())
         .data("detail-tier", detail_tier_name(detail.tier));
+    if config.preserve_labels {
+        doc = doc.data("label-detail", "full");
+    }
 
     let theme = resolve_theme(Some(ir), config);
     let classdef_css = collect_classdef_css(ir);
@@ -4255,10 +4536,18 @@ fn render_layout_to_svg(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    let arrow_markers = known_live_marker_mask.map_or_else(
-        || marker_defs_body(edge_color, emit_fancy_markers),
-        |mask| marker_defs_body_for_mask(edge_color, mask),
-    );
+    let arrow_markers = if ir.diagram_type == DiagramType::Sankey {
+        Cow::Owned(build_marker_defs_body(
+            edge_color,
+            known_live_marker_mask.unwrap_or(ALL_MARKER_MASK),
+            true,
+        ))
+    } else {
+        known_live_marker_mask.map_or_else(
+            || marker_defs_body(edge_color, emit_fancy_markers),
+            |mask| marker_defs_body_for_mask(edge_color, mask),
+        )
+    };
     // ER crow's-foot cardinality markers (bd-dun16) are appended rather than folded into the mask.
     // The original reason was that the mask was a full `u16`; it is a `u32` since bd-lkm9i, so the
     // reason is now the second one alone, which was always the load-bearing half: these defs are
@@ -4345,6 +4634,11 @@ fn render_layout_to_svg(
             ir.edges.iter().any(|edge| edge.label.is_some()),
         );
         strip_unused_theme_css(&mut css, Some(ir));
+        if config.preserve_labels {
+            // Keep glyph metrics in SVG units while zooming. optimizeLegibility can quantize
+            // tiny text to device pixels and retain those distorted bounds after zoom changes.
+            css.push_str(r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#);
+        }
         push_state_css(
             &mut css,
             config,
@@ -4360,7 +4654,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
+            css.push_str(&print_css(gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -4403,7 +4697,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
+            css.push_str(&print_css(gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -4584,7 +4878,14 @@ fn render_layout_to_svg(
         // information instead of duplication. And scoped to this renderer: the terminal draws
         // journey lanes FROM these bands (its cluster overlay does not cover them), so emptying the
         // label upstream in layout would have taken the section names off that surface entirely.
-        let suppress_lane_labels = ir.diagram_type == fm_core::DiagramType::Journey;
+        //
+        // A sequence lifeline is a Lane band too, labelled with its participant, whose name the
+        // head (and foot) header already draws: the caption printed it a third time beside the
+        // lifeline's top. The canvas renderer suppresses it for the same reason.
+        let suppress_lane_labels = matches!(
+            ir.diagram_type,
+            fm_core::DiagramType::Journey | fm_core::DiagramType::Sequence
+        );
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
             if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {
@@ -4700,48 +5001,8 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render sequence diagram notes.
-    for note in &layout.extensions.sequence_notes {
-        let nx = note.bounds.x + offset_x;
-        let ny = note.bounds.y + offset_y;
-        let nw = note.bounds.width;
-        let nh = note.bounds.height;
-
-        // Note background with rounded corners.
-        doc = doc.child(
-            Element::rect()
-                .x(nx)
-                .y(ny)
-                .width(nw)
-                .height(nh)
-                .rx(4.0)
-                .ry(4.0)
-                .fill(&theme.colors.node_fill)
-                .stroke(&theme.colors.accents[4 % theme.colors.accents.len()])
-                .stroke_width(1.0)
-                .class("fm-sequence-note"),
-        );
-
-        // Note text.
-        if !note.text.is_empty() {
-            let note_font_size = config.font_size * 0.8;
-            doc = doc.child(
-                TextBuilder::new(&note.text)
-                    .x(nx + 8.0)
-                    .y(ny + 8.0)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(note_font_size)
-                    .line_height(config.line_height)
-                    .baseline(text::DominantBaseline::Hanging)
-                    .anchor(TextAnchor::Start)
-                    .fill(&theme.colors.text)
-                    .class("fm-sequence-note-text")
-                    .build(),
-            );
-        }
-    }
-
-    // Render sequence diagram interaction fragments (loop, alt, par, etc.).
+    // Render sequence diagram interaction fragments (loop, alt, par, etc.). Notes come AFTER them:
+    // a `rect` is an opaque background band, and a note inside one was painted over by it.
     //
     // The frame is CLAMPED to the diagram's own bounds (bd-zwh3). `build_sequence_fragment_geometry`
     // anchors it at `-padding` and widens it by `2 * padding`, but the padding it uses comes from the
@@ -4751,11 +5012,9 @@ fn render_layout_to_svg(
     // and the `alt` label chip lost its left edge with it. Every alt/opt/loop/par frame in every
     // sequence diagram was drawn open at the ends instead of closed.
     //
-    // Clamping here rather than widening the canvas is the faithful choice: our canvas IS the
-    // participant span, which is what mermaid draws the frame within, so growing it would add
-    // whitespace the incumbent does not have. Layout emitting out-of-bounds geometry is still worth
-    // fixing at the source for the other renderers — recorded on the bead — but no consumer should
-    // have to draw outside its own viewBox to honour it.
+    // Built-in layout reserves room for fragment and note overhang in the diagram bounds.
+    // Retain this clamp for externally supplied layouts with incomplete bounds; it must not
+    // constrain the room layout can reserve to the participant span.
     let drawable_left = offset_x + layout.bounds.x;
     let drawable_right = drawable_left + layout.bounds.width;
     for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
@@ -4919,11 +5178,17 @@ fn render_layout_to_svg(
                 .and_then(|meta| meta.fragments.get(fragment_index))
                 .and_then(|ir_fragment| message_y(ir_fragment.start_edge))
                 .map_or(0.0, |first_message_y| first_message_y - fy);
-            for alternative in alternatives {
-                let Some(branch_y) = message_y(alternative.start_edge) else {
-                    continue;
+            for (branch_index, alternative) in alternatives.iter().enumerate() {
+                // The layout's own divider row when it placed one (a branch that opens with a note
+                // or holds no message has no "first message" to derive it from).
+                let divider_y = if let Some(top) = fragment.branch_tops.get(branch_index) {
+                    top + offset_y
+                } else {
+                    let Some(branch_y) = message_y(alternative.start_edge) else {
+                        continue;
+                    };
+                    branch_y - lead
                 };
-                let divider_y = branch_y - lead;
                 // The divider spans the frame, so it inherits the same out-of-canvas hazard the
                 // frame border did (bd-zwh3) and is drawn between the SAME clamped edges.
                 doc = doc.child(
@@ -4954,6 +5219,47 @@ fn render_layout_to_svg(
                     );
                 }
             }
+        }
+    }
+
+    // Render sequence diagram notes, above the fragment frames (see the note on fragments).
+    for note in &layout.extensions.sequence_notes {
+        let nx = note.bounds.x + offset_x;
+        let ny = note.bounds.y + offset_y;
+        let nw = note.bounds.width;
+        let nh = note.bounds.height;
+
+        // Note background with rounded corners.
+        doc = doc.child(
+            Element::rect()
+                .x(nx)
+                .y(ny)
+                .width(nw)
+                .height(nh)
+                .rx(4.0)
+                .ry(4.0)
+                .fill(&theme.colors.node_fill)
+                .stroke(&theme.colors.accents[4 % theme.colors.accents.len()])
+                .stroke_width(1.0)
+                .class("fm-sequence-note"),
+        );
+
+        // Note text.
+        if !note.text.is_empty() {
+            let note_font_size = config.font_size * fm_layout::LayoutSequenceNote::FONT_SCALE;
+            doc = doc.child(
+                TextBuilder::new(&note.text)
+                    .x(nx + fm_layout::LayoutSequenceNote::PADDING_X)
+                    .y(ny + fm_layout::LayoutSequenceNote::PADDING_Y)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(note_font_size)
+                    .line_height(config.line_height)
+                    .baseline(text::DominantBaseline::Hanging)
+                    .anchor(TextAnchor::Start)
+                    .fill(&theme.colors.text)
+                    .class("fm-sequence-note-text")
+                    .build(),
+            );
         }
     }
 
@@ -5132,7 +5438,7 @@ fn render_layout_to_svg(
             if !display_title.is_empty() {
                 let text = TextBuilder::new(&display_title)
                     .x(cluster.bounds.x + offset_x + 8.0)
-                    .y(cluster.bounds.y + offset_y + 16.0)
+                    .y(cluster.bounds.y + offset_y + (detail.cluster_font_size + 2.0).max(16.0))
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(detail.cluster_font_size)
                     .fill(&label_color)
@@ -5171,7 +5477,10 @@ fn render_layout_to_svg(
         {
             let text = TextBuilder::new(&format!("[{boundary_type}]"))
                 .x(cluster.bounds.x + offset_x + 8.0)
-                .y(cluster.bounds.y + offset_y + 16.0 + detail.cluster_font_size * 1.25)
+                .y(cluster.bounds.y
+                    + offset_y
+                    + (detail.cluster_font_size + 2.0).max(16.0)
+                    + detail.cluster_font_size * 1.25)
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(detail.cluster_font_size)
                 .fill(&label_color)
@@ -5221,18 +5530,21 @@ fn render_layout_to_svg(
         let nx = note.bounds.x + offset_x;
         let ny = note.bounds.y + offset_y;
 
-        // Leader from the state's edge to the note's, dashed like mermaid-js's note connector.
-        doc = doc.child(
-            Element::line()
-                .x1(note.leader_start.x + offset_x)
-                .y1(note.leader_start.y + offset_y)
-                .x2(note.leader_end.x + offset_x)
-                .y2(note.leader_end.y + offset_y)
-                .stroke(&theme.colors.edge)
-                .stroke_width(1.0)
-                .stroke_dasharray("4,3")
-                .class("fm-state-note-leader"),
-        );
+        // Leader from the state's edge to the note's, dashed like mermaid-js's note connector. A
+        // note annotating the whole diagram has none.
+        if note.leader_start != note.leader_end {
+            doc = doc.child(
+                Element::line()
+                    .x1(note.leader_start.x + offset_x)
+                    .y1(note.leader_start.y + offset_y)
+                    .x2(note.leader_end.x + offset_x)
+                    .y2(note.leader_end.y + offset_y)
+                    .stroke(&theme.colors.edge)
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,3")
+                    .class("fm-state-note-leader"),
+            );
+        }
 
         doc = doc.child(
             Element::rect()
@@ -5282,6 +5594,7 @@ fn render_layout_to_svg(
         detail,
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
+        preserved_label_positions: preserved_label_positions.as_deref(),
         // Computed ONCE here; the per-edge helper used to recompute it, re-parsing every flow
         // value on every edge.
         sankey_widest_flow: sankey_widest_flow(ir),
@@ -6389,27 +6702,24 @@ fn write_class_cardinality_labels_into(
             && edge_path.points.len() >= 2
         {
             let font_size = config.font_size * 0.7;
-            if let Some(card) = ir_edge.source_cardinality() {
-                let p = &edge_path.points[0];
+            let points = &edge_path.points;
+            let last = points.len() - 1;
+            for (card, end, next) in [
+                (ir_edge.source_cardinality(), &points[0], &points[1]),
+                (
+                    ir_edge.target_cardinality(),
+                    &points[last],
+                    &points[last - 1],
+                ),
+            ] {
+                let Some(card) = card else { continue };
+                let (x, y, anchor) = cardinality_anchor(end, next, font_size);
                 write_cardinality_text_into(
                     out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
+                    x + offset_x,
+                    y + offset_y,
                     font_size,
-                    &colors.text,
-                    &config.font_family,
-                    config.embed_theme_css,
-                    "fm-class-cardinality",
-                    card,
-                );
-            }
-            if let Some(card) = ir_edge.target_cardinality() {
-                let p = &edge_path.points[edge_path.points.len() - 1];
-                write_cardinality_text_into(
-                    out,
-                    p.x + offset_x + 8.0,
-                    p.y + offset_y - 8.0,
-                    font_size,
+                    anchor,
                     &colors.text,
                     &config.font_family,
                     config.embed_theme_css,
@@ -6418,6 +6728,36 @@ fn write_class_cardinality_labels_into(
                 );
             }
         }
+    }
+}
+
+/// Where a cardinality label goes for the edge end at `end`, whose path continues towards `next`.
+///
+/// The label is stepped along the path past the end marker and kept on the path's side of the node
+/// border. A fixed offset from the endpoint put it INSIDE the node whenever the edge left to the left
+/// or upwards, and cardinality is drawn before the nodes, so the node box covered it.
+fn cardinality_anchor(
+    end: &fm_layout::LayoutPoint,
+    next: &fm_layout::LayoutPoint,
+    font_size: f32,
+) -> (f32, f32, &'static str) {
+    const ALONG: f32 = 14.0;
+    const ASIDE: f32 = 6.0;
+    let (dx, dy) = (next.x - end.x, next.y - end.y);
+    let length = dx.hypot(dy);
+    if length <= f32::EPSILON {
+        return (end.x + ASIDE, end.y - ASIDE, "start");
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let (x, y) = (end.x + ux * ALONG, end.y + uy * ALONG);
+    if ux.abs() >= uy.abs() {
+        // Horizontal: above the line, extending away from the node.
+        (x, y - ASIDE, if ux < 0.0 { "end" } else { "start" })
+    } else if uy > 0.0 {
+        // Leaving downwards: the baseline sits a full line below the border.
+        (x + ASIDE, y + font_size * 0.5, "start")
+    } else {
+        (x + ASIDE, y, "start")
     }
 }
 
@@ -6433,6 +6773,7 @@ fn write_cardinality_text_into(
     x: f32,
     y: f32,
     font_size: f32,
+    anchor: &str,
     fill: &str,
     font_family: &str,
     embed_css: bool,
@@ -6444,7 +6785,9 @@ fn write_cardinality_text_into(
     let _ = crate::attributes::write_number_into(out, x);
     out.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(out, y);
-    out.push_str("\" text-anchor=\"start\" dominant-baseline=\"auto\" font-size=\"");
+    out.push_str("\" text-anchor=\"");
+    out.push_str(anchor);
+    out.push_str("\" dominant-baseline=\"auto\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, font_size);
     out.push('"');
     if !embed_css {
@@ -6687,7 +7030,11 @@ fn render_quadrant_svg(
         for (i, node_box) in layout.nodes.iter().enumerate() {
             let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
             let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
-            let color = accent_colors[i % accent_colors.len()];
+            let paint = QuadrantPointPaint::resolve(
+                quad_meta.points.get(i),
+                accent_colors[i % accent_colors.len()],
+                &theme.colors.background,
+            );
             let label = quad_meta
                 .points
                 .get(i)
@@ -6702,9 +7049,8 @@ fn render_quadrant_svg(
                 &mut points_svg,
                 cx,
                 cy,
-                color,
-                &theme.colors.background,
-                cx + 10.0,
+                &paint,
+                cx + paint.radius + 4.0,
                 cy + 4.0,
                 config.font_size * 0.75,
                 &theme.colors.text,
@@ -6721,14 +7067,18 @@ fn render_quadrant_svg(
     for (i, node_box) in layout.nodes.iter().enumerate() {
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
-        let color = accent_colors[i % accent_colors.len()];
+        let paint = QuadrantPointPaint::resolve(
+            quad_meta.points.get(i),
+            accent_colors[i % accent_colors.len()],
+            &theme.colors.background,
+        );
         let point_circle = Element::circle()
             .cx(cx)
             .cy(cy)
-            .r(6.0)
-            .fill(color)
-            .stroke(&theme.colors.background)
-            .stroke_width(1.5)
+            .r(paint.radius)
+            .fill(paint.fill)
+            .stroke(paint.stroke)
+            .stroke_width(paint.stroke_width)
             .class("fm-quadrant-point");
         // Same accessible name the streaming path emits (bd-0eoa6); this is the non-embedded-CSS
         // export, and the two must not disagree about what a point is called.
@@ -6750,7 +7100,7 @@ fn render_quadrant_svg(
             .unwrap_or(&node_box.node_id);
         doc = doc.child(
             Element::text()
-                .x(cx + 10.0)
+                .x(cx + paint.radius + 4.0)
                 .y(cy + 4.0)
                 .content(label)
                 .attr("text-anchor", "start")
@@ -6794,13 +7144,45 @@ fn quadrant_point_accessible_name(point: &fm_core::IrQuadrantPoint, labels: &[St
 /// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
 /// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
 /// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
+/// How one quadrant point is painted: the theme's accent dot unless the point (or its class)
+/// declared `radius`, `color`, `stroke-color` or `stroke-width`.
+struct QuadrantPointPaint<'a> {
+    radius: f32,
+    fill: &'a str,
+    stroke: &'a str,
+    stroke_width: f32,
+}
+
+impl<'a> QuadrantPointPaint<'a> {
+    const DEFAULT_RADIUS: f32 = 6.0;
+    const DEFAULT_STROKE_WIDTH: f32 = 1.5;
+
+    fn resolve(point: Option<&'a fm_core::IrQuadrantPoint>, accent: &'a str, bg: &'a str) -> Self {
+        let style = point.and_then(|point| point.style.as_ref());
+        Self {
+            radius: style
+                .and_then(|style| style.radius)
+                .filter(|radius| *radius > 0.0)
+                .unwrap_or(Self::DEFAULT_RADIUS),
+            fill: style
+                .and_then(|style| style.color.as_deref())
+                .unwrap_or(accent),
+            stroke: style
+                .and_then(|style| style.stroke_color.as_deref())
+                .unwrap_or(bg),
+            stroke_width: style
+                .and_then(|style| style.stroke_width)
+                .unwrap_or(Self::DEFAULT_STROKE_WIDTH),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_quadrant_point_into(
     f: &mut String,
     cx: f32,
     cy: f32,
-    color: &str,
-    bg: &str,
+    paint: &QuadrantPointPaint<'_>,
     label_x: f32,
     label_y: f32,
     label_font_size: f32,
@@ -6813,11 +7195,24 @@ fn write_quadrant_point_into(
     let _ = crate::attributes::write_number_into(f, cx);
     f.push_str("\" cy=\"");
     let _ = crate::attributes::write_number_into(f, cy);
-    f.push_str("\" r=\"6\" fill=\"");
-    let _ = write_escaped_attr(f, color);
+    // The default dot keeps its fixed serialisation byte for byte (`r="6"`, `stroke-width="1.50"`).
+    f.push_str("\" r=\"");
+    if (paint.radius - QuadrantPointPaint::DEFAULT_RADIUS).abs() < f32::EPSILON {
+        f.push('6');
+    } else {
+        let _ = crate::attributes::write_number_into(f, paint.radius);
+    }
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, paint.fill);
     f.push_str("\" stroke=\"");
-    let _ = write_escaped_attr(f, bg);
-    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"");
+    let _ = write_escaped_attr(f, paint.stroke);
+    f.push_str("\" stroke-width=\"");
+    if (paint.stroke_width - QuadrantPointPaint::DEFAULT_STROKE_WIDTH).abs() < f32::EPSILON {
+        f.push_str("1.50");
+    } else {
+        let _ = crate::attributes::write_number_into(f, paint.stroke_width);
+    }
+    f.push_str("\" class=\"fm-quadrant-point\"");
     match accessible_name {
         Some(name) => {
             f.push_str("><title>");
@@ -7916,7 +8311,7 @@ fn render_xychart_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let plot_bounds = xychart_plot_bounds(layout);
+    let plot_bounds = fm_layout::xychart_plot_bounds(xy_chart_meta, layout.bounds);
     let plot_x = plot_bounds.x + offset_x;
     let plot_y = plot_bounds.y + offset_y;
     let plot_bottom = plot_y + plot_bounds.height;
@@ -7956,242 +8351,260 @@ fn render_xychart_svg(
             .class("fm-xychart-plot"),
     );
 
-    // Nice tick values, not quarter points (see `xychart_nice_step`).
-    for tick_value in xychart_y_ticks(y_min, y_max) {
-        let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
-            (tick_value - y_min) / (y_max - y_min)
-        } else {
-            0.0
-        };
-        let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
-        doc = doc.child(
-            Element::line()
-                .x1(plot_x)
-                .y1(tick_y)
-                .x2(plot_right)
-                .y2(tick_y)
-                .stroke("rgba(148,163,184,0.35)")
-                .stroke_width(1.0)
-                .stroke_dasharray("4,4")
-                .class("fm-xychart-gridline"),
+    if xy_chart_meta.horizontal {
+        doc = write_xychart_horizontal_axes(
+            doc,
+            ir,
+            layout,
+            xy_chart_meta,
+            &categories,
+            (plot_x, plot_y, plot_bounds.width, plot_bounds.height),
+            (y_min, y_max),
+            offset_x,
+            config,
+            theme,
         );
-        doc = doc.child(
-            TextBuilder::new(&format_xychart_tick_value(tick_value))
-                .x(plot_x - 10.0)
-                .y(tick_y + 4.0)
-                .anchor(TextAnchor::End)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.72,
-                    config.min_font_size,
-                ))
-                // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
-                // LINE colour — a category error that is nearly invisible in review because both
-                // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
-                // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
-                //
-                // Measured contrast against the theme background, before this change:
-                //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
-                //                                              the 3:1 large-text floor
-                //   dark     #94a3b8 on #0f172a  =  6.96:1
-                // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
-                // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
-                // was not, on the SHIPPED default theme.
-                .fill(mermaid_default_primary_text_color(config, &theme.colors))
-                .class("fm-xychart-y-tick")
-                .build(),
-        );
-    }
-
-    doc = doc.child(
-        Element::line()
-            .x1(plot_x)
-            .y1(plot_bottom)
-            .x2(plot_right)
-            .y2(plot_bottom)
-            .stroke(&theme.colors.edge)
-            .stroke_width(1.5)
-            .class("fm-xychart-axis fm-xychart-axis-x"),
-    );
-    doc = doc.child(
-        Element::line()
-            .x1(plot_x)
-            .y1(plot_y)
-            .x2(plot_x)
-            .y2(plot_bottom)
-            .stroke(&theme.colors.edge)
-            .stroke_width(1.5)
-            .class("fm-xychart-axis fm-xychart-axis-y"),
-    );
-
-    let band_width = plot_bounds.width / categories.len().max(1) as f32;
-    // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
-    // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
-    // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
-    // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
-    // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
-    // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
-    // (element.rs). Any other config falls back to the TextBuilder path below.
-    let labels_streamable = config.embed_theme_css
-        && categories
-            .iter()
-            .all(|c| !c.contains('\n') && !c.contains('\r'));
-    if labels_streamable {
-        use crate::attributes::{write_escaped_attr, write_escaped_text};
-        let mut y_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
-        let mut fs_text = String::new();
-        let _ = crate::attributes::write_number_into(
-            &mut fs_text,
-            clamp_font_size(config.font_size * 0.74, config.min_font_size),
-        );
-        let mut esc_fill = String::new();
-        let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
-        let mut x_text = String::new();
-        let mut label_svg = String::new();
-        for (index, category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
-            x_text.clear();
-            let _ = crate::attributes::write_number_into(&mut x_text, x);
-            label_svg.push_str("<text x=\"");
-            label_svg.push_str(&x_text);
-            label_svg.push_str("\" y=\"");
-            label_svg.push_str(&y_text);
-            label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
-            label_svg.push_str(&fs_text);
-            label_svg.push_str("\" fill=\"");
-            label_svg.push_str(&esc_fill);
-            label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
-            let _ = write_escaped_text(&mut label_svg, category);
-            label_svg.push_str("</text>");
-        }
-        doc = doc.child(Element::raw_svg(label_svg));
     } else {
-        for (index, category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
+        // Nice tick values shared with the Canvas renderer, not quarter points.
+        for tick_value in xychart_y_ticks(y_min, y_max) {
+            let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
+                (tick_value - y_min) / (y_max - y_min)
+            } else {
+                0.0
+            };
+            let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
             doc = doc.child(
-                TextBuilder::new(category)
-                    .x(x)
-                    .y(plot_bottom + 24.0)
-                    .anchor(TextAnchor::Middle)
+                Element::line()
+                    .x1(plot_x)
+                    .y1(tick_y)
+                    .x2(plot_right)
+                    .y2(tick_y)
+                    .stroke("rgba(148,163,184,0.35)")
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,4")
+                    .class("fm-xychart-gridline"),
+            );
+            doc = doc.child(
+                TextBuilder::new(&format_xychart_tick_value(tick_value))
+                    .x(plot_x - 10.0)
+                    .y(tick_y + 4.0)
+                    .anchor(TextAnchor::End)
                     .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(clamp_font_size(
-                        config.font_size * 0.74,
+                        config.font_size * 0.72,
                         config.min_font_size,
                     ))
-                    .fill(&theme.colors.text)
-                    .class("fm-xychart-x-tick")
+                    // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
+                    // LINE colour — a category error that is nearly invisible in review because both
+                    // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
+                    // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
+                    //
+                    // Measured contrast against the theme background, before this change:
+                    //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
+                    //                                              the 3:1 large-text floor
+                    //   dark     #94a3b8 on #0f172a  =  6.96:1
+                    // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
+                    // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
+                    // was not, on the SHIPPED default theme.
+                    .fill(mermaid_default_primary_text_color(config, &theme.colors))
+                    .class("fm-xychart-y-tick")
                     .build(),
             );
         }
-    }
 
-    if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
-        doc = doc.child(
-            TextBuilder::new(title)
-                .x((layout.bounds.width / 2.0) + offset_x)
-                .y(plot_y - 34.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 1.18,
-                    config.min_font_size,
-                ))
-                .font_weight("600")
-                .fill(&theme.colors.text)
-                .class("fm-xychart-title")
-                .build(),
-        );
-    }
-
-    if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
-        doc = doc.child(
-            TextBuilder::new(y_label)
-                .x(plot_x - 52.0)
-                .y(plot_y - 12.0)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.76,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-y-label")
-                .build(),
-        );
-    }
-
-    // X-axis label (centered below category labels).
-    if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
-        doc = doc.child(
-            TextBuilder::new(x_label)
-                .x(plot_x + plot_bounds.width / 2.0)
-                .y(plot_bottom + 48.0)
-                .anchor(TextAnchor::Middle)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.76,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-x-label")
-                .build(),
-        );
-    }
-
-    // Tick marks at axis edges (small lines at each grid level and category center).
-    let tick_len = 5.0_f32;
-    // The SAME values the labels use — a tick mark beside a different set of labels is worse than
-    // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
-    for tick_value in xychart_y_ticks(y_min, y_max) {
-        let frac = if (y_max - y_min).abs() > f32::EPSILON {
-            (tick_value - y_min) / (y_max - y_min)
-        } else {
-            0.0
-        };
-        let y = plot_bottom - frac * plot_bounds.height;
         doc = doc.child(
             Element::line()
-                .x1(plot_x - tick_len)
-                .y1(y)
-                .x2(plot_x)
-                .y2(y)
-                .stroke(&theme.colors.text)
-                .stroke_width(1.0)
-                .class("fm-xychart-tick"),
+                .x1(plot_x)
+                .y1(plot_bottom)
+                .x2(plot_right)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-x"),
         );
-    }
-    {
-        // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
-        // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
-        // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
-        // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
-        // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
-        use crate::attributes::write_escaped_attr;
-        let mut y1_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
-        let mut y2_text = String::new();
-        let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
-        let mut esc_stroke = String::new();
-        let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
-        let mut x_text = String::new();
-        let mut tick_svg = String::new();
-        for (index, _category) in categories.iter().enumerate() {
-            let x = plot_x + band_width * (index as f32 + 0.5);
-            x_text.clear();
-            let _ = crate::attributes::write_number_into(&mut x_text, x);
-            tick_svg.push_str("<line x1=\"");
-            tick_svg.push_str(&x_text);
-            tick_svg.push_str("\" y1=\"");
-            tick_svg.push_str(&y1_text);
-            tick_svg.push_str("\" x2=\"");
-            tick_svg.push_str(&x_text);
-            tick_svg.push_str("\" y2=\"");
-            tick_svg.push_str(&y2_text);
-            tick_svg.push_str("\" stroke=\"");
-            tick_svg.push_str(&esc_stroke);
-            tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+        doc = doc.child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_x)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-y"),
+        );
+
+        let band_width = plot_bounds.width / categories.len().max(1) as f32;
+        // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
+        // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
+        // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
+        // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
+        // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
+        // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
+        // (element.rs). Any other config falls back to the TextBuilder path below.
+        let labels_streamable = config.embed_theme_css
+            && categories
+                .iter()
+                .all(|c| !c.contains('\n') && !c.contains('\r'));
+        if labels_streamable {
+            use crate::attributes::{write_escaped_attr, write_escaped_text};
+            let mut y_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
+            let mut fs_text = String::new();
+            let _ = crate::attributes::write_number_into(
+                &mut fs_text,
+                clamp_font_size(config.font_size * 0.74, config.min_font_size),
+            );
+            let mut esc_fill = String::new();
+            let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
+            let mut x_text = String::new();
+            let mut label_svg = String::new();
+            for (index, category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                x_text.clear();
+                let _ = crate::attributes::write_number_into(&mut x_text, x);
+                label_svg.push_str("<text x=\"");
+                label_svg.push_str(&x_text);
+                label_svg.push_str("\" y=\"");
+                label_svg.push_str(&y_text);
+                label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
+                label_svg.push_str(&fs_text);
+                label_svg.push_str("\" fill=\"");
+                label_svg.push_str(&esc_fill);
+                label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
+                let _ = write_escaped_text(&mut label_svg, category);
+                label_svg.push_str("</text>");
+            }
+            doc = doc.child(Element::raw_svg(label_svg));
+        } else {
+            for (index, category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                doc = doc.child(
+                    TextBuilder::new(category)
+                        .x(x)
+                        .y(plot_bottom + 24.0)
+                        .anchor(TextAnchor::Middle)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .font_size(clamp_font_size(
+                            config.font_size * 0.74,
+                            config.min_font_size,
+                        ))
+                        .fill(&theme.colors.text)
+                        .class("fm-xychart-x-tick")
+                        .build(),
+                );
+            }
         }
-        doc = doc.child(Element::raw_svg(tick_svg));
+
+        if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
+            doc = doc.child(
+                TextBuilder::new(title)
+                    .x((layout.bounds.width / 2.0) + offset_x)
+                    .y(plot_y - 34.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 1.18,
+                        config.min_font_size,
+                    ))
+                    .font_weight("600")
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-title")
+                    .build(),
+            );
+        }
+
+        if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
+            doc = doc.child(
+                TextBuilder::new(y_label)
+                    .x(plot_x - 52.0)
+                    .y(plot_y - 12.0)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.76,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-y-label")
+                    .build(),
+            );
+        }
+
+        // X-axis label (centered below category labels).
+        if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
+            doc = doc.child(
+                TextBuilder::new(x_label)
+                    .x(plot_x + plot_bounds.width / 2.0)
+                    .y(plot_bottom + 48.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.76,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-label")
+                    .build(),
+            );
+        }
+
+        // Tick marks at axis edges (small lines at each grid level and category center).
+        let tick_len = 5.0_f32;
+        // The SAME values the labels use — a tick mark beside a different set of labels is worse than
+        // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
+        for tick_value in xychart_y_ticks(y_min, y_max) {
+            let frac = if (y_max - y_min).abs() > f32::EPSILON {
+                (tick_value - y_min) / (y_max - y_min)
+            } else {
+                0.0
+            };
+            let y = plot_bottom - frac * plot_bounds.height;
+            doc = doc.child(
+                Element::line()
+                    .x1(plot_x - tick_len)
+                    .y1(y)
+                    .x2(plot_x)
+                    .y2(y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
+        }
+        {
+            // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
+            // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
+            // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
+            // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
+            // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
+            use crate::attributes::write_escaped_attr;
+            let mut y1_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
+            let mut y2_text = String::new();
+            let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
+            let mut esc_stroke = String::new();
+            let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
+            let mut x_text = String::new();
+            let mut tick_svg = String::new();
+            for (index, _category) in categories.iter().enumerate() {
+                let x = plot_x + band_width * (index as f32 + 0.5);
+                x_text.clear();
+                let _ = crate::attributes::write_number_into(&mut x_text, x);
+                tick_svg.push_str("<line x1=\"");
+                tick_svg.push_str(&x_text);
+                tick_svg.push_str("\" y1=\"");
+                tick_svg.push_str(&y1_text);
+                tick_svg.push_str("\" x2=\"");
+                tick_svg.push_str(&x_text);
+                tick_svg.push_str("\" y2=\"");
+                tick_svg.push_str(&y2_text);
+                tick_svg.push_str("\" stroke=\"");
+                tick_svg.push_str(&esc_stroke);
+                tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+            }
+            doc = doc.child(Element::raw_svg(tick_svg));
+        }
     }
 
     // ⚠️ NO LEGEND FOR NAMED SERIES (bd-b33ab). The pinned 11.15.0 incumbent renders no xychart
@@ -8323,11 +8736,28 @@ fn render_xychart_svg(
                     .collect();
 
                 if matches!(series.kind, IrXySeriesKind::Area) {
-                    let first_x = points.first().map_or(plot_x, |point| point.0);
-                    let last_x = points.last().map_or(plot_x, |point| point.0);
-                    let mut fill_points = vec![(first_x, baseline_y)];
-                    fill_points.extend(points.iter().copied());
-                    fill_points.push((last_x, baseline_y));
+                    // The area closes onto the value BASELINE: a horizontal line under a vertical
+                    // chart, a vertical one beside a horizontal chart.
+                    let mut fill_points = Vec::with_capacity(points.len() + 2);
+                    if xy_chart_meta.horizontal {
+                        let baseline_x = fm_layout::xychart_value_to_x(
+                            baseline_value,
+                            y_min,
+                            y_max,
+                            plot_bounds,
+                        ) + offset_x;
+                        let first_y = points.first().map_or(plot_y, |point| point.1);
+                        let last_y = points.last().map_or(plot_y, |point| point.1);
+                        fill_points.push((baseline_x, first_y));
+                        fill_points.extend(points.iter().copied());
+                        fill_points.push((baseline_x, last_y));
+                    } else {
+                        let first_x = points.first().map_or(plot_x, |point| point.0);
+                        let last_x = points.last().map_or(plot_x, |point| point.0);
+                        fill_points.push((first_x, baseline_y));
+                        fill_points.extend(points.iter().copied());
+                        fill_points.push((last_x, baseline_y));
+                    }
                     let mut area_path =
                         PathBuilder::new().move_to(fill_points[0].0, fill_points[0].1);
                     for point in fill_points.iter().skip(1) {
@@ -8439,101 +8869,171 @@ fn render_xychart_svg(
     doc
 }
 
-fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
-    const LEFT_MARGIN: f32 = 88.0;
-    const TOP_MARGIN: f32 = 84.0;
-    const RIGHT_MARGIN: f32 = 36.0;
-    const BOTTOM_MARGIN: f32 = 76.0;
-    // No legend column is reserved: the incumbent renders no legend (bd-b33ab).
-    let right_margin = RIGHT_MARGIN;
+/// The axes, gridlines, labels and title of a HORIZONTAL xychart.
+///
+/// Upstream's horizontal orchestrator puts the category (x) axis on the LEFT and the value (y) axis
+/// along the TOP, title above both. This mirrors the vertical furniture with the roles exchanged —
+/// same classes, colours and font steps — so a stylesheet written for one orientation styles both.
+#[allow(clippy::too_many_arguments)]
+fn write_xychart_horizontal_axes(
+    mut doc: SvgDocument,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    xy_chart_meta: &IrXyChartMeta,
+    categories: &[String],
+    (plot_x, plot_y, plot_width, plot_height): (f32, f32, f32, f32),
+    (y_min, y_max): (f32, f32),
+    offset_x: f32,
+    config: &SvgRenderConfig,
+    theme: &Theme,
+) -> SvgDocument {
+    let plot_bottom = plot_y + plot_height;
+    let plot_right = plot_x + plot_width;
+    let tick_len = 5.0_f32;
+    let tick_font = clamp_font_size(config.font_size * 0.72, config.min_font_size);
+    let label_font = clamp_font_size(config.font_size * 0.74, config.min_font_size);
+    let axis_title_font = clamp_font_size(config.font_size * 0.76, config.min_font_size);
 
-    fm_layout::LayoutRect {
-        x: layout.bounds.x + LEFT_MARGIN,
-        y: layout.bounds.y + TOP_MARGIN,
-        width: (layout.bounds.width - LEFT_MARGIN - right_margin).max(1.0),
-        height: (layout.bounds.height - TOP_MARGIN - BOTTOM_MARGIN).max(1.0),
-    }
-}
-
-fn xychart_categories(xy_chart_meta: &IrXyChartMeta) -> Vec<String> {
-    let series_count = xy_chart_meta
-        .series
-        .iter()
-        .map(|series| series.values.len())
-        .max()
-        .unwrap_or(0);
-    let count = series_count.max(xy_chart_meta.x_axis.categories.len());
-
-    if xy_chart_meta.x_axis.categories.is_empty() {
-        let (x_min, x_max) = resolve_xychart_x_domain(xy_chart_meta, count);
-        if count <= 1 {
-            return vec![format_xychart_tick_value(x_min)];
-        }
-        let step = (x_max - x_min) / (count.saturating_sub(1) as f32).max(1.0);
-        return (0..count)
-            .map(|index| format_xychart_tick_value(x_min + step * index as f32))
-            .collect();
-    }
-
-    let mut categories = xy_chart_meta.x_axis.categories.clone();
-    if categories.len() < count {
-        categories.extend((categories.len()..count).map(|index| (index + 1).to_string()));
-    }
-    categories
-}
-
-fn resolve_xychart_x_domain(xy_chart_meta: &IrXyChartMeta, count: usize) -> (f32, f32) {
-    let min = xy_chart_meta.x_axis.min.unwrap_or(0.0);
-    let max = xy_chart_meta
-        .x_axis
-        .max
-        .unwrap_or_else(|| count.saturating_sub(1) as f32);
-    if (max - min).abs() < f32::EPSILON {
-        (min, min + 1.0)
-    } else {
-        (min, max)
-    }
-}
-
-fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
-    let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
-    let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
-
-    if xy_chart_meta.y_axis.min.is_none() || xy_chart_meta.y_axis.max.is_none() {
-        for value in xy_chart_meta
-            .series
-            .iter()
-            .flat_map(|series| series.values.iter().copied())
-        {
-            min_value = min_value.min(value);
-            max_value = max_value.max(value);
-        }
+    // Value ticks: vertical gridlines, labels and tick marks along the TOP edge.
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let ratio = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
+        let x = ratio.mul_add(plot_width, plot_x);
+        doc = doc
+            .child(
+                Element::line()
+                    .x1(x)
+                    .y1(plot_y)
+                    .x2(x)
+                    .y2(plot_bottom)
+                    .stroke("rgba(148,163,184,0.35)")
+                    .stroke_width(1.0)
+                    .stroke_dasharray("4,4")
+                    .class("fm-xychart-gridline"),
+            )
+            .child(
+                TextBuilder::new(&format_xychart_tick_value(tick_value))
+                    .x(x)
+                    .y(plot_y - tick_len - 6.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(tick_font)
+                    .fill(mermaid_default_primary_text_color(config, &theme.colors))
+                    .class("fm-xychart-y-tick")
+                    .build(),
+            )
+            .child(
+                Element::line()
+                    .x1(x)
+                    .y1(plot_y - tick_len)
+                    .x2(x)
+                    .y2(plot_y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
     }
 
-    if !min_value.is_finite() || !max_value.is_finite() {
-        return (0.0, 1.0);
-    }
-    if xy_chart_meta.y_axis.min.is_none() && min_value > 0.0 {
-        min_value = 0.0;
-    }
-    if xy_chart_meta.y_axis.max.is_none() && max_value < 0.0 {
-        max_value = 0.0;
-    }
-    if (max_value - min_value).abs() < f32::EPSILON {
-        max_value += 1.0;
-    }
-    (min_value, max_value)
-}
+    // The value axis along the top, the category axis down the left.
+    doc = doc
+        .child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_right)
+                .y2(plot_y)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-y"),
+        )
+        .child(
+            Element::line()
+                .x1(plot_x)
+                .y1(plot_y)
+                .x2(plot_x)
+                .y2(plot_bottom)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.5)
+                .class("fm-xychart-axis fm-xychart-axis-x"),
+        );
 
-fn xychart_value_to_y(
-    value: f32,
-    y_min: f32,
-    y_max: f32,
-    plot_bounds: fm_layout::LayoutRect,
-) -> f32 {
-    let range = (y_max - y_min).max(f32::EPSILON);
-    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
-    plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+    // Category labels, right-aligned against the left axis at each row's centre.
+    let band_height = plot_height / categories.len().max(1) as f32;
+    for (index, category) in categories.iter().enumerate() {
+        let y = band_height.mul_add(index as f32 + 0.5, plot_y);
+        doc = doc
+            .child(
+                TextBuilder::new(category)
+                    .x(plot_x - tick_len - 6.0)
+                    .y(y + label_font * 0.35)
+                    .anchor(TextAnchor::End)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(label_font)
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-tick")
+                    .build(),
+            )
+            .child(
+                Element::line()
+                    .x1(plot_x - tick_len)
+                    .y1(y)
+                    .x2(plot_x)
+                    .y2(y)
+                    .stroke(&theme.colors.text)
+                    .stroke_width(1.0)
+                    .class("fm-xychart-tick"),
+            );
+    }
+
+    // Axis titles: the value axis's centred above its tick labels, the category axis's above the
+    // category column, right-aligned like its labels.
+    if let Some(y_label) = xy_chart_meta.y_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(y_label)
+                .x(plot_x + plot_width / 2.0)
+                .y(plot_y - 34.0)
+                .anchor(TextAnchor::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(axis_title_font)
+                .fill(&theme.colors.text)
+                .class("fm-xychart-y-label")
+                .build(),
+        );
+    }
+    if let Some(x_label) = xy_chart_meta.x_axis.label.as_deref() {
+        doc = doc.child(
+            TextBuilder::new(x_label)
+                .x(plot_x - tick_len - 6.0)
+                .y(plot_y - 34.0)
+                .anchor(TextAnchor::End)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(axis_title_font)
+                .fill(&theme.colors.text)
+                .class("fm-xychart-x-label")
+                .build(),
+        );
+    }
+    if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
+        doc = doc.child(
+            TextBuilder::new(title)
+                .x((layout.bounds.width / 2.0) + offset_x)
+                .y(plot_y - 70.0)
+                .anchor(TextAnchor::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(clamp_font_size(
+                    config.font_size * 1.18,
+                    config.min_font_size,
+                ))
+                .font_weight("600")
+                .fill(&theme.colors.text)
+                .class("fm-xychart-title")
+                .build(),
+        );
+    }
+    doc
 }
 
 /// The accessible name for one xychart data mark (bd-sdhzh).
@@ -8584,70 +9084,6 @@ fn write_xychart_mark_accessible_name(
     }
 }
 
-/// The "nice" y-axis step mermaid uses: d3's `tickStep(min, max, 10)`.
-///
-/// MERMAID DOES NOT DIVIDE THE RANGE, IT SNAPS TO 1/2/5 x 10^k. We emitted five ticks at quarter
-/// points, so `y-axis 4000 --> 11000` labelled 5750 and 9250 — values that appear nowhere on a
-/// chart anyone would draw by hand. Measured across six ranges on the pinned 11.15.0 bundle, every
-/// one of which this reproduces exactly:
-///
-/// ```text
-///   0 -> 10        step 1        0 -> 100        step 10
-///   0 -> 1         step 0.1      0 -> 7          step 0.5
-///   100 -> 900     step 100      4000 -> 11000   step 500
-/// ```
-///
-/// The thresholds are d3's own — sqrt(50), sqrt(10), sqrt(2) — and they are not round numbers.
-/// `0 -> 7` is the case that needs them: the raw step is 0.7, whose error 7.0 sits between sqrt(10)
-/// and sqrt(50), so the factor is 5 and the step 0.5. A rule using 7.5 as the cutoff picks 1.0
-/// there and still agrees with mermaid on all five other ranges.
-fn xychart_nice_step(min: f32, max: f32) -> f64 {
-    const COUNT: f64 = 10.0;
-    let span = f64::from(max) - f64::from(min);
-    if !span.is_finite() || span <= 0.0 {
-        return 0.0;
-    }
-    let raw = span / COUNT;
-    let power = raw.log10().floor();
-    let error = raw / 10.0_f64.powf(power);
-    let factor = if error >= 50.0_f64.sqrt() {
-        10.0
-    } else if error >= 10.0_f64.sqrt() {
-        5.0
-    } else if error >= 2.0_f64.sqrt() {
-        2.0
-    } else {
-        1.0
-    };
-    10.0_f64.powf(power) * factor
-}
-
-/// The y values mermaid labels, ascending: every multiple of the nice step inside `[min, max]`.
-///
-/// Falls back to the endpoints when the range is degenerate or the step would produce an absurd
-/// number of ticks, so a malformed axis cannot spin here.
-fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
-    let step = xychart_nice_step(min, max);
-    if step <= 0.0 {
-        return vec![min];
-    }
-    let first = (f64::from(min) / step).ceil();
-    let last = (f64::from(max) / step).floor();
-    let count = last - first;
-    if !count.is_finite() || count < 0.0 || count > 200.0 {
-        return vec![min, max];
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    let ticks: Vec<f32> = (0..=(count as i64))
-        .map(|index| ((first + index as f64) * step) as f32)
-        .collect();
-    if ticks.is_empty() {
-        vec![min, max]
-    } else {
-        ticks
-    }
-}
-
 /// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
 pub(crate) struct JourneyLegendEntry {
     pub(crate) name: String,
@@ -8686,14 +9122,6 @@ fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
             entry
         })
         .collect()
-}
-
-fn format_xychart_tick_value(value: f32) -> String {
-    if (value - value.round()).abs() < 0.0001 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
 }
 
 /// Look up a node's centrality tier by index (O(1) via HashMap).
@@ -8794,6 +9222,8 @@ fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
             || kw.double_border
             || class.eq_ignore_ascii_case("c4-external")
             || class.eq_ignore_ascii_case("block-beta-space")
+            // Drawn as a stick figure by the slow path, never as the fragment's plain shape.
+            || class == "sequence-participant-actor"
         {
             return None;
         }
@@ -8913,31 +9343,17 @@ fn write_class_compartments_into(
         );
         cursor_y += line_h;
     }
-    // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
-    if meta.generics.is_empty() {
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size,
-            " font-weight=\"bold\"",
-            fill,
-            class_name,
-        );
-    } else {
-        let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size,
-            " font-weight=\"bold\"",
-            fill,
-            &display_name,
-        );
-    }
+    let display_name = meta.display_header(class_name);
+    write_class_text_into(
+        f,
+        x + w / 2.0,
+        cursor_y,
+        "middle",
+        font_size,
+        " font-weight=\"bold\"",
+        fill,
+        &display_name,
+    );
     cursor_y += line_h * 0.5;
     write_class_separator_into(f, x, cursor_y, x + w);
     cursor_y += line_h * 0.3;
@@ -9321,17 +9737,12 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, small_font);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
-    let _ = write_escaped_attr(out, c4_type_label_color);
+    let card_text = c4_card_text_color(c4_person_colors.is_some(), colors);
+    let _ = write_escaped_attr(out, card_text);
     // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
-    // attribute. Keep the default-theme C4 stereotype's computed color at Mermaid's pinned white,
-    // while non-default themes continue to inherit their themed text color.
+    // attribute, so the white on the navy Person card is restated inline on each of its texts.
     out.push_str("\" class=\"fm-c4-type-label\"");
-    if config.theme == ThemePreset::Default {
-        out.push_str(" style=\"fill:");
-        let _ = write_escaped_attr(out, c4_type_label_color);
-        out.push('\"');
-    }
+    write_c4_card_text_style(out, c4_person_colors.is_some());
     out.push_str(">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
@@ -9354,8 +9765,10 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, font_size);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, &colors.text);
-    out.push_str("\" class=\"fm-c4-name\">");
+    let _ = write_escaped_attr(out, card_text);
+    out.push_str("\" class=\"fm-c4-name\"");
+    write_c4_card_text_style(out, c4_person_colors.is_some());
+    out.push('>');
     let _ = write_escaped_text(out, label_text);
     out.push_str("</text>");
 
@@ -9378,8 +9791,10 @@ fn write_c4_node_fragment_into(
             out.push_str("\" text-anchor=\"middle\" font-size=\"");
             let _ = write_number_into(out, description_font);
             out.push_str("\" fill=\"");
-            let _ = write_escaped_attr(out, &colors.text);
-            out.push_str("\" class=\"fm-c4-description\">");
+            let _ = write_escaped_attr(out, card_text);
+            out.push_str("\" class=\"fm-c4-description\"");
+            write_c4_card_text_style(out, c4_person_colors.is_some());
+            out.push('>');
             let _ = write_escaped_text(out, &description_lines.join("\n"));
             out.push_str("</text>");
         }
@@ -9532,7 +9947,12 @@ fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
 /// `render_node`'s `PathBuilder::move_to(p0).line_to(p1)…close().build()`: commands join with single spaces
 /// (`M{x0} {y0} L{x1} {y1} … Z`), and coords use `AttributeValue::Number::write_value`, which is bit-for-bit
 /// identical to `PathBuilder`'s `FmtNum` (both: `n as i32` round-trip → `write_int_into` else `write_fixed2`).
-fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill: Option<&str>) {
+fn write_polygon_shape_into(
+    f: &mut String,
+    points: &[(f32, f32)],
+    shape_fill: &str,
+    special_fill: Option<&str>,
+) {
     f.push_str("<path d=\"");
     for (i, &(px, py)) in points.iter().enumerate() {
         f.push_str(if i == 0 { "M" } else { " L" });
@@ -9540,7 +9960,9 @@ fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill:
         f.push(' ');
         let _ = crate::attributes::write_number_into(f, py);
     }
-    f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
+    f.push_str(" Z\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(f, shape_fill);
+    f.push('"');
     write_special_fill_style_into(f, special_fill);
     f.push_str("/>");
 }
@@ -9554,6 +9976,7 @@ fn write_cylinder_shape_into(
     y: f32,
     w: f32,
     h: f32,
+    shape_fill: &str,
     special_fill: Option<&str>,
 ) {
     let ry = h * 0.1;
@@ -9598,7 +10021,9 @@ fn write_cylinder_shape_into(
     let _ = crate::attributes::write_number_into(f, right_x);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, top_y);
-    f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    f.push_str("\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(f, shape_fill);
+    f.push('"');
     write_special_fill_style_into(f, special_fill);
     f.push_str("/>");
 }
@@ -9714,6 +10139,7 @@ fn build_common_node_fragment<const A11Y: bool>(
     user_classes: &str,
     shape: fm_core::NodeShape,
     special_fill: Option<&str>,
+    semantic_colors: Option<&fm_core::NodeShapeStyle>,
 ) -> String {
     // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
     // plus the fixed tag/literal bytes.
@@ -9737,6 +10163,7 @@ fn build_common_node_fragment<const A11Y: bool>(
         user_classes,
         shape,
         special_fill,
+        semantic_colors,
     );
     f
 }
@@ -9763,8 +10190,14 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     user_classes: &str,
     shape: fm_core::NodeShape,
     special_fill: Option<&str>,
+    semantic_colors: Option<&fm_core::NodeShapeStyle>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
+    let shape_fill = if semantic_colors.is_some() {
+        "var(--fm-node-fill)"
+    } else {
+        "url(#fm-node-gradient)"
+    };
     // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
     f.push_str("<g id=\"");
     // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
@@ -9777,11 +10210,18 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     let _ = crate::attributes::write_uint_into(f, accent as u64);
     f.push(' ');
     f.push_str(node_shape_css_class(shape));
+    if semantic_colors.is_some() {
+        f.push_str(" fm-node-semantic");
+    }
     // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
     // empty for the overwhelmingly common no-class node. Matches the slow path's ` fm-node-user-…` tail.
     f.push_str(user_classes);
     f.push_str("\" data-id=\"");
     let _ = write_escaped_attr(f, node_id);
+    if let Some(colors) = semantic_colors {
+        f.push_str("\" style=\"");
+        let _ = write_escaped_attr(f, &semantic_node_css(colors));
+    }
     // The a11y attributes appear in the same insertion order `render_node`'s slow path builds them
     // (`aria_labels` -> role + aria-label, then `keyboard_nav` -> tabindex). `A11Y` is const, so the
     // full variant compiles to the same straight-line pushes it always did, and the lean variant compiles
@@ -9807,7 +10247,9 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             let _ = crate::attributes::write_number_into(f, y + h / 2.0);
             f.push_str("\" r=\"");
             let _ = crate::attributes::write_number_into(f, w.min(h) / 2.0);
-            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(f, shape_fill);
+            f.push('"');
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
         }
@@ -9819,6 +10261,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             write_polygon_shape_into(
                 f,
                 &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9835,11 +10278,12 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + inset, y + h),
                     (x, cy),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
         fm_core::NodeShape::Cylinder => {
-            write_cylinder_shape_into(f, x, y, w, h, special_fill);
+            write_cylinder_shape_into(f, x, y, w, h, shape_fill, special_fill);
         }
         fm_core::NodeShape::Trapezoid => {
             let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
@@ -9851,6 +10295,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9864,6 +10309,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - inset, y + h),
                     (x + inset, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9877,6 +10323,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - inset, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9890,6 +10337,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w, y + h),
                     (x + inset, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9905,6 +10353,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
                     (x + w - flag, y + h),
                     (x, y + h),
                 ],
+                shape_fill,
                 special_fill,
             );
         }
@@ -9920,7 +10369,9 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             let _ = crate::attributes::write_number_into(f, h);
             f.push_str("\" rx=\"");
             let _ = crate::attributes::write_number_into(f, rx);
-            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(f, shape_fill);
+            f.push('"');
             write_special_fill_style_into(f, special_fill);
             f.push_str("/>");
         }
@@ -9967,6 +10418,34 @@ fn write_common_node_fragment_into<const A11Y: bool>(
     } else {
         f.push_str("</g>");
     }
+}
+
+/// Top of the centered requirement text stack. Layout reserves the same full-size name lines and
+/// subtitle line heights; each writer then advances its cursor through the rows it actually draws.
+fn requirement_text_start_y(
+    meta: &fm_core::IrRequirementNodeMeta,
+    label: &str,
+    y: f32,
+    height: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> f32 {
+    let subtitles = usize::from(meta.requirement_type.is_some())
+        + [
+            &meta.req_id,
+            &meta.text,
+            &meta.risk,
+            &meta.verify_method,
+            &meta.element_type,
+            &meta.doc_ref,
+        ]
+        .iter()
+        .filter(|field| field.is_some())
+        .count();
+    let subtitle_font = clamp_font_size(font_size * 0.75, config.min_font_size);
+    let name_height = label.lines().count().max(1) as f32 * font_size * config.line_height;
+    let content_height = name_height + subtitles as f32 * subtitle_font * config.line_height;
+    y + (height - content_height) / 2.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10043,7 +10522,9 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("/>");
 
     let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
-    let mut text_y = y + h * 0.25 + font_size * 0.35;
+    let subtitle_line_height = subtitle_font_size * config.line_height;
+    let name_line_height = font_size * config.line_height;
+    let mut text_y = requirement_text_start_y(meta, label, y, h, font_size, config);
     if let Some(req_type) = meta.requirement_type.as_deref() {
         // ⚠️ `<<Type>>`, NOT `«keyword»`, and both halves changed. mermaid draws
         // `` `<<${n.type}>>` `` with ASCII angles — the same wrapper this renderer already uses for a
@@ -10055,7 +10536,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
         write_req_subtitle_body_into(
             out,
             cx,
-            text_y,
+            text_y + subtitle_line_height / 2.0,
             subtitle_font_size,
             " font-style=\"italic\"",
             "",
@@ -10067,13 +10548,16 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
                 let _ = write_escaped_text(f, ">>");
             },
         );
-        text_y += font_size * 0.85;
+        text_y += subtitle_line_height;
     }
 
     out.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(out, cx);
     out.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(out, text_y);
+    let _ = crate::attributes::write_number_into(
+        out,
+        text_y + name_line_height / 2.0 + font_size / 3.0,
+    );
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, font_size);
     out.push_str("\" fill=\"");
@@ -10081,7 +10565,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text>");
-    text_y += font_size * 0.85;
+    text_y += name_line_height;
 
     // `id:` and `text:` are the requirement's traceability key and the requirement itself — the
     // sentence the diagram exists to record. Both were parsed into the IR, held there, and read by
@@ -10140,7 +10624,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
         write_req_subtitle_body_into(
             out,
             cx,
-            text_y,
+            text_y + subtitle_line_height / 2.0,
             subtitle_font_size,
             "",
             " opacity=\"0.7\"",
@@ -10151,7 +10635,7 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
                 let _ = write_escaped_text(f, value);
             },
         );
-        text_y += font_size * 0.85;
+        text_y += subtitle_line_height;
     }
 
     if A11Y {
@@ -10219,6 +10703,7 @@ fn render_node_into(
 
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
@@ -10247,12 +10732,8 @@ fn render_node_into(
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
-    let label_may_overflow = label_text.lines().any(|line| {
-        line.chars().count() as f32
-            * config.avg_char_width
-            * (node_font_size / config.font_size.max(1.0))
-            > (w - 16.0).max(node_font_size)
-    });
+    let label_may_overflow =
+        node_label_may_overflow(shape, w, h, &label_text, node_font_size, config);
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -10371,7 +10852,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
+        && meta.has_compartments()
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -10415,7 +10896,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
+        && meta.has_compartments()
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -10751,6 +11232,7 @@ fn render_node_into(
             user_classes,
             shape,
             common_fragment_special_fill(node),
+            semantic_colors.as_ref(),
         );
         return;
     }
@@ -10787,8 +11269,41 @@ fn render_node(
 ) -> Element {
     use fm_core::NodeShape;
 
+    // Portable, attribute-driven exports need the same semantic paints as the theme CSS.
+    // Resolve them before building the shape so composite shapes inherit the palette too.
+    let mindmap_role = fm_core::mindmap::node_role(ir, node_box.node_index);
+    let mindmap_colors = mindmap_role
+        .filter(|_| !config.embed_theme_css)
+        .map(|role| {
+            let mut semantic = colors.clone();
+            semantic.node_fill = fm_core::mindmap::branch_fill(
+                &colors.node_fill,
+                &colors.accents[role.branch],
+                role.is_root,
+            );
+            semantic.node_stroke = if role.borderless {
+                String::from("none")
+            } else {
+                colors.accents[role.branch].clone()
+            };
+            semantic
+        });
+    let colors = mindmap_colors.as_ref().unwrap_or(colors);
+
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let semantic_colors = flowchart_shape_colors(ir, shape, config, colors);
+    let flowchart_colors = semantic_colors.as_ref().map(|style| {
+        let mut palette = colors.clone();
+        palette.node_fill = if config.embed_theme_css {
+            String::from("var(--fm-node-fill)")
+        } else {
+            style.fill.clone()
+        };
+        palette.node_stroke.clone_from(&style.stroke);
+        palette
+    });
+    let colors = flowchart_colors.as_ref().unwrap_or(colors);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
     let node_id = ir_node
         .map(|node| node.id.as_str())
@@ -10817,6 +11332,11 @@ fn render_node(
     let sankey_label = sankey_node_label(ir, node_box.node_index);
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    // Markdown runs describe the UNTRUNCATED text, so they apply only while truncation left it
+    // whole. Gating on whether a cap was CONFIGURED instead dropped bold and italics from every
+    // diagram small enough for the auto tier to pick `Normal` (a 48-char cap) — i.e. most of them —
+    // while two shapes passed the runs even for a truncated label.
+    let label_id = label_id.filter(|_| matches!(label_text, Cow::Borrowed(_)));
     let node_font_size = detail.node_font_size;
     // ⚠️ A PACKET FIELD IS NEVER ELLIPSIZED, because its box width is the PROTOCOL, not a layout
     // choice. `fit_node_label_text` shrinks a label to 10px and then cuts it, which is right for a
@@ -10832,12 +11352,8 @@ fn render_node(
             available
         }
     };
-    let label_may_overflow = label_text.lines().any(|line| {
-        line.chars().count() as f32
-            * config.avg_char_width
-            * (node_font_size / config.font_size.max(1.0))
-            > (w - 16.0).max(node_font_size)
-    });
+    let label_may_overflow =
+        node_label_may_overflow(shape, w, h, &label_text, node_font_size, config);
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -10937,6 +11453,7 @@ fn render_node(
             user_classes,
             shape,
             common_fragment_special_fill(node),
+            semantic_colors.as_ref(),
         ));
     }
 
@@ -10947,15 +11464,30 @@ fn render_node(
         .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
         .data("id", node_id);
+    if semantic_colors.is_some() {
+        group = group.class("fm-node-semantic");
+    }
+    if !config.embed_theme_css && mindmap_role.is_some_and(|role| role.is_root) {
+        // Inheritance lets author class/inline font weights override the root's emphasis.
+        group = group.attr("font-weight", "600");
+    }
     // Add centrality tier class if available (FNX semantic styling)
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
         group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());
     }
+    let mut group_style = semantic_colors
+        .as_ref()
+        .filter(|_| config.embed_theme_css)
+        .map(semantic_node_css)
+        .unwrap_or_default();
     if config.animations_enabled {
-        group = group.attr(
-            "style",
-            &animation_style_attr(node_animation_order(node_box)),
-        );
+        if !group_style.is_empty() {
+            group_style.push(';');
+        }
+        group_style.push_str(&animation_style_attr(node_animation_order(node_box)));
+    }
+    if !group_style.is_empty() {
+        group = group.attr("style", &group_style);
     }
     if let Some(icon) = node_icon {
         group = group.class("fm-node-has-icon");
@@ -11089,6 +11621,68 @@ fn render_node(
         }
     }
 
+    // A sequence `actor` is a stick figure with its name beneath it, as mermaid draws it — the
+    // box it used to be drawn as is what a plain `participant` looks like, so the two read alike.
+    if ir.diagram_type == DiagramType::Sequence
+        && ir_node.is_some_and(|node| {
+            node.classes
+                .iter()
+                .any(|class| class == "sequence-participant-actor")
+        })
+    {
+        let label_band = node_font_size + 6.0;
+        let figure_h = (h - label_band).max(24.0);
+        let head_r = (figure_h * 0.17).max(5.0);
+        let head_cy = y + 2.0 + head_r;
+        let neck = head_cy + head_r;
+        let hips = neck + figure_h * 0.33;
+        let arms = neck + figure_h * 0.12;
+        let feet = y + figure_h;
+        let reach = head_r * 1.35;
+        let limbs = PathBuilder::new()
+            .move_to(cx, neck)
+            .line_to(cx, hips)
+            .move_to(cx - reach, arms)
+            .line_to(cx + reach, arms)
+            .move_to(cx - reach, feet)
+            .line_to(cx, hips)
+            .line_to(cx + reach, feet)
+            .build();
+        let figure = Element::group()
+            .class("fm-sequence-actor-figure")
+            .child(
+                Element::circle()
+                    .cx(cx)
+                    .cy(head_cy)
+                    .r(head_r)
+                    .fill(&colors.node_fill)
+                    .stroke(&colors.node_stroke)
+                    .stroke_width(1.6),
+            )
+            .child(
+                Element::path()
+                    .d(&limbs)
+                    .fill("none")
+                    .stroke(&colors.node_stroke)
+                    .stroke_width(1.6),
+            );
+        let label = render_node_label_text(
+            ir,
+            label_id,
+            &label_text,
+            cx,
+            y + h - 4.0,
+            node_font_size,
+            fit_width((w + 40.0).max(node_font_size)),
+            label_band,
+            config,
+            colors,
+            text_style.as_deref(),
+            emit_classdef_classes,
+        );
+        return group.child(figure).child(label);
+    }
+
     // Create shape element based on node type
     let shape_elem = match shape {
         NodeShape::Rect => Element::rect()
@@ -11125,10 +11719,10 @@ fn render_node(
             .y(y)
             .width(w)
             .height(h)
+            .rx(w.min(h) / 2.0)
             .fill(&colors.node_fill)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
-            .rx(w.min(h) / 2.0),
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
 
         NodeShape::Diamond => {
             let path = PathBuilder::new()
@@ -11172,7 +11766,13 @@ fn render_node(
                 .cy(cy)
                 .r(r)
                 .fill(if shape == NodeShape::FilledCircle {
-                    colors.node_stroke.as_str()
+                    colors.edge.as_str()
+                } else if shape == NodeShape::DoubleCircle
+                    && config.node_gradients
+                    && mindmap_role.is_none()
+                    && semantic_colors.is_none()
+                {
+                    "url(#fm-node-gradient)"
                 } else {
                     colors.node_fill.as_str()
                 })
@@ -11204,19 +11804,45 @@ fn render_node(
                 // the end state showed a target symbol where the incumbent shows a bullseye, which was
                 // the surviving half of bd-vfxu.
                 let inner_fill = if ir.diagram_type == fm_core::DiagramType::State {
-                    colors.node_stroke.as_str()
+                    colors.edge.as_str()
                 } else {
                     "none"
                 };
-                Element::group().child(elem).child(
-                    Element::circle()
-                        .cx(cx)
-                        .cy(cy)
-                        .r(inner_r)
-                        .fill(inner_fill)
-                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
-                )
+                let mut outer = elem;
+                let mut inner = Element::circle()
+                    .cx(cx)
+                    .cy(cy)
+                    .r(inner_r)
+                    .fill(inner_fill)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
+                // Paint declarations must reach the primitives rather than inherit through their
+                // explicit fills. Keep opacity and transforms on the composite group so they are
+                // applied once, not again on each ring.
+                let paint_style = shape_style.as_deref().and_then(|style| {
+                    let properties = fm_core::parse_style_string(style)
+                        .properties
+                        .into_iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "fill"
+                                    | "fill-opacity"
+                                    | "stroke"
+                                    | "stroke-width"
+                                    | "stroke-opacity"
+                                    | "stroke-dasharray"
+                                    | "stroke-dashoffset"
+                            )
+                        })
+                        .collect();
+                    style_map_to_css(&properties)
+                });
+                if let Some(style) = paint_style.as_deref() {
+                    outer = outer.attr("style", style);
+                    inner = inner.attr("style", style);
+                }
+                Element::group().child(outer).child(inner)
             }
         }
 
@@ -11225,7 +11851,7 @@ fn render_node(
             .y(y + h * 0.25)
             .width(w)
             .height((h * 0.5).max(8.0))
-            .fill(&colors.node_stroke)
+            .fill(&colors.edge)
             .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0)
             .rx((h * 0.25).max(3.0)),
@@ -11273,7 +11899,7 @@ fn render_node(
                     .y(y)
                     .width(w)
                     .height(h)
-                    .fill(if config.node_gradients {
+                    .fill(if config.node_gradients && mindmap_role.is_none() {
                         "url(#fm-node-gradient)"
                     } else {
                         colors.node_fill.as_str()
@@ -11309,7 +11935,11 @@ fn render_node(
                     label_id,
                     label_text.as_ref(),
                     cx,
-                    cy + node_font_size / 3.0,
+                    cy - label_text.lines().count().saturating_sub(1) as f32
+                        * node_font_size
+                        * config.line_height
+                        * 0.5
+                        + node_font_size / 3.0,
                     node_font_size,
                     fit_width((w - 16.0).max(node_font_size)),
                     (h - 16.0).max(node_font_size),
@@ -11516,7 +12146,7 @@ fn render_node(
                     .cx(cx)
                     .cy(cy)
                     .r(r)
-                    .fill(if config.node_gradients {
+                    .fill(if config.node_gradients && mindmap_role.is_none() {
                         "url(#fm-node-gradient)"
                     } else {
                         colors.node_fill.as_str()
@@ -11551,7 +12181,11 @@ fn render_node(
                     label_id,
                     &label_text,
                     cx,
-                    cy + node_font_size / 3.0,
+                    cy - label_text.lines().count().saturating_sub(1) as f32
+                        * node_font_size
+                        * config.line_height
+                        * 0.5
+                        + node_font_size / 3.0,
                     node_font_size,
                     fit_width((w * 0.8).max(node_font_size)),
                     (h * 0.8).max(node_font_size),
@@ -11914,6 +12548,27 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => {
+            let outline = fm_core::block_arrow_outline(shape, x, y, w, h).unwrap_or_default();
+            let mut path = PathBuilder::new();
+            for (index, &(px, py)) in outline.iter().enumerate() {
+                path = if index == 0 {
+                    path.move_to(px, py)
+                } else {
+                    path.line_to(px, py)
+                };
+            }
+            Element::path()
+                .d(&path.close().build())
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::LinedDocument => {
             // The document outline plus a vertical rule 0.045 of the width in from the left, running
             // to 0.94h — both ratios measured, and the inset deliberately NOT `LinedRect`'s 0.14.
@@ -12105,6 +12760,8 @@ fn render_node(
     let shape_elem = maybe_add_class(shape_elem, "fm-node-shape", emit_classdef_classes);
 
     let shape_elem = if config.node_gradients
+        && mindmap_role.is_none()
+        && semantic_colors.is_none()
         && !matches!(
             shape,
             NodeShape::Note | NodeShape::FilledCircle | NodeShape::HorizontalBar
@@ -12199,9 +12856,7 @@ fn render_node(
     if detail.show_node_labels && !placeholder_space_node {
         if let Some(node) = ir_node
             && let Some(ref meta) = node.class_meta
-            && (!meta.attributes.is_empty()
-                || !meta.methods.is_empty()
-                || meta.stereotype.is_some())
+            && meta.has_compartments()
         {
             group = render_class_compartments(
                 group,
@@ -12219,13 +12874,13 @@ fn render_node(
             );
         } else if let Some(node) = ir_node
             && let Some(ref req_meta) = node.requirement_meta
-            && (req_meta.requirement_type.is_some()
-                || req_meta.risk.is_some()
-                || req_meta.verify_method.is_some())
         {
-            // Requirement node: multi-line content with type, label, metadata.
+            // Requirement node: centered type, name, and field rows with separate line heights.
             let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
-            let mut text_y = y + h * 0.25 + node_font_size * 0.35;
+            let subtitle_line_height = subtitle_font_size * config.line_height;
+            let name_line_height = node_font_size * config.line_height;
+            let mut text_y =
+                requirement_text_start_y(req_meta, &label_text, y, h, node_font_size, config);
 
             // Requirement type header (e.g., "<<requirement>>"). Stream the `<text>` bytes directly under
             // the common themed config (embedded CSS, no per-label style/classdef) instead of building an
@@ -12241,7 +12896,7 @@ fn render_node(
                     write_req_subtitle_into(
                         &mut f,
                         cx,
-                        text_y,
+                        text_y + subtitle_line_height / 2.0,
                         subtitle_font_size,
                         " font-style=\"italic\"",
                         "",
@@ -12253,7 +12908,7 @@ fn render_node(
                 } else {
                     let mut type_elem = Element::text()
                         .x(cx)
-                        .y(text_y)
+                        .y(text_y + subtitle_line_height / 2.0)
                         .content(&type_label)
                         .attr("text-anchor", "middle")
                         .attr("dominant-baseline", "central")
@@ -12271,20 +12926,16 @@ fn render_node(
                     }
                     group = group.child(type_elem);
                 }
-                text_y += node_font_size * 0.85;
+                text_y += subtitle_line_height;
             }
 
             // Main label
             let text_elem = render_node_label_text(
                 ir,
-                if detail.node_label_max_chars.is_none() {
-                    label_id
-                } else {
-                    None
-                },
+                label_id,
                 &label_text,
                 cx,
-                text_y,
+                text_y + name_line_height / 2.0 + node_font_size / 3.0,
                 node_font_size,
                 fit_width((w - 20.0).max(node_font_size)),
                 (h - 20.0).max(node_font_size),
@@ -12294,7 +12945,7 @@ fn render_node(
                 emit_classdef_classes,
             );
             group = group.child(text_elem);
-            text_y += node_font_size * 0.85;
+            text_y += name_line_height * label_text.lines().count().max(1) as f32;
 
             // The field rows — see the fast writer's comment for the reference. Kept in lockstep with
             // it: same order, same labels, same classes, same `opacity 0.7`, same cursor advance.
@@ -12339,7 +12990,7 @@ fn render_node(
                     write_req_subtitle_into(
                         &mut f,
                         cx,
-                        text_y,
+                        text_y + subtitle_line_height / 2.0,
                         subtitle_font_size,
                         "",
                         " opacity=\"0.7\"",
@@ -12351,7 +13002,7 @@ fn render_node(
                 } else {
                     let mut row_elem = Element::text()
                         .x(cx)
-                        .y(text_y)
+                        .y(text_y + subtitle_line_height / 2.0)
                         .content(&row)
                         .attr("text-anchor", "middle")
                         .attr("dominant-baseline", "central")
@@ -12369,7 +13020,7 @@ fn render_node(
                     }
                     group = group.child(row_elem);
                 }
-                text_y += node_font_size * 0.85;
+                text_y += subtitle_line_height;
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
@@ -12500,22 +13151,26 @@ fn render_node(
             let content_width = (w - icon_reserved_width).max(node_font_size);
             let content_top = y + icon_reserved_height;
             let content_height = (h - icon_reserved_height).max(node_font_size);
+            let (label_width, label_height) = node_label_fit_dimensions(
+                shape,
+                (w, h),
+                (content_width, content_height),
+                &label_text,
+                node_font_size,
+                config,
+            );
             let start_y = content_top + (content_height / 2.0) - (total_text_height / 2.0)
                 + (node_font_size / 3.0);
 
             let text_elem = render_node_label_text(
                 ir,
-                if detail.node_label_max_chars.is_none() {
-                    label_id
-                } else {
-                    None
-                },
+                label_id,
                 &label_text,
                 content_left + (content_width / 2.0),
                 start_y,
                 node_font_size,
-                fit_width((content_width - 16.0).max(node_font_size)),
-                (content_height - 16.0).max(node_font_size),
+                fit_width(label_width),
+                label_height,
                 config,
                 colors,
                 text_style.as_deref(),
@@ -12704,22 +13359,6 @@ fn write_packet_field_continuation_into(
         out.push_str("</text>");
     }
     out.push_str("</g>");
-}
-
-fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
-    if ir.diagram_type != DiagramType::State {
-        return false;
-    }
-    let node_id = ir
-        .nodes
-        .get(node_box.node_index)
-        .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
-    ir.clusters.iter().any(|cluster| {
-        cluster
-            .title
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .is_some_and(|label| label.text == node_id)
-    })
 }
 
 pub(crate) fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
@@ -12938,11 +13577,7 @@ fn render_class_compartments(
     }
 
     // Append generic parameters to class name if present (e.g., "List<T>").
-    let display_name = if meta.generics.is_empty() {
-        class_name.to_string()
-    } else {
-        format!("{class_name}<{}>", meta.generics.join(", "))
-    };
+    let display_name = meta.display_header(class_name);
 
     let name_elem = TextBuilder::new(&display_name)
         .x(x + w / 2.0)
@@ -13086,8 +13721,16 @@ fn render_c4_node_content(
     let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
     let mut cursor_y = y + (small_font * 1.25);
 
-    let c4_type_label_color = mermaid_default_c4_stereotype_color(config, colors);
-    let mut c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
+    let person_card = mermaid_default_c4_person_colors(config, c4_meta).is_some();
+    let card_text = c4_card_text_color(person_card, colors);
+    let person_text_style = |elem: Element| {
+        if person_card {
+            elem.attr("style", "fill:#FFFFFF")
+        } else {
+            elem
+        }
+    };
+    let c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
         .x(x + w / 2.0)
         .y(cursor_y)
         .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
@@ -13097,13 +13740,12 @@ fn render_c4_node_content(
         // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
         // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
         // given diagram happens to take.
-        .fill(c4_type_label_color)
+        .fill(card_text)
         .class("fm-c4-type-label")
         .build();
-    if config.theme == ThemePreset::Default {
-        c4_type_label = c4_type_label.attr("style", "fill:#FFFFFF");
-    }
-    group = group.child(apply_label_style(apply_label_class(c4_type_label)));
+    group = group.child(apply_label_style(apply_label_class(person_text_style(
+        c4_type_label,
+    ))));
 
     if node
         .classes
@@ -13118,7 +13760,7 @@ fn render_c4_node_content(
     }
 
     cursor_y += line_h * 0.95;
-    group = group.child(apply_label_style(apply_label_class(
+    group = group.child(apply_label_style(apply_label_class(person_text_style(
         TextBuilder::new(label_text)
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -13126,10 +13768,10 @@ fn render_c4_node_content(
             .font_size(font_size)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
-            .fill(&colors.text)
+            .fill(card_text)
             .class("fm-c4-name")
             .build(),
-    )));
+    ))));
 
     if let Some(technology) = &c4_meta.technology {
         cursor_y += line_h * 0.9;
@@ -13158,7 +13800,7 @@ fn render_c4_node_content(
                 * config.line_height;
             let baseline_y =
                 (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            group = group.child(apply_label_style(apply_label_class(
+            group = group.child(apply_label_style(apply_label_class(person_text_style(
                 TextBuilder::new(&description_text)
                     .x(x + w / 2.0)
                     .y(baseline_y)
@@ -13166,10 +13808,10 @@ fn render_c4_node_content(
                     .font_size(description_font)
                     .line_height(config.line_height)
                     .anchor(TextAnchor::Middle)
-                    .fill(&colors.text)
+                    .fill(card_text)
                     .class("fm-c4-description")
                     .build(),
-            )));
+            ))));
         }
     }
 
@@ -13279,6 +13921,7 @@ fn render_node_icon(
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(size)
                 .anchor(TextAnchor::Middle)
+                .fill(&colors.text)
                 .class("fm-node-icon")
                 .class("fm-node-icon-emoji")
                 .build(),
@@ -13448,6 +14091,54 @@ fn render_node_icon(
                         .stroke_width(1.0),
                 );
             }
+        }
+        // mermaid's five built-in architecture icons are cloud, database, disk, internet and
+        // server; without these two arms `disk` and `internet` fell to the letter fallback.
+        // Each is ONE path (outline plus interior strokes as subpaths), which costs a fraction of
+        // the wasm an element per stroke does.
+        "disk" | "storage" | "hdd" => {
+            let (top, bottom) = (y + size * 0.22, y + size * 0.78);
+            let d = PathBuilder::new()
+                .move_to(x, top)
+                .line_to(x + size, top)
+                .line_to(x + size, bottom)
+                .line_to(x, bottom)
+                .close()
+                .move_to(x + size * 0.14, cy)
+                .line_to(x + size * 0.6, cy)
+                .move_to(x + size * 0.74, cy)
+                .line_to(x + size * 0.86, cy)
+                .build();
+            icon = icon.child(
+                Element::path()
+                    .d(&d)
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
+        }
+        "internet" | "globe" | "web" => {
+            let meridian = half * 0.45;
+            let mut d = PathBuilder::new()
+                .move_to(cx - half, cy)
+                .arc_to(half, half, 0.0, false, true, cx + half, cy)
+                .arc_to(half, half, 0.0, false, true, cx - half, cy)
+                .move_to(cx, y)
+                .arc_to(meridian, half, 0.0, false, true, cx, y + size)
+                .arc_to(meridian, half, 0.0, false, true, cx, y);
+            for dy in [-0.45_f32, 0.0, 0.45] {
+                let reach = half * (1.0 - dy * dy).sqrt();
+                d = d
+                    .move_to(cx - reach, half.mul_add(dy, cy))
+                    .line_to(cx + reach, half.mul_add(dy, cy));
+            }
+            icon = icon.child(
+                Element::path()
+                    .d(&d.build())
+                    .fill(fill)
+                    .stroke(stroke)
+                    .stroke_width(1.1),
+            );
         }
         "api" => {
             icon = icon.child(
@@ -13713,6 +14404,98 @@ fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<St
     lines
 }
 
+/// Conservative proportional measurement for text that must remain visible. Keep a caller's
+/// larger calibration, but do not let a small average erase the font preset's glyph widths.
+/// Wide Latin glyphs need an additional advance allowance: the preset's average-based W/M
+/// estimate is narrower than the actual system and web fonts used by the playground.
+fn preserved_label_width(
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    metrics.estimate_preserved_width(label, font_size, config.avg_char_width)
+}
+
+/// A diamond's enclosing rectangle is not its usable text area. Choose an inscribed rectangle
+/// with the label's aspect ratio, including the displacement caused by an icon. The width and
+/// height therefore consume a shared slope budget instead of each independently reaching an
+/// outer edge. Ordinary shapes retain their existing rectangular inset.
+fn node_label_fit_dimensions(
+    shape: NodeShape,
+    shape_size: (f32, f32),
+    content_size: (f32, f32),
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> (f32, f32) {
+    let (content_width, content_height) = content_size;
+    if shape != NodeShape::Diamond || label.is_empty() {
+        return (
+            (content_width - 16.0).max(font_size),
+            (content_height - 16.0).max(font_size),
+        );
+    }
+    let (width, height) = shape_size;
+    let metrics = config.font_metrics();
+    let text_width = if config.preserve_labels {
+        preserved_label_width(label, font_size, config, &metrics)
+    } else {
+        metrics.estimate_multiline_width(label)
+            * (font_size / config.font_size.max(1.0))
+            * (config.avg_char_width / metrics.avg_char_width())
+    };
+    // SVG glyph bounds include ascenders and descenders, while the fitting routine's line box
+    // starts at one em. Reserve that extra height before computing the diamond's slope budget.
+    let text_height = font_size * 1.2
+        + label.lines().count().saturating_sub(1) as f32 * font_size * config.line_height.max(1.0);
+    let budget =
+        ((content_width - 16.0) / width.max(1.0) + (content_height - 16.0) / height.max(1.0) - 1.0)
+            .max(0.0);
+    let scale = (budget
+        / (text_width / width.max(1.0) + text_height / height.max(1.0)).max(f32::EPSILON))
+    .min(1.0);
+    (
+        (text_width * scale).max(1.0),
+        (text_height * scale).max(1.0),
+    )
+}
+
+fn node_label_may_overflow(
+    shape: NodeShape,
+    width: f32,
+    height: f32,
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> bool {
+    let (max_width, max_height) = node_label_fit_dimensions(
+        shape,
+        (width, height),
+        (width, height),
+        label,
+        font_size,
+        config,
+    );
+    let text_width = if config.preserve_labels {
+        preserved_label_width(label, font_size, config, &config.font_metrics())
+    } else {
+        label
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as f32
+            * config.avg_char_width
+            * (font_size / config.font_size.max(1.0))
+    };
+    text_width > max_width
+        || font_size
+            + label.lines().count().saturating_sub(1) as f32
+                * font_size
+                * config.line_height.max(1.0)
+            > max_height
+}
+
 #[derive(Debug)]
 struct FittedNodeLabel<'a> {
     text: Cow<'a, str>,
@@ -13724,8 +14507,8 @@ struct FittedNodeLabel<'a> {
 ///
 /// Ordinary labels return a borrowed string and preserve the existing fast path. Overflowing labels
 /// first use word-boundary wrapping, then reduce their size no lower than 10px (or a stricter
-/// configured minimum), and finally ellipsize the final visible line. This keeps SVG labels readable
-/// without allowing a long identifier to draw outside its node.
+/// configured minimum), and finally ellipsize the final visible line unless content preservation is
+/// enabled. Interactive hosts keep all authored text even when supplied geometry underestimates it.
 fn fit_node_label_text<'a>(
     label: &'a str,
     max_width: f32,
@@ -13736,6 +14519,7 @@ fn fit_node_label_text<'a>(
     if label.is_empty()
         || !max_width.is_finite()
         || !max_height.is_finite()
+        || !font_size.is_finite()
         || max_width <= 0.0
         || max_height <= 0.0
         || font_size <= 0.0
@@ -13750,6 +14534,9 @@ fn fit_node_label_text<'a>(
     let metrics = config.font_metrics();
     let reference_size = config.font_size.max(1.0);
     let calibrated_width = |text: &str, size: f32| {
+        if config.preserve_labels {
+            return preserved_label_width(text, size, config, &metrics);
+        }
         text.lines()
             .map(|line| {
                 metrics.estimate_width(line)
@@ -13758,7 +14545,13 @@ fn fit_node_label_text<'a>(
             })
             .fold(0.0_f32, f32::max)
     };
-    if calibrated_width(label, font_size) <= max_width {
+    let line_height = config.line_height.max(1.0);
+    let text_height = |line_count: usize, size: f32| {
+        size + line_count.saturating_sub(1) as f32 * size * line_height
+    };
+    if calibrated_width(label, font_size) <= max_width
+        && text_height(label.lines().count().max(1), font_size) <= max_height
+    {
         return FittedNodeLabel {
             text: Cow::Borrowed(label),
             font_size,
@@ -13766,28 +14559,67 @@ fn fit_node_label_text<'a>(
         };
     }
 
-    let min_size = config.min_font_size.max(10.0).min(font_size);
-    let reduced_size =
-        (font_size * max_width / calibrated_width(label, font_size)).clamp(min_size, font_size);
-    let mut fitted_size = reduced_size;
-    let max_lines =
-        |size: f32| ((max_height / (size * config.line_height.max(1.0))).floor() as usize).max(1);
-    let mut lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
-
-    if lines.len() > max_lines(fitted_size) && fitted_size > min_size {
-        fitted_size = min_size;
-        lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+    // An explicit multiline block already carries the author's grouping. If scaling that block
+    // fits at a readable size, keep its exact line breaks before trying additional word wrapping.
+    // In GH#14, wrapping the original three-line node at 30px added an unnecessary fourth line.
+    if config.preserve_labels && label_has_line_break(label) {
+        let width_scale = max_width / calibrated_width(label, font_size).max(f32::EPSILON);
+        let height_scale = max_height / text_height(label.lines().count().max(1), font_size);
+        let fitted_size = font_size * width_scale.min(height_scale).min(1.0);
+        if fitted_size >= config.min_font_size.max(10.0).min(font_size) {
+            return FittedNodeLabel {
+                text: Cow::Borrowed(label),
+                font_size: fitted_size,
+                changed: fitted_size != font_size,
+            };
+        }
     }
 
-    let visible_lines = max_lines(fitted_size);
-    let was_truncated = lines.len() > visible_lines
-        || lines
-            .iter()
-            .any(|line| calibrated_width(line, fitted_size) > max_width);
-    if was_truncated {
+    let fits = |lines: &[String], size: f32| {
+        text_height(lines.len(), size) <= max_height
+            && lines
+                .iter()
+                .all(|line| calibrated_width(line, size) <= max_width)
+    };
+    // Wrapping often provides all the room a label needs without making it harder to read.
+    let mut fitted_size = font_size;
+    let mut lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+    if !fits(&lines, fitted_size) {
+        fitted_size = config.min_font_size.max(10.0).min(font_size);
+        lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+        if fits(&lines, fitted_size) {
+            // Find the largest readable size that fits, retaining the best successful wrapping.
+            let mut upper_size = font_size;
+            for _ in 0..10 {
+                let candidate_size = fitted_size + (upper_size - fitted_size) * 0.5;
+                let candidate =
+                    wrap_node_label_lines(label, max_width, candidate_size, &calibrated_width);
+                if fits(&candidate, candidate_size) {
+                    fitted_size = candidate_size;
+                    lines = candidate;
+                } else {
+                    upper_size = candidate_size;
+                }
+            }
+        }
+    }
+
+    let visible_lines = lines
+        .iter()
+        .enumerate()
+        .take_while(|(index, _)| text_height(*index + 1, fitted_size) <= max_height)
+        .count()
+        .max(1);
+    let hidden_lines = lines.len() > visible_lines;
+    if !config.preserve_labels {
         lines.truncate(visible_lines);
-        if let Some(last) = lines.last_mut() {
-            *last = ellipsize_label_line(last, max_width, fitted_size, &calibrated_width);
+        let last_index = lines.len().saturating_sub(1);
+        for (index, line) in lines.iter_mut().enumerate() {
+            if calibrated_width(line, fitted_size) > max_width
+                || (hidden_lines && index == last_index)
+            {
+                *line = ellipsize_label_line(line, max_width, fitted_size, &calibrated_width);
+            }
         }
     }
 
@@ -13855,6 +14687,75 @@ fn ellipsize_label_line(
     result
 }
 
+/// Preserve visible glyph styles when fitting changes only whitespace. Matching the complete
+/// character stream also prevents an ellipsized label from restoring content that was removed.
+fn reflow_label_markup(
+    segments: &[IrLabelSegment],
+    fitted_text: &str,
+) -> Option<Vec<IrLabelSegment>> {
+    let mut source = segments
+        .iter()
+        .flat_map(|segment| {
+            let (text, style) = match segment {
+                IrLabelSegment::Text {
+                    text,
+                    bold,
+                    italic,
+                    code,
+                    strike,
+                } => (text.as_str(), [*bold, *italic, *code, *strike]),
+                IrLabelSegment::LineBreak => ("\n", [false; 4]),
+            };
+            text.chars().map(move |character| (character, style))
+        })
+        .peekable();
+    let mut reflowed = Vec::new();
+    for character in fitted_text.chars() {
+        if character == '\n' {
+            reflowed.push(IrLabelSegment::LineBreak);
+            continue;
+        }
+        let style = if character.is_whitespace() {
+            source.peek().map_or([false; 4], |(_, style)| *style)
+        } else {
+            while source
+                .peek()
+                .is_some_and(|(value, _)| value.is_whitespace())
+            {
+                let _ = source.next();
+            }
+            let (value, style) = source.next()?;
+            if value != character {
+                return None;
+            }
+            style
+        };
+        if let Some(IrLabelSegment::Text {
+            text,
+            bold,
+            italic,
+            code,
+            strike,
+        }) = reflowed.last_mut()
+            && [*bold, *italic, *code, *strike] == style
+        {
+            text.push(character);
+        } else {
+            reflowed.push(IrLabelSegment::Text {
+                text: character.to_string(),
+                bold: style[0],
+                italic: style[1],
+                code: style[2],
+                strike: style[3],
+            });
+        }
+    }
+    if source.any(|(character, _)| !character.is_whitespace()) {
+        return None;
+    }
+    Some(reflowed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_node_label_text(
     ir: &MermaidDiagramIr,
@@ -13871,23 +14772,42 @@ fn render_node_label_text(
     emit_classdef_classes: bool,
 ) -> Element {
     let fitted = fit_node_label_text(label_text, max_width, max_height, font_size, config);
+    // Callers position the first baseline of the original block. Keep its visual center when
+    // fitting changes either the number of lines or their font size.
+    let y = if fitted.changed {
+        let original_span =
+            label_text.lines().count().saturating_sub(1) as f32 * font_size * config.line_height;
+        let fitted_span = fitted.text.lines().count().saturating_sub(1) as f32
+            * fitted.font_size
+            * config.line_height;
+        y + (original_span - fitted_span) * 0.5 + (fitted.font_size - font_size) / 3.0
+    } else {
+        y
+    };
+    let markup_unchanged = fitted.text.as_ref() == label_text;
     let label_text = fitted.text.as_ref();
     let font_size = fitted.font_size;
-    if !fitted.changed
-        && let Some(label_id) = label_id
+    if let Some(label_id) = label_id
         && let Some(segments) = ir.label_markup.get(&label_id)
         && !segments.is_empty()
     {
-        return render_markdown_text_segments(
-            segments,
-            x,
-            y,
-            font_size,
-            config,
-            colors.text.as_str(),
-            label_style,
-            emit_classdef_classes,
-        );
+        let segments = if markup_unchanged {
+            Some(Cow::Borrowed(segments.as_slice()))
+        } else {
+            reflow_label_markup(segments, label_text).map(Cow::Owned)
+        };
+        if let Some(segments) = segments {
+            return render_markdown_text_segments(
+                &segments,
+                x,
+                y,
+                font_size,
+                config,
+                colors.text.as_str(),
+                label_style,
+                emit_classdef_classes,
+            );
+        }
     }
 
     let mut text = if label_has_line_break(label_text) {
@@ -13962,12 +14882,15 @@ fn render_markdown_text_segments(
                 code,
                 strike,
             } => {
-                let dy = if first_in_line {
-                    if line_index == 0 { 0.0 } else { line_height_px }
-                } else {
-                    0.0
-                };
-                let mut tspan = Element::tspan().x(x).attr_num("dy", dy).content(value);
+                // Only a line's FIRST run is positioned; the rest flow on from it. Giving every run
+                // `x` restarted each one at the anchor, so `The **cat**` drew `The ` and `cat` on
+                // top of each other.
+                let mut tspan = Element::tspan();
+                if first_in_line {
+                    let dy = if line_index == 0 { 0.0 } else { line_height_px };
+                    tspan = tspan.x(x).attr_num("dy", dy);
+                }
+                let mut tspan = tspan.content(value);
                 if *bold {
                     tspan = tspan.attr("font-weight", "700");
                 }
@@ -14239,6 +15162,12 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::Cloud => "fm-node-shape-cloud",
         NodeShape::Tag => "fm-node-shape-tag",
         NodeShape::CrossedCircle => "fm-node-shape-crossed-circle",
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => "fm-node-shape-block-arrow",
     }
 }
 
@@ -14250,6 +15179,7 @@ fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: 
 }
 
 /// Render a single edge to an SVG element.
+#[derive(Clone, Copy)]
 struct EdgeRenderContext<'a> {
     ir: &'a MermaidDiagramIr,
     offset_x: f32,
@@ -14258,6 +15188,9 @@ struct EdgeRenderContext<'a> {
     detail: RenderDetailProfile,
     colors: &'a ThemeColors,
     accessible_node_labels: Option<&'a [&'a str]>,
+    /// Positions indexed by IR edge index, resolved once in paint order for generic graphs.
+    /// Sequence messages and chart annotations retain their specialized label placement.
+    preserved_label_positions: Option<&'a [Option<fm_layout::LayoutPoint>]>,
     /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
     ///
     /// Every ribbon's width is its value normalised against this ONE number, so it is invariant
@@ -14265,103 +15198,6 @@ struct EdgeRenderContext<'a> {
     /// re-scanned `ir.edges` and re-parsed every flow value on every edge: O(E^2) float parses to
     /// produce E widths. Computing it once with the context makes the render O(E).
     sankey_widest_flow: Option<f32>,
-}
-
-/// A sankey node's label: its name, then its throughput on the next line, as mermaid labels it.
-///
-/// ⚠️ THE TOTAL IS THE MAX OF INFLOW AND OUTFLOW, NOT THE SUM, and not either side alone. Measured
-/// on the pinned 11.15.0 bundle with `A,M,10` / `M,B,3`: mermaid draws `M\n10`. The sum would be
-/// 13 and the outflow 3, so a node that does not conserve flow distinguishes all three rules —
-/// every balanced diagram makes them agree, which is why the differential fixture carries an
-/// unbalanced one.
-///
-/// The number is formatted plainly: `A,B,1.5` / `A,C,2.25` gives `A\n3.75`, with no padding and no
-/// trailing zeros.
-fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
-    if ir.diagram_type != DiagramType::Sankey {
-        return None;
-    }
-    let node = ir.nodes.get(node_index)?;
-    let mut inflow = 0.0_f32;
-    let mut outflow = 0.0_f32;
-    for edge in &ir.edges {
-        let Some(value) = sankey_flow_value(ir, edge) else {
-            continue;
-        };
-        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            inflow += value;
-        }
-        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
-            outflow += value;
-        }
-    }
-    let total = inflow.max(outflow);
-    if total <= 0.0 {
-        return None;
-    }
-    Some(format!(
-        "{}\n{}",
-        ir.node_display_text(node),
-        format_sankey_total(total)
-    ))
-}
-
-/// At most TWO decimal places, trailing zeros trimmed: 150 renders `150`, 3.75 renders `3.75`,
-/// 124.729 renders `124.73`.
-///
-/// ⚠️ THE ROUNDING IS THE POINT, AND IT IS NOT COSMETIC. This printed the raw value, so a flow
-/// written `1234.5678` drew `1234.5677` — digits the author never typed, because the total is
-/// accumulated in `f32` and the nearest `f32` to that sum prints back with the error visible. The
-/// reference draws `1234.57`; rounding to two places both matches it and stops float noise reaching
-/// the picture. Measured in Chromium 151 against the pinned 11.15.0 bundle:
-///
-/// ```text
-///   10           -> 10        (no `.00`: the trailing zeros are trimmed)
-///   124.729      -> 124.73
-///   1.23456789   -> 1.23
-///   1234.5678    -> 1234.57
-///   0.3333333    -> 0.33
-/// ```
-///
-/// ⚠️ ONE RESIDUAL DIVERGENCE, RECORDED RATHER THAN PAPERED OVER. `A,B,0.005` draws `0.01` upstream
-/// and cannot reliably do so here: mermaid parses into `f64`, where the stored value sits just above
-/// the exact half and rounds up, while `sankey_flow_value` parses into `f32`, where the nearest
-/// representable value can fall on the other side. That is a property of the IR's numeric width, not
-/// of this formatter, and closing it means widening the stored flow value — a change to the IR, not
-/// a print. The conformance test pins the FORMAT for that input without asserting a digit this
-/// function cannot promise.
-fn format_sankey_total(total: f32) -> String {
-    let rounded = format!("{total:.2}");
-    // Trim only inside the fraction: `trim_end_matches('0')` stops at the first non-`0`, so
-    // `1200.00` loses the two fractional zeros and stops at the dot, never the integer's own.
-    if rounded.contains('.') {
-        rounded
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    } else {
-        rounded
-    }
-}
-
-/// Value carried by a sankey flow, which `parse_sankey` stores as the edge LABEL.
-fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
-    let text = ir.labels.get(edge.label?.0)?.text.trim();
-    let value = text.parse::<f32>().ok()?;
-    (value.is_finite() && value > 0.0).then_some(value)
-}
-
-/// Largest sankey flow in the diagram, computed ONCE per render. `None` for every other type.
-fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
-    if ir.diagram_type != DiagramType::Sankey {
-        return None;
-    }
-    let widest = ir
-        .edges
-        .iter()
-        .filter_map(|edge| sankey_flow_value(ir, edge))
-        .fold(0.0_f32, f32::max);
-    (widest > 0.0).then_some(widest)
 }
 
 /// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to
@@ -14401,7 +15237,7 @@ fn write_common_edge_path_into(
     edge_index: i32,
     marker_end: &str,
 ) {
-    // Path `d` is pure SVG path geometry (`M/L/C/A/Z` + digits/spaces/commas/dots/minus from
+    // Path `d` is pure SVG path geometry (`M/L/Q/C/A/Z` + digits/spaces/commas/dots/minus from
     // `write_fixed2`) and can never contain an XML special (`& < > " '`), so escaping it is a no-op
     // scan. Write it raw — byte-identical, and consistent with the streaming fast path
     // (`write_common_edge_full_fragment_into`) which already emits `d` unescaped via
@@ -14638,13 +15474,18 @@ fn write_common_edge_full_fragment_into<const A11Y: bool, F>(
 /// midpoint, exactly as the labeled-edge fragments need them. Shared by `render_edge` (slow/`Element`
 /// path) and `render_edge_into` (streaming path) so both derive byte-identical label text + position.
 fn compute_edge_label<'a>(
-    ir: &'a MermaidDiagramIr,
     edge_path: &LayoutEdgePath,
-    edge_index: usize,
-    detail: RenderDetailProfile,
-    offset_x: f32,
-    offset_y: f32,
+    context: &EdgeRenderContext<'a>,
 ) -> Option<(Cow<'a, str>, f32, f32)> {
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        detail,
+        preserved_label_positions,
+        ..
+    } = *context;
+    let edge_index = edge_path.edge_index;
     // ⚠️ A SANKEY LINK CARRIES NO LABEL AT ALL, and this is parity, not a simplification. mermaid
     // 11.15.0 draws text only on the NODES: for `A,B,10` its drawn text is exactly
     // `["A\n10", "B\n10"]`, with no standalone `10` anywhere — measured in Chromium 151 against the
@@ -14701,30 +15542,94 @@ fn compute_edge_label<'a>(
         } else {
             label_text
         };
-        let (lx, ly) = if edge_path.points.len() == 4 {
-            let p1 = &edge_path.points[1];
-            let p2 = &edge_path.points[2];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else if edge_path.points.len() == 2 {
-            let p1 = &edge_path.points[0];
-            let p2 = &edge_path.points[1];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
+        // The anchor rule is fm-layout's, shared with the canvas and the render scene.
+        let anchor = preserved_label_positions
+            .and_then(|positions| positions.get(edge_index).copied().flatten())
+            .unwrap_or_else(|| fm_layout::edge_label_position(edge_path));
+        let y = if preserved_label_positions.is_some() {
+            anchor.y + offset_y
         } else {
-            let mid_idx = edge_path.points.len() / 2;
-            let mid_point = &edge_path.points[mid_idx];
-            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
+            // Retain the legacy operation order as well as its offset.
+            anchor.y + offset_y - 8.0
         };
-        Some((label_text, lx, ly))
+        Some((label_text, anchor.x + offset_x, y))
     } else {
         None
     }
 }
+
+fn edge_label_dimensions(
+    label: &str,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    collision_aware: bool,
+) -> (f32, f32, f32) {
+    let line_count = label.lines().count().max(1) as f32;
+    let max_chars = label
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let legacy_width = max_chars as f32 * config.avg_char_width;
+    // Reserve at the base font size, which also leaves room for the smaller tier-specific edge
+    // face. Counting characters alone gives WWW the same width as iii and leaves wide glyphs
+    // outside both their opaque plate and the collision solver's idea of that plate.
+    let text_width = if collision_aware || config.preserve_labels {
+        preserved_label_width(label, config.font_size, config, &config.font_metrics())
+    } else {
+        legacy_width
+    };
+    let text_height = (line_count - 1.0) * font_size * config.line_height;
+    (
+        text_width + 8.0 + 20.0,
+        text_height + font_size + 14.0,
+        text_height,
+    )
+}
+
+/// Resolve generic graph labels in paint order, independently of the text-preservation setting.
+/// Keeping earlier plates as obstacles prevents a later opaque backing from hiding an already
+/// placed label. Sequence messages and chart annotations retain their specialized positioning.
+fn resolve_graph_edge_label_positions(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+) -> Option<Vec<Option<fm_layout::LayoutPoint>>> {
+    if !detail.show_edge_labels
+        || !matches!(
+            ir.diagram_type,
+            DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
+        )
+    {
+        return None;
+    }
+    let mut positions = vec![None; ir.edges.len()];
+    let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding);
+    for path in &layout.edges {
+        if path.bundled || path.points.len() < 2 || !detail.show_edge_labels {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        if edge.arrow == fm_core::ArrowType::Invisible {
+            continue;
+        }
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
+        let (width, height, _) =
+            edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+        let position = placer.place(path, width, height);
+        positions[path.edge_index] = Some(position);
+    }
+    Some(positions)
+}
+
+#[cfg(test)]
+use fm_layout::edge_labels::{EdgeLabelObstacle, clear_edge_label_position};
 
 /// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
 /// `out`. Shared by `render_edge` (into a fresh String wrapped in `Element::raw_svg`) and
@@ -14754,7 +15659,8 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     lx: f32,
     ly: f32,
     label_font_size: f32,
-    avg_char_width: f32,
+    config: &SvgRenderConfig,
+    centered: bool,
     from_label: Option<&str>,
     to_label: Option<&str>,
     colors: &ThemeColors,
@@ -14762,9 +15668,13 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     use crate::attributes::{
         AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
     };
-    let label_width = (label_str.chars().count() as f32 * avg_char_width) + 8.0 + 20.0;
-    let label_height = label_font_size + 14.0;
-    let start_y = ly + (label_font_size / 4.0);
+    let (label_width, label_height, _) =
+        edge_label_dimensions(label_str, label_font_size, config, centered);
+    let start_y = if centered {
+        ly
+    } else {
+        ly + label_font_size / 4.0
+    };
     out.push_str("<g id=\"fm-edge-");
     let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
     out.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
@@ -14785,7 +15695,10 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     out.push_str("<rect x=\"");
     let _ = write_number_into(out, lx - label_width / 2.0);
     out.push_str("\" y=\"");
-    let _ = write_number_into(out, ly - label_height / 2.0 - 1.0);
+    let _ = write_number_into(
+        out,
+        ly - label_height / 2.0 - if centered { 0.0 } else { 1.0 },
+    );
     out.push_str("\" width=\"");
     let _ = write_number_into(out, label_width);
     out.push_str("\" height=\"");
@@ -14798,11 +15711,21 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     let _ = write_number_into(out, lx);
     out.push_str("\" y=\"");
     let _ = write_number_into(out, start_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    out.push_str("\" text-anchor=\"middle\"");
+    if centered {
+        out.push_str(" dominant-baseline=\"central\"");
+    }
+    out.push_str(" font-size=\"");
     let _ = write_number_into(out, label_font_size);
     out.push_str("\" fill=\"");
     let _ = write_escaped_attr(out, &colors.text);
-    out.push_str("\" class=\"edge-label\">");
+    out.push_str("\" class=\"edge-label\"");
+    if centered {
+        out.push_str(" style=\"font-size:");
+        let _ = write_number_into(out, label_font_size);
+        out.push_str("px\"");
+    }
+    out.push('>');
     let _ = write_escaped_text(out, label_str);
     if A11Y {
         out.push_str("</text><title>");
@@ -14819,33 +15742,6 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     }
 }
 
-/// Ribbon width for a sankey flow, proportional to its value (bd-e69x).
-///
-/// Proportional width IS the sankey diagram — it is the only thing carrying the quantity. Drawing
-/// every flow at the generic edge width leaves a stable, tidy picture that conveys nothing, which
-/// is why a byte golden pinned it for months without complaint.
-///
-/// Returns `None` for anything that is not a numeric sankey flow, so every other diagram type and
-/// any malformed row keeps the arrow-derived width exactly as before.
-fn sankey_flow_stroke_width(
-    ir: &MermaidDiagramIr,
-    edge: Option<&fm_core::IrEdge>,
-    widest: Option<f32>,
-) -> Option<f32> {
-    /// Keeps the smallest flow visible instead of collapsing it to a hairline.
-    const MIN_WIDTH: f32 = 1.5;
-    /// Width of the largest flow; every other flow is scaled against it.
-    const MAX_WIDTH: f32 = 24.0;
-
-    // `widest` is `None` for every non-sankey diagram and for a sankey with no usable flow, so it
-    // subsumes the old `diagram_type` guard AND the old `widest <= 0.0` bail.
-    let widest = widest?;
-    let value = sankey_flow_value(ir, edge?)?;
-    // Normalise against the widest flow so the ratio between two ribbons equals the ratio between
-    // their values — the property a reader actually reads off the picture.
-    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
-}
-
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
 
@@ -14858,6 +15754,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         colors,
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
+        preserved_label_positions,
     } = *context;
 
     let edge_index = edge_path.edge_index;
@@ -14880,7 +15777,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // second copy of it that could drift. Previously this was an inline `match arrow`.
     let edge_visuals = |arrow: ArrowType| -> (Option<&str>, Option<&str>, Option<&str>, &str) {
         match arrow {
-            ArrowType::Line | ArrowType::ThickLine => (None, None, None, &colors.edge),
+            ArrowType::Line | ArrowType::ThickLine | ArrowType::Invisible => {
+                (None, None, None, &colors.edge)
+            }
             ArrowType::Arrow => (None, None, Some("url(#arrow-end)"), &colors.edge),
             ArrowType::OpenArrow => (None, None, Some("url(#arrow-open)"), &colors.edge),
             ArrowType::HalfArrowTop => (None, None, Some("url(#arrow-half-top)"), &colors.edge),
@@ -15196,7 +16095,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
     // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
     // `compute_edge_label` so the streaming path derives byte-identical text + position.
-    let edge_label = compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y);
+    let edge_label = compute_edge_label(edge_path, context);
 
     // Whole labeled-edge fast fragment, hoisted above `elem`: for the common single-line solid-`Arrow`
     // label under embedded CSS + default a11y, stream `<g><path/><rect/><text/><title/></g>` and RETURN
@@ -15244,7 +16143,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 *lx,
                 *ly,
                 label_font_size,
-                config.avg_char_width,
+                config,
+                preserved_label_positions.is_some(),
                 from_label,
                 to_label,
                 colors,
@@ -15361,26 +16261,17 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
-        let lines_count = label_text.lines().count().max(1) as f32;
-        let max_line_len = label_text
-            .lines()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(0);
-        let label_text_width = (max_line_len as f32 * config.avg_char_width) + 8.0;
-        let label_padding_x = 10.0;
-        let label_width = label_text_width + (label_padding_x * 2.0);
-
         let label_font_size = detail.edge_font_size;
-        let total_text_height = (lines_count - 1.0) * label_font_size * config.line_height;
-        let label_height = total_text_height + label_font_size + 14.0;
-
-        let start_y = ly - (total_text_height / 2.0) + (label_font_size / 4.0);
+        let centered = preserved_label_positions.is_some();
+        let (label_width, label_height, total_text_height) =
+            edge_label_dimensions(label_text, label_font_size, config, centered);
+        let start_y =
+            ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
 
         group = group.child(
             Element::rect()
                 .x(lx - label_width / 2.0)
-                .y(ly - label_height / 2.0 - 1.0)
+                .y(ly - label_height / 2.0 - if centered { 0.0 } else { 1.0 })
                 .width(label_width)
                 .height(label_height)
                 .fill(&colors.background)
@@ -15391,18 +16282,30 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         );
 
         // Add label text
-        group = group.child(
-            TextBuilder::new(label_text)
-                .x(lx)
-                .y(start_y)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(label_font_size)
-                .line_height(config.line_height)
-                .anchor(TextAnchor::Middle)
-                .fill(&colors.text)
-                .class("edge-label")
-                .build(),
-        );
+        let mut text = TextBuilder::new(label_text)
+            .x(lx)
+            .y(start_y)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(label_font_size)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .baseline(if centered {
+                text::DominantBaseline::Central
+            } else {
+                text::DominantBaseline::Auto
+            })
+            .fill(&colors.text)
+            .class("edge-label")
+            .build();
+        if centered {
+            // The theme's relative .edge-label font-size otherwise overrides the SVG attribute,
+            // so the drawn glyphs would disagree with the dimensions used for collision checks.
+            let mut style = String::from("font-size:");
+            let _ = attributes::write_number_into(&mut style, label_font_size);
+            style.push_str("px");
+            text = text.attr("style", &style);
+        }
+        group = group.child(text);
 
         // A C4 relationship's TECHNOLOGY, drawn as its own italic row beneath the label.
         //
@@ -15538,8 +16441,10 @@ fn write_sequence_number_into(
         return;
     };
 
+    // ON the message's start point, as mermaid's `marker-start` circle sits.
     let number_x = start.x + context.offset_x;
-    let number_y = f32::midpoint(start.y, end.y) + context.offset_y - 8.0;
+    let number_y = start.y + context.offset_y;
+    let _ = end;
 
     // Mermaid 11.15.0 anchors a filled `sequencenumber` marker behind every emitted number.  Keep
     // the decoration beside the number writer so the guard is identical: a sequence message without
@@ -15562,10 +16467,10 @@ fn write_sequence_number_into(
     // SVG default of black — invisible against a dark theme's background, on a diagram whose every
     // other text run is themed. A class with no rule behind it is not styling, it is a name.
     //
-    // `colors.text`, the same colour every other label uses, rather than a new theme field. mermaid
-    // has a dedicated `sequenceNumberColor` computed to CONTRAST with the line colour, which is not
-    // the same thing and is not claimed here: this makes the number readable and theme-consistent,
-    // not identical to the incumbent's palette.
+    // `colors.background`, NOT `colors.text`: the digits sit on a disc of the LINE colour, and text
+    // colour on line colour was dark on dark in the default theme — present, themed and unreadable.
+    // mermaid's `sequenceNumberColor` is computed to contrast with the line colour; the background
+    // does that in every theme here (light digits on a slate disc, dark digits on a light one).
     //
     // Attribute order follows `write_gantt_label_into` — text-anchor, dominant-baseline, font-size,
     // fill, class — because in this file order is output, and a sibling writer disagreeing about it
@@ -15573,7 +16478,7 @@ fn write_sequence_number_into(
     out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
     let _ = crate::attributes::write_number_into(out, context.config.font_size * 0.8);
     out.push_str("\" fill=\"");
-    let _ = crate::attributes::write_escaped_attr(out, &context.colors.text);
+    let _ = crate::attributes::write_escaped_attr(out, &context.colors.background);
     out.push_str("\" class=\"fm-sequence-number\">");
     let _ = crate::attributes::write_number_into(out, number as f32);
     out.push_str("</text>");
@@ -15599,10 +16504,15 @@ fn render_edge_body_into(
         colors,
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
+        preserved_label_positions,
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
+    // `~~~` placed the nodes during layout; drawing it would show the connection the author hid.
+    if arrow == ArrowType::Invisible {
+        return;
+    }
     let is_back_edge = edge_path.reversed;
     // `edgeId@{ animate: … }` opt-in. Resolved once here because it gates BOTH fast paths and is
     // applied on the slow one; a second lookup is how the gate and the emission drift apart.
@@ -15652,7 +16562,7 @@ fn render_edge_body_into(
         && !config.include_source_spans
         && let Some(edge) = ir_edge
         && let Some((label_text, lx, ly)) =
-            compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y)
+            compute_edge_label(edge_path, context)
     {
         let label_str = label_text.as_ref();
         // A sankey flow's WIDTH is its value (bd-e69x). This labeled-edge fast path is the one
@@ -15676,7 +16586,8 @@ fn render_edge_body_into(
                     lx,
                     ly,
                     detail.edge_font_size,
-                    config.avg_char_width,
+                    config,
+                    preserved_label_positions.is_some(),
                     from_label,
                     to_label,
                     colors,
@@ -15695,7 +16606,8 @@ fn render_edge_body_into(
                     lx,
                     ly,
                     detail.edge_font_size,
-                    config.avg_char_width,
+                    config,
+                    preserved_label_positions.is_some(),
                     None,
                     None,
                     colors,
@@ -15728,7 +16640,11 @@ fn render_edge_body_into(
             "",
             " points to ",
         ),
-        ArrowType::Line => (1.8, "fm-edge-solid", "", "", "", " connects to "),
+        // `Invisible` never reaches here (`render_edge_into` returns first); it shares `Line`'s arm
+        // only because the match must be total.
+        ArrowType::Line | ArrowType::Invisible => {
+            (1.8, "fm-edge-solid", "", "", "", " connects to ")
+        }
         ArrowType::OpenArrow => (
             1.8,
             "fm-edge-solid",
@@ -16458,18 +17374,57 @@ mod tests {
         assert!(snapshot.fragments.reused_edges >= 2);
     }
 
+    fn checked_flat_test_prefix(
+        source: &str,
+        diagrams: &[MermaidDiagramIr],
+    ) -> CertifiedSvgBatchPrefix {
+        // The parser's batch plan certifies closed subgraphs, while the tree transplant now
+        // deliberately rejects populated groups. These renderer tests certify a flat prefix
+        // only after checking its complete node/edge objects and referenced label contents.
+        let prefix = fm_parser::parse(source).ir;
+        assert!(!prefix.nodes.is_empty());
+        assert!(!diagrams.is_empty());
+        for ir in std::iter::once(&prefix).chain(diagrams) {
+            assert_eq!(ir.diagram_type, prefix.diagram_type);
+            assert_eq!(ir.direction, prefix.direction);
+            assert!(ir.graph.subgraphs.is_empty());
+            assert!(ir.clusters.is_empty());
+            assert!(ir.ports.is_empty());
+            assert_eq!(ir.constraints, prefix.constraints);
+            assert_eq!(ir.style_refs, prefix.style_refs);
+            assert_eq!(ir.style_defs, prefix.style_defs);
+            assert_eq!(
+                ir.nodes.get(..prefix.nodes.len()),
+                Some(prefix.nodes.as_slice())
+            );
+            assert_eq!(
+                ir.edges.get(..prefix.edges.len()),
+                Some(prefix.edges.as_slice())
+            );
+            for label in prefix
+                .nodes
+                .iter()
+                .filter_map(|node| node.label)
+                .chain(prefix.edges.iter().filter_map(|edge| edge.label))
+            {
+                assert_eq!(ir.labels.get(label.0), prefix.labels.get(label.0));
+                assert_eq!(ir.label_markup.get(&label), prefix.label_markup.get(&label));
+            }
+        }
+        CertifiedSvgBatchPrefix::new(Arc::from(source), prefix.nodes.len(), prefix.edges.len())
+    }
+
     #[test]
     fn borrowed_batch_renderer_transplants_certified_path_geometry() {
+        let mut prefix_source = String::from("flowchart LR\n");
+        for index in 0..48 {
+            prefix_source.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
+        }
+        for index in 0..47 {
+            prefix_source.push_str(&format!("    S{index}-->S{}\n", index + 1));
+        }
         let make_input = |tail_labels: &[&str]| {
-            let mut input =
-                String::from("flowchart LR\n  subgraph Shared[\"Shared ingestion platform\"]\n");
-            for index in 0..48 {
-                input.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
-            }
-            for index in 0..47 {
-                input.push_str(&format!("    S{index}-->S{}\n", index + 1));
-            }
-            input.push_str("  end\n");
+            let mut input = prefix_source.clone();
             for (index, label) in tail_labels.iter().enumerate() {
                 input.push_str(&format!("  D{index}[\"{label}\"]\n"));
             }
@@ -16503,32 +17458,20 @@ mod tests {
                 "Session Store",
             ]),
         ];
-        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
-        let plan = fm_parser::FlowchartBatchParsePlan::new(
-            &inputs,
-            fm_core::MermaidParseMode::Compat,
-            &fm_parser::ParserConfig::default(),
-        );
+        let diagrams = owned_inputs
+            .iter()
+            .map(|input| fm_parser::parse(input).ir)
+            .collect::<Vec<_>>();
+        let prefix = checked_flat_test_prefix(&prefix_source, &diagrams);
+        assert_eq!((prefix.node_count, prefix.edge_count), (48, 47));
         let config = SvgRenderConfig::default();
-        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
         let mut renderer = SvgBatchRenderer::default();
 
-        for (index, input) in inputs.iter().enumerate() {
-            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
-                let prefix = parsed.reusable_prefix.expect("certified prefix");
-                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
-                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
-                let actual = renderer.layout_and_render_borrowed(
-                    parsed.ir,
-                    &config,
-                    Some(CertifiedSvgBatchPrefix::new(
-                        Arc::clone(&prefix.identity),
-                        prefix.node_count,
-                        prefix.edge_count,
-                    )),
-                );
-                assert_eq!(actual, expected);
-            });
+        for ir in &diagrams {
+            let expected_layout = fm_layout::layout_diagram_traced(ir).layout;
+            let expected = render_svg_with_layout(ir, &expected_layout, &config);
+            let actual = renderer.layout_and_render_borrowed(ir, &config, Some(prefix.clone()));
+            assert_eq!(actual, expected);
         }
 
         let snapshot = renderer.previous.as_ref().expect("batch snapshot");
@@ -16626,6 +17569,839 @@ mod tests {
             let snapshot = worker.previous.as_ref().expect("worker snapshot");
             assert!(snapshot.fragments.reused_nodes >= 3);
             assert!(snapshot.fragments.reused_edges >= 2);
+        }
+    }
+
+    fn edge_label_test_node(
+        index: usize,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> LayoutNodeBox {
+        LayoutNodeBox {
+            node_index: index,
+            node_id: ((b'A' + index as u8) as char).to_string(),
+            rank: index,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+        }
+    }
+
+    fn edge_label_test_scene() -> (MermaidDiagramIr, DiagramLayout) {
+        let ir = fm_parser::parse(
+            "flowchart LR\nA[Alpha]-->B[Beta]\nB-->|U uživatelek aplikace|C[Gamma]\nD[Obstacle]",
+        )
+        .ir;
+        let mut layout = frame_test_layout(0.0, 0.0, 700.0, 360.0);
+        layout.nodes = vec![
+            edge_label_test_node(0, 0.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(1, 160.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(2, 520.0, 80.0, 80.0, 40.0),
+            edge_label_test_node(3, 300.0, 220.0, 180.0, 40.0),
+        ];
+        for (edge_index, (start, end)) in [(80.0, 160.0), (240.0, 520.0)].into_iter().enumerate() {
+            layout.edges.push(LayoutEdgePath {
+                edge_index,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: start, y: 100.0 },
+                    fm_layout::LayoutPoint { x: end, y: 100.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            });
+        }
+        (ir, layout)
+    }
+
+    fn edge_label_test_number(element: &str, name: &str) -> f32 {
+        element
+            .split_once(&format!("{name}=\""))
+            .expect("label geometry attribute")
+            .1
+            .split_once('"')
+            .expect("attribute end")
+            .0
+            .parse()
+            .expect("finite label geometry")
+    }
+
+    fn edge_label_test_plate(fragment: &str) -> fm_layout::LayoutRect {
+        let rect = fragment
+            .split_once("<rect ")
+            .expect("label backing plate")
+            .1
+            .split_once("/>")
+            .expect("plate end")
+            .0;
+        fm_layout::LayoutRect {
+            x: edge_label_test_number(rect, "x"),
+            y: edge_label_test_number(rect, "y"),
+            width: edge_label_test_number(rect, "width"),
+            height: edge_label_test_number(rect, "height"),
+        }
+    }
+
+    fn edge_label_test_assert_clear(
+        plate: &fm_layout::LayoutRect,
+        obstacle: &fm_layout::LayoutRect,
+    ) {
+        assert!(
+            plate.x + plate.width <= obstacle.x - 1.98
+                || plate.x >= obstacle.x + obstacle.width + 1.98
+                || plate.y + plate.height <= obstacle.y - 1.98
+                || plate.y >= obstacle.y + obstacle.height + 1.98,
+            "label plate {plate:?} intersects obstacle {obstacle:?}"
+        );
+    }
+
+    #[test]
+    fn default_graph_labels_clear_nodes_and_center_text_in_both_svg_writers() {
+        let colors = ThemeColors::default();
+        for family in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::State,
+            DiagramType::Er,
+        ] {
+            for preserve_labels in [false, true] {
+                for large_font in [false, true] {
+                    for arrow in [ArrowType::Arrow, ArrowType::DottedArrow] {
+                        let (mut ir, mut layout) = edge_label_test_scene();
+                        ir.diagram_type = family;
+                        ir.edges[1].arrow = arrow;
+                        ir.labels[ir.edges[1].label.unwrap().0].text =
+                            "WW wide relation".to_string();
+                        layout.nodes[3] = edge_label_test_node(3, 350.0, 88.0, 60.0, 24.0);
+                        let mut config = SvgRenderConfig {
+                            preserve_labels,
+                            ..Default::default()
+                        };
+                        if large_font {
+                            config.font_size = 30.0;
+                            config.avg_char_width = 18.0;
+                        }
+                        let geometry = svg_geometry(&ir, &layout, &config);
+                        let positions = geometry
+                            .label_positions
+                            .as_ref()
+                            .expect("default graph label placement");
+                        let position = positions[1].expect("labeled edge position");
+                        assert_eq!(position.x, 380.0, "retain the nearest route anchor");
+                        assert_ne!(position.y, 100.0, "the original anchor is obstructed");
+                        let context = EdgeRenderContext {
+                            ir: &ir,
+                            offset_x: geometry.frame.offset_x,
+                            offset_y: geometry.frame.offset_y,
+                            config: &config,
+                            detail: geometry.detail,
+                            colors: &colors,
+                            accessible_node_labels: None,
+                            preserved_label_positions: Some(positions),
+                            sankey_widest_flow: None,
+                        };
+                        let mut streamed = String::new();
+                        render_edge_into(&mut streamed, &layout.edges[1], &context);
+                        let element = render_edge(&layout.edges[1], &context).render();
+                        assert_eq!(streamed, element, "{family:?}/{preserve_labels}/{arrow:?}");
+                        let mut plate = edge_label_test_plate(&streamed);
+                        assert!(plate.x >= 1.98 && plate.y >= 1.98);
+                        assert!(plate.x + plate.width <= geometry.frame.viewbox_width - 1.98);
+                        assert!(plate.y + plate.height <= geometry.frame.viewbox_height - 1.98);
+                        let text = streamed
+                            .split_once("<text ")
+                            .expect("label text")
+                            .1
+                            .split_once('>')
+                            .expect("text attributes")
+                            .0;
+                        assert!(text.contains("dominant-baseline=\"central\""));
+                        assert!(text.contains("style=\"font-size:"));
+                        assert!(
+                            (edge_label_test_number(text, "x") - plate.x - plate.width / 2.0).abs()
+                                < 0.02
+                        );
+                        assert!(
+                            (edge_label_test_number(text, "y") - plate.y - plate.height / 2.0)
+                                .abs()
+                                < 0.02
+                        );
+                        assert!(
+                            (edge_label_test_number(text, "font-size")
+                                - geometry.detail.edge_font_size)
+                                .abs()
+                                < 0.01
+                        );
+                        plate.x -= geometry.frame.offset_x;
+                        plate.y -= geometry.frame.offset_y;
+                        for node in &layout.nodes {
+                            edge_label_test_assert_clear(&plate, &node.bounds);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_graph_labels_measure_the_drawn_truncated_text() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        let label_id = ir.edges[1].label.unwrap();
+        ir.labels[label_id.0].text = "W".repeat(120);
+        layout.nodes.clear();
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Normal,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        assert_eq!(geometry.frame.viewbox_width, 700.0 + config.padding * 2.0);
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        let fragment = svg.split_once("id=\"fm-edge-1\"").unwrap().1;
+        let plate = edge_label_test_plate(fragment);
+        assert!(plate.width < 700.0, "only the visible text reserves space");
+        assert!(fragment.contains(&format!(">{}…</text>", "W".repeat(39))));
+        let full = svg_geometry(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                preserve_labels: true,
+                ..config
+            },
+        );
+        assert!(full.frame.viewbox_width > geometry.frame.viewbox_width * 2.0);
+    }
+
+    #[test]
+    fn default_state_relationship_labels_clear_note_boxes() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        ir.diagram_type = DiagramType::State;
+        layout.nodes.clear();
+        let note_bounds = fm_layout::LayoutRect {
+            x: 300.0,
+            y: 80.0,
+            width: 160.0,
+            height: 40.0,
+        };
+        layout
+            .extensions
+            .state_notes
+            .push(fm_layout::LayoutStateNote {
+                node_index: usize::MAX,
+                side: fm_layout::StateNoteSide::Right,
+                text: "State annotation".to_string(),
+                bounds: note_bounds,
+                leader_start: fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+                leader_end: fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+            });
+        let config = SvgRenderConfig::default();
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        let fragment = svg.split_once("id=\"fm-edge-1\"").unwrap().1;
+        let mut plate = edge_label_test_plate(fragment);
+        plate.x -= geometry.frame.offset_x;
+        plate.y -= geometry.frame.offset_y;
+        edge_label_test_assert_clear(&plate, &note_bounds);
+    }
+
+    #[test]
+    fn er_schema_relationship_plates_clear_every_entity_with_default_settings() {
+        let ir = fm_parser::parse(concat!(
+            "erDiagram\n",
+            "CUSTOMER ||--o{ ORDER : places\n",
+            "ORDER ||--|{ LINE_ITEM : contains\n",
+            "PRODUCT ||--o{ LINE_ITEM : includes\n",
+            "CUSTOMER {\n int id PK\n string name\n string email\n}\n",
+            "ORDER {\n int id PK\n int customer_id FK\n date placed_at\n}\n",
+            "LINE_ITEM {\n int id PK\n int order_id FK\n int product_id FK\n decimal price\n}\n",
+            "PRODUCT {\n int id PK\n string title\n decimal price\n}\n",
+        ))
+        .ir;
+        assert_eq!(ir.edges.len(), 3);
+        for preserve_labels in [false, true] {
+            let config = SvgRenderConfig {
+                preserve_labels,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let frame = svg_frame(&ir, &layout, &config);
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let mut plates = Vec::new();
+            for edge in &layout.edges {
+                let fragment = svg
+                    .split_once(&format!("id=\"fm-edge-{}\"", edge.edge_index))
+                    .expect("relationship group")
+                    .1;
+                let mut plate = edge_label_test_plate(fragment);
+                assert!(plate.x >= 1.98 && plate.y >= 1.98);
+                assert!(plate.x + plate.width <= frame.viewbox_width - 1.98);
+                assert!(plate.y + plate.height <= frame.viewbox_height - 1.98);
+                plate.x -= frame.offset_x;
+                plate.y -= frame.offset_y;
+                for bounds in layout.nodes.iter().map(|node| &node.bounds).chain(&plates) {
+                    edge_label_test_assert_clear(&plate, bounds);
+                }
+                if edge.edge_index == 1 {
+                    // "contains" used to sit under the subsequently painted PRODUCT route
+                    // and its zero-or-more bubble. Check the emitted plate against sampled
+                    // foreign geometry, not the placement solver's own obstacle envelopes.
+                    let foreign = layout
+                        .edges
+                        .iter()
+                        .find(|path| path.edge_index == 2)
+                        .unwrap();
+                    for pair in foreign.points.windows(2) {
+                        for step in 0..=32 {
+                            let t = step as f32 / 32.0;
+                            let point = fm_layout::LayoutRect {
+                                x: pair[0].x + (pair[1].x - pair[0].x) * t,
+                                y: pair[0].y + (pair[1].y - pair[0].y) * t,
+                                width: 0.0,
+                                height: 0.0,
+                            };
+                            edge_label_test_assert_clear(&plate, &point);
+                        }
+                    }
+                    let end = foreign.points[foreign.points.len() - 1];
+                    let previous = foreign
+                        .points
+                        .iter()
+                        .rev()
+                        .find(|point| **point != end)
+                        .unwrap();
+                    let (dx, dy) = (end.x - previous.x, end.y - previous.y);
+                    let length = dx.hypot(dy);
+                    // The SVG zero-or-more end glyph has a radius-6 circle 30px behind the port.
+                    let bubble = fm_layout::LayoutRect {
+                        x: end.x - 30.0 * dx / length - 6.0,
+                        y: end.y - 30.0 * dy / length - 6.0,
+                        width: 12.0,
+                        height: 12.0,
+                    };
+                    edge_label_test_assert_clear(&plate, &bubble);
+                    let anchor = fm_layout::edge_label_position(edge);
+                    assert!((plate.x + plate.width / 2.0 - anchor.x).abs() < plate.width / 2.0);
+                }
+                plates.push(plate);
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_diagonal_routes_do_not_reserve_their_whole_bounding_box() {
+        let layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        let routes = [EdgeLabelObstacle::Segment(
+            fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+            fm_layout::LayoutPoint { x: 100.0, y: 100.0 },
+        )];
+        let clear = fm_layout::LayoutPoint { x: 10.0, y: 90.0 };
+        assert_eq!(
+            clear_edge_label_position(clear, 20.0, 20.0, &layout, 24.0, &[], &routes),
+            clear,
+        );
+        let crossing = fm_layout::LayoutPoint { x: 50.0, y: 50.0 };
+        let moved = clear_edge_label_position(crossing, 20.0, 20.0, &layout, 24.0, &[], &routes);
+        assert_ne!(moved, crossing);
+        assert!((moved.x - moved.y).abs() >= 29.99);
+    }
+
+    #[test]
+    fn partially_shared_branch_trunks_keep_labels_on_their_own_route() {
+        let (ir, mut layout) = edge_label_test_scene();
+        layout.nodes.clear();
+        layout.edges[0].points = [
+            fm_layout::LayoutPoint { x: 200.0, y: 100.0 },
+            fm_layout::LayoutPoint { x: 200.0, y: 250.0 },
+            fm_layout::LayoutPoint { x: 300.0, y: 250.0 },
+        ]
+        .into_iter()
+        .collect();
+        layout.edges[1].points = [
+            fm_layout::LayoutPoint { x: 200.0, y: 100.0 },
+            fm_layout::LayoutPoint { x: 200.0, y: 300.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = SvgRenderConfig::default();
+        let geometry = svg_geometry(&ir, &layout, &config);
+        assert_eq!(
+            geometry.label_positions.unwrap()[1],
+            Some(fm_layout::LayoutPoint { x: 200.0, y: 200.0 }),
+        );
+    }
+
+    #[test]
+    fn label_clearance_merges_obstacle_chains_and_respects_the_existing_frame() {
+        let mut layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        layout
+            .nodes
+            .push(edge_label_test_node(0, 0.0, 0.0, 100.0, 70.0));
+        let anchor = fm_layout::LayoutPoint { x: 50.0, y: 65.0 };
+        let clear = clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]);
+        assert_eq!(clear, fm_layout::LayoutPoint { x: 50.0, y: 82.0 });
+        assert_eq!(
+            clear.y - 10.0 - 70.0,
+            2.0,
+            "the whole plate has a gap to the node"
+        );
+        assert!(clear.y + 10.0 <= layout.bounds.height);
+
+        // A completely occupied frame requires a clear position outside it. The document frame
+        // grows around this position instead of leaving the label underneath an opaque node.
+        layout.nodes[0].bounds.height = 100.0;
+        assert_eq!(
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]),
+            fm_layout::LayoutPoint { x: 50.0, y: 112.0 }
+        );
+        layout.nodes.clear();
+        assert_eq!(
+            clear_edge_label_position(anchor, 20.0, 20.0, &layout, 0.0, &[], &[]),
+            anchor
+        );
+    }
+
+    #[test]
+    fn otherwise_clear_edge_labels_are_projected_inside_the_frame() {
+        let layout = frame_test_layout(0.0, 0.0, 100.0, 100.0);
+        for (anchor, expected) in [
+            ((98.0, 50.0), (78.0, 50.0)),
+            ((2.0, 50.0), (22.0, 50.0)),
+            ((50.0, 99.0), (50.0, 88.0)),
+            ((50.0, 1.0), (50.0, 12.0)),
+        ] {
+            assert_eq!(
+                clear_edge_label_position(
+                    fm_layout::LayoutPoint {
+                        x: anchor.0,
+                        y: anchor.1
+                    },
+                    40.0,
+                    20.0,
+                    &layout,
+                    0.0,
+                    &[],
+                    &[],
+                ),
+                fm_layout::LayoutPoint {
+                    x: expected.0,
+                    y: expected.1
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_edge_frame_contains_oversized_text_and_its_clear_plate() {
+        let (mut ir, layout) = edge_label_test_scene();
+        let label_id = ir.edges[1].label.unwrap();
+        ir.labels[label_id.0].text = "W".repeat(80);
+        let config = SvgRenderConfig {
+            font_size: 30.0,
+            avg_char_width: 15.0,
+            preserve_labels: true,
+            detail_tier: MermaidTier::Rich,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let position = geometry.label_positions.as_ref().unwrap()[1].unwrap();
+        let (width, height, _) = edge_label_dimensions(
+            &ir.labels[label_id.0].text,
+            geometry.detail.edge_font_size,
+            &config,
+            true,
+        );
+        assert!(width >= 80.0 * config.font_size + 28.0 - 0.01);
+        assert!(geometry.frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
+        let x = position.x + geometry.frame.offset_x;
+        let y = position.y + geometry.frame.offset_y;
+        assert!(x - width / 2.0 >= 1.99);
+        assert!(x + width / 2.0 <= geometry.frame.viewbox_width - 1.99);
+        assert!(y - height / 2.0 >= 1.99);
+        assert!(y + height / 2.0 <= geometry.frame.viewbox_height - 1.99);
+        for node in &layout.nodes {
+            assert!(
+                position.x + width / 2.0 <= node.bounds.x
+                    || position.x - width / 2.0 >= node.bounds.x + node.bounds.width
+                    || position.y + height / 2.0 <= node.bounds.y
+                    || position.y - height / 2.0 >= node.bounds.y + node.bounds.height
+            );
+        }
+        assert_eq!(svg_frame(&ir, &layout, &config), geometry.frame);
+    }
+
+    #[test]
+    fn preserved_edge_metrics_distinguish_wide_glyphs_and_scale_with_font() {
+        let mut config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let (wide, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 12.75, &config, true);
+        let (narrow, _, _) = edge_label_dimensions("iiiiiiiiiiiiiiiiiiii", 12.75, &config, true);
+        assert!(wide > narrow * 1.5);
+        config.font_size = 30.0;
+        config.avg_char_width = 15.0;
+        let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config, true);
+        assert!((doubled - 28.0 - (wide - 28.0) * 2.0).abs() < 0.01);
+        assert_eq!(
+            edge_label_dimensions("e\u{301}", 25.5, &config, true),
+            edge_label_dimensions("é", 25.5, &config, true),
+            "a combining accent must not reserve another glyph advance"
+        );
+    }
+
+    #[test]
+    fn displaced_edge_plates_leave_the_flowchart_title_band_clear() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        ir.meta.title = Some("Diagram heading".to_string());
+        ir.meta.title_from_front_matter = true;
+        assert!(generic_title_for(&ir).is_some());
+        layout.bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        layout.nodes = vec![edge_label_test_node(0, 0.0, 0.0, 100.0, 100.0)];
+        layout.edges[1].points = [
+            fm_layout::LayoutPoint { x: 40.0, y: 4.0 },
+            fm_layout::LayoutPoint { x: 60.0, y: 4.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let geometry = svg_geometry(&ir, &layout, &config);
+        let position = geometry.label_positions.as_ref().unwrap()[1].unwrap();
+        assert!(
+            position.y < 0.0,
+            "the nearest clear placement is above the layout"
+        );
+        let label = &ir.labels[ir.edges[1].label.unwrap().0].text;
+        let (_, height, _) =
+            edge_label_dimensions(label, geometry.detail.edge_font_size, &config, true);
+        let plate_top = position.y + geometry.frame.offset_y - height / 2.0;
+        assert!(plate_top >= config.padding + config.font_size + 22.0);
+    }
+
+    #[test]
+    fn preserved_edge_labels_share_font_baseline_and_clearance_in_both_svg_paths() {
+        let colors = ThemeColors::default();
+        for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+            for a11y in [A11yConfig::full(), A11yConfig::none()] {
+                for arrow in [ArrowType::Arrow, ArrowType::DottedArrow] {
+                    for label in [
+                        "U uživatelek aplikace",
+                        "U uživatelek aplikace\nDalší informace",
+                    ] {
+                        let (mut ir, mut layout) = edge_label_test_scene();
+                        let id = ir.edges[1].label.expect("labeled edge");
+                        ir.labels[id.0].text = label.to_string();
+                        ir.edges[1].arrow = arrow;
+                        layout.nodes[3] = edge_label_test_node(3, 400.0, 72.0, 180.0, 20.0);
+                        let config = SvgRenderConfig {
+                            detail_tier: tier,
+                            preserve_labels: true,
+                            a11y: a11y.clone(),
+                            ..Default::default()
+                        };
+                        let detail = resolve_detail_profile(700.0, 360.0, &config);
+                        let positions =
+                            resolve_graph_edge_label_positions(&ir, &layout, &config, detail)
+                                .expect("preserved positions");
+                        let context = EdgeRenderContext {
+                            ir: &ir,
+                            offset_x: 5.0,
+                            offset_y: 7.0,
+                            config: &config,
+                            detail,
+                            colors: &colors,
+                            accessible_node_labels: None,
+                            preserved_label_positions: Some(&positions),
+                            sankey_widest_flow: None,
+                        };
+                        let edge = &layout.edges[1];
+                        let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
+                        let (_, height, _) =
+                            edge_label_dimensions(label, detail.edge_font_size, &config, true);
+                        assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
+                        assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
+                        let mut streamed = String::new();
+                        render_edge_into(&mut streamed, edge, &context);
+                        let element = render_edge(edge, &context).render();
+                        assert_eq!(streamed, element, "{tier:?}/{arrow:?}/{label}");
+                        assert!(streamed.contains("dominant-baseline=\"central\""));
+                        let mut font = String::new();
+                        let _ = attributes::write_number_into(&mut font, detail.edge_font_size);
+                        assert!(streamed.contains(&format!("style=\"font-size:{font}px\"")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserved_labels_clear_earlier_plates_in_actual_paint_order() {
+        let (mut ir, mut layout) = edge_label_test_scene();
+        layout.nodes.clear();
+        ir.edges[0].label = Some(IrLabelId(ir.labels.len()));
+        ir.labels.push(IrLabel {
+            text: "Ano".to_string(),
+            span: Span::default(),
+        });
+        for edge in &mut layout.edges {
+            edge.points = [
+                fm_layout::LayoutPoint { x: 100.0, y: 100.0 },
+                fm_layout::LayoutPoint { x: 300.0, y: 100.0 },
+            ]
+            .into_iter()
+            .collect();
+        }
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let detail = resolve_detail_profile(700.0, 360.0, &config);
+        let colors = ThemeColors::default();
+        let anchor = fm_layout::LayoutPoint { x: 200.0, y: 100.0 };
+        for reversed in [false, true] {
+            if reversed {
+                layout.edges.reverse();
+            }
+            let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail)
+                .expect("preserved positions");
+            let first_index = layout.edges[0].edge_index;
+            let last_index = layout.edges[1].edge_index;
+            assert_eq!(positions[first_index], Some(anchor));
+            let last = positions[last_index].expect("second position");
+            assert_eq!(last.x, anchor.x);
+            assert!(
+                (last.y - anchor.y - (detail.edge_font_size + 16.0)).abs() < 0.001,
+                "both whole plates have a two-pixel gap"
+            );
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+                preserved_label_positions: Some(&positions),
+                sankey_widest_flow: None,
+            };
+            for edge in &layout.edges {
+                let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
+                assert_eq!(
+                    positions[edge.edge_index],
+                    Some(fm_layout::LayoutPoint { x, y })
+                );
+                let mut streamed = String::new();
+                render_edge_into(&mut streamed, edge, &context);
+                assert_eq!(streamed, render_edge(edge, &context).render());
+            }
+        }
+
+        // A non-painted edge must not reserve space and displace a visible label.
+        let hidden = layout.edges[0].edge_index;
+        let visible = layout.edges[1].edge_index;
+        ir.edges[hidden].arrow = ArrowType::Invisible;
+        let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        assert_eq!(positions[hidden], None);
+        assert_eq!(positions[visible], Some(anchor));
+        ir.edges[hidden].arrow = ArrowType::Arrow;
+        layout.edges[0].bundled = true;
+        let positions = resolve_graph_edge_label_positions(&ir, &layout, &config, detail).unwrap();
+        assert_eq!(positions[hidden], None);
+        assert_eq!(positions[visible], Some(anchor));
+    }
+
+    #[test]
+    fn graph_label_placement_does_not_change_sequence_edge_geometry() {
+        for (diagram_type, preserve_labels) in [
+            (DiagramType::Sequence, false),
+            (DiagramType::Sequence, true),
+        ] {
+            let (mut ir, layout) = edge_label_test_scene();
+            ir.diagram_type = diagram_type;
+            let config = SvgRenderConfig {
+                detail_tier: MermaidTier::Rich,
+                preserve_labels,
+                ..Default::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let fragment = svg
+                .split_once("id=\"fm-edge-1\"")
+                .expect("edge group")
+                .1
+                .split_once("</g>")
+                .expect("edge end")
+                .0;
+            assert!(!fragment.contains("dominant-baseline=\"central\""));
+            assert!(!fragment.contains("style=\"font-size:"));
+            let detail = resolve_detail_profile(700.0, 360.0, &config);
+            let frame = svg_frame(&ir, &layout, &config);
+            let mut expected_y = String::new();
+            let _ = attributes::write_number_into(
+                &mut expected_y,
+                100.0 + frame.offset_y - 8.0 + detail.edge_font_size / 4.0,
+            );
+            let text = fragment.split_once("<text ").expect("edge text").1;
+            assert!(
+                text.contains(&format!("y=\"{expected_y}\"")),
+                "{diagram_type:?}/{preserve_labels}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_label_reuse_tracks_unrelated_obstacles_and_frame_changes() {
+        let (ir, base) = edge_label_test_scene();
+        let ir = Arc::new(ir);
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            font_size: 16.0,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let prefix = CertifiedSvgBatchPrefix::new(Arc::from("unchanged-label-prefix"), 3, 2);
+        for certified in [false, true] {
+            let mut renderer = SvgBatchRenderer::default();
+            let render = |renderer: &mut SvgBatchRenderer, layout: DiagramLayout| {
+                let expected = render_svg_with_layout(&ir, &layout, &config);
+                let layout = Arc::new(layout);
+                let actual = if certified {
+                    renderer.render_borrowed(&ir, layout, &config, Some(prefix.clone()))
+                } else {
+                    renderer.render(Arc::clone(&ir), layout, &config)
+                };
+                assert_eq!(actual, expected, "certified={certified}");
+            };
+            render(&mut renderer, base.clone());
+            let mut far = base.clone();
+            far.nodes[3].bounds.y += 20.0;
+            render(&mut renderer, far);
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                2
+            );
+
+            let mut blocked = base.clone();
+            blocked.nodes[3] = edge_label_test_node(3, 400.0, 72.0, 180.0, 20.0);
+            assert_eq!(blocked.edges, base.edges, "no edge route changed");
+            render(&mut renderer, blocked.clone());
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                1,
+                "only the prefix before the affected label can be reused"
+            );
+            render(&mut renderer, blocked.clone());
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                2
+            );
+
+            // Same nodes, routes, offsets, and explicit detail tier; only the available frame
+            // changes. Its lower edge now rules out the formerly closest downward adjustment.
+            blocked.bounds.height = 120.0;
+            render(&mut renderer, blocked);
+            assert_eq!(
+                renderer.previous.as_ref().unwrap().fragments.reused_edges,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn transplanted_path_labels_revalidate_the_previous_placement() {
+        let prefix_source = concat!(
+            "flowchart LR\n",
+            "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
+            "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
+            "C[Short]\nA-->B\n",
+            "B-->|WW|C\n",
+        );
+        let make_input = |tail: &str| {
+            let mut input = prefix_source.to_string();
+            input.push_str("C-->D");
+            input.push_str(tail);
+            input.push_str("\nD-->E0");
+            // A long path selects the same tree specialization as the optimized batch workload.
+            for index in 0..48 {
+                input.push_str(&format!("\nE{index}-->E{}", index + 1));
+            }
+            input
+        };
+        let owned_inputs = [
+            make_input("[\"Short\"]"),
+            make_input("[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5\"]"),
+        ];
+        let diagrams = owned_inputs
+            .iter()
+            .map(|input| fm_parser::parse(input).ir)
+            .collect::<Vec<_>>();
+        let prefix = checked_flat_test_prefix(prefix_source, &diagrams);
+        assert_eq!((prefix.node_count, prefix.edge_count), (3, 2));
+        let config = SvgRenderConfig {
+            detail_tier: MermaidTier::Rich,
+            preserve_labels: true,
+            // The short IR label keeps the tree's fixed 80px rank gaps certifiable. Supply a
+            // deliberately wider SVG calibration so its plate still reaches the changing
+            // suffix; reuse must revalidate rendered label geometry, not only the IR prefix.
+            avg_char_width: 160.0,
+            ..Default::default()
+        };
+        let mut renderer = SvgBatchRenderer::default();
+        let mut previous_label = None;
+        for (index, ir) in diagrams.iter().enumerate() {
+            let expected_layout = fm_layout::layout_diagram_traced(ir).layout;
+            let expected = render_svg_with_layout(ir, &expected_layout, &config);
+            let label = expected
+                .split_once("id=\"fm-edge-1\"")
+                .expect("edge group")
+                .1
+                .split_once("</g>")
+                .expect("edge end")
+                .0
+                .to_string();
+            if let Some(previous_label) = previous_label.as_ref() {
+                assert_ne!(
+                    previous_label, &label,
+                    "the growing suffix moves the prefix label"
+                );
+            }
+            previous_label = Some(label);
+            let actual = renderer.layout_and_render_borrowed(ir, &config, Some(prefix.clone()));
+            assert_eq!(actual, expected);
+            let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+            assert!(
+                snapshot.layout_prefix.is_some(),
+                "tree transplant remains eligible"
+            );
+            if index > 0 {
+                assert_eq!(snapshot.fragments.reused_nodes, 3);
+                assert_eq!(snapshot.fragments.reused_edges, 1);
+            }
         }
     }
 
@@ -16742,67 +18518,228 @@ mod tests {
 
     #[test]
     fn node_shape_fast_fragments_match_slow_render() {
-        let config = SvgRenderConfig::default();
-        let colors = ThemeColors::default();
-        let detail = resolve_detail_profile(800.0, 600.0, &config);
         let centrality = HashMap::new();
-
-        for shape in [
-            NodeShape::Diamond,
-            NodeShape::Hexagon,
-            NodeShape::Subroutine,
-            NodeShape::Cylinder,
-            NodeShape::Trapezoid,
-            NodeShape::InvTrapezoid,
-            NodeShape::Parallelogram,
-            NodeShape::InvParallelogram,
-            NodeShape::Asymmetric,
-        ] {
-            let ir = create_ir_with_single_node("N0", shape);
-            let node_box = LayoutNodeBox {
-                node_index: 0,
-                node_id: "N0".to_string(),
-                rank: 0,
-                order: 0,
-                span: Span::default(),
-                bounds: fm_layout::LayoutRect {
-                    x: 10.0,
-                    y: 20.0,
-                    width: 140.0,
-                    height: 90.0,
-                },
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let config = SvgRenderConfig {
+                theme: preset,
+                ..SvgRenderConfig::default()
             };
+            let colors = ThemeColors::from_preset(preset);
+            let detail = resolve_detail_profile(800.0, 600.0, &config);
+            for shape in [
+                NodeShape::Diamond,
+                NodeShape::Hexagon,
+                NodeShape::Stadium,
+                NodeShape::Circle,
+                NodeShape::DoubleCircle,
+                NodeShape::Note,
+                NodeShape::Cloud,
+                NodeShape::Subroutine,
+                NodeShape::Cylinder,
+                NodeShape::HorizontalCylinder,
+                NodeShape::LinedCylinder,
+                NodeShape::DataStore,
+                NodeShape::Trapezoid,
+                NodeShape::InvTrapezoid,
+                NodeShape::Parallelogram,
+                NodeShape::InvParallelogram,
+                NodeShape::Asymmetric,
+            ] {
+                let mut ir = create_ir_with_single_node("N0", shape);
+                // Keep every supported fragment eligible for its fast path, including circles.
+                ir.labels[0].text = "Role".to_string();
+                let node_box = LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "N0".to_string(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: fm_layout::LayoutRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 140.0,
+                        height: 90.0,
+                    },
+                };
+                let mut streamed = String::new();
+                render_node_into(
+                    &mut streamed,
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                );
+                for permit_fast in [false, true] {
+                    let mut built = String::new();
+                    render_node(
+                        &node_box,
+                        &ir,
+                        0.0,
+                        0.0,
+                        &config,
+                        detail,
+                        &colors,
+                        false,
+                        &centrality,
+                        permit_fast,
+                    )
+                    .write_to_string(&mut built);
+                    assert_eq!(streamed, built, "{preset:?} {shape:?} fast={permit_fast}");
+                }
+                if let Some(role) = flowchart_shape_colors(&ir, shape, &config, &colors) {
+                    assert!(streamed.contains("fm-node-semantic"));
+                    assert!(streamed.contains(&format!("--fm-node-fill:{}", role.fill)));
+                    assert!(streamed.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+                    assert!(streamed.contains("fill=\"var(--fm-node-fill)\""));
+                }
+            }
+        }
+    }
 
-            let mut streamed = String::new();
-            render_node_into(
-                &mut streamed,
-                &node_box,
-                &ir,
-                0.0,
-                0.0,
-                &config,
-                detail,
-                &colors,
-                false,
-                &centrality,
-            );
+    #[test]
+    fn semantic_shape_exports_use_concrete_paints_and_respect_palette_opt_outs() {
+        let marker = format!("id=\"{}\"", mermaid_node_element_id("N0", 0));
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let colors = ThemeColors::from_preset(preset);
+            let config = SvgRenderConfig {
+                theme: preset,
+                embed_theme_css: false,
+                ..SvgRenderConfig::default()
+            };
+            for shape in [
+                NodeShape::Diamond,
+                NodeShape::Stadium,
+                NodeShape::Cylinder,
+                NodeShape::Cloud,
+                NodeShape::DoubleCircle,
+            ] {
+                let ir = create_ir_with_single_node("N0", shape);
+                let role = flowchart_shape_colors(&ir, shape, &config, &colors)
+                    .expect("this shape has a semantic role");
+                let svg = render_svg_with_config(&ir, &config);
+                let node = svg
+                    .split_once(&marker)
+                    .expect("rendered node")
+                    .1
+                    .split_once("</g>")
+                    .expect("node group end")
+                    .0;
+                assert!(node.contains(&format!("fill=\"{}\"", role.fill)));
+                assert!(node.contains(&format!("stroke=\"{}\"", role.stroke)));
+                assert!(!node.contains("var(--fm-node-fill)"));
+                assert!(!node.contains("url(#fm-node-gradient)"));
+                if shape == NodeShape::DoubleCircle {
+                    assert!(
+                        node.contains("fill=\"none\""),
+                        "the inner ring stays hollow"
+                    );
+                }
+            }
+        }
 
-            let mut slow = String::new();
-            render_node(
-                &node_box,
-                &ir,
-                0.0,
-                0.0,
-                &config,
-                detail,
-                &colors,
-                false,
-                &centrality,
-                false,
-            )
-            .write_to_string(&mut slow);
+        for (preset, semantic_colors, directive) in [
+            (ThemePreset::Default, false, false),
+            (ThemePreset::Mermaid, true, false),
+            (ThemePreset::Monochrome, true, true),
+            (ThemePreset::HighContrast, true, true),
+            (ThemePreset::Forest, true, false),
+        ] {
+            let mut ir = create_ir_with_single_node("N0", NodeShape::Diamond);
+            if directive {
+                ir.meta.theme_overrides.theme = Some(preset.as_str().to_owned());
+            }
+            let config = SvgRenderConfig {
+                theme: if directive {
+                    ThemePreset::Default
+                } else {
+                    preset
+                },
+                semantic_colors,
+                embed_theme_css: false,
+                node_gradients: false,
+                ..SvgRenderConfig::default()
+            };
+            let colors = ThemeColors::from_preset(preset);
+            let svg = render_svg_with_config(&ir, &config);
+            let node = svg
+                .split_once(&marker)
+                .expect("rendered node")
+                .1
+                .split_once("</g>")
+                .expect("node group end")
+                .0;
+            assert!(!node.contains("fm-node-semantic"), "{preset:?}");
+            assert!(node.contains(&format!("fill=\"{}\"", colors.node_fill)));
+            assert!(node.contains(&format!("stroke=\"{}\"", colors.node_stroke)));
+        }
+    }
 
-            assert_eq!(streamed, slow, "shape {shape:?}");
+    #[test]
+    fn semantic_shape_variables_survive_animations_and_reset_for_print_and_contrast() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Diamond);
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let marker = format!("id=\"{}\"", mermaid_node_element_id("N0", 0));
+        for animations_enabled in [false, true] {
+            let config = SvgRenderConfig {
+                theme: ThemePreset::Dark,
+                animations_enabled,
+                ..SvgRenderConfig::default()
+            };
+            let role = flowchart_shape_colors(&ir, NodeShape::Diamond, &config, &colors)
+                .expect("decision role");
+            let svg = render_svg_with_config(&ir, &config);
+            let node = svg
+                .split_once(&marker)
+                .expect("rendered node")
+                .1
+                .split_once("</g>")
+                .expect("node group end")
+                .0;
+            let opening = node.split_once('>').expect("node opening tag").0;
+            let style = opening
+                .split_once("style=\"")
+                .expect("node style")
+                .1
+                .split_once('"')
+                .expect("node style end")
+                .0;
+            assert!(style.contains(&format!("--fm-node-fill:{}", role.fill)));
+            assert!(style.contains(&format!("--fm-node-stroke:{}", role.stroke)));
+            assert_eq!(style.contains("--fm-enter-order:"), animations_enabled);
+            assert!(node.contains("fill=\"var(--fm-node-fill)\""));
+
+            let css: String = svg
+                .split_once("<style>")
+                .expect("embedded stylesheet")
+                .1
+                .split_once("</style>")
+                .expect("stylesheet end")
+                .0
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            for (media, fill, stroke) in [
+                ("@mediaprint{", "#fff", "#111"),
+                ("@media(prefers-contrast:more){", "#ffffff", "#000000"),
+            ] {
+                let reset = css
+                    .split_once(media)
+                    .expect("accessibility media query")
+                    .1
+                    .split_once(".fm-node-semantic{")
+                    .expect("local semantic variables must reset too")
+                    .1
+                    .split_once('}')
+                    .expect("reset rule end")
+                    .0;
+                assert!(reset.contains(&format!("--fm-node-fill:{fill}!important")));
+                assert!(reset.contains(&format!("--fm-node-stroke:{stroke}!important")));
+            }
         }
     }
 
@@ -17371,6 +19308,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -17447,6 +19385,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -17549,6 +19488,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                preserved_label_positions: None,
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -17722,6 +19662,7 @@ mod tests {
             detail,
             colors: &colors,
             accessible_node_labels: None,
+            preserved_label_positions: None,
             sankey_widest_flow: sankey_widest_flow(&ir),
         };
 
@@ -17820,6 +19761,342 @@ mod tests {
     }
 
     #[test]
+    fn compact_process_boxes_preserve_full_size_for_long_labels() {
+        let source = r#"flowchart TB
+  A["Review all international shipment documentation before approval"] --> B["Validate the complete delivery address and recipient contact details"]
+  B --> C["Document the decision and notify every participating team"]"#;
+        let ir = fm_parser::parse(source).ir;
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(layout.nodes.len(), 3);
+        for node_box in &layout.nodes {
+            let node = &ir.nodes[node_box.node_index];
+            let label = ir.node_display_text(node);
+            let (width, height) = node_label_fit_dimensions(
+                node.shape,
+                (node_box.bounds.width, node_box.bounds.height),
+                (node_box.bounds.width, node_box.bounds.height),
+                label,
+                config.font_size,
+                &config,
+            );
+            let fitted = fit_node_label_text(label, width, height, config.font_size, &config);
+            assert_eq!(
+                fitted.font_size, config.font_size,
+                "{} lost full-size type",
+                node.id
+            );
+            assert_eq!(
+                fitted.text.split_whitespace().collect::<Vec<_>>(),
+                label.split_whitespace().collect::<Vec<_>>()
+            );
+            assert!(
+                fitted.text.lines().count() > 1,
+                "the long label needs wrapping room"
+            );
+        }
+    }
+
+    #[test]
+    fn issue14_decision_labels_fit_the_slopes_in_both_svg_writers() {
+        let ir = fm_parser::parse(include_str!("../tests/fixtures/issue14_omnichannel.mmd")).ir;
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::Diamond)
+                .count(),
+            2
+        );
+        for font_size in [11.0, 15.0, 22.0, 30.0] {
+            let config = SvgRenderConfig {
+                font_size,
+                avg_char_width: font_size / 2.0,
+                preserve_labels: true,
+                detail_tier: MermaidTier::Rich,
+                ..Default::default()
+            };
+            for (index, node) in ir
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.shape == NodeShape::Diamond)
+            {
+                let label = ir.node_display_text(node);
+                let (width, height) = (360.0, 100.0);
+                let (max_width, max_height) = node_label_fit_dimensions(
+                    node.shape,
+                    (width, height),
+                    (width, height),
+                    label,
+                    font_size,
+                    &config,
+                );
+                let fitted = fit_node_label_text(label, max_width, max_height, font_size, &config);
+                assert_eq!(
+                    fitted.text.split_whitespace().collect::<Vec<_>>(),
+                    label.split_whitespace().collect::<Vec<_>>()
+                );
+                let text_width = preserved_label_width(
+                    &fitted.text,
+                    fitted.font_size,
+                    &config,
+                    &config.font_metrics(),
+                );
+                let text_height = fitted.font_size * 1.2
+                    + fitted.text.lines().count().saturating_sub(1) as f32
+                        * fitted.font_size
+                        * config.line_height;
+                assert!(
+                    text_width / width + text_height / height < 1.0,
+                    "{} at {font_size}px crosses a diamond slope",
+                    node.id
+                );
+                let node_box = edge_label_test_node(index, 0.0, 0.0, width, height);
+                let detail = resolve_detail_profile(width, height, &config);
+                let colors = ThemeColors::default();
+                let centrality = HashMap::new();
+                let mut streamed = String::new();
+                render_node_into(
+                    &mut streamed,
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                );
+                let slow = render_node(
+                    &node_box,
+                    &ir,
+                    0.0,
+                    0.0,
+                    &config,
+                    detail,
+                    &colors,
+                    false,
+                    &centrality,
+                    false,
+                )
+                .render();
+                assert_eq!(streamed, slow, "{} at {font_size}px", node.id);
+            }
+        }
+    }
+
+    #[test]
+    fn node_label_fitting_wraps_at_full_size_when_two_lines_fit() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("alpha beta", 48.0, 48.0, 15.0, &config);
+
+        assert_eq!(fitted.font_size, 15.0);
+        assert_eq!(fitted.text.as_ref(), "alpha\nbeta");
+    }
+
+    #[test]
+    fn preserved_multiline_fitting_keeps_authored_breaks_before_wrapping() {
+        let config = SvgRenderConfig {
+            font_size: 30.0,
+            avg_char_width: 15.0,
+            preserve_labels: true,
+            ..Default::default()
+        };
+        let label = "A deliberately long first line\nSecond authored line\nThird authored line";
+        let fitted = fit_node_label_text(label, 360.0, 160.0, 30.0, &config);
+        assert_eq!(fitted.text, label);
+        assert_eq!(fitted.text.lines().count(), 3);
+        assert!(fitted.font_size >= 10.0 && fitted.font_size < 30.0);
+        assert!(fitted.changed);
+    }
+
+    #[test]
+    fn node_label_fitting_checks_height_even_when_every_line_fits_width() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("one\ntwo\nthree", 240.0, 48.0, 15.0, &config);
+
+        assert_eq!(fitted.text.as_ref(), "one\ntwo\nthree");
+        assert!(fitted.font_size > 11.9 && fitted.font_size <= 12.0);
+        assert!(fitted.changed);
+    }
+
+    #[test]
+    fn node_label_fitting_clips_an_overlong_word_before_the_last_line() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text(
+            "extraordinarily-long-unbreakable-identifier\nOK",
+            48.0,
+            64.0,
+            15.0,
+            &config,
+        );
+
+        let lines: Vec<_> = fitted.text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with('…'));
+        assert_eq!(lines[1], "OK");
+    }
+
+    #[test]
+    fn wrapped_node_labels_keep_the_original_visual_center() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig::default();
+        let center_y = 50.0;
+        let svg = render_node_label_text(
+            &ir,
+            None,
+            "alpha beta",
+            24.0,
+            center_y + config.font_size / 3.0,
+            config.font_size,
+            48.0,
+            48.0,
+            &config,
+            &ThemeColors::default(),
+            None,
+            false,
+        )
+        .render();
+
+        let number = |tag: &str, name: &str| -> f32 {
+            let needle = format!(" {name}=\"");
+            let value = tag.split_once(&needle).expect("numeric attribute").1;
+            value.split('"').next().unwrap().parse().unwrap()
+        };
+        let first_baseline = number(&svg, "y");
+        let font_size = number(&svg, "font-size");
+        let line_offsets: Vec<_> = svg
+            .split("<tspan ")
+            .skip(1)
+            .map(|span| number(span, "dy"))
+            .collect();
+        assert_eq!(line_offsets.len(), 2);
+        assert_eq!(font_size, config.font_size);
+        let final_baseline = first_baseline + line_offsets.iter().sum::<f32>();
+        let rendered_center = (first_baseline + final_baseline) * 0.5 - font_size / 3.0;
+        assert!((rendered_center - center_y).abs() < 0.01);
+        assert!(first_baseline - font_size >= center_y - 24.0);
+        assert!(final_baseline <= center_y + 24.0);
+    }
+
+    #[test]
+    fn wrapped_node_labels_preserve_markdown_styles_and_content() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let segments = vec![
+            IrLabelSegment::Text {
+                text: "alpha ".to_string(),
+                bold: true,
+                italic: false,
+                code: false,
+                strike: false,
+            },
+            IrLabelSegment::Text {
+                text: "beta".to_string(),
+                bold: false,
+                italic: true,
+                code: false,
+                strike: false,
+            },
+        ];
+        assert!(reflow_label_markup(&segments, "alpha…").is_none());
+        ir.label_markup.insert(IrLabelId(0), segments);
+        let config = SvgRenderConfig::default();
+        let svg = render_node_label_text(
+            &ir,
+            Some(IrLabelId(0)),
+            "alpha beta",
+            24.0,
+            50.0,
+            15.0,
+            48.0,
+            48.0,
+            &config,
+            &ThemeColors::default(),
+            None,
+            false,
+        )
+        .render();
+
+        assert!(svg.contains("font-size=\"15\""), "{svg}");
+        assert!(svg.contains("font-weight=\"700\">alpha</tspan>"), "{svg}");
+        assert!(svg.contains("font-style=\"italic\">beta</tspan>"), "{svg}");
+        assert_eq!(svg.matches("<tspan x=").count(), 2, "{svg}");
+        assert!(!svg.contains('…'), "{svg}");
+    }
+
+    #[test]
+    fn multiline_labels_are_centered_in_ordinary_and_special_shapes() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(120.0, 100.0, &config);
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "N0".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 120.0,
+                height: 100.0,
+            },
+        };
+        for shape in [
+            NodeShape::Rect,
+            NodeShape::Subroutine,
+            NodeShape::CrossedCircle,
+        ] {
+            let mut ir = create_ir_with_single_node("N0", shape);
+            ir.labels[0].text = "one\ntwo".to_string();
+            let svg = render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &HashMap::new(),
+                false,
+            )
+            .render();
+            let text = svg.split("<text ").nth(1).expect("node label");
+            let number = |tag: &str, name: &str| -> f32 {
+                let needle = format!(" {name}=\"");
+                let value = tag.split_once(&needle).expect("numeric attribute").1;
+                value.split('"').next().unwrap().parse().unwrap()
+            };
+            let first_baseline = number(text, "y");
+            let font_size = number(text, "font-size");
+            let offsets: Vec<_> = text
+                .split("<tspan ")
+                .skip(1)
+                .map(|span| number(span, "dy"))
+                .collect();
+            assert_eq!(offsets.len(), 2, "{shape:?}: {svg}");
+            let rendered_center =
+                first_baseline + offsets.iter().sum::<f32>() * 0.5 - font_size / 3.0;
+            let expected_center = node_box.bounds.y + node_box.bounds.height * 0.5;
+            assert!(
+                (rendered_center - expected_center).abs() < 0.01,
+                "{shape:?}: {svg}"
+            );
+        }
+    }
+
+    #[test]
     fn node_label_fitting_wraps_on_word_boundaries_before_ellipsis() {
         let config = SvgRenderConfig::default();
         let fitted = fit_node_label_text("one two three four", 48.0, 52.0, 15.0, &config);
@@ -17848,6 +20125,27 @@ mod tests {
             fitted.text.as_ref(),
             "extraordinarily-long-unbreakable-identifier"
         );
+    }
+
+    #[test]
+    fn content_preservation_keeps_text_when_supplied_geometry_is_too_small() {
+        let config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        for label in [
+            "extraordinarily-long-unbreakable-identifier",
+            "Připomenutí návštěvy a praktické informace\nNavazující komunikace napříč kanály",
+        ] {
+            let fitted = fit_node_label_text(label, 48.0, 16.0, 15.0, &config);
+            assert!(fitted.changed);
+            assert_eq!(fitted.font_size, 10.0);
+            assert!(!fitted.text.contains('…'));
+            assert_eq!(
+                fitted.text.split_whitespace().collect::<Vec<_>>(),
+                label.split_whitespace().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -18138,6 +20436,7 @@ mod tests {
             ..Default::default()
         });
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: Some("Sales Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -18611,6 +20910,7 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::XyChart);
         ir.meta.title = Some(String::from("Shared Title"));
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: None,
             ..IrXyChartMeta::default()
         });
@@ -18905,6 +21205,7 @@ mod tests {
                         width: 120.0,
                         height: 60.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -18946,6 +21247,7 @@ mod tests {
                         width: 120.0,
                         height: 60.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -19412,7 +21714,226 @@ mod tests {
             ..Default::default()
         };
         let svg = render_svg_with_config(&ir, &config);
-        assert!(svg.contains("data-detail-tier=\"normal\""));
+        assert!(svg.contains("data-detail-tier=\"rich\""));
+    }
+
+    #[test]
+    fn default_svg_preserves_complete_labels_without_an_intrinsic_area_budget() {
+        let source = "flowchart LR\nA[A complete descriptive label that is longer than forty eight characters] -->|An equally descriptive edge label longer than forty characters| B[Done]";
+        let parsed = fm_parser::parse(source);
+        let expected_node =
+            "A complete descriptive label that is longer than forty eight characters";
+        let expected_edge = "An equally descriptive edge label longer than forty characters";
+        let config = SvgRenderConfig {
+            padding: 0.0,
+            ..Default::default()
+        };
+        let svg = render_svg_with_config(&parsed.ir, &config);
+        let drawn = issue14_drawn_text(&svg);
+        assert!(
+            drawn.contains_key(expected_node),
+            "complete node text: {drawn:?}"
+        );
+        assert!(
+            drawn.contains_key(expected_edge),
+            "complete edge text: {drawn:?}"
+        );
+
+        let mut tiny = create_ir_with_single_node("Still readable", NodeShape::Rect);
+        tiny.labels[0].text = "Still readable".to_string();
+        let svg = render_svg_with_config(&tiny, &config);
+        assert!(issue14_drawn_text(&svg).contains_key("Still readable"));
+        for (width, height) in [(40.0, 30.0), (320.0, 180.0), (2400.0, 1800.0)] {
+            let detail = resolve_detail_profile(width, height, &config);
+            assert!(
+                detail.show_node_labels && detail.show_edge_labels && detail.show_cluster_labels
+            );
+            assert_eq!(detail.node_font_size, config.font_size);
+            assert!(detail.node_label_max_chars.is_none() && detail.edge_label_max_chars.is_none());
+        }
+    }
+
+    #[test]
+    fn embedded_theme_uses_the_same_font_settings_as_layout_and_export() {
+        let parsed = fm_parser::parse("flowchart LR\nA[Wide words] -->|Label| B[Done]");
+        let config = SvgRenderConfig {
+            font_family: "monospace".into(),
+            font_size: 24.0,
+            ..Default::default()
+        };
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                ..config.clone()
+            };
+            let theme = resolve_theme(Some(&parsed.ir), &config);
+            assert_eq!(theme.font.family, config.font_family);
+            assert_eq!(theme.font.size, config.font_metrics().font_size());
+            let svg = render_svg_with_config(&parsed.ir, &config);
+            assert!(svg.contains("font-family: monospace"));
+            assert!(svg.contains("font-size: 24px"));
+            assert!(!svg.contains("@import"));
+            let print = svg
+                .split_once("@media print")
+                .expect("print stylesheet")
+                .1
+                .split_once("</style>")
+                .expect("print stylesheet end")
+                .0;
+            assert!(
+                !print.contains("font-size:"),
+                "printing must retain fitted label sizes"
+            );
+        }
+    }
+
+    #[test]
+    fn preserving_labels_keeps_compact_typography_and_resource_simplification() {
+        let mut config = SvgRenderConfig {
+            preserve_labels: true,
+            ..Default::default()
+        };
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Compact,
+            reduce_decoration: true,
+            ..Default::default()
+        });
+        let detail = resolve_detail_profile(80.0, 60.0, &config);
+        assert_eq!(detail.tier, RenderDetailTier::Compact);
+        assert_eq!(detail.node_font_size, config.font_size * 0.78);
+        assert!(!detail.enable_shadows);
+        assert!(!config.shadows && !config.node_gradients && !config.glow_enabled);
+        assert!(detail.show_node_labels && detail.show_edge_labels && detail.show_cluster_labels);
+        assert!(detail.node_label_max_chars.is_none() && detail.edge_label_max_chars.is_none());
+
+        let ir = create_ir_with_single_node("zoomable-label", NodeShape::Rect);
+        let precision_css = r#"[data-label-detail="full"] text{text-rendering:geometricPrecision}"#;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            config.backend = backend;
+            for preserve_labels in [false, true] {
+                config.preserve_labels = preserve_labels;
+                let svg = render_svg_with_config(&ir, &config);
+                assert_eq!(svg.contains(precision_css), preserve_labels);
+                let (_, root) = svg.split_once("<svg ").unwrap();
+                let (root, _) = root.split_once('>').unwrap();
+                assert_eq!(root.contains("data-label-detail=\"full\""), preserve_labels);
+                if preserve_labels {
+                    assert!(
+                        svg.find(precision_css).unwrap()
+                            > svg.rfind("text-rendering:optimizeLegibility").unwrap(),
+                        "the exported preservation rule must override the theme's text hinting"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Read only drawn `<text>` content. The issue's broken SVG already preserved the complete
+    /// strings in `<title>`, `<desc>`, and `aria-label`, so whole-document substring assertions
+    /// would pass on exactly the artifact that prompted GH#14.
+    fn issue14_drawn_text(svg: &str) -> BTreeMap<String, usize> {
+        let mut labels = BTreeMap::new();
+        for element in svg.split("<text ").skip(1) {
+            let body = element
+                .split_once('>')
+                .expect("text opening tag")
+                .1
+                .split_once("</text>")
+                .expect("text closing tag")
+                .0;
+            let label = if body.contains("<tspan ") {
+                body.split("<tspan ")
+                    .skip(1)
+                    .map(|span| {
+                        span.split_once('>')
+                            .expect("tspan opening tag")
+                            .1
+                            .split_once("</tspan>")
+                            .expect("tspan closing tag")
+                            .0
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                body.to_string()
+            };
+            let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            *labels.entry(normalized).or_default() += 1;
+        }
+        labels
+    }
+
+    #[test]
+    fn issue14_preserves_every_drawn_label_at_all_detail_tiers() {
+        let parsed = fm_parser::parse(include_str!("../tests/fixtures/issue14_omnichannel.mmd"));
+        let ir = &parsed.ir;
+        assert_eq!(ir.nodes.len(), 24);
+        assert_eq!(ir.edges.len(), 43);
+        assert_eq!(ir.clusters.len(), 2);
+        assert_eq!(
+            ir.edges.iter().filter(|edge| edge.label.is_some()).count(),
+            24
+        );
+
+        let mut expected = BTreeMap::<String, usize>::new();
+        for label in ir
+            .nodes
+            .iter()
+            .map(|node| ir.node_display_text(node))
+            .chain(
+                ir.edges
+                    .iter()
+                    .filter_map(|edge| edge.label)
+                    .map(|id| ir.labels[id.0].text.as_str()),
+            )
+            .chain(
+                ir.clusters
+                    .iter()
+                    .filter_map(|cluster| cluster.title)
+                    .map(|id| ir.labels[id.0].text.as_str()),
+            )
+        {
+            let label = escape_xml_text(label);
+            let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+            *expected.entry(normalized).or_default() += 1;
+        }
+        assert_eq!(expected.values().sum::<usize>(), 50);
+        let sms = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "S")
+            .expect("SMS node");
+        assert_eq!(
+            ir.node_display_text(sms),
+            "SMS: avízo hovoru a konkrétní termíny\n1 / 2 / 3 = zvolený termín\n4 = zavolejte mi"
+        );
+
+        for tier in [
+            MermaidTier::Auto,
+            MermaidTier::Compact,
+            MermaidTier::Normal,
+            MermaidTier::Rich,
+        ] {
+            let config = SvgRenderConfig {
+                detail_tier: tier,
+                preserve_labels: true,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(ir, &config);
+            assert!(svg.contains("data-label-detail=\"full\""));
+            assert_eq!(
+                issue14_drawn_text(&svg),
+                expected,
+                "drawn labels at {tier:?}"
+            );
+            let sms_group = svg.split_once("data-id=\"S\"").expect("SMS group").1;
+            let sms_group = sms_group.split_once("</g>").expect("SMS group end").0;
+            assert_eq!(
+                sms_group.matches("<tspan ").count(),
+                3,
+                "explicit line breaks at {tier:?}"
+            );
+        }
     }
 
     #[test]
@@ -19420,6 +21941,58 @@ mod tests {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
         assert!(svg.contains("@media print"));
+    }
+
+    #[test]
+    fn print_css_resets_dark_surfaces_without_forcing_authored_text_colors() {
+        let parsed = fm_parser::parse(
+            "flowchart TD\nA{Decision} -->|Yes| B[Result]\nstyle B fill:#002233,color:#ffcc00",
+        );
+        let svg = render_svg_with_config(
+            &parsed.ir,
+            &SvgRenderConfig {
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            },
+        );
+        let print = svg
+            .split_once("@media print")
+            .expect("print rules")
+            .1
+            .split_once("</style>")
+            .expect("stylesheet end")
+            .0;
+        for property in [
+            "--fm-bg: #fff !important",
+            "--fm-edge-label-bg: #fff !important",
+            "--fm-edge-color: #111 !important",
+            "background: #fff !important",
+        ] {
+            assert!(print.contains(property), "missing print reset: {property}");
+        }
+        let text_rule = print
+            .split_once(".fm-node text")
+            .expect("print text rule")
+            .1
+            .split_once('{')
+            .expect("text declarations")
+            .1
+            .split_once('}')
+            .expect("text rule end")
+            .0;
+        assert!(text_rule.contains("fill: #111"));
+        assert!(!text_rule.contains("!important"));
+        let authored = svg
+            .split_once("id=\"fm-node-b-1\"")
+            .expect("authored node")
+            .1
+            .split_once("</g>")
+            .expect("authored group end")
+            .0;
+        assert!(
+            authored.contains("#ffcc00"),
+            "author text paint must survive"
+        );
     }
 
     /// Printing must not reproduce the node gradient (bd-ccni).
@@ -20510,9 +23083,10 @@ marker#arrow-open path {
         };
 
         let state = inner_fills("stateDiagram-v2\n  [*] --> Idle\n  Idle --> [*]\n");
-        assert!(
-            state.iter().any(|fill| fill != "none" && !fill.is_empty()),
-            "a state terminal must have a filled inner disc, got {state:?}"
+        assert_eq!(
+            state.last().map(String::as_str),
+            Some(ThemeColors::default().edge.as_str()),
+            "a state terminal must have a contrasting inner disc, got {state:?}"
         );
 
         let flow = inner_fills("flowchart TD\n  A(((Double)))\n");
@@ -20521,10 +23095,30 @@ marker#arrow-open path {
             2,
             "a flowchart double circle must emit two circles, got {flow:?}"
         );
-        assert!(
-            flow.iter().any(|fill| fill == "none"),
-            "a flowchart double circle must keep its inner ring hollow, got {flow:?}"
+        assert_eq!(
+            flow,
+            ["url(#fm-node-gradient)", "none"],
+            "the outer circle carries its gradient and the inner ring stays hollow"
         );
+    }
+
+    #[test]
+    fn double_circle_inline_paints_reach_both_rings_without_repeating_opacity() {
+        let parsed = fm_parser::parse(
+            "flowchart LR\n  A(((Ready)))\n  style A fill:#f97316,stroke:#020617,opacity:0.5\n",
+        );
+        let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        let circles: Vec<_> = svg
+            .split("<circle")
+            .skip(1)
+            .filter_map(|chunk| chunk.split('>').next())
+            .collect();
+        assert_eq!(circles.len(), 2);
+        for circle in circles {
+            assert!(circle.contains("style=\"fill:#f97316; stroke:#020617\""));
+            assert!(!circle.contains("opacity:"));
+        }
+        assert_eq!(svg.matches("opacity:0.5").count(), 1);
     }
 
     /// An `alt` / `opt` / `loop` / `par` frame must be drawn INSIDE the canvas (bd-zwh3).
@@ -21623,6 +24217,49 @@ marker#arrow-open path {
     }
 
     #[test]
+    fn sequence_note_wrapping_reaches_the_drawn_svg_text() {
+        let text = "Customer checks the current account balance before approving a payment";
+        let ir = fm_parser::parse(&format!(
+            "sequenceDiagram\n  participant Customer\n  participant Store\n  \
+             Note left of Customer: {text}\n  Customer->>Store: Continue\n"
+        ))
+        .ir;
+        for (font_size, line_height, note_font, pitch) in
+            [(15.0, 1.5, 12.0, 18.0), (20.0, 1.75, 16.0, 28.0)]
+        {
+            for embed_theme_css in [true, false] {
+                let svg = render_svg_with_config(
+                    &ir,
+                    &SvgRenderConfig {
+                        font_size,
+                        line_height,
+                        embed_theme_css,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(issue14_drawn_text(&svg).get(text), Some(&1));
+                let note = svg
+                    .split("<text ")
+                    .skip(1)
+                    .find(|element| {
+                        element
+                            .split_once('>')
+                            .unwrap()
+                            .0
+                            .contains("fm-sequence-note-text")
+                    })
+                    .expect("a drawn note body")
+                    .split_once("</text>")
+                    .unwrap()
+                    .0;
+                assert!(note.matches("<tspan ").count() >= 2);
+                assert!(note.contains(&format!("font-size=\"{note_font}\"")));
+                assert!(note.contains(&format!("dy=\"{pitch}\"")));
+            }
+        }
+    }
+
+    #[test]
     fn renders_sequence_mirror_actor_headers() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
         ir.nodes.push(IrNode {
@@ -21830,6 +24467,99 @@ marker#arrow-open path {
             !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
             "a prefixed label survived alongside the number element, so both forms are emitted"
         );
+    }
+
+    /// A cardinality is stepped OUT of its node whichever way the edge leaves, and extends away from
+    /// it: the old fixed `(+8, -8)` offset put it inside the box for edges leaving left or up.
+    #[test]
+    fn cardinality_sits_on_the_path_side_of_its_node() {
+        let end = fm_layout::LayoutPoint { x: 100.0, y: 50.0 };
+        let cases = [
+            ((60.0, 50.0), "end"),    // leaves leftwards
+            ((140.0, 50.0), "start"), // leaves rightwards
+            ((100.0, 10.0), "start"), // leaves upwards
+            ((100.0, 90.0), "start"), // leaves downwards
+        ];
+        for ((nx, ny), expected_anchor) in cases {
+            let next = fm_layout::LayoutPoint { x: nx, y: ny };
+            let (x, y, anchor) = cardinality_anchor(&end, &next, 10.0);
+            assert_eq!(anchor, expected_anchor, "towards ({nx},{ny})");
+            // The label lies on the path's side of the border it leaves through.
+            if nx < 100.0 {
+                assert!(x < end.x, "left: {x}");
+            } else if nx > 100.0 {
+                assert!(x > end.x, "right: {x}");
+            } else if ny < 50.0 {
+                assert!(y < end.y, "up: {y}");
+            } else {
+                assert!(
+                    y - 10.0 > end.y,
+                    "down: the glyphs start below the border, {y}"
+                );
+            }
+        }
+    }
+
+    /// A `~~~` link is neither drawn nor described: it positions nodes and nothing else.
+    #[test]
+    fn invisible_links_are_not_drawn_or_described() {
+        let svg = render_svg(
+            &fm_parser::parse("flowchart LR\n  A --> B\n  A ~~~|secret| C\n  C --> D\n").ir,
+        );
+        assert_eq!(
+            svg.matches("class=\"fm-edge fm-edge-solid\"").count(),
+            2,
+            "only the two visible edges are drawn"
+        );
+        assert!(!svg.contains("secret"), "the hidden link's label is drawn");
+        let desc = svg
+            .split("<desc")
+            .nth(1)
+            .and_then(|rest| rest.split("</desc>").next())
+            .expect("CONTROL: the diagram is described");
+        assert!(desc.contains("4 nodes and 2 edges"), "{desc}");
+        assert!(!desc.contains("A connects to C"), "{desc}");
+    }
+
+    /// The composition diamond at `marker-start` lies on the path, not inside the owning node.
+    /// Its tip is the anchor, so with plain `orient="auto"` the start slot pointed the body INTO the
+    /// node, which painted over it.
+    #[test]
+    fn start_diamonds_point_their_body_along_the_path() {
+        let svg = render_svg(&fm_parser::parse("classDiagram\n  A *-- B\n  C o-- D\n").ir);
+        for id in ["arrow-diamond", "arrow-diamond-open"] {
+            let def = svg
+                .split("<marker ")
+                .find(|chunk| chunk.starts_with(&format!("id=\"{id}\"")))
+                .unwrap_or_else(|| panic!("CONTROL: {id} is defined"));
+            assert!(def.contains("orient=\"auto-start-reverse\""), "{id}: {def}");
+        }
+        assert!(
+            svg.contains("marker-start=\"url(#arrow-diamond)\"")
+                && svg.contains("marker-start=\"url(#arrow-diamond-open)\""),
+            "CONTROL: both diamonds are used at the start slot"
+        );
+    }
+
+    /// An `actor` is drawn as a stick figure with its name beneath; a `participant` keeps its box.
+    #[test]
+    fn sequence_actor_is_a_stick_figure() {
+        let svg = render_source(
+            "sequenceDiagram\n  actor U as User\n  participant W as Web\n  U->>W: Login\n",
+        );
+        let actor = svg
+            .split("<g id=")
+            .find(|group| group.contains("fm-node-user-sequence-participant-actor"))
+            .unwrap_or_else(|| panic!("no actor group: {svg}"));
+        assert!(actor.contains("fm-sequence-actor-figure"), "{actor}");
+        assert!(actor.contains("<circle"), "a head: {actor}");
+        assert!(actor.contains(">User</text>"), "its name: {actor}");
+        assert!(!actor.contains("<rect"), "no box for an actor: {actor}");
+        let participant = svg
+            .split("<g id=")
+            .find(|group| group.contains(">Web</text>") && group.contains("fm-node"))
+            .expect("participant group");
+        assert!(!participant.contains("fm-sequence-actor-figure"));
     }
 
     #[test]
@@ -22617,6 +25347,7 @@ marker#arrow-open path {
                         width: 190.0,
                         height: 80.0,
                     },
+                    branch_tops: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -22766,6 +25497,60 @@ marker#arrow-open path {
         );
     }
 
+    /// Quantity width and direction remain separate in both SVG assembly paths and export modes.
+    #[test]
+    fn sankey_quantity_ribbons_keep_bounded_direction_markers() {
+        fn end_marker(svg: &str) -> &str {
+            svg.split("<marker")
+                .filter_map(|fragment| fragment.split_once('>'))
+                .map(|(tag, _)| tag)
+                .find(|tag| tag.contains("id=\"arrow-end\""))
+                .expect("a real Sankey ribbon must retain its direction marker")
+        }
+        let ir = fm_parser::parse("sankey-beta\nA,B,100\nA,C,50\nA,D,10").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        for embed_theme_css in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let widths = path_stroke_widths(&svg);
+            for width in ["24", "12", "2.40"] {
+                assert!(widths.iter().any(|actual| actual == width));
+            }
+            for output in [
+                svg,
+                render_scene_document_with_ir(&scene, &config, Some(&ir)),
+            ] {
+                let marker = end_marker(&output);
+                assert!(marker.contains("markerUnits=\"userSpaceOnUse\""));
+                assert!(marker.contains("viewBox=\"0 0 8 7\""));
+                assert!(marker.contains("markerWidth=\"32\""));
+                assert!(marker.contains("markerHeight=\"28\""));
+                for selector in [".fm-edge{", ".fm-edge:hover{", ".fm-edge-thick{"] {
+                    if let Some((_, rule)) = output.split_once(selector) {
+                        assert!(
+                            !rule
+                                .split('}')
+                                .next()
+                                .unwrap()
+                                .split(';')
+                                .any(|declaration| declaration.trim().starts_with("stroke-width:")),
+                            "theme rule {selector} overrides the encoded ribbon width"
+                        );
+                    }
+                }
+            }
+        }
+        let ordinary = render_source("flowchart LR\nA --> B");
+        let marker = end_marker(&ordinary);
+        assert!(marker.contains("markerUnits=\"strokeWidth\""));
+        assert!(marker.contains("markerWidth=\"8\""));
+        assert!(marker.contains("markerHeight=\"7\""));
+    }
+
     /// Ribbon widths are proportional to flow value, and stay so after hoisting the normaliser.
     ///
     /// `sankey_flow_stroke_width` used to recompute the widest flow ON EVERY EDGE, re-scanning
@@ -22876,6 +25661,43 @@ marker#arrow-open path {
         out
     }
 
+    /// Markdown runs reach the SVG in a SMALL diagram (the auto tier's `Normal`, with its 48-char
+    /// cap that this label does not hit), and a line's later runs flow on from its first instead of
+    /// each restarting at the anchor `x`.
+    #[test]
+    fn markdown_label_runs_flow_within_a_line_in_a_small_diagram() {
+        let svg = render_source("flowchart LR\n  a(\"`The **cat** sat`\")\n");
+        let text = svg
+            .split("<text")
+            .find(|text| text.contains(">cat</tspan>"))
+            .unwrap_or_else(|| panic!("the bold run was dropped: {svg}"));
+        assert!(
+            text.contains(r#"<tspan font-weight="700">cat</tspan>"#),
+            "{text}"
+        );
+        assert_eq!(text.matches("<tspan x=").count(), 1, "{text}");
+    }
+
+    /// CONTROL: a label the tier's cap DOES truncate draws its truncated plain text, not the full
+    /// markdown runs it no longer matches.
+    #[test]
+    fn truncated_markdown_label_falls_back_to_its_plain_text() {
+        let long = "word ".repeat(14);
+        let parsed = fm_parser::parse(&format!("flowchart LR\n  a(\"`**{}**`\")\n", long.trim()));
+        let svg = render_svg_with_config(
+            &parsed.ir,
+            &SvgRenderConfig {
+                detail_tier: MermaidTier::Normal,
+                ..Default::default()
+            },
+        );
+        assert!(
+            svg.contains('…'),
+            "the explicit Normal tier's 48-char cap should truncate this label"
+        );
+        assert!(!svg.contains(r#"font-weight="700""#), "{svg}");
+    }
+
     #[test]
     fn smoke_sankey() {
         smoke_test_diagram(
@@ -22892,6 +25714,36 @@ marker#arrow-open path {
             "quadrant",
             0,
         );
+    }
+
+    /// A styled point is drawn with its own radius and colours and its label clears the larger
+    /// dot; an unstyled point keeps the theme's accent dot byte for byte.
+    #[test]
+    fn quadrant_point_style_reaches_the_svg() {
+        let svg = render_source(
+            "quadrantChart\n  A: [0.3, 0.6] radius: 12, color: #ff3300, stroke-color: #000000, stroke-width: 3px\n  B: [0.7, 0.2]\n",
+        );
+        let circles: Vec<&str> = svg
+            .split("<circle")
+            .skip(1)
+            .filter(|tag| tag.contains("fm-quadrant-point"))
+            .collect();
+        assert_eq!(circles.len(), 2, "{svg}");
+        assert!(circles[0].contains(r#"r="12""#), "{}", circles[0]);
+        assert!(circles[0].contains(r##"fill="#ff3300""##), "{}", circles[0]);
+        assert!(
+            circles[0].contains(r##"stroke="#000000""##),
+            "{}",
+            circles[0]
+        );
+        assert!(circles[0].contains(r#"stroke-width="3""#), "{}", circles[0]);
+        assert!(circles[1].contains(r#"r="6""#), "{}", circles[1]);
+        assert!(
+            circles[1].contains(r#"stroke-width="1.50""#),
+            "{}",
+            circles[1]
+        );
+        assert!(!circles[1].contains("#ff3300"), "{}", circles[1]);
     }
 
     #[test]
@@ -23094,6 +25946,36 @@ marker#arrow-open path {
             "xychart bar series should render rects"
         );
         assert!(svg.contains("Revenue"), "xychart should render title");
+    }
+
+    #[test]
+    fn horizontal_xychart_puts_categories_left_and_value_ticks_on_top() {
+        let svg = render_sequence_e2e(
+            "xychart-beta horizontal\n  title Revenue\n  x-axis [Jan, Feb, Mar]\n  y-axis 0 --> 300\n  bar [100, 200, 150]",
+        );
+        // Category labels hang off the left axis, right-aligned against it.
+        let jan = svg
+            .split("<text")
+            .find(|text| text.contains(">Jan<"))
+            .expect("the Jan category label is drawn");
+        assert!(jan.contains(r#"text-anchor="end""#), "{jan}");
+        // Bars lie flat: wider than tall, all starting at the same x.
+        let bars: Vec<&str> = svg
+            .split("<rect")
+            .filter(|rect| rect.contains("fm-xychart-bar"))
+            .collect();
+        assert_eq!(bars.len(), 3);
+        let attr = |rect: &str, name: &str| -> f32 {
+            let start = rect.find(&format!(" {name}=\"")).unwrap() + name.len() + 3;
+            rect[start..].split('"').next().unwrap().parse().unwrap()
+        };
+        let x0 = attr(bars[0], "x");
+        for bar in &bars {
+            assert!((attr(bar, "x") - x0).abs() < 0.01);
+            assert!(attr(bar, "width") > attr(bar, "height") || attr(bar, "width") < 1.5);
+        }
+        assert!(attr(bars[1], "width") > attr(bars[0], "width"));
+        assert!(attr(bars[1], "y") > attr(bars[0], "y"));
     }
 
     #[test]

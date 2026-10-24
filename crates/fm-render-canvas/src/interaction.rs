@@ -20,6 +20,11 @@ use fm_core::MermaidDiagramIr;
 use fm_layout::{DiagramLayout, LayoutRect};
 use std::sync::Arc;
 
+use crate::selection::{
+    NodeSelectionSet, SelectionContainment, SelectionGesture, SelectionMode, SelectionRegion,
+    render_to_canvas_with_multi_selection,
+};
+
 /// One interactive node's clickable area and what the author attached to it.
 ///
 /// Every field the parser records for `click` is carried, because dropping one here would recreate
@@ -383,12 +388,28 @@ fn navigation_score(
 /// until redrawn. Hosts must also call [`Self::invalidate`] when clearing/replacing its pixels
 /// without changing dimensions (including assigning the same width). The session owns no DOM and
 /// cannot observe external canvas writes. Selection methods change state; redraw to show it.
+///
+/// Single clicks, modifier clicks, keyboard extension and box/lasso gestures share ONE selected
+/// set. The primary selected node supplies the keyboard anchor. Gestures capture the current
+/// draw's viewport and roll back on invalidation, source replacement or resize; delayed events
+/// cannot publish into a later gesture. Selection never activates links or callbacks.
 #[derive(Debug, Default)]
 pub struct CanvasSession {
     frame: Option<CanvasFrame>,
     selection: NodeSelection,
+    selection_set: NodeSelectionSet,
+    selection_gesture: Option<CanvasSelectionGesture>,
+    next_gesture_id: u64,
     selection_style: crate::CanvasSelectionStyle,
     last_result: Option<crate::CanvasRenderResult>,
+}
+
+#[derive(Debug)]
+struct CanvasSelectionGesture {
+    id: u64,
+    query: SelectionGesture,
+    primary: NodeSelection,
+    viewport: crate::Viewport,
 }
 
 #[derive(Debug)]
@@ -407,9 +428,26 @@ impl CanvasSession {
         layout: Arc<DiagramLayout>,
         config: crate::CanvasRenderConfig,
     ) {
-        self.selection.reconcile(&ir, &layout);
-        self.frame = Some(CanvasFrame { ir, layout, config });
+        // A preview is not committed selection. Restore against the OLD frame before reconciling
+        // the replacement, or a source edit during a drag would silently commit its last preview.
         self.invalidate();
+        self.selection_set.reconcile(&ir, &layout);
+        self.selection.reconcile(&ir, &layout);
+        self.reconcile_primary(None);
+        self.frame = Some(CanvasFrame { ir, layout, config });
+    }
+
+    /// Change raster styling or fit/padding without copying or recomputing the retained geometry.
+    ///
+    /// Cancels provisional selection and invalidates the old pointer map before the next redraw.
+    /// Typography changes that affect node dimensions still require a newly laid-out pair through
+    /// [`Self::set_diagram`]; this method does not pretend to resize boxes for a different font.
+    /// Before a diagram is supplied this is a no-op, not a way to manufacture an empty frame.
+    pub fn set_render_config(&mut self, config: crate::CanvasRenderConfig) {
+        self.invalidate();
+        if let Some(frame) = &mut self.frame {
+            frame.config = config;
+        }
     }
 
     /// Draw the retained diagram at the context's CURRENT size and refresh the pointer map.
@@ -418,13 +456,19 @@ impl CanvasSession {
         &mut self,
         context: &mut C,
     ) -> Option<&crate::CanvasRenderResult> {
+        if self.selection_gesture.as_ref().is_some_and(|gesture| {
+            gesture.viewport.canvas_width != context.width()
+                || gesture.viewport.canvas_height != context.height()
+        }) {
+            self.cancel_active_selection_gesture();
+        }
         let frame = self.frame.as_ref()?;
-        let result = crate::render_to_canvas_with_selection(
+        let result = render_to_canvas_with_multi_selection(
             &frame.ir,
             &frame.layout,
             context,
             &frame.config,
-            &mut self.selection,
+            &mut self.selection_set,
             &self.selection_style,
         );
         Some(self.last_result.insert(result))
@@ -432,6 +476,7 @@ impl CanvasSession {
 
     /// Forget pixels and their pointer map, but keep geometry and selection for a later redraw.
     pub fn invalidate(&mut self) {
+        self.cancel_active_selection_gesture();
         self.last_result = None;
     }
 
@@ -440,6 +485,9 @@ impl CanvasSession {
         self.frame = None;
         self.last_result = None;
         self.selection.clear();
+        self.selection_set.clear();
+        self.selection_gesture = None;
+        // Never reset next_gesture_id: an event queued before clear must stay revoked.
     }
 
     /// The last completed draw, provided its dimensions still match the host's canvas.
@@ -535,39 +583,244 @@ impl CanvasSession {
         closest.map(|(index, _)| index)
     }
 
-    /// The selected author's ID. Selection does not itself follow a link or call user code.
+    /// The primary selected author ID, used as the keyboard anchor. It is always in the set.
     #[must_use]
     pub fn selected_node_id(&self) -> Option<&str> {
         self.selection.selected_node_id()
     }
 
+    /// All selected author IDs in lexical order, including the current gesture preview.
+    pub fn selected_node_ids(&self) -> impl DoubleEndedIterator<Item = &str> + ExactSizeIterator {
+        self.selection_set.selected_node_ids()
+    }
+
     /// Select a placed node. Unknown IDs and repeated selection leave state unchanged.
     pub fn select_node(&mut self, id: &str) -> bool {
-        self.frame
-            .as_ref()
-            .is_some_and(|frame| self.selection.select_node(&frame.ir, &frame.layout, id))
+        self.select_node_with_mode(id, SelectionMode::Replace)
+    }
+
+    /// Apply a modifier selection by author ID. An unknown ID leaves an active drag untouched.
+    /// A valid command cancels any drag before applying its policy to committed selection.
+    pub fn select_node_with_mode(&mut self, id: &str, mode: SelectionMode) -> bool {
+        if !self.frame.as_ref().is_some_and(|frame| {
+            selectable_nodes(&frame.ir, &frame.layout).any(|node| node.id == id)
+        }) {
+            return false;
+        }
+        let before = self.selection_set.clone();
+        let primary = self.selection.clone();
+        self.cancel_active_selection_gesture();
+        if let Some(frame) = &self.frame {
+            self.selection_set
+                .select_node(&frame.ir, &frame.layout, id, mode);
+        }
+        self.reconcile_primary(Some(id));
+        before != self.selection_set || primary != self.selection
     }
 
     /// Select at a rendered canvas point. Empty space clears focus; invalid/stale points do not.
     pub fn select_at(&mut self, x: f64, y: f64, canvas_size: [f64; 2]) -> bool {
+        self.select_at_with_mode(x, y, canvas_size, SelectionMode::Replace)
+    }
+
+    /// Modifier click using the last actual draw. Invalid/outside/stale pointers change nothing.
+    /// Empty-space Replace clears the set; Add/Remove/Toggle on empty space keep it.
+    pub fn select_at_with_mode(
+        &mut self,
+        x: f64,
+        y: f64,
+        canvas_size: [f64; 2],
+        mode: SelectionMode,
+    ) -> bool {
         let Some((x, y)) = self.layout_point(x, y, canvas_size) else {
             return false;
         };
-        self.frame
-            .as_ref()
-            .is_some_and(|frame| self.selection.select_at(&frame.ir, &frame.layout, x, y))
+        let preferred = self.node_at(x, y).map(|node| node.id.to_owned());
+        let before = self.selection_set.clone();
+        let primary = self.selection.clone();
+        self.cancel_active_selection_gesture();
+        if let Some(frame) = &self.frame {
+            self.selection_set
+                .select_at(&frame.ir, &frame.layout, (x, y), mode);
+        }
+        self.reconcile_primary(preferred.as_deref());
+        before != self.selection_set || primary != self.selection
     }
 
     /// Navigate spatially without reparsing or relayout. Returns whether focus moved.
     pub fn navigate_selection(&mut self, direction: NavigationDirection) -> bool {
-        self.frame
-            .as_ref()
-            .is_some_and(|frame| self.selection.navigate(&frame.ir, &frame.layout, direction))
+        self.navigate_selection_with_extension(direction, false)
     }
 
-    /// Clear focus, retaining the diagram.
+    /// Move the primary selected node, adding the destination when `extend` is true.
+    /// A boundary does not collapse a multi-selection. A valid movement without extension does.
+    pub fn navigate_selection_with_extension(
+        &mut self,
+        direction: NavigationDirection,
+        extend: bool,
+    ) -> bool {
+        let before = self.selection_set.clone();
+        let primary = self.selection.clone();
+        self.cancel_active_selection_gesture();
+        if let Some(frame) = &self.frame
+            && self.selection.navigate(&frame.ir, &frame.layout, direction)
+            && let Some(id) = self.selection.selected_node_id()
+        {
+            self.selection_set.select_node(
+                &frame.ir,
+                &frame.layout,
+                id,
+                if extend {
+                    SelectionMode::Add
+                } else {
+                    SelectionMode::Replace
+                },
+            );
+        }
+        self.reconcile_primary(None);
+        before != self.selection_set || primary != self.selection
+    }
+
+    /// Clear selection and revoke any drag, retaining the diagram. A later cancel cannot undo it.
     pub fn clear_selection(&mut self) -> bool {
-        self.selection.clear()
+        self.selection_gesture = None;
+        let primary_changed = self.selection.clear();
+        self.selection_set.clear() || primary_changed
+    }
+
+    /// Start a box/lasso drag from committed selection and the current draw's coordinate map.
+    /// Returns a session-local token; pass it to every preview/commit/cancel. Only one gesture
+    /// may own this session. Missing/stale pixels, invalid transforms or token exhaustion reject
+    /// the start without changing state. The caller owns pointer capture and the drag threshold.
+    pub fn begin_selection_gesture(
+        &mut self,
+        canvas_size: [f64; 2],
+        mode: SelectionMode,
+        containment: SelectionContainment,
+    ) -> Option<u64> {
+        if self.selection_gesture.is_some() || self.frame.is_none() {
+            return None;
+        }
+        let viewport = self.selection_viewport(canvas_size)?;
+        let id = self.next_gesture_id.checked_add(1)?;
+        self.next_gesture_id = id;
+        self.selection_gesture = Some(CanvasSelectionGesture {
+            id,
+            query: self.selection_set.begin_gesture(mode, containment),
+            primary: self.selection.clone(),
+            viewport,
+        });
+        Some(id)
+    }
+
+    /// Preview in backing-store pixels, including captured drag positions outside the canvas.
+    /// The frozen pointer-down selection prevents repeated toggle/add previews accumulating.
+    /// Returns whether selection/primary changed. Invalid shapes keep the last valid preview;
+    /// a stale viewport rolls it back and revokes the token. Wrong tokens have no side effects.
+    pub fn preview_selection_gesture(
+        &mut self,
+        token: u64,
+        region: SelectionRegion<'_>,
+        canvas_size: [f64; 2],
+    ) -> bool {
+        let Some(gesture) = &self.selection_gesture else {
+            return false;
+        };
+        if gesture.id != token {
+            return false;
+        }
+        if self.selection_viewport(canvas_size) != Some(gesture.viewport) {
+            return self.cancel_active_selection_gesture();
+        }
+        let Some(frame) = &self.frame else {
+            return false;
+        };
+        let primary = gesture.primary.selected_node_id().map(str::to_owned);
+        let changed = gesture.query.preview_canvas(
+            &frame.ir,
+            &frame.layout,
+            &gesture.viewport,
+            &mut self.selection_set,
+            region,
+        );
+        let primary_changed = self.reconcile_primary(primary.as_deref());
+        changed || primary_changed
+    }
+
+    /// Commit the last accepted preview, returning whether this token was current and committed.
+    /// This is NOT a selection-changed result. A changed viewport cancels rather than commits.
+    pub fn commit_selection_gesture(&mut self, token: u64, canvas_size: [f64; 2]) -> bool {
+        let Some(gesture) = &self.selection_gesture else {
+            return false;
+        };
+        if gesture.id != token {
+            return false;
+        }
+        if self.selection_viewport(canvas_size) != Some(gesture.viewport) {
+            self.cancel_active_selection_gesture();
+            return false;
+        }
+        self.selection_gesture = None;
+        true
+    }
+
+    /// Roll back on Escape, pointer cancellation or lost capture. Wrong/retired tokens do nothing.
+    /// Returns whether the selected set or its primary changed; redraw after a true result.
+    pub fn cancel_selection_gesture(&mut self, token: u64) -> bool {
+        if self
+            .selection_gesture
+            .as_ref()
+            .is_some_and(|gesture| gesture.id == token)
+        {
+            self.cancel_active_selection_gesture()
+        } else {
+            false
+        }
+    }
+
+    /// The current session-local gesture token, or `None` after commit/cancel/invalidation.
+    #[must_use]
+    pub fn active_selection_gesture(&self) -> Option<u64> {
+        self.selection_gesture.as_ref().map(|gesture| gesture.id)
+    }
+
+    fn cancel_active_selection_gesture(&mut self) -> bool {
+        let Some(gesture) = self.selection_gesture.take() else {
+            return false;
+        };
+        let primary = self.selection.clone();
+        let changed = if let Some(frame) = &self.frame {
+            gesture
+                .query
+                .cancel(&frame.ir, &frame.layout, &mut self.selection_set)
+        } else {
+            self.selection_set.clear()
+        };
+        self.selection = gesture.primary;
+        self.reconcile_primary(None);
+        changed || primary != self.selection
+    }
+
+    fn reconcile_primary(&mut self, preferred: Option<&str>) -> bool {
+        let id = preferred
+            .filter(|id| self.selection_set.contains(id))
+            .or_else(|| {
+                self.selection
+                    .selected_node_id()
+                    .filter(|id| self.selection_set.contains(id))
+            })
+            .or_else(|| self.selection_set.selected_node_ids().next())
+            .map(str::to_owned);
+        self.selection.replace(id.as_deref())
+    }
+
+    fn selection_viewport(&self, canvas_size: [f64; 2]) -> Option<crate::Viewport> {
+        let viewport = self.last_result(canvas_size)?.viewport;
+        (viewport.zoom.is_finite()
+            && viewport.zoom > 0.0
+            && viewport.offset_x.is_finite()
+            && viewport.offset_y.is_finite())
+        .then_some(viewport)
     }
 
     /// Set the focus-ring appearance for the next redraw.
@@ -576,17 +829,13 @@ impl CanvasSession {
     }
 
     fn layout_point(&self, x: f64, y: f64, canvas_size: [f64; 2]) -> Option<(f64, f64)> {
-        let viewport = self.last_result(canvas_size)?.viewport;
+        let viewport = self.selection_viewport(canvas_size)?;
         if !x.is_finite()
             || !y.is_finite()
             || x < 0.0
             || y < 0.0
             || x >= canvas_size[0]
             || y >= canvas_size[1]
-            || !viewport.zoom.is_finite()
-            || viewport.zoom <= 0.0
-            || !viewport.offset_x.is_finite()
-            || !viewport.offset_y.is_finite()
         {
             return None;
         }
@@ -813,6 +1062,7 @@ mod selection_tests {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+    use crate::selection::SelectionBox;
     use crate::{CanvasRenderConfig, DrawOperation, MockCanvas2dContext, ViewportTransform};
     use fm_layout::LayoutPoint;
 
@@ -1117,5 +1367,429 @@ mod session_tests {
         assert!(context.operations().is_empty());
         assert!(session.last_result([200.0, 120.0]).is_none());
         assert!(!session.navigate_selection(NavigationDirection::Right));
+    }
+
+    fn selected(session: &CanvasSession) -> Vec<&str> {
+        session.selected_node_ids().collect()
+    }
+
+    fn marquee(start: (f64, f64), end: (f64, f64)) -> SelectionRegion<'static> {
+        SelectionRegion::Box(SelectionBox { start, end })
+    }
+
+    #[test]
+    fn session_modifier_clicks_share_the_rendered_set_and_primary() {
+        let mut session = session(false);
+        let mut context = MockCanvas2dContext::new(400.0, 200.0);
+        let plain = session.redraw(&mut context).unwrap().clone();
+        let baseline = context.operations().to_vec();
+        let (ax, ay) = drawn_label(&context, "Alpha");
+        let (bx, by) = drawn_label(&context, "Beta");
+        assert!(session.select_at(ax, ay, [400.0, 200.0]));
+        assert!(session.select_at_with_mode(bx, by, [400.0, 200.0], SelectionMode::Add));
+        assert_eq!(selected(&session), ["A", "B"]);
+        assert_eq!(session.selected_node_id(), Some("B"));
+        context.clear();
+        let rendered = session.redraw(&mut context).unwrap();
+        assert_eq!(rendered.draw_calls, plain.draw_calls + 4);
+        assert_eq!(rendered.hit_regions, plain.hit_regions);
+        assert_eq!(rendered.nodes_drawn, plain.nodes_drawn);
+        assert_eq!(rendered.edges_drawn, plain.edges_drawn);
+        assert_eq!(rendered.labels_drawn, plain.labels_drawn);
+        assert_eq!(&context.operations()[..baseline.len()], baseline.as_slice());
+        assert!(session.select_at_with_mode(bx, by, [400.0, 200.0], SelectionMode::Toggle));
+        assert_eq!(selected(&session), ["A"]);
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert!(!session.select_node("A"));
+        assert!(session.select_node_with_mode("A", SelectionMode::Remove));
+        assert_eq!(session.selected_node_id(), None);
+        assert!(selected(&session).is_empty());
+        context.clear();
+        session.redraw(&mut context).unwrap();
+        assert_eq!(context.operations(), baseline.as_slice());
+    }
+
+    #[test]
+    fn session_keyboard_extension_uses_the_same_selection_and_stops_at_boundaries() {
+        let mut session = session(true);
+        assert!(session.select_node("A"));
+        assert!(session.navigate_selection_with_extension(NavigationDirection::Right, true));
+        assert_eq!(selected(&session), ["A", "B"]);
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(!session.navigate_selection(NavigationDirection::Right));
+        assert_eq!(selected(&session), ["A", "B"]);
+        assert!(session.navigate_selection(NavigationDirection::Left));
+        assert_eq!(selected(&session), ["A"]);
+        assert_eq!(session.selected_node_id(), Some("A"));
+    }
+
+    #[test]
+    fn session_toggle_marquee_uses_pointer_down_baseline_and_actual_draw_mapping() {
+        for auto_fit in [false, true] {
+            let mut session = session(auto_fit);
+            let mut context = MockCanvas2dContext::new(400.0, 200.0);
+            session.redraw(&mut context).unwrap();
+            let (bx, by) = drawn_label(&context, "Beta");
+            session.select_node("A");
+            let token = session
+                .begin_selection_gesture(
+                    [400.0, 200.0],
+                    SelectionMode::Toggle,
+                    SelectionContainment::Intersects,
+                )
+                .unwrap();
+            assert!(session.preview_selection_gesture(
+                token,
+                marquee((-10.0, -10.0), (410.0, 210.0)),
+                [400.0, 200.0],
+            ));
+            assert_eq!(selected(&session), ["B"]);
+            assert!(!session.preview_selection_gesture(
+                token,
+                marquee((-10.0, -10.0), (410.0, 210.0)),
+                [400.0, 200.0],
+            ));
+            assert!(session.preview_selection_gesture(
+                token,
+                marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)),
+                [400.0, 200.0],
+            ));
+            assert_eq!(selected(&session), ["A", "B"]);
+            assert_eq!(session.selected_node_id(), Some("A"));
+            assert!(session.cancel_selection_gesture(token));
+            assert_eq!(selected(&session), ["A"]);
+            assert_eq!(session.active_selection_gesture(), None);
+        }
+    }
+
+    #[test]
+    fn session_lasso_commit_retires_ownership_without_leaking_into_the_next_drag() {
+        let mut session = session(true);
+        let mut context = MockCanvas2dContext::new(400.0, 200.0);
+        session.redraw(&mut context).unwrap();
+        let (ax, ay) = drawn_label(&context, "Alpha");
+        session.select_node("B");
+        let token = session
+            .begin_selection_gesture(
+                [400.0, 200.0],
+                SelectionMode::Add,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
+        let points = [(ax - 1.0, ay - 1.0), (ax + 1.0, ay - 1.0), (ax, ay + 1.0)];
+        assert!(session.preview_selection_gesture(
+            token,
+            SelectionRegion::Lasso(&points),
+            [400.0, 200.0],
+        ));
+        assert_eq!(selected(&session), ["A", "B"]);
+        // A normal same-size redraw preserves the drag and uses the shared multi-ring renderer.
+        context.clear();
+        session.redraw(&mut context).unwrap();
+        assert_eq!(session.active_selection_gesture(), Some(token));
+        assert!(session.commit_selection_gesture(token, [400.0, 200.0]));
+        assert!(!session.cancel_selection_gesture(token));
+        let next = session
+            .begin_selection_gesture(
+                [400.0, 200.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
+        assert_ne!(next, token);
+        assert!(!session.preview_selection_gesture(
+            token,
+            marquee((0.0, 150.0), (10.0, 160.0)),
+            [400.0, 200.0],
+        ));
+        assert!(!session.commit_selection_gesture(token, [400.0, 200.0]));
+        assert!(!session.cancel_selection_gesture(token));
+        assert_eq!(session.active_selection_gesture(), Some(next));
+        assert_eq!(selected(&session), ["A", "B"]);
+    }
+
+    fn preview_beta(session: &mut CanvasSession) -> u64 {
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        let (bx, by) = drawn_label(&context, "Beta");
+        session.select_node("A");
+        let token = session
+            .begin_selection_gesture(
+                [200.0, 120.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
+        assert!(session.preview_selection_gesture(
+            token,
+            marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)),
+            [200.0, 120.0],
+        ));
+        assert_eq!(selected(session), ["B"]);
+        token
+    }
+
+    #[test]
+    fn session_resize_redraw_rolls_back_before_drawing_and_preserves_layout_allocation() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        let layout = Arc::clone(&session.frame.as_ref().unwrap().layout);
+        let mut context = MockCanvas2dContext::new(400.0, 240.0);
+        session.redraw(&mut context).unwrap();
+        assert_eq!(selected(&session), ["A"]);
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert_eq!(session.active_selection_gesture(), None);
+        assert!(!session.commit_selection_gesture(token, [400.0, 240.0]));
+        assert!(Arc::ptr_eq(
+            &layout,
+            &session.frame.as_ref().unwrap().layout
+        ));
+        let (x, y) = drawn_label(&context, "Alpha");
+        assert_eq!(session.hit_test_node(x, y, [400.0, 240.0]), Some("A"));
+        let mut expected = MockCanvas2dContext::new(400.0, 240.0);
+        let frame = session.frame.as_ref().unwrap();
+        let mut primary = session.selection.clone();
+        crate::render_to_canvas_with_selection(
+            &frame.ir,
+            &frame.layout,
+            &mut expected,
+            &frame.config,
+            &mut primary,
+            &session.selection_style,
+        );
+        assert_eq!(context.operations(), expected.operations());
+    }
+
+    #[test]
+    fn session_stale_resize_events_cancel_even_before_redraw() {
+        for commit in [false, true] {
+            let mut session = session(true);
+            let token = preview_beta(&mut session);
+            if commit {
+                assert!(!session.commit_selection_gesture(token, [400.0, 240.0]));
+            } else {
+                assert!(session.preview_selection_gesture(
+                    token,
+                    marquee((0.0, 0.0), (400.0, 240.0)),
+                    [400.0, 240.0],
+                ));
+            }
+            assert_eq!(selected(&session), ["A"]);
+            assert_eq!(session.active_selection_gesture(), None);
+            // Returning to the old dimensions cannot reactivate the cancelled drag.
+            assert!(!session.commit_selection_gesture(token, [200.0, 120.0]));
+        }
+    }
+
+    #[test]
+    fn session_source_replacement_reconciles_committed_not_preview_selection() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        let ir = fm_parser::parse("flowchart LR\n B[Beta]\n").ir;
+        let layout = Arc::new(fm_layout::layout_diagram(&ir));
+        session.set_diagram(ir, layout, CanvasRenderConfig::default());
+        // A was committed and removed. B only existed in the cancelled preview, not the baseline.
+        assert!(selected(&session).is_empty());
+        assert_eq!(session.selected_node_id(), None);
+        assert_eq!(session.active_selection_gesture(), None);
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        assert!(!session.commit_selection_gesture(token, [200.0, 120.0]));
+        assert!(selected(&session).is_empty());
+    }
+
+    #[test]
+    fn session_invalidation_cancels_preview_but_explicit_clear_cannot_be_undone() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        session.invalidate();
+        assert_eq!(selected(&session), ["A"]);
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert!(!session.cancel_selection_gesture(token));
+        let token = preview_beta(&mut session);
+        assert!(session.clear_selection());
+        assert!(!session.cancel_selection_gesture(token));
+        assert!(selected(&session).is_empty());
+        let token = preview_beta(&mut session);
+        session.clear();
+        let (ir, layout) = diagram();
+        session.set_diagram(ir, layout, CanvasRenderConfig::default());
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        let next = session
+            .begin_selection_gesture(
+                [200.0, 120.0],
+                SelectionMode::Replace,
+                SelectionContainment::Contains,
+            )
+            .unwrap();
+        assert_ne!(next, token);
+        assert!(!session.cancel_selection_gesture(token));
+        assert_eq!(session.active_selection_gesture(), Some(next));
+        assert!(selected(&session).is_empty());
+    }
+
+    #[test]
+    fn session_invalid_queries_and_competing_gestures_leave_the_live_preview_unchanged() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Toggle,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
+        assert!(!session.select_node_with_mode("missing", SelectionMode::Replace));
+        assert!(!session.select_at_with_mode(f64::NAN, 32.5, [200.0, 120.0], SelectionMode::Add));
+        assert!(!session.preview_selection_gesture(
+            token,
+            SelectionRegion::Lasso(&[(f64::NAN, 0.0); 3]),
+            [200.0, 120.0],
+        ));
+        assert!(!session.preview_selection_gesture(
+            token,
+            marquee((10.0, 10.0), (10.0, 10.0)),
+            [200.0, 120.0],
+        ));
+        assert!(!session.preview_selection_gesture(
+            token + 1,
+            marquee((0.0, 0.0), (200.0, 120.0)),
+            [400.0, 240.0],
+        ));
+        assert_eq!(selected(&session), ["B"]);
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert_eq!(session.active_selection_gesture(), Some(token));
+        assert!(session.cancel_selection_gesture(token));
+        assert_eq!(selected(&session), ["A"]);
+    }
+
+    #[test]
+    fn session_new_commands_cancel_the_preview_before_applying_modifier_semantics() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        session.select_node_with_mode("B", SelectionMode::Add);
+        // This must add B to committed A, not to the provisional B-only set.
+        assert_eq!(selected(&session), ["A", "B"]);
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(!session.cancel_selection_gesture(token));
+        let token = preview_beta(&mut session);
+        session.navigate_selection_with_extension(NavigationDirection::Right, true);
+        assert_eq!(selected(&session), ["A", "B"]);
+        assert!(!session.cancel_selection_gesture(token));
+    }
+
+    #[test]
+    fn session_gestures_require_usable_pixels_and_never_wrap_tokens() {
+        let mut session = session(true);
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Replace,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        session.redraw(&mut context).unwrap();
+        for size in [[400.0, 240.0], [0.0, 120.0], [f64::NAN, 120.0]] {
+            assert!(
+                session
+                    .begin_selection_gesture(
+                        size,
+                        SelectionMode::Replace,
+                        SelectionContainment::Contains,
+                    )
+                    .is_none()
+            );
+        }
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            session.last_result.as_mut().unwrap().viewport.zoom = zoom;
+            assert!(
+                session
+                    .begin_selection_gesture(
+                        [200.0, 120.0],
+                        SelectionMode::Replace,
+                        SelectionContainment::Contains,
+                    )
+                    .is_none()
+            );
+        }
+        session.redraw(&mut context).unwrap();
+        session.next_gesture_id = u64::MAX;
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Replace,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
+        assert_eq!(session.active_selection_gesture(), None);
+        assert!(selected(&session).is_empty());
+    }
+
+    #[test]
+    fn session_reconfiguration_rolls_back_preview_and_reuses_the_same_geometry() {
+        let mut session = session(true);
+        let token = preview_beta(&mut session);
+        let layout = Arc::clone(&session.frame.as_ref().unwrap().layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 7.0,
+            node_fill: "#123456".to_string(),
+            label_color: "#abcdef".to_string(),
+            ..CanvasRenderConfig::default()
+        };
+        session.set_render_config(config.clone());
+        assert_eq!(selected(&session), ["A"]);
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert_eq!(session.active_selection_gesture(), None);
+        assert!(!session.commit_selection_gesture(token, [200.0, 120.0]));
+        assert!(session.last_result([200.0, 120.0]).is_none());
+        assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), None);
+        assert!(Arc::ptr_eq(
+            &layout,
+            &session.frame.as_ref().unwrap().layout
+        ));
+
+        let mut context = MockCanvas2dContext::new(400.0, 200.0);
+        session.redraw(&mut context).unwrap();
+        let (x, y) = drawn_label(&context, "Alpha");
+        assert!((x - 47.0).abs() < 1e-6 && (y - 52.0).abs() < 1e-6);
+        assert_eq!(session.hit_test_node(x, y, [400.0, 200.0]), Some("A"));
+        assert_eq!(session.frame.as_ref().unwrap().config.node_fill, "#123456");
+        assert_eq!(
+            session.frame.as_ref().unwrap().config.label_color,
+            "#abcdef"
+        );
+        let mut expected = MockCanvas2dContext::new(400.0, 200.0);
+        let frame = session.frame.as_ref().unwrap();
+        let mut selection = session.selection_set.clone();
+        render_to_canvas_with_multi_selection(
+            &frame.ir,
+            &frame.layout,
+            &mut expected,
+            &config,
+            &mut selection,
+            &session.selection_style,
+        );
+        assert_eq!(context.operations(), expected.operations());
+    }
+
+    #[test]
+    fn session_reconfiguration_without_a_diagram_does_not_invent_a_frame() {
+        let mut session = CanvasSession::default();
+        session.set_render_config(CanvasRenderConfig::default());
+        let mut context = MockCanvas2dContext::new(200.0, 120.0);
+        assert!(session.redraw(&mut context).is_none());
+        assert!(context.operations().is_empty());
+        assert!(selected(&session).is_empty());
+        assert!(session.last_result([200.0, 120.0]).is_none());
     }
 }

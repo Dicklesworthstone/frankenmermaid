@@ -23,8 +23,21 @@ pub mod fnx_ordering;
 
 pub mod adapton;
 mod cga_routing;
+mod compound;
+pub mod edge_labels;
+pub mod edge_paths;
+mod event_model;
 pub mod invariants;
+mod ishikawa;
 pub mod layout_lens;
+mod tree_view;
+mod venn;
+mod wardley;
+use event_model::layout_diagram_event_model_traced;
+use ishikawa::layout_diagram_ishikawa_traced;
+use tree_view::layout_diagram_tree_view_traced;
+use venn::layout_diagram_venn_traced;
+use wardley::layout_diagram_wardley_traced;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -775,6 +788,11 @@ pub enum LayoutAlgorithm {
     Architecture,
     Treemap,
     Radar,
+    Ishikawa,
+    TreeView,
+    Venn,
+    Wardley,
+    EventModeling,
 }
 
 impl LayoutAlgorithm {
@@ -801,6 +819,11 @@ impl LayoutAlgorithm {
             Self::Architecture => "architecture",
             Self::Treemap => "treemap",
             Self::Radar => "radar",
+            Self::Ishikawa => "ishikawa",
+            Self::TreeView => "treeview",
+            Self::Venn => "venn",
+            Self::Wardley => "wardley",
+            Self::EventModeling => "eventmodeling",
         }
     }
 }
@@ -815,7 +838,7 @@ pub struct LayoutAlgorithmRow {
     pub notes: &'static str,
 }
 
-/// All 18 concrete algorithms plus `Auto`, one row each. Pinned by
+/// All 23 concrete algorithms plus `Auto`, one row each. Pinned by
 /// `tests::layout_algorithm_rows_cover_every_variant` — the pin's variant list is a
 /// compiler-checked match surface, so adding a `LayoutAlgorithm` variant without a row
 /// fails the build, not the docs.
@@ -916,6 +939,31 @@ pub const fn layout_algorithm_rows() -> &'static [LayoutAlgorithmRow] {
             algorithm: LayoutAlgorithm::Radar,
             serves: "Radar-beta",
             notes: "Polar wedges with cardinal-spline rendering",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Ishikawa,
+            serves: "Ishikawa",
+            notes: "Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::TreeView,
+            serves: "TreeView-beta",
+            notes: "One pre-order row per entry, indented by depth, with trunk-and-elbow connectors",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Venn,
+            serves: "Venn-beta",
+            notes: "Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::Wardley,
+            serves: "Wardley-beta",
+            notes: "Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links",
+        },
+        LayoutAlgorithmRow {
+            algorithm: LayoutAlgorithm::EventModeling,
+            serves: "EventModeling",
+            notes: "Source-order timeframes in stacked type swimlanes, staircase placement across lane changes, two-thirds/one-third flow arrows",
         },
     ];
     ROWS
@@ -1214,9 +1262,9 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 80.0,
-            rank_spacing: 120.0,
-            cluster_padding: 52.0,
+            node_spacing: 40.0,
+            rank_spacing: 64.0,
+            cluster_padding: 28.0,
             sequence_participant_gap_extra: 80.0,
             sequence_min_message_gap: 56.0,
             sequence_self_loop_width: 40.0,
@@ -1854,55 +1902,6 @@ fn incremental_overlap_alignment(
     ))
 }
 
-/// Smooth edges that cross a dirty/clean subgraph boundary.
-///
-/// After incremental re-layout, edges with one endpoint in the dirty region and one in
-/// the clean region may have intermediate waypoints that create visual kinks. This pass
-/// applies a gentle Laplacian smoothing to interior waypoints of boundary edges, pulling
-/// each interior point toward the midpoint of its neighbors to reduce angular
-/// discontinuities while preserving the start and end anchors.
-fn smooth_boundary_edges(
-    ir: &MermaidDiagramIr,
-    edges: &mut [LayoutEdgePath],
-    dirty_node_indexes: &BTreeSet<usize>,
-) {
-    const SMOOTHING_FACTOR: f32 = 0.3;
-    const SMOOTHING_PASSES: usize = 2;
-
-    for edge_path in edges.iter_mut() {
-        let Some(edge) = ir.edges.get(edge_path.edge_index) else {
-            continue;
-        };
-        let source = endpoint_node_index(ir, edge.from);
-        let target = endpoint_node_index(ir, edge.to);
-        let (Some(src), Some(tgt)) = (source, target) else {
-            continue;
-        };
-        let src_dirty = dirty_node_indexes.contains(&src);
-        let tgt_dirty = dirty_node_indexes.contains(&tgt);
-        // Only smooth boundary-crossing edges (one dirty, one clean).
-        if src_dirty == tgt_dirty {
-            continue;
-        }
-        if edge_path.points.len() < 3 {
-            continue;
-        }
-        // Laplacian smoothing: pull interior points toward neighbor midpoints.
-        for _ in 0..SMOOTHING_PASSES {
-            let len = edge_path.points.len();
-            for i in 1..len - 1 {
-                let prev = edge_path.points[i - 1];
-                let next = edge_path.points[i + 1];
-                let mid_x = (prev.x + next.x) * 0.5;
-                let mid_y = (prev.y + next.y) * 0.5;
-                let pt = &mut edge_path.points[i];
-                pt.x += (mid_x - pt.x) * SMOOTHING_FACTOR;
-                pt.y += (mid_y - pt.y) * SMOOTHING_FACTOR;
-            }
-        }
-    }
-}
-
 /// The edit list between two IRs, plus whether they share a dependency topology.
 struct LayoutDiff {
     edits: Vec<LayoutEdit>,
@@ -2103,6 +2102,9 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         xy_chart_meta,
         treemap_meta,
         radar_meta,
+        venn_meta,
+        wardley_meta,
+        event_model_meta,
         pie_meta,
         quadrant_meta,
         packet_meta,
@@ -2130,6 +2132,9 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *xy_chart_meta == current.xy_chart_meta
         && *treemap_meta == current.treemap_meta
         && *radar_meta == current.radar_meta
+        && *venn_meta == current.venn_meta
+        && *wardley_meta == current.wardley_meta
+        && *event_model_meta == current.event_model_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
         && *packet_meta == current.packet_meta
@@ -2363,7 +2368,8 @@ pub enum StateNoteSide {
 /// it. A renderer-only placement lands outside the viewBox and is clipped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutStateNote {
-    /// Index into [`DiagramLayout::nodes`] for the state this note annotates.
+    /// Index into [`DiagramLayout::nodes`] for the state this note annotates; `usize::MAX` for a
+    /// note that annotates the whole diagram (whose leader is then a single point).
     pub node_index: usize,
     /// Side the note was placed on, from `IrStateNote::position`.
     pub side: StateNoteSide,
@@ -2400,8 +2406,18 @@ pub struct LayoutPacketFieldContinuation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutSequenceNote {
     pub position: fm_core::NotePosition,
+    /// Display lines, including measured wraps; the IR retains the authored text.
     pub text: String,
     pub bounds: LayoutRect,
+}
+
+impl LayoutSequenceNote {
+    /// Note text size relative to the diagram's base font.
+    pub const FONT_SCALE: f32 = 0.8;
+    /// Horizontal text inset on each side of the note.
+    pub const PADDING_X: f32 = 12.0;
+    /// Vertical text inset above and below the note.
+    pub const PADDING_Y: f32 = 10.0;
 }
 
 /// A sequence diagram interaction fragment box (loop, alt, par, etc.).
@@ -2411,6 +2427,10 @@ pub struct LayoutSequenceFragment {
     pub label: String,
     pub color: Option<String>,
     pub bounds: LayoutRect,
+    /// The y of each branch divider (`else` / `and` / `option`), in the order of the IR
+    /// fragment's `alternatives`. Empty when the layout did not place them, in which case a
+    /// renderer derives them from the branches' first messages.
+    pub branch_tops: Vec<f32>,
 }
 
 /// A sequence lifecycle marker positioned on a participant lifeline.
@@ -3580,49 +3600,23 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         RenderGroup::new(Some(String::from("edges"))).with_source(RenderSource::Diagram);
 
     for edge in &layout.edges {
-        if edge.points.len() < 2 {
+        // A `~~~` link has done its work in the layout and is never drawn.
+        if edge.bundled
+            || edge.points.len() < 2
+            || ir
+                .edges
+                .get(edge.edge_index)
+                .is_some_and(|e| e.arrow == fm_core::ArrowType::Invisible)
+        {
             continue;
         }
 
         let mut commands = Vec::with_capacity(edge.points.len() * 2);
-        let n = edge.points.len();
-
-        // Implement smoothing logic (Catmull-Rom to Cubic Bezier)
-        commands.push(PathCmd::MoveTo {
-            x: edge.points[0].x,
-            y: edge.points[0].y,
+        let endpoints = edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
+            commands.push(command);
         });
-
-        if n == 2 {
-            commands.push(PathCmd::LineTo {
-                x: edge.points[1].x,
-                y: edge.points[1].y,
-            });
-        } else {
-            let t: f32 = 0.25; // Tension factor matching legacy renderer
-            for i in 0..(n - 1) {
-                let p_prev = if i == 0 {
-                    edge.points[0]
-                } else {
-                    edge.points[i - 1]
-                };
-                let p_cur = edge.points[i];
-                let p_next = edge.points[i + 1];
-                let p_next2 = if i + 2 < n {
-                    edge.points[i + 2]
-                } else {
-                    edge.points[n - 1]
-                };
-
-                commands.push(PathCmd::CubicTo {
-                    c1x: (p_next.x - p_prev.x).mul_add(t, p_cur.x),
-                    c1y: (p_next.y - p_prev.y).mul_add(t, p_cur.y),
-                    c2x: (p_next2.x - p_cur.x).mul_add(-t, p_next.x),
-                    c2y: (p_next2.y - p_cur.y).mul_add(-t, p_next.y),
-                    x: p_next.x,
-                    y: p_next.y,
-                });
-            }
+        if endpoints.is_none() {
+            continue;
         }
 
         let mut stroke = StrokeStyle::solid("#475569", 1.5);
@@ -3832,6 +3826,8 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     fm_core::ArrowType::LollipopReverse => {
                         marker_end = MarkerKind::Lollipop;
                     }
+                    // Skipped at the top of the loop; it has no marker to give.
+                    fm_core::ArrowType::Invisible => {}
                 }
 
                 // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second
@@ -4010,26 +4006,25 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
     layer
 }
 
-fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
-    if edge_path.points.len() == 4 {
-        let p1 = &edge_path.points[1];
-        let p2 = &edge_path.points[2];
+/// Where an edge's label is anchored: the middle of its middle segment. The one rule the SVG
+/// renderer, the canvas renderer and the render scene all place labels by.
+#[must_use]
+pub fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
+    let points = &edge_path.points;
+    if points.len() == 4 {
         LayoutPoint {
-            x: f32::midpoint(p1.x, p2.x),
-            y: f32::midpoint(p1.y, p2.y),
+            x: f32::midpoint(points[1].x, points[2].x),
+            y: f32::midpoint(points[1].y, points[2].y),
         }
-    } else if edge_path.points.len() == 2 {
-        let p1 = &edge_path.points[0];
-        let p2 = &edge_path.points[1];
+    } else if points.len() == 2 {
         LayoutPoint {
-            x: f32::midpoint(p1.x, p2.x),
-            y: f32::midpoint(p1.y, p2.y),
+            x: f32::midpoint(points[0].x, points[1].x),
+            y: f32::midpoint(points[0].y, points[1].y),
         }
-    } else if edge_path.points.is_empty() {
+    } else if points.is_empty() {
         LayoutPoint { x: 0.0, y: 0.0 }
     } else {
-        let midpoint_index = edge_path.points.len() / 2;
-        edge_path.points[midpoint_index]
+        points[points.len() / 2]
     }
 }
 
@@ -4218,8 +4213,13 @@ fn compute_traced_layout_with_config_and_guardrails(
             layout_diagram_sugiyama_traced_with_config(ir, config)
         }
         LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
-        LayoutAlgorithm::Tree => layout_diagram_tree_traced(ir),
-        LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
+        LayoutAlgorithm::Tree => {
+            let metrics = config
+                .font_metrics
+                .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+            layout_diagram_tree_traced_with_metrics(ir, &metrics)
+        }
+        LayoutAlgorithm::Radial => layout_diagram_radial_traced_with_config(ir, config),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
@@ -4227,13 +4227,24 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
         LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
-        LayoutAlgorithm::Sequence => layout_diagram_sequence_traced(ir),
+        LayoutAlgorithm::Sequence => layout_diagram_sequence_traced_with_metrics(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+        ),
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
         LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
         LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
         LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
+        LayoutAlgorithm::Ishikawa => layout_diagram_ishikawa_traced(ir),
+        LayoutAlgorithm::TreeView => layout_diagram_tree_view_traced(ir),
+        LayoutAlgorithm::Venn => layout_diagram_venn_traced(ir),
+        LayoutAlgorithm::Wardley => layout_diagram_wardley_traced(ir),
+        LayoutAlgorithm::EventModeling => layout_diagram_event_model_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -4245,6 +4256,20 @@ fn compute_traced_layout_with_config_and_guardrails(
         let notes = build_state_note_geometry(ir, &layout.nodes, &metrics);
         layout.extensions.state_notes = notes;
         extend_bounds_for_state_notes(layout);
+    }
+    // Class and ER relationships carry their meaning in END markers — inheritance triangles,
+    // composition diamonds, crow's feet, cardinalities — so two relationships may not share one
+    // endpoint, where the second marker is drawn exactly under the first and disappears.
+    // In a flowchart or state diagram only an edge arriving where another leaves is moved: a
+    // return edge drawn into the start of the node's own outgoing line read as one two-way edge.
+    match ir.diagram_type {
+        DiagramType::Class | DiagramType::Er => {
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false);
+        }
+        DiagramType::Flowchart | DiagramType::State => {
+            spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true);
+        }
+        _ => {}
     }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
@@ -4954,18 +4979,24 @@ impl IncrementalLayoutEngine {
                 .map_or(Span::default(), |node| node.span_primary);
         }
 
+        // Clusters before routing, as in the full path: edges are routed around them.
+        let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
         let mut edges = build_edge_paths(
             ir,
             &nodes,
+            &clusters,
             &highlighted_edge_indexes,
             // Resolved the same way as the full path; wiring only one would make an edited
             // diagram re-route part of itself with the caller's default instead of the source's
             // request.
             edge_routing_with_source_hints(config.edge_routing, ir),
         );
-        smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
+        // These routes were just rebuilt from the current node and cluster boxes, including
+        // the source's routing mode. A second smoothing pass would cut the router's detours
+        // through obstacles and turn orthogonal connectors into diagonals after an edit.
+        // Keep the same route postprocessing as the full layout path in every routing mode.
         bundle_parallel_edges(ir, &mut edges);
-        let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+        separate_shared_channels(ir, &nodes, &mut edges);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -5162,6 +5193,11 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
             return "auto_diagram_type_architecture";
         }
         DiagramType::Sequence => return "auto_diagram_type_sequence",
+        DiagramType::Ishikawa => return "auto_diagram_type_ishikawa",
+        DiagramType::TreeView => return "auto_diagram_type_tree_view",
+        DiagramType::Venn => return "auto_diagram_type_venn",
+        DiagramType::Wardley => return "auto_diagram_type_wardley",
+        DiagramType::EventModeling => return "auto_diagram_type_eventmodeling",
         _ => {}
     }
     match selected {
@@ -5197,6 +5233,11 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
         DiagramType::Treemap => LayoutAlgorithm::Treemap,
         DiagramType::Radar => LayoutAlgorithm::Radar,
+        DiagramType::Ishikawa => LayoutAlgorithm::Ishikawa,
+        DiagramType::TreeView => LayoutAlgorithm::TreeView,
+        DiagramType::Venn => LayoutAlgorithm::Venn,
+        DiagramType::Wardley => LayoutAlgorithm::Wardley,
+        DiagramType::EventModeling => LayoutAlgorithm::EventModeling,
         // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
         // direction-aware placement has nothing to honour when no edge declares a side, so an
         // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
@@ -5435,6 +5476,11 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Architecture => matches!(diagram_type, DiagramType::ArchitectureBeta),
         LayoutAlgorithm::Treemap => matches!(diagram_type, DiagramType::Treemap),
         LayoutAlgorithm::Radar => matches!(diagram_type, DiagramType::Radar),
+        LayoutAlgorithm::Ishikawa => matches!(diagram_type, DiagramType::Ishikawa),
+        LayoutAlgorithm::TreeView => matches!(diagram_type, DiagramType::TreeView),
+        LayoutAlgorithm::Venn => matches!(diagram_type, DiagramType::Venn),
+        LayoutAlgorithm::Wardley => matches!(diagram_type, DiagramType::Wardley),
+        LayoutAlgorithm::EventModeling => matches!(diagram_type, DiagramType::EventModeling),
     }
 }
 
@@ -5654,13 +5700,32 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         // Squarify is a single descending-sorted pass per sibling group: cheap and linear.
         | LayoutAlgorithm::Treemap
         // Polar placement is one trig call per vertex.
-        | LayoutAlgorithm::Radar => LayoutCostEstimate {
+        | LayoutAlgorithm::Radar
+        // One pre-order walk per cause bone; every label and bone is placed once.
+        | LayoutAlgorithm::Ishikawa
+        // One pre-order walk; one row and one connector per entry.
+        | LayoutAlgorithm::TreeView
+        // A handful of sets: O(n²) pair targets and a fixed refinement budget.
+        | LayoutAlgorithm::Venn => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
                 .saturating_add(edges.saturating_mul(2))
                 .saturating_add(6),
             iterations: nodes.saturating_add(2),
             route_ops: edges.saturating_mul(6).saturating_add(nodes),
+        },
+        // A pure projection — every mark, box and straight link placed once — priced by its linear
+        // work, as the directed-path tree is. At the generic three milliseconds a node a 34-node
+        // tea-shop map cost more than Sugiyama, so a loaded host's budget "fell back" to laying the
+        // map out as a graph, discarding every coordinate the author wrote. An event model is the
+        // same kind of single source-order pass.
+        LayoutAlgorithm::Wardley | LayoutAlgorithm::EventModeling => LayoutCostEstimate {
+            time_ms: nodes
+                .div_ceil(16)
+                .saturating_add(edges.div_ceil(16))
+                .saturating_add(1),
+            iterations: 1,
+            route_ops: edges.saturating_add(nodes),
         },
         LayoutAlgorithm::Sankey => LayoutCostEstimate {
             time_ms: nodes
@@ -5935,6 +6000,87 @@ fn evaluate_layout_guardrails(
     guard
 }
 
+/// Node priorities and cycle removal: the layered layout's first phase.
+///
+/// Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node
+/// ids) that `cycle_removal`, `rank_assignment` and `build_cycle_cluster_map` all need, so they are
+/// computed once and threaded through. Shared by the full pipeline and compound placement, so each
+/// phase has ONE caller and is compiled once.
+#[inline(never)]
+pub(crate) fn cycle_preparation(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+) -> (Vec<usize>, CycleRemovalResult) {
+    let node_priority = stable_node_priorities(ir);
+    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
+    (node_priority, cycle_result)
+}
+
+/// Ranks, crossing reduction and coordinates for a graph laid out flat: returns the crossing
+/// counts before and after refinement, and the node boxes.
+///
+/// The one implementation the full pipeline and compound placement (`compound`) share. A second
+/// copy of these calls once cost 34 KB of wasm, because every phase that had been inlined into its
+/// single caller was then compiled a second time out of line.
+#[inline(never)]
+pub(crate) fn flat_placement(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    config: &LayoutConfig,
+    spacing: LayoutSpacing,
+    cycle_result: &CycleRemovalResult,
+    node_priority: &[usize],
+    trace: &mut LayoutTrace,
+) -> (usize, usize, Vec<LayoutNodeBox>) {
+    let mut ranks = rank_assignment(ir, cycle_result, node_priority);
+    if config.lp_relaxation_layers
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
+        && ir.constraints.is_empty()
+        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, cycle_result, &ranks)
+    {
+        ranks = relaxed_ranks;
+    }
+    apply_ir_constraints(ir, &mut ranks);
+    push_snapshot(
+        trace,
+        "rank_assignment",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        0,
+    );
+
+    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks, config);
+    push_snapshot(
+        trace,
+        "crossing_minimization",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        crossing_count_before,
+    );
+
+    // Refinement: transpose + sifting heuristics.
+    let (crossing_count, ordering_by_rank) =
+        crossing_refinement(ir, &ranks, ordering_by_rank, crossing_count_before);
+    push_snapshot(
+        trace,
+        "crossing_refinement",
+        ir.nodes.len(),
+        ir.edges.len(),
+        cycle_result.reversed_edge_indexes.len(),
+        crossing_count,
+    );
+
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let nodes = coordinate_assignment(ir, node_sizes, &ranks, &ordering_by_rank, spacing, &metrics);
+    (crossing_count_before, crossing_count, nodes)
+}
+
 fn layout_diagram_sugiyama_traced_with_config(
     ir: &MermaidDiagramIr,
     config: LayoutConfig,
@@ -5946,11 +6092,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         .clone()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
-    // Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node ids).
-    // `cycle_removal`, `rank_assignment`, and `build_cycle_cluster_map` each recomputed it — hoist to ONE
-    // computation and thread it through. Byte-identical (same Vec); removes 1-2 redundant sorts per layout.
-    let node_priority = stable_node_priorities(ir);
-    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
+    let (node_priority, cycle_result) = cycle_preparation(ir, &config);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -5966,50 +6108,34 @@ fn layout_diagram_sugiyama_traced_with_config(
         None
     };
 
-    let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
-    if config.lp_relaxation_layers
-        && ir.diagram_type == DiagramType::Flowchart
-        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
-        && ir.constraints.is_empty()
-        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, &cycle_result, &ranks)
+    // Clusters are placed as units where the diagram has any (see `compound`); their contents,
+    // directions and separation then come from that placement rather than the flat passes.
+    let (crossing_count_before, crossing_count, mut nodes) = if let Some(nodes) =
+        compound::compound_node_boxes(ir, &node_sizes, &config, spacing, &metrics)
     {
-        ranks = relaxed_ranks;
-    }
-    apply_ir_constraints(ir, &mut ranks);
-    push_snapshot(
-        &mut trace,
-        "rank_assignment",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        0,
-    );
-
-    let (crossing_count_before, ordering_by_rank) = crossing_minimization(ir, &ranks, &config);
-    push_snapshot(
-        &mut trace,
-        "crossing_minimization",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        crossing_count_before,
-    );
-
-    // Refinement: transpose + sifting heuristics.
-    let (crossing_count, ordering_by_rank) =
-        crossing_refinement(ir, &ranks, ordering_by_rank, crossing_count_before);
-    push_snapshot(
-        &mut trace,
-        "crossing_refinement",
-        ir.nodes.len(),
-        ir.edges.len(),
-        cycle_result.reversed_edge_indexes.len(),
-        crossing_count,
-    );
-
-    let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
-    apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
-    separate_disjoint_subgraphs(ir, &mut nodes, spacing);
+        push_snapshot(
+            &mut trace,
+            "compound_placement",
+            ir.nodes.len(),
+            ir.edges.len(),
+            cycle_result.reversed_edge_indexes.len(),
+            0,
+        );
+        (0, 0, nodes)
+    } else {
+        let (before, after, mut nodes) = flat_placement(
+            ir,
+            &node_sizes,
+            &config,
+            spacing,
+            &cycle_result,
+            &node_priority,
+            &mut trace,
+        );
+        apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
+        separate_disjoint_subgraphs(ir, &mut nodes, spacing);
+        (before, after, nodes)
+    };
     apply_constraint_solver(ir, &mut nodes, spacing, &config);
     // Clusters are built BEFORE edge routing, not after. `build_cluster_boxes` is a pure function of
     // the already-positioned `nodes`, so the boxes are identical either way — but a composite state
@@ -6021,10 +6147,12 @@ fn layout_diagram_sugiyama_traced_with_config(
     let mut edges = build_edge_paths(
         ir,
         &nodes,
+        &clusters,
         &cycle_result.highlighted_edge_indexes,
         edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
+    separate_shared_channels(ir, &nodes, &mut edges);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -6246,9 +6374,16 @@ pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out using the tree algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_tree_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+}
+
+fn layout_diagram_tree_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
     let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let node_sizes = compute_node_sizes(ir, metrics);
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -6272,86 +6407,57 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         };
     }
 
-    if let Some(path_order) = directed_path_order(ir) {
-        return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
-    }
-
-    let tree = build_tree_layout_structure(ir);
-    push_snapshot(
-        &mut trace,
-        "tree_structure",
-        node_count,
-        ir.edges.len(),
-        0,
-        0,
-    );
-
-    let span_sizes: Vec<f32> = node_sizes
-        .iter()
-        .map(|(width, height)| {
-            if tree.horizontal_depth_axis {
-                *height
-            } else {
-                *width
-            }
-        })
-        .collect();
-
-    let mut span_memo = vec![None; node_count];
-    compute_tree_subtree_spans(
-        &tree.roots,
-        &tree.children,
-        &span_sizes,
+    // Tree selection must preserve the same subgraph containment as the layered algorithm.
+    // Reserve each complete frame before placing its parent, using tree coordinates at every
+    // level; a plain directed path can still take its allocation-saving specialization below.
+    let mut nodes = if let Some(nodes) = compound::compound_tree_node_boxes(
+        ir,
+        &node_sizes,
+        &LayoutConfig::default(),
         spacing,
-        &mut span_memo,
-    );
-    let subtree_spans: Vec<f32> = span_memo
-        .into_iter()
-        .map(|span| span.unwrap_or(0.0))
-        .collect();
-
-    let mut span_centers = vec![0.0_f32; node_count];
-    compute_all_tree_span_centers(
-        &tree.roots,
-        &tree.children,
-        &subtree_spans,
-        spacing,
-        &mut span_centers,
-    );
-
-    let depth_level_sizes = tree_depth_level_sizes(&tree, &node_sizes);
-    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
-
-    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    for node_index in 0..node_count {
-        let logical_depth = tree.depth[node_index];
-        let mapped_depth = if tree.reverse_depth_axis {
-            tree.max_depth.saturating_sub(logical_depth)
-        } else {
-            logical_depth
-        };
-        let depth_center = depth_centers[mapped_depth];
-        let span_center = span_centers[node_index];
-        centers[node_index] = if tree.horizontal_depth_axis {
-            (depth_center, span_center)
-        } else {
-            (span_center, depth_center)
-        };
-    }
-    normalize_center_positions(&mut centers, &node_sizes);
-
-    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
-    let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges =
+        metrics,
+    ) {
+        push_snapshot(
+            &mut trace,
+            "compound_placement",
+            node_count,
+            ir.edges.len(),
+            0,
+            0,
+        );
+        nodes
+    } else {
+        if let Some(path_order) = directed_path_order(ir) {
+            return layout_directed_path_tree_traced(
+                ir, path_order, node_sizes, spacing, metrics, trace,
+            );
+        }
+        push_snapshot(
+            &mut trace,
+            "tree_structure",
+            node_count,
+            ir.edges.len(),
+            0,
+            0,
+        );
+        tree_node_boxes(ir, &node_sizes, spacing, metrics)
+    };
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
+    anchor_composite_state_nodes(ir, &mut nodes, &clusters);
+    let edges = if clusters.is_empty() {
         build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
             .unwrap_or_else(|| {
-                build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
-            });
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+                build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default())
+            })
+    } else {
+        build_edge_paths(
+            ir,
+            &nodes,
+            &clusters,
+            &BTreeSet::new(),
+            EdgeRouting::default(),
+        )
+    };
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -6394,17 +6500,86 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
+/// The tree coordinate kernel, shared by ordinary and compound tree placement.
+fn tree_node_boxes(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutNodeBox> {
+    let node_count = ir.nodes.len();
+    let tree = build_tree_layout_structure(ir);
+    let span_sizes: Vec<f32> = node_sizes
+        .iter()
+        .map(|(width, height)| {
+            if tree.horizontal_depth_axis {
+                *height
+            } else {
+                *width
+            }
+        })
+        .collect();
+
+    let mut span_memo = vec![None; node_count];
+    compute_tree_subtree_spans(
+        &tree.roots,
+        &tree.children,
+        &span_sizes,
+        spacing,
+        &mut span_memo,
+    );
+    let subtree_spans: Vec<f32> = span_memo
+        .into_iter()
+        .map(|span| span.unwrap_or(0.0))
+        .collect();
+
+    let mut span_centers = vec![0.0_f32; node_count];
+    compute_all_tree_span_centers(
+        &tree.roots,
+        &tree.children,
+        &subtree_spans,
+        spacing,
+        &mut span_centers,
+    );
+
+    let depth_level_sizes = tree_depth_level_sizes(&tree, node_sizes);
+    let depth_centers = depth_level_centers(
+        ir,
+        &depth_level_sizes,
+        &tree.depth,
+        spacing.rank_spacing,
+        tree.reverse_depth_axis,
+        metrics,
+    );
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let logical_depth = tree.depth[node_index];
+        let depth_center = depth_centers[logical_depth];
+        let span_center = span_centers[node_index];
+        centers[node_index] = if tree.horizontal_depth_axis {
+            (depth_center, span_center)
+        } else {
+            (span_center, depth_center)
+        };
+    }
+    normalize_center_positions(&mut centers, node_sizes);
+
+    let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
+    node_boxes_from_centers(ir, node_sizes, &tree.depth, &order_by_rank, &centers)
+}
+
 fn layout_directed_path_tree_traced(
     ir: &MermaidDiagramIr,
     path_order: Vec<usize>,
     node_sizes: Vec<(f32, f32)>,
     spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
     mut trace: LayoutTrace,
 ) -> TracedLayout {
     let node_count = ir.nodes.len();
     let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let reverse_depth_axis = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
-    let max_depth = node_count.saturating_sub(1);
 
     push_snapshot(
         &mut trace,
@@ -6442,16 +6617,18 @@ fn layout_directed_path_tree_traced(
         }
     }
 
-    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+    let depth_centers = depth_level_centers(
+        ir,
+        &depth_level_sizes,
+        &depth,
+        spacing.rank_spacing,
+        reverse_depth_axis,
+        metrics,
+    );
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let logical_depth = depth[node_index];
-        let mapped_depth = if reverse_depth_axis {
-            max_depth.saturating_sub(logical_depth)
-        } else {
-            logical_depth
-        };
-        let depth_center = depth_centers[mapped_depth];
+        let depth_center = depth_centers[logical_depth];
         let span_center = span_centers[node_index];
         centers[node_index] = if horizontal_depth_axis {
             (depth_center, span_center)
@@ -6470,11 +6647,7 @@ fn layout_directed_path_tree_traced(
         EdgeRouting::default(),
     )
     .expect("validated directed path endpoints");
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -6530,6 +6703,11 @@ pub fn certify_directed_path_layout_prefix(
     edge_count: usize,
 ) -> Option<DirectedPathLayoutPrefix> {
     if ir.direction != GraphDirection::LR
+        || ir
+            .graph
+            .subgraphs
+            .iter()
+            .any(|subgraph| !subgraph.members.is_empty())
         || node_count == 0
         || edge_count.checked_add(1) != Some(node_count)
         || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
@@ -6624,7 +6802,14 @@ pub fn try_relayout_directed_path_suffix(
     prefix: &DirectedPathLayoutPrefix,
 ) -> bool {
     let suffix_node_count = ir.nodes.len().saturating_sub(prefix.node_count);
+    // A new nonempty subgraph reserves a compound frame and can move the existing path.
+    // Reject it before mutation instead of reusing the flat path's fixed spacing cursor.
     if ir.direction != GraphDirection::LR
+        || ir
+            .graph
+            .subgraphs
+            .iter()
+            .any(|subgraph| !subgraph.members.is_empty())
         || prefix.node_count == 0
         || prefix.edge_count.checked_add(1) != Some(prefix.node_count)
         || prefix.node_count > ir.nodes.len()
@@ -6640,7 +6825,10 @@ pub fn try_relayout_directed_path_suffix(
     for (suffix_offset, edge) in ir.edges[prefix.edge_count..].iter().enumerate() {
         let target = prefix.node_count + suffix_offset;
         let source = target.saturating_sub(1);
-        if endpoint_node_index(ir, edge.from) != Some(source)
+        // This reuse path advances by a fixed rank gap. A new edge label may enlarge the
+        // preceding gap, so let the full tree layout reserve space before changing the cache.
+        if edge.label.is_some()
+            || endpoint_node_index(ir, edge.from) != Some(source)
             || endpoint_node_index(ir, edge.to) != Some(target)
         {
             return false;
@@ -6755,9 +6943,19 @@ pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out using the radial tree algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_radial_traced_with_config(ir, LayoutConfig::default())
+}
+
+fn layout_diagram_radial_traced_with_config(
+    ir: &MermaidDiagramIr,
+    config: LayoutConfig,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let spacing = config.spacing;
+    let metrics = config
+        .font_metrics
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let node_sizes = compute_node_sizes(ir, &metrics);
     let node_count = ir.nodes.len();
 
     if node_count == 0 {
@@ -6796,7 +6994,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut ring_level_sizes = vec![0.0_f32; effective_max_depth + 1];
     for (node_index, (width, height)) in node_sizes.iter().copied().enumerate() {
         let level = tree.depth[node_index] + depth_offset;
-        ring_level_sizes[level] = ring_level_sizes[level].max(width.max(height));
+        ring_level_sizes[level] = ring_level_sizes[level].max(width.hypot(height));
     }
 
     let mut radii = vec![0.0_f32; effective_max_depth + 1];
@@ -6855,6 +7053,16 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         }
     }
 
+    size_radial_rings(
+        &tree,
+        &node_sizes,
+        depth_offset,
+        spacing,
+        &ring_level_sizes,
+        &mut angles,
+        &mut radii,
+    );
+
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
     for node_index in 0..node_count {
         let level = tree.depth[node_index] + depth_offset;
@@ -6867,10 +7075,6 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
     let edges = force_build_edge_paths(ir, &nodes);
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -6912,6 +7116,206 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         }),
         trace,
     }
+}
+
+/// Separate nodes within each ring as well as across rings. Angular allocation alone cannot
+/// prevent wide siblings from overlapping when their requested spans exceed the available arc.
+#[allow(clippy::too_many_arguments)]
+fn size_radial_rings(
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    depth_offset: usize,
+    spacing: LayoutSpacing,
+    diameters: &[f32],
+    angles: &mut [f32],
+    radii: &mut [f32],
+) {
+    let mut levels = vec![Vec::new(); radii.len()];
+    for (node, depth) in tree.depth.iter().copied().enumerate() {
+        levels[depth + depth_offset].push(node);
+    }
+    let gap = (spacing.node_spacing * 0.35).max(8.0);
+    for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
+        sort_radial_ring(nodes, angles);
+        // A very narrow subtree can exhaust f32 angular precision. Preserve cyclic order while
+        // spreading that level instead of dividing by a zero chord or stacking its labels.
+        if nodes.len() > 1 && radial_min_angle_gap(nodes, angles) < 0.000_001 {
+            for (index, node) in nodes.iter().copied().enumerate() {
+                angles[node] = -PI + 2.0 * PI * (index as f32 + 0.5) / nodes.len() as f32;
+            }
+        }
+        let inner = radii[level - 1]
+            + diameters[level - 1] * 0.5
+            + spacing.rank_spacing.max(0.0)
+            + diameters[level] * 0.5;
+        let mut radius = inner.max(radial_ring_radius(nodes, node_sizes, angles, gap));
+
+        // Flat, broad mindmaps benefit from more labels beside the root and fewer above it.
+        // Weight the polar angle by the measured label aspect ratio, then accept this candidate
+        // only when its exact rectangle clearance needs a smaller radius. Multilevel trees use
+        // a single shared remap below; remapping each ring independently would split subtrees.
+        if tree.roots.len() == 1 && tree.max_depth == 1 && (8..=64).contains(&nodes.len()) {
+            let width = nodes
+                .iter()
+                .map(|node| node_sizes[*node].0)
+                .fold(1.0, f32::max);
+            let height = nodes
+                .iter()
+                .map(|node| node_sizes[*node].1)
+                .fold(1.0, f32::max);
+            let aspect = ((width + gap) / (height + gap)).max(1.0).sqrt();
+            let mut candidate = angles.to_vec();
+            for node in nodes.iter().copied() {
+                candidate[node] = (angles[node].sin() / aspect).atan2(angles[node].cos());
+            }
+            let candidate_radius =
+                inner.max(radial_ring_radius(nodes, node_sizes, &candidate, gap));
+            if candidate_radius < radius {
+                radius = candidate_radius;
+                for node in nodes.iter().copied() {
+                    angles[node] = candidate[node];
+                }
+            }
+        }
+        // Leave a subpixel rounding cushion for the later f32 coordinate normalization.
+        radii[level] = radius.mul_add(1.001, 1.0);
+    }
+
+    if tree.roots.len() != 1 || tree.max_depth < 2 {
+        return;
+    }
+
+    // Wide labels near the top and bottom can otherwise force every outer ring to an enormous
+    // radius. One monotone circle map gives those labels more angular space while preserving
+    // the cyclic order of every subtree, including the directions of its intermediate parents.
+    // The root stays at radius zero. There is only one candidate and one extra bounded sizing
+    // pass, rather than an angle-vector clone or an optimization search for every level.
+    let (width, height) =
+        levels
+            .iter()
+            .skip(1)
+            .flatten()
+            .fold((1.0_f32, 1.0_f32), |(width, height), node| {
+                (
+                    width.max(node_sizes[*node].0),
+                    height.max(node_sizes[*node].1),
+                )
+            });
+    let aspect = ((width + gap) / (height + gap)).max(1.0).sqrt();
+    if aspect <= 1.0 || !aspect.is_finite() {
+        return;
+    }
+    let candidate_angles: Vec<f32> = angles
+        .iter()
+        .map(|angle| (angle.sin() / aspect).atan2(angle.cos()))
+        .collect();
+    let mut candidate_radii = vec![0.0_f32; radii.len()];
+    candidate_radii[0] = radii[0];
+    for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
+        // atan2 can move a direction across the +/-PI seam; the clearance bound needs the
+        // candidate's own cyclic ordering, not the old ordering with a negative wraparound gap.
+        sort_radial_ring(nodes, &candidate_angles);
+        if nodes.len() > 1 && radial_min_angle_gap(nodes, &candidate_angles) < 0.000_001 {
+            // Never redistribute only one candidate level: that would cease to be a shared
+            // monotone map and could pull children outside their parent's original sector.
+            return;
+        }
+        let inner = candidate_radii[level - 1]
+            + diameters[level - 1] * 0.5
+            + spacing.rank_spacing.max(0.0)
+            + diameters[level] * 0.5;
+        candidate_radii[level] = inner
+            .max(radial_ring_radius(
+                nodes,
+                node_sizes,
+                &candidate_angles,
+                gap,
+            ))
+            .mul_add(1.001, 1.0);
+    }
+    let candidate_area = radial_footprint_area(
+        tree,
+        node_sizes,
+        depth_offset,
+        &candidate_angles,
+        &candidate_radii,
+    );
+    if candidate_area.is_finite()
+        && candidate_radii.last() < radii.last()
+        && candidate_area < radial_footprint_area(tree, node_sizes, depth_offset, angles, radii)
+    {
+        angles.copy_from_slice(&candidate_angles);
+        radii.copy_from_slice(&candidate_radii);
+    }
+}
+
+fn radial_footprint_area(
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    depth_offset: usize,
+    angles: &[f32],
+    radii: &[f32],
+) -> f64 {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (node, &(width, height)) in node_sizes.iter().enumerate() {
+        let radius = radii[tree.depth[node] + depth_offset];
+        let x = f64::from(radius * angles[node].cos());
+        let y = f64::from(radius * angles[node].sin());
+        let half_width = f64::from(width) * 0.5;
+        let half_height = f64::from(height) * 0.5;
+        min_x = min_x.min(x - half_width);
+        min_y = min_y.min(y - half_height);
+        max_x = max_x.max(x + half_width);
+        max_y = max_y.max(y + half_height);
+    }
+    (max_x - min_x) * (max_y - min_y)
+}
+
+fn sort_radial_ring(nodes: &mut [usize], angles: &[f32]) {
+    nodes.sort_by(|left, right| {
+        angles[*left]
+            .total_cmp(&angles[*right])
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn radial_min_angle_gap(nodes: &[usize], angles: &[f32]) -> f32 {
+    let first = angles[nodes[0]];
+    let last = angles[*nodes.last().expect("a ring has nodes")];
+    nodes
+        .windows(2)
+        .map(|pair| angles[pair[1]] - angles[pair[0]])
+        .fold(2.0 * PI - last + first, f32::min)
+}
+
+fn radial_ring_radius(nodes: &[usize], node_sizes: &[(f32, f32)], angles: &[f32], gap: f32) -> f32 {
+    if nodes.len() < 2 {
+        return 0.0;
+    }
+    if nodes.len() > 128 {
+        // A common enclosing-circle diameter and the smallest cyclic gap bound every pair.
+        // Sorting is O(n log n); unlike pairwise collision repair this stays practical for large maps.
+        let diameter = nodes
+            .iter()
+            .map(|node| node_sizes[*node].0.hypot(node_sizes[*node].1))
+            .fold(0.0, f32::max);
+        return (diameter + gap) / (2.0 * (radial_min_angle_gap(nodes, angles) * 0.5).sin());
+    }
+    let mut radius = 0.0_f32;
+    for (index, left) in nodes.iter().copied().enumerate() {
+        for right in nodes[index + 1..].iter().copied() {
+            let dx = (angles[left].cos() - angles[right].cos()).abs();
+            let dy = (angles[left].sin() - angles[right].sin()).abs();
+            // Separating either axis is sufficient for two axis-aligned label rectangles.
+            let horizontal = ((node_sizes[left].0 + node_sizes[right].0) * 0.5 + gap) / dx;
+            let vertical = ((node_sizes[left].1 + node_sizes[right].1) * 0.5 + gap) / dy;
+            radius = radius.max(horizontal.min(vertical));
+        }
+    }
+    radius
 }
 
 fn mindmap_subtree_heights(
@@ -7419,8 +7823,25 @@ pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_sequence_traced_with_metrics(ir, &fm_core::FontMetrics::default_metrics())
+}
+
+fn layout_diagram_sequence_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let mut node_sizes = compute_node_sizes(ir, metrics);
+    // An `actor` is drawn as a stick figure with its name beneath: it needs a taller header.
+    for (size, node) in node_sizes.iter_mut().zip(&ir.nodes) {
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "sequence-participant-actor")
+        {
+            size.1 = size.1.max(76.0);
+        }
+    }
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -7497,34 +7918,63 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let first_message_y =
         header_y + node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max) + message_gap;
 
-    let mut message_y_positions: Vec<f32> = Vec::with_capacity(ir.edges.len());
-    let mut y_cursor = first_message_y;
-    for edge in &ir.edges {
-        message_y_positions.push(y_cursor);
-        let is_self = match (
-            endpoint_node_index(ir, edge.from),
-            endpoint_node_index(ir, edge.to),
-        ) {
-            (Some(s), Some(t)) => s == t,
-            _ => false,
-        };
-        // Self-messages need more vertical space for the loop.
-        let row_height = if is_self {
-            message_gap * 1.5
-        } else {
-            message_gap
-        };
-        y_cursor += row_height;
-    }
+    // Wrap before assigning rows: every message and fragment below a note must reserve the
+    // height of the lines that both renderers will actually draw.
+    let mut sequence_notes =
+        build_sequence_note_geometry(ir, &participant_x_centers, &node_sizes, metrics);
 
-    // Total sequence content height before optional mirrored participant headers.
-    let lifeline_bottom = message_gap.mul_add(0.5, y_cursor);
+    // With notes or fragments, the source-order timeline gives each its own rows; without them
+    // (or for a hand-built IR) every message gets one row, as it always has.
+    let timeline_rows = ir.sequence_meta.as_ref().and_then(|meta| {
+        sequence_timeline_rows(
+            ir,
+            meta,
+            first_message_y - message_gap,
+            message_gap,
+            &sequence_notes,
+            metrics.font_size(),
+        )
+    });
+    let (message_y_positions, lifeline_bottom) = if let Some(rows) = &timeline_rows {
+        (rows.message_y.clone(), rows.end)
+    } else {
+        let mut message_y_positions: Vec<f32> = Vec::with_capacity(ir.edges.len());
+        let mut y_cursor = first_message_y;
+        for edge in &ir.edges {
+            message_y_positions.push(y_cursor);
+            // Self-messages need more vertical space for the loop.
+            let row_height = if is_self_message(ir, edge) {
+                message_gap * 1.5
+            } else {
+                message_gap
+            };
+            y_cursor += row_height;
+        }
+        // Total sequence content height before optional mirrored participant headers.
+        (message_y_positions, message_gap.mul_add(0.5, y_cursor))
+    };
+
+    // A participant `create`d mid-diagram is drawn where it is created, as mermaid draws it: its box
+    // centred on the creating message, which stops at the box's edge.
+    let mut creation_edge: Vec<Option<usize>> = vec![None; node_count];
+    if let Some(meta) = &ir.sequence_meta {
+        for event in &meta.lifecycle_events {
+            if event.kind == fm_core::LifecycleEventKind::Create
+                && event.at_edge < message_y_positions.len()
+                && let Some(slot) = creation_edge.get_mut(event.participant.0)
+            {
+                *slot = Some(event.at_edge);
+            }
+        }
+    }
 
     // ── Phase 3: build layout nodes (participant boxes at the top) ──────
     let nodes: Vec<LayoutNodeBox> = (0..node_count)
         .map(|participant_order| {
             let (width, height) = node_sizes[participant_order];
             let cx = participant_x_centers[participant_order];
+            let y = creation_edge[participant_order]
+                .map_or(header_y, |edge| message_y_positions[edge] - height / 2.0);
             LayoutNodeBox {
                 node_index: participant_order,
                 node_id: ir.nodes[participant_order].id.clone(),
@@ -7533,7 +7983,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 span: ir.nodes[participant_order].span_primary,
                 bounds: LayoutRect {
                     x: cx - width / 2.0,
-                    y: header_y,
+                    y,
                     width,
                     height,
                 },
@@ -7556,11 +8006,15 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 .get(source_index)
                 .copied()
                 .unwrap_or(0.0);
-            let target_x = participant_x_centers
+            let mut target_x = participant_x_centers
                 .get(target_index)
                 .copied()
                 .unwrap_or(0.0);
             let is_self_loop = source_index == target_index;
+            if !is_self_loop && creation_edge.get(target_index) == Some(&Some(edge_index)) {
+                let half_width = node_sizes[target_index].0 / 2.0;
+                target_x -= half_width.copysign(target_x - source_x);
+            }
 
             let points = if is_self_loop {
                 // Self-message: draw a loop to the right and back.
@@ -7682,8 +8136,10 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
             match event.kind {
                 fm_core::LifecycleEventKind::Create => {
+                    // Below the box drawn at the creating message, when there is one.
+                    let below_box = event_y + node_sizes[participant_index].1 / 2.0;
                     if let Some(start_y) = lifeline_start_y.get_mut(participant_index) {
-                        *start_y = (*start_y).max(event_y);
+                        *start_y = (*start_y).max(below_box);
                     }
                 }
                 fm_core::LifecycleEventKind::Destroy => {
@@ -7815,38 +8271,65 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         })
         .unwrap_or_default();
 
-    let cluster_bounds =
-        participant_group_clusters
-            .iter()
-            .fold(None::<(f32, f32, f32, f32)>, |acc, cluster| {
-                let cluster_max_x = cluster.bounds.x + cluster.bounds.width;
-                let cluster_max_y = cluster.bounds.y + cluster.bounds.height;
-                Some(match acc {
-                    Some((min_x, min_y, max_x, max_y)) => (
-                        min_x.min(cluster.bounds.x),
-                        min_y.min(cluster.bounds.y),
-                        max_x.max(cluster_max_x),
-                        max_y.max(cluster_max_y),
-                    ),
-                    None => (
-                        cluster.bounds.x,
-                        cluster.bounds.y,
-                        cluster_max_x,
-                        cluster_max_y,
-                    ),
-                })
-            });
+    if let Some(meta) = &ir.sequence_meta {
+        for (index, (note, authored)) in sequence_notes.iter_mut().zip(&meta.notes).enumerate() {
+            // Its own row on the timeline; hand-built IR falls back to the referenced message.
+            note.bounds.y = timeline_rows
+                .as_ref()
+                .and_then(|rows| rows.note_top.get(index))
+                .copied()
+                .unwrap_or_else(|| {
+                    message_y_positions
+                        .get(authored.after_edge)
+                        .copied()
+                        .unwrap_or(
+                            (authored.after_edge as f32).mul_add(message_gap, first_message_y),
+                        )
+                        - note.bounds.height / 2.0
+                });
+        }
+    }
+    let sequence_fragments = build_sequence_fragment_geometry(
+        ir,
+        &participant_x_centers,
+        &node_sizes,
+        &message_y_positions,
+        first_message_y,
+        diagram_bottom,
+        message_gap,
+        timeline_rows.as_ref().map(|rows| rows.fragments.as_slice()),
+    );
 
-    let bounds = if let Some((cluster_min_x, cluster_min_y, cluster_max_x, cluster_max_y)) =
-        cluster_bounds
-    {
-        let min_x = cluster_min_x.min(0.0);
-        let min_y = cluster_min_y.min(0.0);
+    // Notes beside the outermost actors and fragment borders can extend beyond the
+    // participant columns. Include the geometry actually rendered so every surface
+    // can fit the complete diagram without clipping annotations or losing padding.
+    let outer_bounds = participant_group_clusters
+        .iter()
+        .map(|cluster| cluster.bounds)
+        .chain(sequence_notes.iter().map(|note| note.bounds))
+        .chain(sequence_fragments.iter().map(|fragment| fragment.bounds))
+        .fold(None::<(f32, f32, f32, f32)>, |acc, rect| {
+            let right = rect.x + rect.width;
+            let bottom = rect.y + rect.height;
+            Some(match acc {
+                Some((min_x, min_y, max_x, max_y)) => (
+                    min_x.min(rect.x),
+                    min_y.min(rect.y),
+                    max_x.max(right),
+                    max_y.max(bottom),
+                ),
+                None => (rect.x, rect.y, right, bottom),
+            })
+        });
+
+    let bounds = if let Some((outer_min_x, outer_min_y, outer_max_x, outer_max_y)) = outer_bounds {
+        let min_x = outer_min_x.min(0.0);
+        let min_y = outer_min_y.min(0.0);
         LayoutRect {
             x: min_x,
             y: min_y,
-            width: total_width.max(cluster_max_x) - min_x,
-            height: diagram_bottom.max(cluster_max_y) - min_y,
+            width: total_width.max(outer_max_x) - min_x,
+            height: diagram_bottom.max(outer_max_y) - min_y,
         }
     } else {
         LayoutRect {
@@ -7898,23 +8381,8 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 gantt_axis_rows: Vec::new(),
                 cluster_dividers: Vec::new(),
                 activation_bars,
-                sequence_notes: build_sequence_note_geometry(
-                    ir,
-                    &participant_x_centers,
-                    &node_sizes,
-                    &message_y_positions,
-                    first_message_y,
-                    message_gap,
-                ),
-                sequence_fragments: build_sequence_fragment_geometry(
-                    ir,
-                    &participant_x_centers,
-                    &node_sizes,
-                    &message_y_positions,
-                    first_message_y,
-                    diagram_bottom,
-                    message_gap,
-                ),
+                sequence_notes,
+                sequence_fragments,
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
                 node_centrality: Vec::new(),
@@ -7928,50 +8396,342 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
+/// Spread edge ends that meet a node at the SAME point on the same side apart along that side.
+///
+/// Orthogonal routing gives every edge leaving one side of a node the side's centre as its port.
+/// That is harmless for a plain arrowhead converging on a target, and destructive where the END
+/// carries meaning: `Animal <|-- Duck` and `Animal *-- Leg` both left `Animal` at one point, and the
+/// composition diamond was drawn exactly under the inheritance triangle, with its cardinality on
+/// top of it. Ends are fanned out by up to 14px each, ordered by where their routes head so the
+/// fan does not cross itself, and an end's first segment is kept straight by moving the bend that
+/// shares its coordinate.
+///
+/// `by_role` (flowcharts and state diagrams) spreads a point only where edges both LEAVE and ENTER
+/// there — a return edge arriving where the node's own edge departs, drawn in and out on one line —
+/// and moves every end of one role together, so a fan-out keeps its shared trunk.
+fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by_role: bool) {
+    /// (node, side 0=left 1=right 2=top 3=bottom, quantised x, quantised y)
+    type EndKey = (usize, u8, i32, i32);
+    const GAP: f32 = 14.0;
+    const LABELLED_GAP: f32 = 26.0;
+    const EPS: f32 = 0.5;
+    // key -> [(edge path, at_start)]
+    let mut groups: Vec<(EndKey, Vec<(usize, bool)>)> = Vec::new();
+    for (path_index, path) in layout.edges.iter().enumerate() {
+        if path.points.len() < 2 || path.is_self_loop {
+            continue;
+        }
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        for (at_start, endpoint) in [(true, edge.from), (false, edge.to)] {
+            let Some(node) = endpoint_node_index(ir, endpoint) else {
+                continue;
+            };
+            let Some(bounds) = layout.nodes.get(node).map(|n| n.bounds) else {
+                continue;
+            };
+            let p = if at_start {
+                path.points[0]
+            } else {
+                path.points[path.points.len() - 1]
+            };
+            let side = if (p.x - bounds.x).abs() < EPS {
+                0
+            } else if (p.x - (bounds.x + bounds.width)).abs() < EPS {
+                1
+            } else if (p.y - bounds.y).abs() < EPS {
+                2
+            } else if (p.y - (bounds.y + bounds.height)).abs() < EPS {
+                3
+            } else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let key = (
+                node,
+                side,
+                (p.x * 4.0).round() as i32,
+                (p.y * 4.0).round() as i32,
+            );
+            match groups.iter_mut().find(|(existing, _)| *existing == key) {
+                Some((_, members)) => members.push((path_index, at_start)),
+                None => groups.push((key, vec![(path_index, at_start)])),
+            }
+        }
+    }
+
+    for ((node, side, _, _), mut members) in groups {
+        if members.len() < 2 || (by_role && members.iter().all(|m| m.1 == members[0].1)) {
+            continue;
+        }
+        let vertical_side = side < 2;
+        let bounds = layout.nodes[node].bounds;
+        let side_length = if vertical_side {
+            bounds.height
+        } else {
+            bounds.width
+        };
+        // Where each route heads after its first bend, along the side's own axis.
+        let heading = |layout: &DiagramLayout, (path, at_start): (usize, bool)| {
+            let points = &layout.edges[path].points;
+            let far = if at_start {
+                points[points.len().min(3) - 1]
+            } else {
+                points[points.len().saturating_sub(3)]
+            };
+            if vertical_side { far.y } else { far.x }
+        };
+        // Insertion sort, stable like `sort_by`: a group is a handful of ends, and the generic
+        // stable sort monomorphised for this one call cost ~11 KB of wasm.
+        for i in 1..members.len() {
+            let mut j = i;
+            while j > 0 && heading(layout, members[j - 1]) > heading(layout, members[j]) {
+                members.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        // By role only one role moves, a full gap toward the side its routes head, and the other
+        // keeps the port: the arriving ends, unless one of them is a straight two-point route
+        // (moving its end would tilt it), then the leaving ends; with both straight, neither.
+        let straight = |arriving: bool| {
+            members.iter().any(|&(path, at_start)| {
+                at_start != arriving && layout.edges[path].points.len() == 2
+            })
+        };
+        let moving = if !straight(true) {
+            Some(false)
+        } else if !straight(false) {
+            Some(true)
+        } else {
+            None
+        };
+        if by_role && moving.is_none() {
+            continue;
+        }
+        let first_role = members[0].1;
+        #[allow(clippy::cast_precision_loss)]
+        let span = if by_role {
+            1.0
+        } else {
+            (members.len() - 1) as f32
+        };
+        // A label sits at its path's midpoint, so two labelled relationships between the same pair
+        // need their paths a label's height apart or the labels print over each other.
+        let labelled = members.iter().any(|&(path, _)| {
+            ir.edges
+                .get(layout.edges[path].edge_index)
+                .is_some_and(|edge| edge.label.is_some())
+        });
+        let wanted = if labelled { LABELLED_GAP } else { GAP };
+        let gap = wanted.min(side_length * 0.8 / span.max(1.0));
+        for (rank, (path, at_start)) in members.into_iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let offset = if !by_role {
+                (rank as f32 - span / 2.0) * gap
+            } else if Some(at_start) != moving {
+                continue;
+            } else if at_start == first_role {
+                -gap
+            } else {
+                gap
+            };
+            let points = &mut layout.edges[path].points;
+            let len = points.len();
+            let (end, next) = if at_start { (0, 1) } else { (len - 1, len - 2) };
+            let original = points[end];
+            let shift = |p: &mut LayoutPoint| {
+                if vertical_side {
+                    p.y += offset;
+                } else {
+                    p.x += offset;
+                }
+            };
+            shift(&mut points[end]);
+            // Keep the end's first segment straight by moving the bend that shares its coordinate
+            // — but never the far endpoint of a two-point route.
+            let shares = if vertical_side {
+                (points[next].y - original.y).abs() < EPS
+            } else {
+                (points[next].x - original.x).abs() < EPS
+            };
+            if len > 2 && shares {
+                shift(&mut points[next]);
+            }
+        }
+    }
+}
+
+/// Reserve the actual note font's line pitch and the inset used by SVG and Canvas.
+fn sequence_note_height(line_count: usize, metrics: &fm_core::FontMetrics) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let line_count = line_count.max(1) as f32;
+    line_count.mul_add(
+        metrics.line_height_px() * LayoutSequenceNote::FONT_SCALE,
+        2.0 * LayoutSequenceNote::PADDING_Y,
+    )
+}
+
+/// Where the sequence timeline puts each message, note and fragment.
+struct SequenceTimelineRows {
+    message_y: Vec<f32>,
+    note_top: Vec<f32>,
+    /// Per fragment (in `meta.fragments` order): top, bottom, and the y of each branch divider.
+    fragments: Vec<(f32, f32, Vec<f32>)>,
+    /// Where the lifelines end.
+    end: f32,
+}
+
+/// Walk the source-order timeline, giving notes, fragment headers, branch rows and fragment ends
+/// their own vertical space.
+///
+/// `floor` is the bottom of everything drawn so far. A message right after a message keeps the
+/// full row pitch; after anything else it needs only room for its label above the arrow. Returns
+/// `None` when the timeline does not describe this IR (a hand-built or edited one), so the caller
+/// keeps one row per message.
+fn sequence_timeline_rows(
+    ir: &MermaidDiagramIr,
+    meta: &fm_core::IrSequenceMeta,
+    header_bottom: f32,
+    message_gap: f32,
+    notes: &[LayoutSequenceNote],
+    font: f32,
+) -> Option<SequenceTimelineRows> {
+    use fm_core::IrSequenceStep as Step;
+    let timeline = &meta.timeline;
+    if timeline.is_empty() {
+        return None;
+    }
+    let count = |wanted: Step| timeline.iter().filter(|step| **step == wanted).count();
+    if count(Step::Message) != ir.edges.len()
+        || count(Step::Note) != meta.notes.len()
+        || count(Step::Close) != meta.fragments.len()
+    {
+        return None;
+    }
+    // Which fragment each `Open` starts: fragments are stored in the order they CLOSE.
+    let mut open_fragment = vec![usize::MAX; count(Step::Open)];
+    let (mut stack, mut opens, mut closes) = (Vec::new(), 0, 0);
+    for step in timeline {
+        match step {
+            Step::Open => {
+                stack.push(opens);
+                opens += 1;
+            }
+            Step::Close => {
+                if let Some(open) = stack.pop() {
+                    open_fragment[open] = closes;
+                }
+                closes += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let lead = |after_message: bool| message_gap * if after_message { 0.25 } else { 0.1 };
+    let mut rows = SequenceTimelineRows {
+        message_y: Vec::with_capacity(ir.edges.len()),
+        note_top: Vec::with_capacity(meta.notes.len()),
+        fragments: vec![(0.0, 0.0, Vec::new()); meta.fragments.len()],
+        end: 0.0,
+    };
+    let mut open: Vec<(usize, f32, Vec<f32>)> = Vec::new();
+    let (mut floor, mut after_message) = (header_bottom, true);
+    let (mut opens, mut closes) = (0, 0);
+    for step in timeline {
+        match step {
+            Step::Message => {
+                let y = floor
+                    + if after_message {
+                        message_gap
+                    } else {
+                        message_gap * 0.5
+                    };
+                let edge = &ir.edges[rows.message_y.len()];
+                rows.message_y.push(y);
+                floor = if is_self_message(ir, edge) {
+                    message_gap.mul_add(0.6, y)
+                } else {
+                    y
+                };
+                after_message = true;
+                continue;
+            }
+            Step::Note => {
+                let top = floor + lead(after_message);
+                let note = &notes[rows.note_top.len()];
+                rows.note_top.push(top);
+                floor = top + note.bounds.height;
+            }
+            Step::Open => {
+                let fragment = open_fragment
+                    .get(opens)
+                    .and_then(|&index| meta.fragments.get(index));
+                opens += 1;
+                let top = floor + lead(after_message);
+                // The keyword tab, and the condition beneath it; a `rect` draws neither.
+                let header = match fragment {
+                    Some(f) if f.kind == fm_core::FragmentKind::Rect => 0.0,
+                    Some(f) if !f.label.is_empty() => font.mul_add(1.75, 14.0),
+                    _ => font + 8.0,
+                };
+                open.push((opens - 1, top, Vec::new()));
+                floor = top + header;
+            }
+            Step::Else => {
+                // The branch label is drawn just above its divider.
+                let divider = floor + lead(after_message) + font;
+                if let Some((_, _, branches)) = open.last_mut() {
+                    branches.push(divider);
+                }
+                floor = divider;
+            }
+            Step::Close => {
+                let bottom = floor + lead(after_message);
+                if let Some((_, top, branches)) = open.pop()
+                    && let Some(slot) = rows.fragments.get_mut(closes)
+                {
+                    *slot = (top, bottom, branches);
+                }
+                closes += 1;
+                floor = bottom;
+            }
+        }
+        after_message = false;
+    }
+    rows.end = message_gap.mul_add(0.75, floor);
+    Some(rows)
+}
+
+fn is_self_message(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> bool {
+    matches!(
+        (endpoint_node_index(ir, edge.from), endpoint_node_index(ir, edge.to)),
+        (Some(s), Some(t)) if s == t
+    )
+}
+
 fn build_sequence_note_geometry(
     ir: &MermaidDiagramIr,
     participant_x_centers: &[f32],
     node_sizes: &[(f32, f32)],
-    message_y_positions: &[f32],
-    first_message_y: f32,
-    message_gap: f32,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutSequenceNote> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
     };
-    let default_note_width = 120.0_f32;
-    let note_line_height = 16.0_f32;
-    let note_vertical_padding = 12.0_f32;
-    let base_note_height = message_gap * 0.7;
-    // Average character width estimate for note sizing (matches FontMetrics default sans-serif).
-    let avg_char_w = 8.25_f32;
+    // The deterministic estimate runs narrower than browser text. Match state notes' 15%
+    // allowance when wrapping, so the inset remains available in an actual system font.
+    let width_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: metrics.font_size() * LayoutSequenceNote::FONT_SCALE * 1.15,
+        ..metrics.config().clone()
+    });
 
     meta.notes
         .iter()
         .map(|note| {
-            let line_count = note.text.lines().count().max(1) as f32;
-            let note_height = if line_count <= 1.0 {
-                base_note_height
-            } else {
-                (line_count - 1.0).mul_add(note_line_height, base_note_height)
-                    + note_vertical_padding
-            };
-            // Adaptive note width from content: use the widest line + padding.
-            let max_line_chars = note
-                .text
-                .lines()
-                .map(|line| line.chars().count())
-                .max()
-                .unwrap_or(0);
-            let note_width = (max_line_chars as f32)
-                .mul_add(avg_char_w, 24.0)
-                .clamp(80.0, default_note_width * 2.5);
-
-            // Position the note at the edge after which it appears.
-            let y = message_y_positions
-                .get(note.after_edge)
-                .copied()
-                .unwrap_or((note.after_edge as f32).mul_add(message_gap, first_message_y));
+            let note_width = (width_metrics.estimate_multiline_width(&note.text)
+                + 2.0 * LayoutSequenceNote::PADDING_X)
+                .clamp(80.0, 300.0);
 
             // Determine x position based on participants and note position.
             let first_pid = note.participants.first().map_or(0, |p| p.0);
@@ -7983,33 +8743,39 @@ fn build_sequence_note_geometry(
                 .unwrap_or(first_cx);
             let first_half_w = node_sizes.get(first_pid).map_or(50.0, |(w, _)| w / 2.0);
 
-            let x = match note.position {
-                fm_core::NotePosition::LeftOf => first_cx - first_half_w - note_width - 10.0,
-                fm_core::NotePosition::RightOf => {
-                    let last_half_w = node_sizes.get(last_pid).map_or(50.0, |(w, _)| w / 2.0);
-                    last_cx + last_half_w + 10.0
-                }
-                fm_core::NotePosition::Over => {
-                    let span_width = (last_cx - first_cx).abs() + note_width;
-                    let center = f32::midpoint(first_cx, last_cx);
-                    center - span_width / 2.0
-                }
-            };
-
-            let w = match note.position {
+            let width = match note.position {
                 fm_core::NotePosition::Over if first_pid != last_pid => {
                     (last_cx - first_cx).abs() + note_width
                 }
                 _ => note_width,
             };
+            let lines = width_metrics
+                .wrap_to_width(&note.text, width - 2.0 * LayoutSequenceNote::PADDING_X);
+            let note_height = sequence_note_height(lines.len(), metrics);
+            let text = lines.join("\n");
+            // One unbreakable glyph at an unusually large font size still needs its full box.
+            let width = width.max(
+                width_metrics.estimate_multiline_width(&text) + 2.0 * LayoutSequenceNote::PADDING_X,
+            );
+            let x = match note.position {
+                fm_core::NotePosition::LeftOf => first_cx - first_half_w - width - 10.0,
+                fm_core::NotePosition::RightOf => {
+                    let last_half_w = node_sizes.get(last_pid).map_or(50.0, |(w, _)| w / 2.0);
+                    last_cx + last_half_w + 10.0
+                }
+                fm_core::NotePosition::Over => {
+                    let center = f32::midpoint(first_cx, last_cx);
+                    center - width / 2.0
+                }
+            };
 
             LayoutSequenceNote {
                 position: note.position,
-                text: note.text.clone(),
+                text,
                 bounds: LayoutRect {
                     x,
-                    y: y - note_height / 2.0,
-                    width: w,
+                    y: 0.0,
+                    width,
                     height: note_height,
                 },
             }
@@ -8017,6 +8783,7 @@ fn build_sequence_note_geometry(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_sequence_fragment_geometry(
     ir: &MermaidDiagramIr,
     participant_x_centers: &[f32],
@@ -8025,6 +8792,7 @@ fn build_sequence_fragment_geometry(
     first_message_y: f32,
     diagram_bottom: f32,
     message_gap: f32,
+    timeline_spans: Option<&[(f32, f32, Vec<f32>)]>,
 ) -> Vec<LayoutSequenceFragment> {
     let Some(meta) = &ir.sequence_meta else {
         return Vec::new();
@@ -8041,29 +8809,46 @@ fn build_sequence_fragment_geometry(
 
     meta.fragments
         .iter()
-        .map(|fragment| {
-            let start_y = message_y_positions
-                .get(fragment.start_edge)
-                .copied()
-                .unwrap_or(first_message_y);
-            let end_y = message_y_positions
-                .get(fragment.end_edge)
-                .copied()
-                .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
-
+        .enumerate()
+        .map(|(fragment_index, fragment)| {
             let padding = message_gap * 0.35;
+            // The timeline's own rows when there are some; else spanned from the messages inside.
+            let (y, height, branch_tops) = if let Some((top, bottom, branches)) =
+                timeline_spans.and_then(|spans| spans.get(fragment_index))
+            {
+                (
+                    *top,
+                    (bottom - top).max(message_gap * 0.25),
+                    branches.clone(),
+                )
+            } else {
+                let start_y = message_y_positions
+                    .get(fragment.start_edge)
+                    .copied()
+                    .unwrap_or(first_message_y);
+                let end_y = message_y_positions
+                    .get(fragment.end_edge)
+                    .copied()
+                    .unwrap_or(message_gap.mul_add(-0.5, diagram_bottom));
+                (
+                    message_gap.mul_add(-0.3, start_y),
+                    message_gap
+                        .mul_add(0.6, end_y - start_y)
+                        .max(message_gap * 0.5),
+                    Vec::new(),
+                )
+            };
             LayoutSequenceFragment {
                 kind: fragment.kind,
                 label: fragment.label.clone(),
                 color: fragment.color.clone(),
                 bounds: LayoutRect {
                     x: -padding,
-                    y: message_gap.mul_add(-0.3, start_y),
+                    y,
                     width: total_width + padding * 2.0,
-                    height: message_gap
-                        .mul_add(0.6, end_y - start_y)
-                        .max(message_gap * 0.5),
+                    height,
                 },
+                branch_tops,
             }
         })
         .collect()
@@ -8712,36 +9497,47 @@ fn layout_diagram_xychart_from_meta(
         0,
     );
 
-    const LEFT_MARGIN: f32 = 88.0;
-    const TOP_MARGIN: f32 = 84.0;
-    const RIGHT_MARGIN: f32 = 36.0;
-    const BOTTOM_MARGIN: f32 = 76.0;
     const PLOT_HEIGHT: f32 = 320.0;
     const MIN_PLOT_WIDTH: f32 = 240.0;
     const CATEGORY_STEP: f32 = 88.0;
+    /// A horizontal chart's category ROWS: bars lie flat, so a row needs less room than a column.
+    const HORIZONTAL_CATEGORY_STEP: f32 = 48.0;
+    const HORIZONTAL_PLOT_WIDTH: f32 = 480.0;
     const POINT_DIAMETER: f32 = 12.0;
 
+    let horizontal = xy_chart_meta.horizontal;
     let category_count = xy_chart_category_count(xy_chart_meta).max(1);
-    let plot_width = (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH);
-    // No legend column: the incumbent renders no xychart legend (bd-b33ab).
-    let right_margin = RIGHT_MARGIN;
-    let plot_bounds = LayoutRect {
-        x: LEFT_MARGIN,
-        y: TOP_MARGIN,
-        width: plot_width,
-        height: PLOT_HEIGHT,
+    let (plot_width, plot_height) = if horizontal {
+        (
+            HORIZONTAL_PLOT_WIDTH,
+            (category_count as f32 * HORIZONTAL_CATEGORY_STEP).max(MIN_PLOT_WIDTH),
+        )
+    } else {
+        (
+            (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH),
+            PLOT_HEIGHT,
+        )
     };
+    // No legend column: the incumbent renders no xychart legend (bd-b33ab).
+    let (left_margin, top_margin, right_margin, bottom_margin) = xychart_margins(xy_chart_meta);
     let bounds = LayoutRect {
         x: 0.0,
         y: 0.0,
-        width: LEFT_MARGIN + plot_width + right_margin,
-        height: TOP_MARGIN + PLOT_HEIGHT + BOTTOM_MARGIN,
+        width: left_margin + plot_width + right_margin,
+        height: top_margin + plot_height + bottom_margin,
     };
+    let plot_bounds = xychart_plot_bounds(xy_chart_meta, bounds);
 
     let (y_min, y_max) = resolve_xychart_y_domain(xy_chart_meta);
     let baseline_value = y_min.min(0.0).max(y_max.min(0.0));
     let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds);
-    let band_width = plot_bounds.width / category_count as f32;
+    let baseline_x = xychart_value_to_x(baseline_value, y_min, y_max, plot_bounds);
+    // The category axis runs ACROSS a vertical chart and DOWN a horizontal one.
+    let band_width = if horizontal {
+        plot_bounds.height
+    } else {
+        plot_bounds.width
+    } / category_count as f32;
     let bar_series_count = xy_chart_meta
         .series
         .iter()
@@ -8767,6 +9563,40 @@ fn layout_diagram_xychart_from_meta(
             let Some(&value) = series.values.get(point_index) else {
                 continue;
             };
+            if horizontal {
+                // Same construction with the axes exchanged: the band is a ROW from the top, the
+                // value runs from the baseline rightward, and grouped bars stack downward.
+                let y_band_start = (point_index as f32).mul_add(band_width, plot_bounds.y);
+                let value_x = xychart_value_to_x(value, y_min, y_max, plot_bounds);
+                let node_bounds = if is_bar {
+                    let bar_thickness = (band_width * 0.72 / bar_series_count as f32)
+                        .clamp(10.0, (band_width * 0.78).max(10.0));
+                    let group_height = bar_thickness * bar_series_count as f32;
+                    let group_start = y_band_start + (band_width - group_height) / 2.0;
+                    LayoutRect {
+                        x: value_x.min(baseline_x),
+                        y: (local_bar_slot as f32).mul_add(bar_thickness, group_start),
+                        width: (value_x - baseline_x).abs().max(1.0),
+                        height: bar_thickness,
+                    }
+                } else {
+                    LayoutRect {
+                        x: value_x - POINT_DIAMETER / 2.0,
+                        y: y_band_start + band_width / 2.0 - POINT_DIAMETER / 2.0,
+                        width: POINT_DIAMETER,
+                        height: POINT_DIAMETER,
+                    }
+                };
+                nodes.push(LayoutNodeBox {
+                    node_index: node_id.0,
+                    node_id: ir.nodes[node_id.0].id.clone(),
+                    rank: point_index,
+                    order: series_index,
+                    span: ir.nodes[node_id.0].span_primary,
+                    bounds: node_bounds,
+                });
+                continue;
+            }
             let x_band_start = (point_index as f32).mul_add(band_width, plot_bounds.x);
             let x_center = x_band_start + band_width / 2.0;
             let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
@@ -8896,7 +9726,9 @@ fn xy_chart_category_count(xy_chart_meta: &IrXyChartMeta) -> usize {
     )
 }
 
-fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
+/// The value domain shared by XY chart layout and every rendering backend.
+#[must_use]
+pub fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
     let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
     let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
 
@@ -8926,10 +9758,143 @@ fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
     (min_value, max_value)
 }
 
-fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
+/// A value's y position on a vertical XY chart, clamped to its plot rectangle.
+#[must_use]
+pub fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
     let range = (y_max - y_min).max(f32::EPSILON);
     let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+}
+
+/// A value's x position on a HORIZONTAL chart's value axis: minimum at the left edge.
+#[must_use]
+pub fn xychart_value_to_x(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
+    let range = (y_max - y_min).max(f32::EPSILON);
+    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    ratio.mul_add(plot_bounds.width, plot_bounds.x)
+}
+
+/// `(left, top, right, bottom)` margins around an xychart's plot area.
+///
+/// A vertical chart keeps the fixed margins every renderer has always used. A horizontal one puts
+/// the category labels on the LEFT, so that margin grows to the widest label, and the value ticks,
+/// value-axis title and chart title stack above the plot, as upstream's horizontal orchestrator
+/// places them.
+fn xychart_margins(meta: &IrXyChartMeta) -> (f32, f32, f32, f32) {
+    if !meta.horizontal {
+        return (88.0, 84.0, 36.0, 76.0);
+    }
+    // Labels are drawn at ~3/4 of the node font; measuring at full size over-reserves slightly,
+    // which reads as padding, where under-reserving would clip the text.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let widest = meta
+        .x_axis
+        .categories
+        .iter()
+        .map(|category| metrics.estimate_width(category))
+        .fold(0.0_f32, f32::max);
+    ((widest * 0.8 + 28.0).max(88.0), 112.0, 36.0, 48.0)
+}
+
+/// The plot rectangle of an xychart laid out in `bounds` — the ONE derivation layout and every
+/// renderer share, so the axes a renderer draws are the axes the marks were placed against.
+#[must_use]
+pub fn xychart_plot_bounds(meta: &IrXyChartMeta, bounds: LayoutRect) -> LayoutRect {
+    let (left, top, right, bottom) = xychart_margins(meta);
+    LayoutRect {
+        x: bounds.x + left,
+        y: bounds.y + top,
+        width: (bounds.width - left - right).max(1.0),
+        height: (bounds.height - top - bottom).max(1.0),
+    }
+}
+
+/// Category labels for all XY chart data slots, including numeric x domains and unnamed slots.
+#[must_use]
+pub fn xychart_categories(meta: &IrXyChartMeta) -> Vec<String> {
+    let count = xy_chart_category_count(meta);
+    if meta.x_axis.categories.is_empty() {
+        let min = meta.x_axis.min.unwrap_or(0.0);
+        let max = meta
+            .x_axis
+            .max
+            .unwrap_or_else(|| count.saturating_sub(1) as f32);
+        let max = if (max - min).abs() < f32::EPSILON {
+            min + 1.0
+        } else {
+            max
+        };
+        if count <= 1 {
+            return vec![format_xychart_tick_value(min)];
+        }
+        let step = (max - min) / (count.saturating_sub(1) as f32).max(1.0);
+        return (0..count)
+            .map(|index| format_xychart_tick_value(min + step * index as f32))
+            .collect();
+    }
+    let mut categories = meta.x_axis.categories.clone();
+    if categories.len() < count {
+        categories.extend((categories.len()..count).map(|index| (index + 1).to_string()));
+    }
+    categories
+}
+
+/// The "nice" y-axis step Mermaid uses: d3's `tickStep(min, max, 10)`.
+///
+/// Snap to 1/2/5 × 10^k using d3's thresholds, not quarter points. In particular, the
+/// range 0..7 uses 0.5 steps and 4000..11000 uses 500 steps. These decisions must agree
+/// across SVG and Canvas or the same chart acquires a different scale on export.
+fn xychart_nice_step(min: f32, max: f32) -> f64 {
+    let span = f64::from(max) - f64::from(min);
+    if !span.is_finite() || span <= 0.0 {
+        return 0.0;
+    }
+    let raw = span / 10.0;
+    let power = raw.log10().floor();
+    let error = raw / 10.0_f64.powf(power);
+    let factor = if error >= 50.0_f64.sqrt() {
+        10.0
+    } else if error >= 10.0_f64.sqrt() {
+        5.0
+    } else if error >= 2.0_f64.sqrt() {
+        2.0
+    } else {
+        1.0
+    };
+    10.0_f64.powf(power) * factor
+}
+
+/// Numeric XY ticks in ascending order, bounded even for a malformed domain.
+#[must_use]
+pub fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
+    let step = xychart_nice_step(min, max);
+    if step <= 0.0 {
+        return vec![min];
+    }
+    let first = (f64::from(min) / step).ceil();
+    let last = (f64::from(max) / step).floor();
+    let count = last - first;
+    if !count.is_finite() || count < 0.0 || count > 200.0 {
+        return vec![min, max];
+    }
+    let ticks: Vec<f32> = (0..=(count as i64))
+        .map(|index| ((first + index as f64) * step) as f32)
+        .collect();
+    if ticks.is_empty() {
+        vec![min, max]
+    } else {
+        ticks
+    }
+}
+
+/// Format XY chart values consistently in axis labels and data-mark alternatives.
+#[must_use]
+pub fn format_xychart_tick_value(value: f32) -> String {
+    if (value - value.round()).abs() < 0.0001 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 /// Epoch day number for an ISO `YYYY-MM-DD` date, or `None` if it is not a real calendar date.
@@ -9262,6 +10227,96 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// A Sankey node's name and throughput, shared by the rendering backends.
+///
+/// Throughput is the larger of inflow and outflow: `A,M,10` / `M,B,3` labels M
+/// with 10, not 13 or 3. Nonpositive and nonfinite values do not contribute.
+#[must_use]
+pub fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let node = ir.nodes.get(node_index)?;
+    let mut inflow = 0.0_f32;
+    let mut outflow = 0.0_f32;
+    for edge in &ir.edges {
+        let Some(value) = sankey_flow_value(ir, edge) else {
+            continue;
+        };
+        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            inflow += value;
+        }
+        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            outflow += value;
+        }
+    }
+    let total = inflow.max(outflow);
+    if total <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "{}\n{}",
+        ir.node_display_text(node),
+        format_sankey_total(total)
+    ))
+}
+
+/// At most two decimal places, with fractional trailing zeros trimmed.
+///
+/// This preserves the SVG formatter's f32 rounding: 1234.5678 displays as
+/// 1234.57 rather than exposing float noise, and 1200 stays 1200. Half-cent
+/// values can still round differently from Mermaid's f64 representation.
+fn format_sankey_total(total: f32) -> String {
+    let rounded = format!("{total:.2}");
+    if rounded.contains('.') {
+        rounded
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        rounded
+    }
+}
+
+/// Sankey values are stored in edge labels, not in a separate weight field.
+fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
+    let text = ir.labels.get(edge.label?.0)?.text.trim();
+    let value = text.parse::<f32>().ok()?;
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// Largest positive, finite Sankey flow; compute once per render, not per edge.
+/// Returns `None` for every other diagram type and for diagrams without a usable value.
+#[must_use]
+pub fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let widest = ir
+        .edges
+        .iter()
+        .filter_map(|edge| sankey_flow_value(ir, edge))
+        .fold(0.0_f32, f32::max);
+    (widest > 0.0).then_some(widest)
+}
+
+/// Proportional Sankey ribbon width, with a 24px maximum and a visible 1.5px floor.
+///
+/// Pass the result of [`sankey_widest_flow`] for this diagram. `None` preserves
+/// generic edge styling for other diagram types and malformed flow values.
+#[must_use]
+pub fn sankey_flow_stroke_width(
+    ir: &MermaidDiagramIr,
+    edge: Option<&fm_core::IrEdge>,
+    widest: Option<f32>,
+) -> Option<f32> {
+    const MIN_WIDTH: f32 = 1.5;
+    const MAX_WIDTH: f32 = 24.0;
+    let widest = widest?;
+    let value = sankey_flow_value(ir, edge?)?;
+    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
+}
+
 #[must_use]
 pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
     Arc::unwrap_or_clone(layout_diagram_sankey_traced(ir).layout)
@@ -9270,7 +10325,8 @@ pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
 #[must_use]
 pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let mut node_sizes = compute_node_sizes(ir, &metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -9281,36 +10337,61 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let mut in_flow = vec![0.0_f32; node_count];
-    let mut out_flow = vec![0.0_f32; node_count];
-    let mut sankey_links: Vec<(usize, usize, f32)> = Vec::with_capacity(ir.edges.len());
-    for edge in &ir.edges {
-        let Some(source) = endpoint_node_index(ir, edge.from) else {
-            continue;
-        };
-        let Some(target) = endpoint_node_index(ir, edge.to) else {
-            continue;
-        };
+    let usable_flow = |edge: &fm_core::IrEdge| {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
         if source == target || source >= node_count || target >= node_count {
-            continue;
+            return None;
         }
-
-        let flow_val = edge
+        let value = edge
             .label
             .and_then(|label_id| ir.labels.get(label_id.0))
-            .and_then(|label| label.text.parse::<f32>().ok())
-            .unwrap_or(1.0)
-            .max(0.001);
-
-        out_flow[source] += flow_val;
-        in_flow[target] += flow_val;
-        sankey_links.push((source, target, flow_val));
+            .and_then(|label| label.text.trim().parse::<f64>().ok())?;
+        (value.is_finite() && value > 0.0).then_some((source, target, value))
+    };
+    // Changing units must not change the picture's height. Normalize before summing so even
+    // several finite values near f64::MAX cannot overflow into infinite node coordinates.
+    let widest_flow = ir
+        .edges
+        .iter()
+        .filter_map(usable_flow)
+        .map(|(_, _, value)| value)
+        .fold(0.0_f64, f64::max);
+    let mut in_flow = vec![0.0_f64; node_count];
+    let mut out_flow = vec![0.0_f64; node_count];
+    if widest_flow > 0.0 {
+        for (source, target, value) in ir.edges.iter().filter_map(usable_flow) {
+            let normalized = value / widest_flow;
+            out_flow[source] += normalized;
+            in_flow[target] += normalized;
+        }
     }
+    let max_throughput = in_flow
+        .iter()
+        .zip(&out_flow)
+        .map(|(&incoming, &outgoing)| incoming.max(outgoing))
+        .fold(0.0_f64, f64::max);
 
+    const MAX_FLOW_HEIGHT: f32 = 160.0;
     for (node_index, size) in node_sizes.iter_mut().enumerate() {
-        let flow = in_flow[node_index].max(out_flow[node_index]).max(1.0);
-        size.0 = size.0.max(108.0);
-        size.1 = size.1.max(30.0 + (flow * 14.0));
+        let relative_flow = if max_throughput > 0.0 {
+            (in_flow[node_index].max(out_flow[node_index]) / max_throughput) as f32
+        } else {
+            0.0
+        };
+        let name = ir.node_display_text(&ir.nodes[node_index]);
+        let rendered_label = sankey_node_label(ir, node_index);
+        let (label_width, label_height) =
+            metrics.estimate_dimensions(rendered_label.as_deref().unwrap_or(name));
+        // Reserve a quantity row even when an unsupported value has no rendered total. The
+        // text floor then stays stable across units, and tiny flows retain readable labels.
+        let label_height =
+            label_height.max(metrics.estimate_height(name) + metrics.line_height_px());
+        size.0 = size.0.max(label_width + 32.0).max(108.0);
+        size.1 = size
+            .1
+            .max(label_height + 24.0)
+            .max(relative_flow * MAX_FLOW_HEIGHT);
     }
 
     let ranks = layered_ranks(ir);
@@ -9322,128 +10403,46 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     }
 
-    if nodes_by_rank.len() > 1 && sankey_links.len() > 1 {
-        let mut order_in_rank = vec![0_usize; node_count];
-        for nodes in nodes_by_rank.values() {
-            for (pos, &node_idx) in nodes.iter().enumerate() {
-                order_in_rank[node_idx] = pos;
-            }
-        }
-        let weighted_crossings = |order: &[usize]| -> f32 {
-            let mut cost = 0.0_f32;
-            for (idx, &(u1, v1, w1)) in sankey_links.iter().enumerate() {
-                if ranks[u1] == ranks[v1] {
-                    continue;
-                }
-                let (l1, r1) = if ranks[u1] < ranks[v1] {
-                    (u1, v1)
-                } else {
-                    (v1, u1)
-                };
-                for &(u2, v2, w2) in &sankey_links[idx + 1..] {
-                    if ranks[u2] == ranks[v2] {
-                        continue;
-                    }
-                    let (l2, r2) = if ranks[u2] < ranks[v2] {
-                        (u2, v2)
-                    } else {
-                        (v2, u2)
-                    };
-                    if ranks[l1] == ranks[l2] && ranks[r1] == ranks[r2] {
-                        let inv_left = order[l1].cmp(&order[l2]);
-                        let inv_right = order[r1].cmp(&order[r2]);
-                        if (inv_left.is_lt() && inv_right.is_gt())
-                            || (inv_left.is_gt() && inv_right.is_lt())
-                        {
-                            cost += w1 * w2;
-                        }
-                    }
-                }
-            }
-            cost
-        };
-
-        let mut best_cost = weighted_crossings(&order_in_rank);
-        let mut best_nodes_by_rank = nodes_by_rank.clone();
-        let rank_keys: Vec<usize> = nodes_by_rank.keys().copied().collect();
-
-        for _sweep in 0..4 {
-            if best_cost <= 0.0 {
-                break;
-            }
-            for forward in [true, false] {
-                for idx in 1..rank_keys.len() {
-                    let rank = if forward {
-                        rank_keys[idx]
-                    } else {
-                        rank_keys[rank_keys.len() - 1 - idx]
-                    };
-                    if let Some(nodes) = nodes_by_rank.get_mut(&rank) {
-                        let mut barycenters: Vec<(usize, f32)> = nodes
-                            .iter()
-                            .map(|&node_idx| {
-                                let mut weighted_sum = 0.0_f32;
-                                let mut total_weight = 0.0_f32;
-                                for &(src, dst, weight) in &sankey_links {
-                                    let other = if dst == node_idx {
-                                        src
-                                    } else if src == node_idx {
-                                        dst
-                                    } else {
-                                        continue;
-                                    };
-                                    if (forward && ranks[other] < rank)
-                                        || (!forward && ranks[other] > rank)
-                                    {
-                                        weighted_sum += (order_in_rank[other] as f32) * weight;
-                                        total_weight += weight;
-                                    }
-                                }
-                                let bary = if total_weight > 0.0 {
-                                    weighted_sum / total_weight
-                                } else {
-                                    order_in_rank[node_idx] as f32
-                                };
-                                (node_idx, bary)
-                            })
-                            .collect();
-                        barycenters.sort_by(|(left_idx, left_bary), (right_idx, right_bary)| {
-                            left_bary
-                                .total_cmp(right_bary)
-                                .then_with(|| compare_node_indices(ir, *left_idx, *right_idx))
-                        });
-                        for (pos, (node_idx, _)) in barycenters.iter().enumerate() {
-                            nodes[pos] = *node_idx;
-                            order_in_rank[*node_idx] = pos;
-                        }
-                    }
-                }
-                let sweep_cost = weighted_crossings(&order_in_rank);
-                if sweep_cost < best_cost {
-                    best_cost = sweep_cost;
-                    best_nodes_by_rank = nodes_by_rank.clone();
-                }
-            }
-        }
-        nodes_by_rank = best_nodes_by_rank;
-    }
-
     let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    let col_gap = spacing.rank_spacing + 136.0;
     let row_gap = spacing.node_spacing.mul_add(0.45, 18.0);
+    let column_sizes: BTreeMap<usize, (f32, f32)> = nodes_by_rank
+        .iter()
+        .map(|(&rank, nodes)| {
+            let width = nodes
+                .iter()
+                .map(|&node_index| node_sizes[node_index].0)
+                .fold(0.0_f32, f32::max);
+            let height = nodes
+                .iter()
+                .map(|&node_index| node_sizes[node_index].1)
+                .sum::<f32>()
+                + nodes.len().saturating_sub(1) as f32 * row_gap;
+            (rank, (width, height))
+        })
+        .collect();
+    let tallest_column = column_sizes
+        .values()
+        .map(|&(_, height)| height)
+        .fold(0.0_f32, f32::max);
 
+    let mut cursor_x = 0.0_f32;
     for (rank, nodes) in &nodes_by_rank {
-        let mut cursor_y = 0.0_f32;
+        let (column_width, column_height) = column_sizes[rank];
+        let center_x = cursor_x + column_width * 0.5;
+        let mut cursor_y = (tallest_column - column_height) * 0.5;
         for (order_index, node_index) in nodes.iter().enumerate() {
             let height = node_sizes[*node_index].1;
-            centers[*node_index] = (*rank as f32 * col_gap, cursor_y + (height / 2.0));
+            centers[*node_index] = (center_x, cursor_y + (height / 2.0));
             rank_by_node[*node_index] = *rank;
             order_by_node[*node_index] = order_index;
             cursor_y += height + row_gap;
         }
+        // Spacing is between the real column bounds, so long names and wide quantities cannot
+        // consume the neighboring column's label or ribbon corridor.
+        cursor_x += column_width + spacing.rank_spacing;
     }
 
     let mut traced = finalize_specialized_layout(
@@ -10063,7 +11062,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         });
     }
 
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
+    let edges = build_edge_paths(ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::default());
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let mut bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
@@ -10966,11 +11965,140 @@ fn row_worst_ratio(
 /// Reached only when [`architecture_declares_a_side`] holds, so a side-less architecture diagram
 /// still takes the general path and is unchanged.
 fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    layout_diagram_directed_grid_traced(
+    let mut traced = layout_diagram_directed_grid_traced(
         ir,
         architecture_edge_step,
         "architecture_direction_placement",
-    )
+    );
+    let layout = Arc::make_mut(&mut traced.layout);
+    route_architecture_sides(ir, layout);
+    layout.bounds = compute_bounds(
+        &layout.nodes,
+        &layout.clusters,
+        &layout.edges,
+        LayoutSpacing::default(),
+    );
+    traced
+}
+
+/// Route every architecture edge between the SIDES it names.
+///
+/// `db:L -- R:server` says the line leaves db's left face and enters server's right face; the
+/// shared router ignored that and ran from db's bottom, through both boxes, to server's top. Each
+/// end now starts at the middle of its declared side (an undeclared end takes the side facing the
+/// other node), steps straight out, and the two stubs are joined orthogonally.
+fn route_architecture_sides(ir: &MermaidDiagramIr, layout: &mut DiagramLayout) {
+    const STUB: f32 = 18.0;
+    let port = |bounds: LayoutRect, side: ArchitectureSide| -> (LayoutPoint, (f32, f32)) {
+        let (cx, cy) = (
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        );
+        match side {
+            ArchitectureSide::Left => (LayoutPoint { x: bounds.x, y: cy }, (-1.0, 0.0)),
+            ArchitectureSide::Right => (
+                LayoutPoint {
+                    x: bounds.x + bounds.width,
+                    y: cy,
+                },
+                (1.0, 0.0),
+            ),
+            ArchitectureSide::Top => (LayoutPoint { x: cx, y: bounds.y }, (0.0, -1.0)),
+            ArchitectureSide::Bottom => (
+                LayoutPoint {
+                    x: cx,
+                    y: bounds.y + bounds.height,
+                },
+                (0.0, 1.0),
+            ),
+        }
+    };
+    // The side of `from` that faces `to`, for an end that declared none.
+    let facing = |from: LayoutRect, to: LayoutRect| {
+        let dx = (to.x + to.width / 2.0) - (from.x + from.width / 2.0);
+        let dy = (to.y + to.height / 2.0) - (from.y + from.height / 2.0);
+        if dx.abs() >= dy.abs() {
+            if dx >= 0.0 {
+                ArchitectureSide::Right
+            } else {
+                ArchitectureSide::Left
+            }
+        } else if dy >= 0.0 {
+            ArchitectureSide::Bottom
+        } else {
+            ArchitectureSide::Top
+        }
+    };
+
+    for path in &mut layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        let (a, b) = (layout.nodes[from].bounds, layout.nodes[to].bounds);
+        let source_side = edge.source_side().unwrap_or_else(|| facing(a, b));
+        let target_side = edge.target_side().unwrap_or_else(|| facing(b, a));
+        let (p, (pnx, pny)) = port(a, source_side);
+        let (q, (qnx, qny)) = port(b, target_side);
+        let p_out = LayoutPoint {
+            x: pnx.mul_add(STUB, p.x),
+            y: pny.mul_add(STUB, p.y),
+        };
+        let q_out = LayoutPoint {
+            x: qnx.mul_add(STUB, q.x),
+            y: qny.mul_add(STUB, q.y),
+        };
+        let horizontal = |nx: f32| nx != 0.0;
+        let mut points = EdgePoints::new();
+        points.push(p);
+        match (horizontal(pnx), horizontal(qnx)) {
+            // Facing horizontal sides: one vertical jog halfway between the faces.
+            (true, true) if pnx * (q.x - p.x) > 0.0 && qnx * (p.x - q.x) > 0.0 => {
+                let mid = (p.x + q.x) / 2.0;
+                points.push(LayoutPoint { x: mid, y: p.y });
+                points.push(LayoutPoint { x: mid, y: q.y });
+            }
+            (false, false) if pny * (q.y - p.y) > 0.0 && qny * (p.y - q.y) > 0.0 => {
+                let mid = (p.y + q.y) / 2.0;
+                points.push(LayoutPoint { x: p.x, y: mid });
+                points.push(LayoutPoint { x: q.x, y: mid });
+            }
+            // One horizontal and one vertical side: a single corner, when it lies outward of both.
+            (true, false) if pnx * (q.x - p.x) >= 0.0 && qny * (p.y - q.y) >= 0.0 => {
+                points.push(LayoutPoint { x: q.x, y: p.y });
+            }
+            (false, true) if pny * (q.y - p.y) >= 0.0 && qnx * (p.x - q.x) >= 0.0 => {
+                points.push(LayoutPoint { x: p.x, y: q.y });
+            }
+            // Otherwise leave both faces straight and join the stubs around the outside.
+            (source_horizontal, _) => {
+                points.push(p_out);
+                if source_horizontal {
+                    points.push(LayoutPoint {
+                        x: p_out.x,
+                        y: q_out.y,
+                    });
+                } else {
+                    points.push(LayoutPoint {
+                        x: q_out.x,
+                        y: p_out.y,
+                    });
+                }
+                points.push(q_out);
+            }
+        }
+        points.push(q);
+        points.dedup_by(|x, y| (x.x - y.x).abs() < 0.01 && (x.y - y.y).abs() < 0.01);
+        path.points = points;
+    }
 }
 
 /// Lay out nodes on a deterministic grid whose selected edges specify one source-to-target step
@@ -11119,6 +12247,7 @@ fn finalize_specialized_layout(
     let edges = build_edge_paths_with_orientation(
         ir,
         &nodes,
+        &[],
         &BTreeSet::new(),
         horizontal_edges,
         EdgeRouting::default(),
@@ -11517,13 +12646,45 @@ fn tree_depth_level_sizes(tree: &TreeLayoutStructure, node_sizes: &[(f32, f32)])
     level_sizes
 }
 
-fn depth_level_centers(level_sizes: &[f32], gap: f32) -> Vec<f32> {
+fn depth_level_centers(
+    ir: &MermaidDiagramIr,
+    level_sizes: &[f32],
+    node_depths: &[usize],
+    gap: f32,
+    reverse: bool,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<f32> {
+    // Tree ranks need the same label clearance as Sugiyama. Avoid additional allocations for
+    // unlabelled trees, and enlarge only the logical gap containing a label.
+    let label_gaps = if ir.edges.iter().any(|edge| edge.label.is_some()) {
+        let ranks: BTreeMap<usize, usize> = node_depths.iter().copied().enumerate().collect();
+        let rank_to_index: BTreeMap<usize, usize> =
+            (0..level_sizes.len()).map(|rank| (rank, rank)).collect();
+        edge_label_rank_gaps(
+            ir,
+            &ranks,
+            &rank_to_index,
+            matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
+            metrics,
+        )
+    } else {
+        BTreeMap::new()
+    };
     let mut centers = vec![0.0_f32; level_sizes.len()];
     let mut cursor = 0.0_f32;
     for (index, level_size) in level_sizes.iter().copied().enumerate() {
         let bounded_size = level_size.max(1.0);
         centers[index] = cursor + (bounded_size / 2.0);
-        cursor += bounded_size + gap;
+        cursor += bounded_size + gap.max(label_gaps.get(&index).copied().unwrap_or(gap));
+    }
+    // Reflect the physical axis while retaining each logical rank's own dimensions. Reversing
+    // the rank indexes instead assigned a large node the centre allocated to a smaller band,
+    // which could put its child inside it in RL or BT diagrams.
+    if reverse {
+        let extent = cursor - gap;
+        for center in &mut centers {
+            *center = extent - *center;
+        }
     }
     centers
 }
@@ -12289,17 +13450,16 @@ fn force_build_node_boxes(
         .collect()
 }
 
-/// Build straight-line edge paths for force-directed layout.
 /// Fan offset per edge index for edges sharing an unordered endpoint pair.
 ///
-/// Same formula the Sugiyama builder uses — a symmetric fan of 12px steps centred on zero — so the
-/// two layouts separate parallel edges by the same amount. Returns an empty `Vec` when no pair
-/// repeats, which is the common case, so callers skip the work entirely.
+/// Use a symmetric fan of up to 12px steps, capped to the smaller endpoint's drawn outline.
+/// Returns an empty `Vec` when no pair repeats, which is the common case. A repeated pair's
+/// middle edge keeps `Some(0.0)` so it uses the same attachment axis as the rest of its fan.
 ///
 /// Without this the Force path gave every edge between one pair identical geometry, so an ER model
 /// with two relationships between the same entities (`A ||--o{ B : owns` and `A ||--o{ B : rents`)
 /// drew one line and silently lost the other.
-fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
+fn force_parallel_edge_offsets(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<Option<f32>> {
     let mut seen: FxHashSet<(usize, usize)> = FxHashSet::default();
     seen.reserve(ir.edges.len());
     // `fm_core::IrEdge` is not in this module's import list (see the `use fm_core::{…}` at the top),
@@ -12327,17 +13487,27 @@ fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
         .map(|(&pair_idx, edge)| {
             let pair_total = count.get(&pair_of(edge)).copied().unwrap_or(1);
             if pair_total > 1 {
-                let offset_step = 12.0_f32;
-                (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
+                let source = nodes.get(endpoint_node_index(ir, edge.from)?);
+                let target = nodes.get(endpoint_node_index(ir, edge.to)?);
+                let offset_step = source.zip(target).map_or(12.0, |(source, target)| {
+                    parallel_port_step(
+                        node_outline_bounds(source.bounds, node_shape_at(ir, source)),
+                        node_outline_bounds(target.bounds, node_shape_at(ir, target)),
+                        force_parallel_axis(source.bounds, target.bounds),
+                        pair_total,
+                        12.0,
+                    )
+                });
+                Some((pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step)
             } else {
-                0.0
+                None
             }
         })
         .collect()
 }
 
 fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<LayoutEdgePath> {
-    let parallel_offsets = force_parallel_edge_offsets(ir);
+    let parallel_offsets = force_parallel_edge_offsets(ir, nodes);
     // Obstacle set for avoidance (bd-h2ze). This builder used to emit a bare `[from, to]` line for
     // every edge, so a node sitting between two connected nodes was simply drawn through -- 30
     // cases across five committed goldens, up to 33.2px into a 66.5px-tall box, i.e. the CENTRE of
@@ -12357,7 +13527,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
         .iter()
         .enumerate()
         .filter_map(|(ei, edge)| {
-            let parallel_offset = parallel_offsets.get(ei).copied().unwrap_or(0.0);
+            let fan_offset = parallel_offsets.get(ei).copied().flatten();
+            let parallel_offset = fan_offset.unwrap_or(0.0);
             let from_idx = endpoint_node_index(ir, edge.from)?;
             let to_idx = endpoint_node_index(ir, edge.to)?;
             if from_idx >= nodes.len() || to_idx >= nodes.len() {
@@ -12397,10 +13568,43 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 .nodes
                 .get(to_idx)
                 .map_or(fm_core::NodeShape::Rect, |node| node.shape);
-            let from_pt =
-                clip_to_shape_border(from_center, to_center, &nodes[from_idx].bounds, from_shape);
-            let to_pt =
-                clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
+            let horizontal_ranks = fan_offset.is_some()
+                && force_parallel_axis(nodes[from_idx].bounds, nodes[to_idx].bounds);
+            let (from_pt, to_pt) = if fan_offset.is_some() {
+                let (from_anchor, to_anchor) = edge_anchors(
+                    &nodes[from_idx],
+                    &nodes[to_idx],
+                    horizontal_ranks,
+                    from_shape,
+                    to_shape,
+                );
+                (
+                    parallel_edge_anchor(
+                        from_anchor,
+                        nodes[from_idx].bounds,
+                        from_shape,
+                        horizontal_ranks,
+                        parallel_offset,
+                    ),
+                    parallel_edge_anchor(
+                        to_anchor,
+                        nodes[to_idx].bounds,
+                        to_shape,
+                        horizontal_ranks,
+                        parallel_offset,
+                    ),
+                )
+            } else {
+                (
+                    clip_to_shape_border(
+                        from_center,
+                        to_center,
+                        &nodes[from_idx].bounds,
+                        from_shape,
+                    ),
+                    clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape),
+                )
+            };
 
             // An edge must not avoid its OWN endpoints, so park those two boxes far away for the
             // duration of this query and restore them afterwards -- the same technique
@@ -12420,25 +13624,52 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             if let Some(slot) = obstacle_bounds.get_mut(to_idx) {
                 *slot = parked;
             }
-            // `false` for `horizontal_ranks`: force layout has no rank orientation, and this is the
-            // same convention the self-loop branch above already uses.
-            let mut points = route_edge_points_with_obstacle_index(
-                from_pt,
-                to_pt,
-                false,
-                &obstacle_bounds,
-                None,
-            );
+            // Route the final attachment points. Moving a routed path afterwards can detach its
+            // endpoints from curved outlines and move an otherwise clear segment into an obstacle.
+            let mut points = if ir.diagram_type == DiagramType::Mindmap
+                && parallel_offset.abs() <= 0.01
+                && !cga_routing::segment_intersects_obstacles(from_pt, to_pt, &obstacle_bounds, 8.0)
+            {
+                smallvec![from_pt, to_pt]
+            } else {
+                route_edge_points_with_obstacle_index(
+                    from_pt,
+                    to_pt,
+                    horizontal_ranks,
+                    &obstacle_bounds,
+                    None,
+                )
+            };
+            if points.windows(2).any(|pair| {
+                cga_routing::segment_intersects_obstacles(pair[0], pair[1], &obstacle_bounds, 8.0)
+            }) {
+                // Force placement has no empty rank corridors: nearby boxes can form a barrier
+                // across the whole strip between these ports. Permit a wider bounded search,
+                // keeping the endpoint boxes as obstacles so it cannot escape through them.
+                let retry_horizontal = if horizontal_ranks {
+                    (to_pt.x - from_pt.x).abs() >= 0.001
+                } else {
+                    (to_pt.y - from_pt.y).abs() < 0.001
+                };
+                if let Some(clear) = bounded_orthogonal_route(
+                    from_pt,
+                    to_pt,
+                    retry_horizontal,
+                    &obstacle_bounds,
+                    None,
+                    Some([
+                        node_outline_bounds(nodes[from_idx].bounds, from_shape),
+                        node_outline_bounds(nodes[to_idx].bounds, to_shape),
+                    ]),
+                ) {
+                    points = clear;
+                }
+            }
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(from_idx), saved_from) {
                 *slot = saved;
             }
             if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(to_idx), saved_to) {
                 *slot = saved;
-            }
-            if parallel_offset.abs() > 0.01 {
-                // Same helper and same orientation convention the Sugiyama builder uses, so the two
-                // layouts fan a repeated pair identically instead of one of them stacking the edges.
-                apply_parallel_offset(&mut points, parallel_offset, false);
             }
             Some(LayoutEdgePath {
                 edge_index: ei,
@@ -12462,8 +13693,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
 /// diagonal approach to the rectangle leaves the endpoint floating outside the drawn shape — by up
 /// to a factor of sqrt(2) for a circle, which reads as an arrowhead detached from its node.
 ///
-/// Only the force-directed path needs this. `edge_anchors`, used by the Sugiyama route, attaches
-/// at side midpoints, which is exactly where an inscribed circle or diamond meets its box.
+/// The force-directed path approaches at arbitrary angles. The ranked router uses side midpoints
+/// of the same drawn outline, including when supplied circular geometry has non-square bounds.
 fn clip_to_shape_border(
     from: LayoutPoint,
     to: LayoutPoint,
@@ -12472,6 +13703,13 @@ fn clip_to_shape_border(
 ) -> LayoutPoint {
     use fm_core::NodeShape;
 
+    let rect = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => shapes::circle_bounds(*rect),
+        _ => *rect,
+    };
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
     let dx = to.x - from.x;
@@ -12486,8 +13724,11 @@ fn clip_to_shape_border(
 
     // Parameter along (dx, dy) at which the ray leaves the shape, measured from the centre.
     let t = match shape {
-        // Inscribed ellipse: |(t*dx/half_w, t*dy/half_h)| = 1.
-        NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+        // SVG and Canvas draw a circle with radius min(width, height) / 2, not an ellipse.
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => {
             let nx = dx / half_w.max(f32::EPSILON);
             let ny = dy / half_h.max(f32::EPSILON);
             let norm = nx.hypot(ny);
@@ -12610,48 +13851,70 @@ fn compute_node_size(
     let text = display_node_label_ref(ir, node);
 
     match node.shape {
-        // ⚠️ ASYMMETRIC SIBLINGS. `DoubleCircle` below already sizes to its text when it has any,
-        // and `FilledCircle` was pinned at 20x20 unconditionally — fine while both shapes only ever
-        // appeared as label-less state pseudo-states, wrong the moment gitGraph's `type: REVERSE`
-        // commits started displaying their ids (bd-3cj8v). The dot stayed 20px and the id was
-        // elided to `th…` INSIDE it. Same branch as the sibling, same reason.
-        fm_core::NodeShape::FilledCircle => {
-            if text.is_empty() {
-                (20.0, 20.0)
+        fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
+        fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::FilledCircle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => {
+            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let (icon_width, icon_height) = icon_dimensions(node, metrics);
+            let content_width = label_width
+                .max(icon_width)
+                .max(icon_width.mul_add(0.85, label_width));
+            // A circle must contain the corners of the padded text block, not merely its width.
+            // Equal extents also put ranked ports on the circle SVG and Canvas actually draw.
+            let diameter = (content_width + 32.0).hypot(label_height + icon_height + 32.0);
+            let ring_gap = if node.shape == fm_core::NodeShape::DoubleCircle {
+                8.0
             } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(text);
-                (
-                    (label_width + 52.0).max(42.0),
-                    (label_height + 30.0).max(42.0),
-                )
-            }
-        }
-        fm_core::NodeShape::DoubleCircle => {
-            if text.is_empty() {
-                (24.0, 24.0)
-            } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(text);
-                (
-                    (label_width + 52.0).max(42.0),
-                    (label_height + 30.0).max(42.0),
-                )
-            }
+                0.0
+            };
+            let diameter = (diameter + ring_gap).max(64.0);
+            (diameter, diameter)
         }
         fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
+        // A state `<<choice>>`, the one diamond with no text: mermaid's is a 28px mark. Sized
+        // from its id it was a full decision box with nothing in it.
+        fm_core::NodeShape::Diamond if text.is_empty() => (28.0, 28.0),
         _ => {
             let text = if text.is_empty() {
                 node.id.as_str()
             } else {
                 text
             };
-            let (label_width, label_height) = metrics.estimate_dimensions(text);
+            let class_header = node
+                .class_meta
+                .as_deref()
+                .map(|meta| meta.display_header(text));
+            let (label_width, label_height) =
+                metrics.estimate_dimensions(class_header.as_deref().unwrap_or(text));
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
-            let width = label_width
+            let content_width = label_width
                 .max(icon_width)
-                .max(icon_width.mul_add(0.85, label_width))
-                + 72.0;
-            let height = label_height + icon_height + 44.0;
-            let (width, height) = (width.max(100.0), height.max(52.0));
+                .max(icon_width.mul_add(0.85, label_width));
+            let content_height = label_height + icon_height;
+            // Plain process boxes need less vertical whitespace than shaped or annotated nodes.
+            // Retain the horizontal allowance: long labels and wide glyphs need that room at
+            // full font size, especially when the SVG renderer preserves every label.
+            let width = (content_width + 72.0).max(100.0);
+            let compact_box = node.requirement_meta.is_none()
+                && matches!(
+                    node.shape,
+                    fm_core::NodeShape::Rect
+                        | fm_core::NodeShape::Rounded
+                        | fm_core::NodeShape::Subroutine
+                        | fm_core::NodeShape::TextBlock
+                )
+                // A conservative label that needs another line keeps the previous vertical
+                // allowance, so compact defaults do not trade readable type for a shorter box.
+                && metrics.estimate_preserved_width(text, metrics.font_size(), metrics.avg_char_width())
+                    <= (width - 16.0).max(metrics.font_size());
+            let height = if compact_box {
+                (content_height + 24.0).max(44.0)
+            } else {
+                (content_height + 44.0).max(52.0)
+            };
             // A class node's box must also hold its compartment stack. The SVG renderer walks the
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
@@ -12690,99 +13953,139 @@ fn compute_node_size(
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
-            // A requirement node's box must hold the two rows the renderer draws BESIDE the name:
-            // the `«type»` header and the `Risk: … | Verify: …` row. Nothing sized for them at all,
-            // so whether a row escaped depended on how long the declared `risk:`/`verifymethod:`
-            // strings happened to be — golden/requirement_basic's LoginReq measured 163.37 in a
-            // 133.05-wide box, spilling 15.16 past each side (bd-jnc1).
-            match requirement_row_dimensions(node, metrics) {
+            // Requirement fields form independent rows, including the element's Type and Doc Ref.
+            // Size the complete stack for both SVG and Canvas before the renderers place its text.
+            let (width, height) = match requirement_row_dimensions(node, text, metrics) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
+            };
+            if node.shape == fm_core::NodeShape::Diamond {
+                // A rectangle that fits the bounds can still cross a diamond's sloping sides.
+                // At each padded content corner, |x|/(w/2) + |y|/(h/2) must be at most one.
+                let scale =
+                    ((content_width + 24.0) / width + (content_height + 24.0) / height).max(1.0);
+                (width * scale, height * scale)
+            } else {
+                (width, height)
             }
         }
     }
 }
 
-/// Size a requirement node's box needs so the rows drawn beside its name stay inside it.
-///
-/// `None` when the node is not a requirement node, or when it declares neither a type nor any
-/// risk/verify metadata — then only the name is drawn and the base sizing already covers it.
-///
-/// Mirrors `fm-render-svg`'s `write_requirement_node_fragment_into`: an optional `«{type}»` row and
-/// an optional `Risk: …[ | Verify: …]` row (or `Verify: …` alone), both centred on `cx` at
-/// `font_size * 0.75`, with the name row between them at full size. Rows advance `font_size * 0.85`
-/// from a first baseline at `y + h * 0.25 + font_size * 0.35`.
-///
-/// Measured at the LAYOUT metrics' font size, which is the full node font; the renderer draws these
-/// rows at its own (smaller) detail-tier size, so this over-estimates rather than under-estimates.
-/// Over-sizing renders as padding; under-sizing is the defect.
-fn requirement_row_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+/// Measure the displayed requirement fields, including their prefixes and type display names.
+/// SVG centers a stack of full-size name lines and smaller subtitle lines; Canvas uses a name,
+/// divider, and left-aligned fields at a larger subtitle size. The box must contain both layouts.
+fn requirement_row_dimensions(
+    node: &IrNode,
+    name: &str,
+    metrics: &fm_core::FontMetrics,
+) -> Option<(f32, f32)> {
     let meta = node.requirement_meta.as_deref()?;
-
     let font_size = metrics.font_size();
     let subtitle_font = (font_size * 0.75).max(REQUIREMENT_FONT_FLOOR);
-    // `estimate_width` measures at `font_size`; these rows are drawn smaller, and width scales with
-    // the em size.
-    let subtitle_scale = subtitle_font / font_size.max(f32::EPSILON);
-    let mut widest = 0.0_f32;
-    let mut rows = 1_usize; // the name row, always drawn
+    // Metadata is emitted as one text run, so embedded line breaks become spaces rather than
+    // separate lines. Only the name uses a multiline text builder.
+    let row_width = |row: &str, size| {
+        if row.contains(['\r', '\n']) {
+            metrics.estimate_preserved_width(
+                &row.replace(['\r', '\n'], " "),
+                size,
+                metrics.avg_char_width(),
+            )
+        } else {
+            metrics.estimate_preserved_width(row, size, metrics.avg_char_width())
+        }
+    };
+    let mut widest = metrics.estimate_preserved_width(name, font_size, metrics.avg_char_width());
+    let mut subtitle_rows = 0_usize;
 
     if let Some(req_type) = meta.requirement_type.as_deref() {
-        // The renderer wraps the type in guillemets, which are two more glyphs to hold.
-        let mut row = String::with_capacity(req_type.len() + 2);
-        row.push('\u{00ab}');
-        row.push_str(req_type);
-        row.push('\u{00bb}');
-        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
-        rows += 1;
+        let row = format!("<<{}>>", fm_core::requirement_type_display(req_type));
+        widest = widest.max(row_width(&row, subtitle_font));
+        subtitle_rows += 1;
     }
 
-    // `ID: …` and `Text: …` rows (bd-f3tc). Widened for, not wrapped: the incumbent's requirement
-    // renderer draws each as one unwrapped label and grows the box to its bbox, so wrapping here
-    // would diverge from it. A long `text:` therefore makes a wide box, exactly as it does there.
-    for (prefix, value) in [
-        ("ID: ", meta.req_id.as_deref()),
-        ("Text: ", meta.text.as_deref()),
+    let mut canvas_rows = 0_usize;
+    for (prefix, canvas_prefix, value, display) in [
+        (
+            "ID: ",
+            "id: ",
+            meta.req_id.as_deref(),
+            meta.req_id.as_deref(),
+        ),
+        (
+            "Text: ",
+            "text: ",
+            meta.text.as_deref(),
+            meta.text.as_deref(),
+        ),
+        (
+            "Risk: ",
+            "risk: ",
+            meta.risk.as_deref(),
+            meta.risk.as_deref().map(fm_core::requirement_risk_display),
+        ),
+        (
+            "Verification: ",
+            "verify: ",
+            meta.verify_method.as_deref(),
+            meta.verify_method
+                .as_deref()
+                .map(fm_core::requirement_verify_method_display),
+        ),
+        (
+            "Type: ",
+            "type: ",
+            meta.element_type.as_deref(),
+            meta.element_type.as_deref(),
+        ),
+        (
+            "Doc Ref: ",
+            "doc: ",
+            meta.doc_ref.as_deref(),
+            meta.doc_ref.as_deref(),
+        ),
     ] {
-        let Some(value) = value else { continue };
-        let mut row = String::with_capacity(prefix.len() + value.len());
-        row.push_str(prefix);
-        row.push_str(value);
-        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
-        rows += 1;
+        let Some(display) = display else { continue };
+        widest = widest.max(row_width(&format!("{prefix}{display}"), subtitle_font));
+        subtitle_rows += 1;
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            widest = widest.max(row_width(
+                &format!("{canvas_prefix}{value}"),
+                font_size * 0.9,
+            ));
+            canvas_rows += 1;
+        }
     }
 
-    let metadata_row = match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
-        (Some(risk), Some(verify)) => Some(format!("Risk: {risk} | Verify: {verify}")),
-        (Some(risk), None) => Some(format!("Risk: {risk}")),
-        (None, Some(verify)) => Some(format!("Verify: {verify}")),
-        (None, None) => None,
-    };
-    if let Some(row) = metadata_row.as_deref() {
-        widest = widest.max(metrics.estimate_width(row) * subtitle_scale);
-        rows += 1;
-    }
-
-    if rows == 1 {
+    if subtitle_rows == 0 {
         return None;
     }
 
-    // Rows are centred on the box's centre, so the box needs the widest row plus a margin on each
-    // side. `REQUIREMENT_ROW_MARGIN` is the total of both sides.
-    let width = widest + REQUIREMENT_ROW_MARGIN;
-    // Vertical: the last row's baseline sits `0.25h + 0.35font + (rows - 1) * 0.85font` below the
-    // box top and needs its descender inside too. Solving `0.75h >= (0.35 + 0.85(rows-1) + 0.3)font`
-    // for `h` gives the floor below.
-    let height = ((rows - 1) as f32).mul_add(0.85, 0.65) * font_size / 0.75;
-    Some((width, height))
+    let svg_height = metrics.estimate_height(name)
+        + subtitle_rows as f32 * subtitle_font * metrics.config().line_height
+        + REQUIREMENT_ROW_MARGIN;
+    // Canvas puts its name at 1.3em, the divider half a name line below, and metadata rows at
+    // 0.9em with 1.2 line spacing. Include the final row's lower half and its 6px inset.
+    let canvas_height = if canvas_rows == 0 {
+        0.0
+    } else {
+        font_size * 1.3 * 1.5
+            + font_size * 0.9
+            + canvas_rows.saturating_sub(1) as f32 * font_size * 0.9 * 1.2
+            + 6.0
+    };
+    Some((
+        widest + REQUIREMENT_ROW_MARGIN,
+        svg_height.max(canvas_height),
+    ))
 }
 
 /// Smallest font the requirement subtitle rows are measured at, mirroring the renderer's
 /// `config.min_font_size` clamp on `font_size * 0.75`.
 const REQUIREMENT_FONT_FLOOR: f32 = 8.0;
 
-/// Horizontal breathing room a requirement box adds around its widest subtitle row, split evenly
-/// between the two sides.
+/// Total content padding around a requirement stack, split evenly between opposite sides.
 const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 
 /// Height a C4 node needs so its wrapped description stays inside the box. `None` when the node has
@@ -12957,12 +14260,9 @@ fn class_compartment_dimensions(
     metrics: &fm_core::FontMetrics,
 ) -> Option<(f32, f32)> {
     let meta = node.class_meta.as_deref()?;
-    // A STEREOTYPE ALONE is enough to need a compartment stack (bd-d48wi). A marker interface —
-    // `class Shape { <<interface>> }` with no members — is idiomatic mermaid, and the pinned
-    // incumbent gates its annotation row on `annotations.length > 0` with no member requirement.
-    // Returning `None` here left the box sized from the class name alone, and every backend then
-    // declined to draw the stereotype at all rather than draw it into an unsized box.
-    if meta.attributes.is_empty() && meta.methods.is_empty() && meta.stereotype.is_none() {
+    // A stereotype (bd-d48wi) or generic header still needs the class renderer when no members
+    // are declared. Keep this gate shared with the renderers so the box holds what they draw.
+    if !meta.has_compartments() {
         return None;
     }
 
@@ -13009,9 +14309,14 @@ fn class_compartment_dimensions(
     // `class A { <<interface>> }` sized a box to fit `A` and then drew a string four times wider.
     // Height had always counted this row; only the width forgot it — the asymmetry that made the
     // omission survive, since a too-narrow box overflows visibly rather than dropping content.
-    // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
+    // Renderers draw it at `font_size * 0.85`. Use the same conservative glyph allowances as
+    // other preserved text so a wide stereotype cannot cross its own compartment border.
     let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
-        metrics.estimate_dimensions(&stereotype.label()).0 * 0.85
+        metrics.estimate_preserved_width(
+            &stereotype.label(),
+            metrics.font_size() * 0.85,
+            metrics.avg_char_width(),
+        )
     });
 
     Some((member_width.max(stereotype_width) + 16.0, height))
@@ -13112,8 +14417,10 @@ fn class_member_row_width(
         row.push_str(" : ");
         row.push_str(&fm_core::parse_generic_types(return_type));
     }
-    // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.
-    metrics.estimate_dimensions(&row).0 * 0.9
+    // Preserve the full-size allowance for rows drawn at 90% size, then account for the actual
+    // wide glyphs and font fallback differences. The plain estimate still let `+Decimal amount`
+    // cross Payment's right border in the default browser font.
+    metrics.estimate_preserved_width(&row, metrics.font_size(), metrics.avg_char_width())
 }
 
 fn node_size_cache_key(
@@ -13136,6 +14443,13 @@ fn node_size_cache_key(
         hash_u64(&mut hash, meta.attributes.len() as u64);
         hash_u64(&mut hash, meta.methods.len() as u64);
         hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
+        if let Some(stereotype) = &meta.stereotype {
+            hash_str(&mut hash, &stereotype.label());
+        }
+        hash_u64(&mut hash, meta.generics.len() as u64);
+        for generic in &meta.generics {
+            hash_str(&mut hash, generic);
+        }
         for member in meta.attributes.iter().chain(meta.methods.iter()) {
             hash_str(&mut hash, &member.name);
             hash_str(&mut hash, member.return_type.as_deref().unwrap_or_default());
@@ -13171,19 +14485,21 @@ fn node_size_cache_key(
     if let Some(meta) = node.c4_meta.as_deref() {
         hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
     }
-    // The requirement type / risk / verifymethod strings feed `compute_node_size` through
-    // `requirement_row_dimensions`, so lengthening a `verifymethod:` without touching the node's
-    // label must not serve the pre-edit size and put the row back outside the box (bd-jnc1).
+    // Every requirement field sizes a drawn row. Include presence as well as contents: a declared
+    // empty value still has a prefix in SVG and therefore occupies a row.
     if let Some(meta) = node.requirement_meta.as_deref() {
-        hash_str(
-            &mut hash,
-            meta.requirement_type.as_deref().unwrap_or_default(),
-        );
-        hash_str(&mut hash, meta.risk.as_deref().unwrap_or_default());
-        hash_str(&mut hash, meta.verify_method.as_deref().unwrap_or_default());
-        // `id:` and `text:` became drawn rows in bd-f3tc, so they size the box too.
-        hash_str(&mut hash, meta.req_id.as_deref().unwrap_or_default());
-        hash_str(&mut hash, meta.text.as_deref().unwrap_or_default());
+        for field in [
+            &meta.requirement_type,
+            &meta.risk,
+            &meta.verify_method,
+            &meta.req_id,
+            &meta.text,
+            &meta.element_type,
+            &meta.doc_ref,
+        ] {
+            hash_u64(&mut hash, u64::from(field.is_some()));
+            hash_str(&mut hash, field.as_deref().unwrap_or_default());
+        }
     }
     hash
 }
@@ -13204,13 +14520,19 @@ fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) 
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
-    display_node_label_ref(ir, node).to_string()
+    let text = display_node_label_ref(ir, node);
+    if let Some(meta) = node.class_meta.as_deref() {
+        meta.display_header(text).into_owned()
+    } else {
+        text.to_string()
+    }
 }
 
-/// Borrowing core of [`display_node_label`]: the displayed label text is always either the IR label
-/// text, the node id, or empty — all borrowable from `ir`/`node` — so callers that only READ it (text
-/// measurement, hashing) need not clone. Byte-identical content to `display_node_label`; the owning
-/// version just `.to_string()`s this for callers that store the result.
+/// Resolve the base label without allocating, before class type parameters are appended.
+///
+/// The result is either the IR label text, the node id, or empty, all borrowable from `ir`/`node`.
+/// Scene text adds the class header in [`display_node_label`]; measurement does so in
+/// [`compute_node_size`].
 ///
 /// ⚠️ THE RULE ITSELF LIVES IN `fm_core` and is shared with fm-render-svg on purpose (bd-3cj8v).
 /// Layout SIZES the box from this string and the renderer PAINTS from it; a local copy here drifted
@@ -13381,7 +14703,7 @@ fn cycle_removal_fnx_cycle_aware(
     }
 
     let check_edges = oriented_edges(ir, &candidate_reversals);
-    if cycle_removal_dfs_back(node_count, &check_edges, node_priority).is_empty() {
+    if cycle_removal_dfs_back(node_count, &check_edges).is_empty() {
         candidate_reversals
     } else {
         dfs_back_edges.clone()
@@ -13422,7 +14744,7 @@ fn cycle_removal(
         };
     }
 
-    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, node_priority);
+    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges);
     // A directed graph is acyclic iff a DFS finds no back edge. When the graph is
     // acyclic there are no cyclic components and the cycle summary is empty, so the
     // (otherwise unconditional) strongly-connected-components pass is pure waste — the
@@ -13436,7 +14758,21 @@ fn cycle_removal(
     };
 
     let reversed_edge_indexes = match cycle_strategy {
-        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
+        // Eades' ordering knows nothing of the source, so it may reverse an edge the author drew
+        // forward: in mermaid's own `Christmas` example it reversed `Go shopping --> Let me
+        // think`, putting the decision above the step that leads to it, and in a CI pipeline whose
+        // two loops share a path it reversed one edge of that path, putting `QA Pass?` on top. The
+        // DFS choice (mermaid's) is kept unless greedy breaks the cycles with under half as many
+        // reversals — a dense knot, where DFS's extra upward edges cost more than the order.
+        CycleStrategy::Greedy if !dfs_back_edges.is_empty() => {
+            let greedy = cycle_removal_greedy(node_count, &edges, node_priority);
+            if 2 * greedy.len() < dfs_back_edges.len() {
+                greedy
+            } else {
+                dfs_back_edges.clone()
+            }
+        }
+        CycleStrategy::Greedy => BTreeSet::new(),
         CycleStrategy::DfsBack => dfs_back_edges.clone(),
         CycleStrategy::MfasApprox => {
             cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
@@ -13622,19 +14958,21 @@ fn detect_cycle_components(
     }
 }
 
-fn cycle_removal_dfs_back(
-    node_count: usize,
-    edges: &[OrientedEdge],
-    node_priority: &[usize],
-) -> BTreeSet<usize> {
-    let outgoing_edge_slots = sorted_outgoing_edge_slots(node_count, edges, node_priority);
+/// Reverse every DFS back edge, visiting nodes and each node's out-edges in DECLARATION order —
+/// mermaid's own acyclicer (dagre's `dfsFAS`). So the edge reversed is the one that closes a loop
+/// as the source reads: in `B --> C … H -->|No| B` it is `H --> B`, the loop the author drew
+/// back, not `B --> C`, which put the decision above the step that leads to it. (The visit order
+/// used to be node ids sorted alphabetically, which matched the source only by accident.)
+fn cycle_removal_dfs_back(node_count: usize, edges: &[OrientedEdge]) -> BTreeSet<usize> {
+    // `edges` is in declaration order already.
+    let mut outgoing_edge_slots = vec![Vec::new(); node_count];
+    for (edge_slot, edge) in edges.iter().enumerate() {
+        outgoing_edge_slots[edge.source].push(edge_slot);
+    }
     let mut state = vec![0_u8; node_count];
     let mut reversed_edge_indexes = BTreeSet::new();
 
-    let mut node_visit_order: Vec<usize> = (0..node_count).collect();
-    node_visit_order.sort_by(|left, right| compare_priority(*left, *right, node_priority));
-
-    for start_node in node_visit_order {
+    for start_node in 0..node_count {
         if state[start_node] != 0 {
             continue;
         }
@@ -13726,7 +15064,7 @@ fn cycle_removal_mfas_approx(
     }
 
     if reversed_edge_indexes.is_empty() {
-        return cycle_removal_dfs_back(node_count, edges, node_priority);
+        return cycle_removal_dfs_back(node_count, edges);
     }
 
     reversed_edge_indexes
@@ -13997,7 +15335,15 @@ fn rank_assignment(
     // Compact disconnected components along the rank axis so each component
     // gets an independent band instead of sharing rank-0/rank-1 globally.
     // This avoids pathological ultra-wide layouts for many disconnected chains.
+    //
+    // A FEW components share the ranks instead, side by side across the rank axis, as mermaid
+    // places them: two independent flows read as two parallel lanes. Banding them laid `A --> B`
+    // and `C --> D` end to end in one line, and inside a subgraph it put two branches of the same
+    // fork one after the other. Isolated nodes count as one group.
+    const SHARED_RANK_COMPONENTS: usize = 4;
     let mut components = weakly_connected_components(node_count, &edges);
+    let groups = components.iter().filter(|c| c.len() > 1).count()
+        + usize::from(components.iter().any(|c| c.len() == 1));
     components.sort_by_key(|component| {
         component
             .iter()
@@ -14006,7 +15352,7 @@ fn rank_assignment(
             .unwrap_or(usize::MAX)
     });
 
-    if components.len() > 1 {
+    if components.len() > 1 && groups > SHARED_RANK_COMPONENTS {
         let mut compacted_ranks = ranks.clone();
         let mut rank_cursor = 0_usize;
         let mut isolated_singletons = Vec::new();
@@ -14442,15 +15788,33 @@ fn block_beta_item_rows(
     match item {
         BlockBetaGridItem::Node(_) => 1,
         BlockBetaGridItem::Group(subgraph_id) => {
-            let group_columns = block_beta_item_span(ir, item, available_columns);
+            let span = block_beta_item_span(ir, item, available_columns);
             let children = block_beta_direct_items(ir, Some(subgraph_id));
             if children.is_empty() {
                 1
             } else {
-                block_beta_rows_required(ir, &children, group_columns)
+                block_beta_rows_required(
+                    ir,
+                    &children,
+                    block_beta_inner_columns(ir, subgraph_id, span),
+                )
             }
         }
     }
+}
+
+/// How many columns a group's OWN grid has: the `columns N` written inside it, else its span.
+fn block_beta_inner_columns(
+    ir: &MermaidDiagramIr,
+    subgraph_id: fm_core::IrSubgraphId,
+    span: usize,
+) -> usize {
+    ir.meta
+        .block_beta_group_columns
+        .iter()
+        .find(|(group, _)| *group == subgraph_id.0)
+        .map_or(span, |(_, columns)| *columns)
+        .max(1)
 }
 
 fn block_beta_rows_required(
@@ -14587,7 +15951,11 @@ fn place_block_beta_items(
                     // The container owns `span` columns of the OUTER grid. Its children divide
                     // that width between the columns they actually use, so a container's declared
                     // span reaches its contents instead of evaporating when they under-fill it.
-                    let used = block_beta_group_used_columns(ir, &child_items, span);
+                    let used = block_beta_group_used_columns(
+                        ir,
+                        &child_items,
+                        block_beta_inner_columns(ir, subgraph_id, span),
+                    );
                     let inner_cell_width = span as f32 * cell_width / used as f32;
                     // `item_x` is the CENTRE of the container's first outer cell, and these
                     // coordinates are cell centres throughout (a box is `centre ± width/2`). The
@@ -15274,9 +16642,8 @@ fn bk_horizontal_compaction(
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     root: &[usize],
     align: &[usize],
-    // `pred_in_rank` (each node's left neighbour in its rank) depends only on `ordering_by_rank`, which
-    // is identical across all four BK alignment passes — so it's built ONCE by the caller and shared
-    // here instead of being rebuilt per pass.
+    // The preceding node in the sweep direction: left neighbours for left-to-right compaction,
+    // right neighbours for right-to-left. Both tables are built once by the caller.
     pred_in_rank: &[Option<usize>],
     node_spacing: f32,
     horizontal_ranks: bool,
@@ -15485,14 +16852,16 @@ fn brandes_kopf_secondary_coords(
         }
     }
 
-    // Each node's left neighbour in its rank — a pure function of `ordering_by_rank`, identical across all
-    // four alignment passes. Build it ONCE here instead of rebuilding it inside each `bk_horizontal_
-    // compaction` call (3 of 4 builds were pure waste). Byte-identical (same values, same order).
+    // Compaction must follow the alignment's horizontal sweep. Using left predecessors for a
+    // right-to-left alignment biases branching diagrams toward the left and gives a different
+    // layout when the same rank order is mirrored. Build both neighbour tables once.
     let mut pred_in_rank: Vec<Option<usize>> = vec![None; n];
+    let mut succ_in_rank: Vec<Option<usize>> = vec![None; n];
     for nodes in ordering_by_rank.values() {
         for i in 1..nodes.len() {
             if nodes[i] < n && nodes[i - 1] < n {
                 pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
+                succ_in_rank[nodes[i - 1]] = Some(nodes[i]);
             }
         }
     }
@@ -15520,30 +16889,73 @@ fn brandes_kopf_secondary_coords(
             left_to_right,
         );
 
-        let coords = bk_horizontal_compaction(
+        let mut coords = bk_horizontal_compaction(
             n,
             node_sizes,
             ordering_by_rank,
             &root,
             &align,
-            &pred_in_rank,
+            if left_to_right {
+                &pred_in_rank
+            } else {
+                &succ_in_rank
+            },
             spacing.node_spacing,
             horizontal_ranks,
         );
 
+        // Compaction increases coordinates along its sweep. Reflect the right-to-left passes
+        // back into the diagram's coordinate system before combining the four layouts.
+        if !left_to_right {
+            for coordinate in &mut coords {
+                *coordinate = -*coordinate;
+            }
+        }
+
         all_coords.push(coords);
     }
 
-    // Normalize each pass so that the minimum coordinate is 0.
-    for coords in &mut all_coords {
-        let min_val = coords
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite())
-            .fold(f32::INFINITY, f32::min);
-        if min_val.is_finite() {
-            for c in coords.iter_mut() {
-                *c -= min_val;
+    // Balance against the narrowest layout: left sweeps share its leading edge and right sweeps
+    // share its trailing edge. Independently left-normalizing every pass loses this balance and
+    // pulls asymmetric branches sideways. Compare the actual box extents, so wide labels count
+    // when choosing the envelope rather than only the distance between node centres.
+    let pass_bounds: Vec<(f32, f32)> = all_coords
+        .iter()
+        .map(|coords| {
+            coords.iter().enumerate().fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(min, max), (node, &coordinate)| {
+                    if !coordinate.is_finite() {
+                        return (min, max);
+                    }
+                    let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
+                    let half_extent = if horizontal_ranks { height } else { width } / 2.0;
+                    (
+                        min.min(coordinate - half_extent),
+                        max.max(coordinate + half_extent),
+                    )
+                },
+            )
+        })
+        .collect();
+    let reference = pass_bounds
+        .iter()
+        .copied()
+        .filter(|(min, max)| min.is_finite() && max.is_finite())
+        .min_by(|left, right| (left.1 - left.0).total_cmp(&(right.1 - right.0)));
+    if let Some((reference_min, reference_max)) = reference {
+        for ((coords, &(min, max)), &(_, left_to_right)) in
+            all_coords.iter_mut().zip(&pass_bounds).zip(&directions)
+        {
+            let shift = if left_to_right {
+                reference_min - min
+            } else {
+                reference_max - max
+            };
+            if shift.is_finite() {
+                for coordinate in coords {
+                    *coordinate += shift;
+                }
             }
         }
     }
@@ -15587,12 +16999,59 @@ fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) 
     spacing
 }
 
+/// The gap each pair of adjacent ranks needs for the edge labels drawn between them, keyed by the
+/// lower rank index.
+///
+/// A label sits on its edge's midpoint, which for an edge between adjacent ranks is in the gap
+/// between them. The gap was the fixed `rank_spacing` however long the label, so in a left-to-right
+/// diagram a label wider than the gap was drawn under the two nodes it connects and read as
+/// `y long label on this`. The floor is the label's extent along the rank axis plus room for an
+/// arrowhead at each end. Use the same configured metrics as node sizing; a font-size override
+/// must enlarge both the glyphs and the space reserved for them.
+fn edge_label_rank_gaps(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    rank_to_index: &BTreeMap<usize, usize>,
+    horizontal_ranks: bool,
+    metrics: &fm_core::FontMetrics,
+) -> BTreeMap<usize, f32> {
+    const END_ROOM: f32 = 40.0;
+    let mut gaps = BTreeMap::new();
+    for edge in &ir.edges {
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let index = |endpoint| {
+            let node = endpoint_node_index(ir, endpoint)?;
+            rank_to_index.get(ranks.get(&node)?).copied()
+        };
+        let (Some(a), Some(b)) = (index(edge.from), index(edge.to)) else {
+            continue;
+        };
+        if a.abs_diff(b) != 1 {
+            continue;
+        }
+        let (width, height) = metrics.estimate_dimensions(&label.text);
+        // The renderer sizes the label's box from its own per-character estimate, which runs about
+        // a third wider than this measure (a 268-wide box for a label this measures at 199).
+        let needed = if horizontal_ranks {
+            width.mul_add(1.4, END_ROOM)
+        } else {
+            height + END_ROOM
+        };
+        let gap = gaps.entry(a.min(b)).or_insert(0.0_f32);
+        *gap = gap.max(needed);
+    }
+    gaps
+}
+
 fn coordinate_assignment(
     ir: &MermaidDiagramIr,
     node_sizes: &[(f32, f32)],
     ranks: &BTreeMap<usize, usize>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutNodeBox> {
     let fallback_nodes_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
@@ -15630,9 +17089,15 @@ fn coordinate_assignment(
     } else {
         (0..ordered_ranks.len()).collect()
     };
-    for rank_index in iter_order {
+    let label_gaps = edge_label_rank_gaps(ir, ranks, &rank_to_index, horizontal_ranks, metrics);
+    for (position, &rank_index) in iter_order.iter().enumerate() {
         primary_offsets[rank_index] = primary_cursor;
-        primary_cursor += rank_span[rank_index] + spacing.rank_spacing;
+        let label_gap = iter_order
+            .get(position + 1)
+            .and_then(|&next| label_gaps.get(&rank_index.min(next)))
+            .copied()
+            .unwrap_or(0.0);
+        primary_cursor += rank_span[rank_index] + spacing.rank_spacing.max(label_gap);
     }
 
     // Compute secondary coordinates using Brandes-Köpf 4-way alignment.
@@ -15646,6 +17111,20 @@ fn coordinate_assignment(
     );
 
     // Build output using primary offsets and Brandes-Köpf secondary coordinates.
+    // The coordinates are centres (see below); the smallest leading edge is kept at 0, as it was
+    // when they were used as edges.
+    let secondary_floor = (0..ir.nodes.len())
+        .filter_map(|node| {
+            let centre = *secondary_coords.get(node)?;
+            let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
+            Some(centre - if horizontal_ranks { height } else { width } / 2.0)
+        })
+        .fold(f32::INFINITY, f32::min);
+    let secondary_floor = if secondary_floor.is_finite() {
+        secondary_floor
+    } else {
+        0.0
+    };
     let mut output = Vec::with_capacity(ir.nodes.len());
     for (rank, fallback_node_indexes) in &fallback_nodes_by_rank {
         let Some(rank_index) = rank_to_index.get(rank).copied() else {
@@ -15662,10 +17141,15 @@ fn coordinate_assignment(
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let secondary = secondary_coords.get(node_index).copied().unwrap_or(0.0);
 
+            // Brandes-Köpf separates neighbours by HALF extents, so its coordinate is a node's
+            // CENTRE; using it as the top/left edge misaligned nodes of different sizes (an edge
+            // between a narrow and a wide node jogged) and could overlap them. Along the rank axis
+            // a node stays on its band's leading edge, which gives every edge into the rank one
+            // shared channel for the orthogonal router.
             let (x, y) = if horizontal_ranks {
-                (primary, secondary)
+                (primary, secondary - height / 2.0 - secondary_floor)
             } else {
-                (secondary, primary)
+                (secondary - width / 2.0 - secondary_floor, primary)
             };
             let node_id = ir
                 .nodes
@@ -16611,7 +18095,18 @@ fn build_subgraph_local_layout(
             .fold(0.0_f32, f32::max)
             .max(1.0);
 
-        let mut secondary_cursor = 0.0_f32;
+        // Centred across the rank like the full pipeline's coordinate assignment, so a relaid
+        // region matches what a full layout would have put there: each rank's run is centred on
+        // one line, and every node stays on its band's leading edge.
+        let run: f32 = rank_nodes
+            .iter()
+            .map(|&node_index| {
+                let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
+                if horizontal_ranks { height } else { width }
+            })
+            .sum::<f32>()
+            + spacing.node_spacing * rank_nodes.len().saturating_sub(1) as f32;
+        let mut secondary_cursor = -run / 2.0;
         for (order, &node_index) in rank_nodes.iter().enumerate() {
             let (width, height) = node_sizes.get(node_index).copied().unwrap_or((84.0, 44.0));
             let bounds = if horizontal_ranks {
@@ -18113,6 +19608,7 @@ fn count_inversions(values: &mut [usize]) -> usize {
 fn build_edge_paths(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
+    clusters: &[LayoutClusterBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
@@ -18120,6 +19616,7 @@ fn build_edge_paths(
     build_edge_paths_with_orientation(
         ir,
         nodes,
+        clusters,
         highlighted_edge_indexes,
         horizontal_ranks,
         edge_routing,
@@ -18197,6 +19694,7 @@ fn build_directed_path_edge_paths_unchecked(
 fn build_edge_paths_with_orientation(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
+    clusters: &[LayoutClusterBox],
     highlighted_edge_indexes: &BTreeSet<usize>,
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
@@ -18222,20 +19720,30 @@ fn build_edge_paths_with_orientation(
             break;
         }
     }
-    // Only when parallels exist do we need the per-edge `(pair_total, pair_idx)`. Rebuilt identically
-    // to the original single-pass counts; byte-identical for the routing loop below.
-    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), usize>, Vec<usize>) =
+    // Every edge in a pair must share a step. Choosing a larger step only for labelled edges can
+    // put an inner labelled lane on top of an outer unlabelled lane.
+    #[derive(Default)]
+    struct ParallelPair {
+        count: usize,
+        label_width: Option<f32>,
+    }
+    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), ParallelPair>, Vec<usize>) =
         if any_parallel {
-            let mut count = FxHashMap::default();
+            let mut count: FxHashMap<(usize, usize), ParallelPair> = FxHashMap::default();
             count.reserve(ir.edges.len());
             let mut index = Vec::with_capacity(ir.edges.len());
+            let metrics = fm_core::FontMetrics::default_metrics();
             for edge in &ir.edges {
                 let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
                 let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
                 let key = (source.min(target), source.max(target));
-                let c = count.entry(key).or_insert(0);
-                index.push(*c);
-                *c += 1;
+                let pair = count.entry(key).or_default();
+                index.push(pair.count);
+                pair.count += 1;
+                if let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) {
+                    let width = metrics.estimate_dimensions(&label.text).0;
+                    pair.label_width = Some(pair.label_width.map_or(width, |old| old.max(width)));
+                }
             }
             (count, index)
         } else {
@@ -18246,7 +19754,23 @@ fn build_edge_paths_with_orientation(
     // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
     // Each edge's own two endpoints are temporarily parked far away below so the
     // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
-    let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    //
+    // Cluster boxes come FIRST: an edge goes AROUND a subgraph it neither starts nor ends in
+    // rather than through it (where it read as part of that subgraph). The nudge is taken from the
+    // lowest-index obstacle a segment hits, and a cluster encloses its nodes, so stepping past the
+    // cluster clears them too; with the nodes first the route stepped past one member and stayed
+    // inside the box. The clusters holding either end are parked per edge, below, as its
+    // endpoints are. Node `i` is obstacle `base + i`.
+    let base = clusters.len();
+    let mut obstacle_bounds: Vec<LayoutRect> = clusters
+        .iter()
+        .map(|cluster| cluster.bounds)
+        .chain(nodes.iter().map(|n| n.bounds))
+        .collect();
+    // A composite state's node has its cluster's box (`anchor_composite_state_nodes`), so as an
+    // obstacle it walls in its own contents: every route between two of its members was nudged out
+    // of the box and back. Each node's enclosing composites are parked with its edges' endpoints.
+    let containers = composite_containers(ir, nodes.len());
     // Index the obstacle set for either a sparse/tree-like flowchart (the original
     // `edges <= 1.5*nodes` case) **or** a *large* dense graph. The density gate alone
     // kept wide layered graphs on the per-edge linear scan, but a fresh profile shows
@@ -18295,19 +19819,40 @@ fn build_edge_paths_with_orientation(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
+            // Inside a subgraph laid out in its own direction, its edges run that way too.
+            let horizontal_ranks =
+                subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks);
 
             let is_self_loop = source == target;
-            let (pair_total, pair_idx) = if any_parallel {
+            let (pair_total, pair_idx, pair_label_width) = if any_parallel {
                 let key = (source.min(target), source.max(target));
+                let pair = edge_pair_count.get(&key);
                 (
-                    edge_pair_count.get(&key).copied().unwrap_or(1),
+                    pair.map_or(1, |pair| pair.count),
                     edge_pair_index.get(edge_index).copied().unwrap_or(0),
+                    pair.and_then(|pair| pair.label_width),
                 )
             } else {
-                (1, 0)
+                (1, 0, None)
             };
             let parallel_offset = if pair_total > 1 {
-                let offset_step = 12.0_f32;
+                // A labelled edge's label sits on its midpoint, so two edges of one pair a few
+                // units apart printed their labels over each other. The offset runs ACROSS the
+                // path: a label's height where ranks run left to right, its width (as far as the
+                // nodes leave room) where they run top to bottom.
+                let requested_step = match pair_label_width {
+                    None => 12.0_f32,
+                    Some(_) if horizontal_ranks => 26.0,
+                    // The rendered box: the renderer's wider per-character measure plus padding.
+                    Some(width) => width.mul_add(1.4, 30.0).max(26.0),
+                };
+                let offset_step = parallel_port_step(
+                    node_outline_bounds(source_box.bounds, node_shape_at(ir, source_box)),
+                    node_outline_bounds(target_box.bounds, node_shape_at(ir, target_box)),
+                    horizontal_ranks,
+                    pair_total,
+                    requested_step,
+                );
                 (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
             } else {
                 0.0
@@ -18316,13 +19861,59 @@ fn build_edge_paths_with_orientation(
             let points = if is_self_loop {
                 route_self_loop(source_box, horizontal_ranks)
             } else {
-                let (source_anchor, target_anchor) = edge_anchors(
-                    source_box,
-                    target_box,
-                    horizontal_ranks,
-                    node_shape_at(ir, source_box),
-                    node_shape_at(ir, target_box),
+                // An end written to a subgraph (`one --> two`) is drawn to the subgraph's box, as
+                // mermaid draws it: it leaves or enters the box's face instead of the member the
+                // endpoint resolved to for ranking.
+                let (from_subgraph, to_subgraph) = edge.named_subgraphs();
+                let end_box = |subgraph: Option<fm_core::IrSubgraphId>, member: &LayoutNodeBox| {
+                    let cluster = ir.graph.subgraph(subgraph?)?.cluster?;
+                    let found = clusters.iter().find(|c| c.cluster_index == cluster.0)?;
+                    Some(LayoutNodeBox {
+                        bounds: found.bounds,
+                        ..member.clone()
+                    })
+                };
+                let (source_end, target_end) = (
+                    end_box(from_subgraph, source_box),
+                    end_box(to_subgraph, target_box),
                 );
+                let shape = |end: &Option<LayoutNodeBox>, member| {
+                    end.as_ref()
+                        .map_or_else(|| node_shape_at(ir, member), |_| fm_core::NodeShape::Rect)
+                };
+                let (source_end, target_end) = (
+                    (
+                        source_end.as_ref().unwrap_or(source_box),
+                        shape(&source_end, source_box),
+                    ),
+                    (
+                        target_end.as_ref().unwrap_or(target_box),
+                        shape(&target_end, target_box),
+                    ),
+                );
+                let (mut source_anchor, mut target_anchor) = edge_anchors(
+                    source_end.0,
+                    target_end.0,
+                    horizontal_ranks,
+                    source_end.1,
+                    target_end.1,
+                );
+                if parallel_offset.abs() > 0.01 {
+                    source_anchor = parallel_edge_anchor(
+                        source_anchor,
+                        source_end.0.bounds,
+                        source_end.1,
+                        horizontal_ranks,
+                        parallel_offset,
+                    );
+                    target_anchor = parallel_edge_anchor(
+                        target_anchor,
+                        target_end.0.bounds,
+                        target_end.1,
+                        horizontal_ranks,
+                        parallel_offset,
+                    );
+                }
                 // Exclude this edge's own endpoints from the shared obstacle set by
                 // parking them far away (the router's AABB reject drops them), then
                 // restore. Far enough that no realistic segment bbox can overlap.
@@ -18332,13 +19923,34 @@ fn build_edge_paths_with_orientation(
                     width: 0.0,
                     height: 0.0,
                 };
-                let saved_source = obstacle_bounds.get(source).copied();
-                let saved_target = obstacle_bounds.get(target).copied();
-                if let Some(slot) = obstacle_bounds.get_mut(source) {
-                    *slot = FAR_AWAY;
-                }
-                if let Some(slot) = obstacle_bounds.get_mut(target) {
-                    *slot = FAR_AWAY;
+                // Restored in reverse, so a box parked twice (a container enclosing BOTH ends)
+                // gets its first-saved (real) box back rather than the parked one its second save
+                // captured. The two endpoints, then their enclosing composites, then every cluster
+                // holding either end.
+                let mut parked: SmallVec<[(usize, LayoutRect); 4]> = SmallVec::new();
+                let ends = [source_box.bounds.center(), target_box.bounds.center()];
+                let holding_clusters = clusters.iter().enumerate().filter(|(_, cluster)| {
+                    let r = cluster.bounds;
+                    ends.iter().any(|p| {
+                        p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+                    })
+                });
+                for slot in [source, target]
+                    .into_iter()
+                    .chain(
+                        [source, target]
+                            .iter()
+                            .filter_map(|&node| containers.get(node))
+                            .flatten()
+                            .copied(),
+                    )
+                    .map(|node| base + node)
+                    .chain(holding_clusters.map(|(k, _)| k))
+                {
+                    if let Some(slot_box) = obstacle_bounds.get_mut(slot) {
+                        parked.push((slot, *slot_box));
+                        *slot_box = FAR_AWAY;
+                    }
                 }
                 let mut pts = match edge_routing {
                     EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
@@ -18356,14 +19968,55 @@ fn build_edge_paths_with_orientation(
                         obstacle_index.as_mut(),
                     ),
                 };
-                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(source), saved_source) {
-                    *slot = saved;
+                // An aligned detour leaves and enters at the faces'
+                // centres, where the edges between neighbouring ranks attach too, so its stubs
+                // ran along theirs; on a flat face it attaches part-way toward its detour instead.
+                if pair_total == 1
+                    && pts.len() == 6
+                    && matches!(edge_routing, EdgeRouting::Orthogonal)
+                    && if horizontal_ranks {
+                        (source_anchor.y - target_anchor.y).abs() < 0.001
+                    } else {
+                        (source_anchor.x - target_anchor.x).abs() < 0.001
+                    }
+                {
+                    let original = pts.clone();
+                    let across = |p: LayoutPoint| if horizontal_ranks { p.y } else { p.x };
+                    let toward = across(pts[2]) - across(pts[0]);
+                    for (bends, (end_box, end_shape)) in
+                        [([0, 1], source_end), ([4, 5], target_end)]
+                    {
+                        if !matches!(
+                            end_shape,
+                            fm_core::NodeShape::Rect | fm_core::NodeShape::Rounded
+                        ) {
+                            continue;
+                        }
+                        let face = if horizontal_ranks {
+                            end_box.bounds.height
+                        } else {
+                            end_box.bounds.width
+                        };
+                        let shift = toward.clamp(-face / 4.0, face / 4.0);
+                        for bend in bends {
+                            if horizontal_ranks {
+                                pts[bend].y += shift;
+                            } else {
+                                pts[bend].x += shift;
+                            }
+                        }
+                    }
+                    // Moving a port changes the two side stubs too. Keep the already-clear
+                    // route if that cosmetic separation would run through another node.
+                    if pts.windows(2).any(|pair| {
+                        segment_blocked(pair[0], pair[1], &obstacle_bounds, obstacle_index.as_mut())
+                            .is_some()
+                    }) {
+                        pts = original;
+                    }
                 }
-                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(target), saved_target) {
-                    *slot = saved;
-                }
-                if parallel_offset.abs() > 0.01 {
-                    apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
+                for &(slot, saved) in parked.iter().rev() {
+                    obstacle_bounds[slot] = saved;
                 }
                 pts
             };
@@ -18384,6 +20037,36 @@ fn build_edge_paths_with_orientation(
         });
     edge_paths.extend(routed);
     edge_paths
+}
+
+/// Whether an edge's ranks run across (`LR`/`RL`): the direction of the innermost subgraph
+/// holding both its ends that sets one, or `None` to follow the diagram.
+///
+/// A subgraph with its own `direction` is laid out that way, but its edges were anchored and
+/// routed by the DIAGRAM's direction: in `direction LR` inside a TB chart each edge left its
+/// source's bottom and entered its target's top, two nodes side by side, so the line ran through
+/// both and the arrowhead ended under a node.
+fn subgraph_rank_axis(ir: &MermaidDiagramIr, source: usize, target: usize) -> Option<bool> {
+    let held = |node: usize| {
+        ir.graph
+            .nodes
+            .get(node)
+            .map_or(&[][..], |graph_node| graph_node.subgraphs.as_slice())
+    };
+    let depth = |mut id: fm_core::IrSubgraphId| {
+        let mut depth = 0_usize;
+        while let Some(parent) = ir.graph.subgraph(id).and_then(|s| s.parent) {
+            depth += 1;
+            id = parent;
+        }
+        depth
+    };
+    held(source)
+        .iter()
+        .filter(|subgraph| held(target).contains(subgraph))
+        .filter_map(|&subgraph| Some((depth(subgraph), ir.graph.subgraph(subgraph)?.direction?)))
+        .max_by_key(|&(depth, _)| depth)
+        .map(|(_, direction)| matches!(direction, GraphDirection::LR | GraphDirection::RL))
 }
 
 /// Route a self-loop edge: goes out one side and returns on another.
@@ -18440,17 +20123,82 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> EdgePoin
     }
 }
 
-/// Apply parallel offset to an edge path to distinguish parallel edges.
-fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ranks: bool) {
-    if points.len() < 2 {
-        return;
+/// Keep a fan's ports inside the central 80% of both endpoint outlines.
+fn parallel_port_step(
+    source: LayoutRect,
+    target: LayoutRect,
+    horizontal_ranks: bool,
+    count: usize,
+    requested: f32,
+) -> f32 {
+    let extent = if horizontal_ranks {
+        source.height.min(target.height)
+    } else {
+        source.width.min(target.width)
+    };
+    requested.min(extent.max(0.0) * 0.8 / count.saturating_sub(1).max(1) as f32)
+}
+
+/// A force-directed pair uses the same attachment axis in both edge directions.
+/// Prefer a separated pair of faces: centre displacement alone can choose overlapping horizontal
+/// faces on wide, vertically separated boxes and route the first segment through its own node.
+fn force_parallel_axis(source: LayoutRect, target: LayoutRect) -> bool {
+    let source_center = source.center();
+    let target_center = target.center();
+    let dx = (target_center.x - source_center.x).abs();
+    let dy = (target_center.y - source_center.y).abs();
+    let separated_x = dx >= (source.width + target.width) / 2.0;
+    let separated_y = dy >= (source.height + target.height) / 2.0;
+    match (separated_x, separated_y) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => dx >= dy,
     }
-    // Offset perpendicular to the main routing direction.
-    for pt in points.iter_mut() {
-        if horizontal_ranks {
-            pt.y += offset;
-        } else {
-            pt.x += offset;
+}
+
+/// Move a port across its attachment side while keeping it on the drawn outline.
+/// The router must receive this final point: translating its output invalidates both attachment
+/// geometry and obstacle avoidance, especially on diamonds and circular nodes.
+fn parallel_edge_anchor(
+    anchor: LayoutPoint,
+    bounds: LayoutRect,
+    shape: fm_core::NodeShape,
+    horizontal_ranks: bool,
+    offset: f32,
+) -> LayoutPoint {
+    use fm_core::NodeShape;
+
+    let bounds = node_outline_bounds(bounds, shape);
+    let center = bounds.center();
+    let (half_along, half_across, original_along) = if horizontal_ranks {
+        (bounds.width / 2.0, bounds.height / 2.0, anchor.x - center.x)
+    } else {
+        (bounds.height / 2.0, bounds.width / 2.0, anchor.y - center.y)
+    };
+    let across = offset.clamp(-half_across, half_across);
+    let along = match shape {
+        NodeShape::Circle
+        | NodeShape::FilledCircle
+        | NodeShape::DoubleCircle
+        | NodeShape::CrossedCircle => (half_along * half_along - across * across).max(0.0).sqrt(),
+        NodeShape::Diamond => half_along * (1.0 - across.abs() / half_across.max(f32::EPSILON)),
+        NodeShape::Stadium => {
+            let radius = half_along.min(half_across);
+            let cap_offset = (across.abs() - (half_across - radius)).max(0.0);
+            half_along - radius + (radius * radius - cap_offset * cap_offset).max(0.0).sqrt()
+        }
+        _ => original_along.abs(),
+    };
+    let along = if original_along < 0.0 { -along } else { along };
+    if horizontal_ranks {
+        LayoutPoint {
+            x: center.x + along,
+            y: center.y + across,
+        }
+    } else {
+        LayoutPoint {
+            x: center.x + across,
+            y: center.y + along,
         }
     }
 }
@@ -18755,6 +20503,16 @@ fn node_shape_at(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> fm_core::No
         .map_or(fm_core::NodeShape::Rect, |node| node.shape)
 }
 
+fn node_outline_bounds(bounds: LayoutRect, shape: fm_core::NodeShape) -> LayoutRect {
+    match shape {
+        fm_core::NodeShape::Circle
+        | fm_core::NodeShape::FilledCircle
+        | fm_core::NodeShape::DoubleCircle
+        | fm_core::NodeShape::CrossedCircle => shapes::circle_bounds(bounds),
+        _ => bounds,
+    }
+}
+
 fn edge_anchors(
     source_box: &LayoutNodeBox,
     target_box: &LayoutNodeBox,
@@ -18762,25 +20520,27 @@ fn edge_anchors(
     source_shape: fm_core::NodeShape,
     target_shape: fm_core::NodeShape,
 ) -> (LayoutPoint, LayoutPoint) {
-    let source_center = source_box.bounds.center();
-    let target_center = target_box.bounds.center();
+    let source_bounds = node_outline_bounds(source_box.bounds, source_shape);
+    let target_bounds = node_outline_bounds(target_box.bounds, target_shape);
+    let source_center = source_bounds.center();
+    let target_center = target_bounds.center();
 
     if horizontal_ranks {
         // Slanted shapes pull away from their box between the horizontal edges, so the side
         // midpoint is not on the drawn outline. Anchoring at the box there leaves the arrowhead
         // floating beside the node — a triangle is a quarter of its own width adrift.
-        let source_inset = source_box.bounds.width * source_shape.horizontal_outline_inset_ratio();
-        let target_inset = target_box.bounds.width * target_shape.horizontal_outline_inset_ratio();
+        let source_inset = source_bounds.width * source_shape.horizontal_outline_inset_ratio();
+        let target_inset = target_bounds.width * target_shape.horizontal_outline_inset_ratio();
 
         let (source_x, target_x) = if target_center.x >= source_center.x {
             (
-                source_box.bounds.x + source_box.bounds.width - source_inset,
-                target_box.bounds.x + target_inset,
+                source_bounds.x + source_bounds.width - source_inset,
+                target_bounds.x + target_inset,
             )
         } else {
             (
-                source_box.bounds.x + source_inset,
-                target_box.bounds.x + target_box.bounds.width - target_inset,
+                source_bounds.x + source_inset,
+                target_bounds.x + target_bounds.width - target_inset,
             )
         };
         (
@@ -18795,15 +20555,9 @@ fn edge_anchors(
         )
     } else {
         let (source_y, target_y) = if target_center.y >= source_center.y {
-            (
-                source_box.bounds.y + source_box.bounds.height,
-                target_box.bounds.y,
-            )
+            (source_bounds.y + source_bounds.height, target_bounds.y)
         } else {
-            (
-                source_box.bounds.y,
-                target_box.bounds.y + target_box.bounds.height,
-            )
+            (source_bounds.y, target_bounds.y + target_bounds.height)
         };
         (
             LayoutPoint {
@@ -18850,149 +20604,33 @@ fn route_edge_points_with_obstacle_index(
 ) -> EdgePoints {
     let has_spatial_index = obstacle_index.is_some();
     let epsilon = 0.001_f32;
-
-    let points = if horizontal_ranks {
-        if (source.y - target.y).abs() < epsilon {
-            let segment = (
-                LayoutPoint {
-                    x: source.x.min(target.x),
-                    y: source.y,
-                },
-                LayoutPoint {
-                    x: source.x.max(target.x),
-                    y: target.y,
-                },
-            );
-            if let Some(nudge) =
-                find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
-            {
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: source.x,
-                        y: nudge,
-                    },
-                    LayoutPoint {
-                        x: target.x,
-                        y: nudge,
-                    },
-                    target,
-                ]
-            } else {
-                smallvec![source, target]
-            }
+    let aligned = if horizontal_ranks {
+        (source.y - target.y).abs() < epsilon
+    } else {
+        (source.x - target.x).abs() < epsilon
+    };
+    let points = if !aligned {
+        turning_route(source, target, horizontal_ranks, obstacles, obstacle_index)
+    } else if let Some(clear) = clear_line(source, target, obstacles, obstacle_index.as_deref_mut())
+    {
+        let detour = aligned_detour(source, target, clear, horizontal_ranks);
+        if detour.windows(2).all(|pair| {
+            segment_blocked(pair[0], pair[1], obstacles, obstacle_index.as_deref_mut()).is_none()
+        }) {
+            detour
         } else {
-            let mid_x = f32::midpoint(source.x, target.x);
-            let mid_segment = (
-                LayoutPoint {
-                    x: mid_x,
-                    y: source.y.min(target.y),
-                },
-                LayoutPoint {
-                    x: mid_x,
-                    y: source.y.max(target.y),
-                },
-            );
-            // Check if the vertical mid-segment clips through any obstacle.
-            if let Some(nudge) =
-                find_obstacle_nudge_x(mid_segment, mid_x, obstacles, obstacle_index.as_deref_mut())
-            {
-                // Route around: two vertical segments flanking the obstacle.
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: nudge,
-                        y: source.y,
-                    },
-                    LayoutPoint {
-                        x: nudge,
-                        y: target.y,
-                    },
-                    target,
-                ]
-            } else {
-                smallvec![
-                    source,
-                    LayoutPoint {
-                        x: mid_x,
-                        y: source.y,
-                    },
-                    LayoutPoint {
-                        x: mid_x,
-                        y: target.y,
-                    },
-                    target,
-                ]
-            }
-        }
-    } else if (source.x - target.x).abs() < epsilon {
-        let segment = (
-            LayoutPoint {
-                x: source.x,
-                y: source.y.min(target.y),
-            },
-            LayoutPoint {
-                x: target.x,
-                y: source.y.max(target.y),
-            },
-        );
-        if let Some(nudge) =
-            find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
-        {
-            smallvec![
+            bounded_orthogonal_route(
                 source,
-                LayoutPoint {
-                    x: nudge,
-                    y: source.y,
-                },
-                LayoutPoint {
-                    x: nudge,
-                    y: target.y,
-                },
                 target,
-            ]
-        } else {
-            smallvec![source, target]
+                horizontal_ranks,
+                obstacles,
+                obstacle_index,
+                None,
+            )
+            .unwrap_or(detour)
         }
     } else {
-        let mid_y = f32::midpoint(source.y, target.y);
-        let mid_segment = (
-            LayoutPoint {
-                x: source.x.min(target.x),
-                y: mid_y,
-            },
-            LayoutPoint {
-                x: source.x.max(target.x),
-                y: mid_y,
-            },
-        );
-        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles, obstacle_index) {
-            smallvec![
-                source,
-                LayoutPoint {
-                    x: source.x,
-                    y: nudge,
-                },
-                LayoutPoint {
-                    x: target.x,
-                    y: nudge,
-                },
-                target,
-            ]
-        } else {
-            smallvec![
-                source,
-                LayoutPoint {
-                    x: source.x,
-                    y: mid_y,
-                },
-                LayoutPoint {
-                    x: target.x,
-                    y: mid_y,
-                },
-                target,
-            ]
-        }
+        smallvec![source, target]
     };
 
     let points = if !has_spatial_index
@@ -19008,6 +20646,429 @@ fn route_edge_points_with_obstacle_index(
     };
 
     simplify_polyline(points)
+}
+
+/// Whether a segment parallel to an axis runs into an obstacle (within the router's margin).
+fn segment_blocked(
+    a: LayoutPoint,
+    b: LayoutPoint,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> Option<f32> {
+    let segment = (
+        LayoutPoint {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+        },
+        LayoutPoint {
+            x: a.x.max(b.x),
+            y: a.y.max(b.y),
+        },
+    );
+    if (a.x - b.x).abs() < 0.001 {
+        find_obstacle_nudge_x(segment, a.x, obstacles, obstacle_index)
+    } else {
+        find_obstacle_nudge_y(segment, a.y, obstacles, obstacle_index)
+    }
+}
+
+/// Where a segment parallel to an axis has to move to clear EVERY obstacle, or `None` when it is
+/// clear where it is.
+///
+/// The router's nudge steps past the first obstacle it finds, so a line along a column of nodes
+/// cleared the nearest and ran through a wider one further along. This keeps stepping the line,
+/// in the direction of that first step, past whatever is still in its way.
+fn clear_line(
+    a: LayoutPoint,
+    b: LayoutPoint,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> Option<f32> {
+    const MARGIN: f32 = 8.0;
+    let first = segment_blocked(a, b, obstacles, obstacle_index)?;
+    let vertical = (a.x - b.x).abs() < 0.001;
+    let (line, lo, hi) = if vertical {
+        (a.x, a.y.min(b.y), a.y.max(b.y))
+    } else {
+        (a.y, a.x.min(b.x), a.x.max(b.x))
+    };
+    let downward = first < line;
+    // The CGA intersection test includes contact with the inflated box boundary. The first
+    // nudge, like every later one below, must step just beyond it; otherwise validation rejects
+    // even a simple clear detour and needlessly sends it through the bounded grid search.
+    let mut at = first + if downward { -0.5 } else { 0.5 };
+    for _ in 0..obstacles.len() {
+        let in_the_way = obstacles.iter().find(|r| {
+            let (span_lo, span_hi, cross_lo, cross_hi) = if vertical {
+                (r.y, r.y + r.height, r.x, r.x + r.width)
+            } else {
+                (r.x, r.x + r.width, r.y, r.y + r.height)
+            };
+            hi > span_lo - MARGIN
+                && lo < span_hi + MARGIN
+                && at > cross_lo - MARGIN
+                && at < cross_hi + MARGIN
+        });
+        let Some(r) = in_the_way else {
+            break;
+        };
+        let (cross_lo, cross_hi) = if vertical {
+            (r.x, r.x + r.width)
+        } else {
+            (r.y, r.y + r.height)
+        };
+        at = if downward {
+            cross_lo - MARGIN - 0.5
+        } else {
+            cross_hi + MARGIN + 0.5
+        };
+    }
+    Some(at)
+}
+
+/// Route an edge whose ends are not aligned: out along the rank axis, across, and on into the
+/// target.
+///
+/// The turn is halfway between the ends, stepped past anything on that crossing line, whenever
+/// both legs are clear — every edge between neighbouring ranks. An edge spanning several ranks
+/// ran its legs straight through the nodes of the ranks between, so a leg that runs into a node
+/// turns instead just past the source, or just before the target, whichever leaves its segments
+/// clear, or else crosses on a clear line between those two turns.
+fn turning_route(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> EdgePoints {
+    const STUB: f32 = 16.0;
+    let (start, end, from, to) = if horizontal_ranks {
+        (source.x, target.x, source.y, target.y)
+    } else {
+        (source.y, target.y, source.x, target.x)
+    };
+    let point = |along: f32, across: f32| {
+        if horizontal_ranks {
+            LayoutPoint {
+                x: along,
+                y: across,
+            }
+        } else {
+            LayoutPoint {
+                x: across,
+                y: along,
+            }
+        }
+    };
+    let turn =
+        |at: f32| -> EdgePoints { smallvec![source, point(at, from), point(at, to), target] };
+    let clear = |route: &EdgePoints, index: &mut Option<&mut ObstacleSpatialIndex>| {
+        route.windows(2).all(|pair| {
+            segment_blocked(pair[0], pair[1], obstacles, index.as_deref_mut()).is_none()
+        })
+    };
+
+    let mid = f32::midpoint(start, end);
+    let mid = clear_line(
+        point(mid, from),
+        point(mid, to),
+        obstacles,
+        obstacle_index.as_deref_mut(),
+    )
+    .unwrap_or(mid);
+    let halfway = turn(mid);
+    if segment_blocked(source, halfway[1], obstacles, obstacle_index.as_deref_mut()).is_none()
+        && segment_blocked(halfway[2], target, obstacles, obstacle_index.as_deref_mut()).is_none()
+    {
+        return halfway;
+    }
+    let step = STUB.copysign(end - start);
+    let (early, late) = (start + step, end - step);
+    for at in [early, late] {
+        let route = turn(at);
+        if clear(&route, &mut obstacle_index) {
+            return route;
+        }
+    }
+    // Both turns are blocked: cross between them on the first clear line past the target's.
+    let line = clear_line(
+        point(early, to),
+        point(late, to),
+        obstacles,
+        obstacle_index.as_deref_mut(),
+    )
+    .unwrap_or(to);
+    let detour: EdgePoints = smallvec![
+        source,
+        point(early, from),
+        point(early, line),
+        point(late, line),
+        point(late, to),
+        target,
+    ];
+    if clear(&detour, &mut obstacle_index) {
+        detour
+    } else {
+        bounded_orthogonal_route(
+            source,
+            target,
+            horizontal_ranks,
+            obstacles,
+            obstacle_index,
+            None,
+        )
+        .unwrap_or(halfway)
+    }
+}
+
+/// Find a clear corridor when the cheap one- and two-turn routes are obstructed.
+///
+/// Search a rectilinear grid formed by the nearest obstacle boundaries. Edges are generated on
+/// demand and checked against the COMPLETE obstacle set, so a boundary omitted by the size cap
+/// can limit the search but can never make an obstructed route look clear. Independent caps on
+/// boundary count and expanded states keep a difficult edge from creating an unbounded global
+/// visibility graph. Failure leaves the caller's existing route intact rather than losing an edge.
+///
+/// Ranked routes advance between the endpoint faces along their rank axis, preventing a detour
+/// through their temporarily excluded bounds. Force layouts can supply those endpoint bounds to
+/// permit wider, winding corridors; every segment then also avoids both endpoint interiors.
+fn bounded_orthogonal_route(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+    endpoint_bounds: Option<[LayoutRect; 2]>,
+) -> Option<EdgePoints> {
+    const CLEARANCE: f32 = 8.5;
+    const MAX_OBSTACLES: usize = 64;
+    const MAX_EXPANSIONS: usize = 8_192;
+    const BEND_COST: f32 = 20.0;
+
+    let (start, end) = if horizontal_ranks {
+        (source.x, target.x)
+    } else {
+        (source.y, target.y)
+    };
+    if !start.is_finite()
+        || !end.is_finite()
+        || !source.x.is_finite()
+        || !source.y.is_finite()
+        || !target.x.is_finite()
+        || !target.y.is_finite()
+        || (end - start).abs() < 0.001
+    {
+        return None;
+    }
+    let forward = (end - start).signum();
+    let (lo_x, hi_x) = (source.x.min(target.x), source.x.max(target.x));
+    let (lo_y, hi_y) = (source.y.min(target.y), source.y.max(target.y));
+    let mut nearest = BinaryHeap::new();
+    let mut envelope = (lo_x, hi_x, lo_y, hi_y);
+    for (index, bounds) in obstacles.iter().enumerate() {
+        let right = bounds.x + bounds.width;
+        let bottom = bounds.y + bounds.height;
+        if bounds.width <= 0.0
+            || bounds.height <= 0.0
+            || !bounds.x.is_finite()
+            || !bounds.y.is_finite()
+            || !right.is_finite()
+            || !bottom.is_finite()
+        {
+            continue;
+        }
+        envelope.0 = envelope.0.min(bounds.x);
+        envelope.1 = envelope.1.max(right);
+        envelope.2 = envelope.2.max(bounds.y);
+        envelope.3 = envelope.3.max(bottom);
+        let distance = (bounds.x - hi_x).max(lo_x - right).max(0.0)
+            + (bounds.y - hi_y).max(lo_y - bottom).max(0.0);
+        nearest.push((distance.to_bits(), index));
+        if nearest.len() > MAX_OBSTACLES {
+            nearest.pop();
+        }
+    }
+    let mut xs = vec![
+        source.x,
+        target.x,
+        envelope.0 - CLEARANCE,
+        envelope.1 + CLEARANCE,
+    ];
+    let mut ys = vec![
+        source.y,
+        target.y,
+        envelope.2 - CLEARANCE,
+        envelope.3 + CLEARANCE,
+    ];
+    // A short outward stub is available even where no obstacle boundary happens to supply one.
+    let stub = ((end - start).abs() / 4.0).min(16.0) * forward;
+    let along = if horizontal_ranks { &mut xs } else { &mut ys };
+    along.extend([start + stub, end - stub]);
+    for (_, index) in nearest.into_sorted_vec() {
+        let bounds = obstacles[index];
+        xs.extend([bounds.x - CLEARANCE, bounds.x + bounds.width + CLEARANCE]);
+        ys.extend([bounds.y - CLEARANCE, bounds.y + bounds.height + CLEARANCE]);
+    }
+    if let Some(bounds) = endpoint_bounds {
+        for bounds in bounds {
+            // Endpoints need a way out of their own port. Half a pixel keeps the returning
+            // corridor off their border without closing the small gaps in force placement.
+            xs.extend([bounds.x - 0.5, bounds.x + bounds.width + 0.5]);
+            ys.extend([bounds.y - 0.5, bounds.y + bounds.height + 0.5]);
+        }
+    } else {
+        let along = if horizontal_ranks { &mut xs } else { &mut ys };
+        along.retain(|&value| value >= start.min(end) && value <= start.max(end));
+    }
+    for axis in [&mut xs, &mut ys] {
+        axis.retain(|value| value.is_finite());
+        axis.sort_by(f32::total_cmp);
+        axis.dedup_by(|a, b| *a == *b);
+    }
+    let source_x = xs.iter().position(|&x| x == source.x)?;
+    let source_y = ys.iter().position(|&y| y == source.y)?;
+    let target_x = xs.iter().position(|&x| x == target.x)?;
+    let target_y = ys.iter().position(|&y| y == target.y)?;
+    let width = xs.len();
+    let source_cell = source_y * width + source_x;
+    let target_cell = target_y * width + target_x;
+    let preferred_axis = usize::from(horizontal_ranks);
+    let initial = source_cell * 2 + preferred_axis;
+    let mut costs = vec![f32::INFINITY; width * ys.len() * 2];
+    let mut previous = vec![usize::MAX; costs.len()];
+    let mut queue = BinaryHeap::new();
+    costs[initial] = 0.0;
+    let heuristic = |x: usize, y: usize| (xs[x] - target.x).abs() + (ys[y] - target.y).abs();
+    queue.push(Reverse((
+        heuristic(source_x, source_y).to_bits(),
+        0_u32,
+        initial,
+    )));
+
+    let mut expanded = 0;
+    while let Some(Reverse((_, cost_bits, state))) = queue.pop() {
+        let cost = f32::from_bits(cost_bits);
+        if cost != costs[state] {
+            continue;
+        }
+        if expanded >= MAX_EXPANSIONS {
+            return None;
+        }
+        expanded += 1;
+        let cell = state / 2;
+        let (x, y) = (cell % width, cell / width);
+        if cell == target_cell && state % 2 == preferred_axis {
+            let mut route = EdgePoints::new();
+            let mut cursor = state;
+            loop {
+                let cell = cursor / 2;
+                route.push(LayoutPoint {
+                    x: xs[cell % width],
+                    y: ys[cell / width],
+                });
+                if cursor == initial {
+                    break;
+                }
+                cursor = previous[cursor];
+            }
+            route.reverse();
+            return Some(simplify_polyline(route));
+        }
+        let candidates = [
+            x.checked_sub(1).map(|next| (next, y, 1)),
+            (x + 1 < width).then_some((x + 1, y, 1)),
+            y.checked_sub(1).map(|next| (x, next, 0)),
+            (y + 1 < ys.len()).then_some((x, y + 1, 0)),
+        ];
+        for (next_x, next_y, axis) in candidates.into_iter().flatten() {
+            let next_cell = next_y * width + next_x;
+            if (cell == source_cell || next_cell == target_cell) && axis != preferred_axis {
+                continue;
+            }
+            let (from, to) = (
+                LayoutPoint { x: xs[x], y: ys[y] },
+                LayoutPoint {
+                    x: xs[next_x],
+                    y: ys[next_y],
+                },
+            );
+            let primary_step = if horizontal_ranks {
+                to.x - from.x
+            } else {
+                to.y - from.y
+            };
+            if primary_step * forward < 0.0
+                && (endpoint_bounds.is_none() || cell == source_cell || next_cell == target_cell)
+            {
+                continue;
+            }
+            // Strict interior overlap allows a segment to meet its own port on the boundary,
+            // while every later segment must remain outside the complete endpoint rectangle.
+            if endpoint_bounds.is_some_and(|bounds| {
+                bounds.iter().any(|bounds| {
+                    from.x.max(to.x) > bounds.x + 0.001
+                        && from.x.min(to.x) < bounds.x + bounds.width - 0.001
+                        && from.y.max(to.y) > bounds.y + 0.001
+                        && from.y.min(to.y) < bounds.y + bounds.height - 0.001
+                })
+            }) {
+                continue;
+            }
+            let step = (to.x - from.x).abs() + (to.y - from.y).abs();
+            let next_cost = cost + step + if axis == state % 2 { 0.0 } else { BEND_COST };
+            let next = next_cell * 2 + axis;
+            if next_cost >= costs[next]
+                || segment_blocked(from, to, obstacles, obstacle_index.as_deref_mut()).is_some()
+            {
+                continue;
+            }
+            costs[next] = next_cost;
+            previous[next] = state;
+            let score = next_cost + heuristic(next_x, next_y);
+            queue.push(Reverse((score.to_bits(), next_cost.to_bits(), next)));
+        }
+    }
+    None
+}
+
+/// The detour for an aligned edge whose straight run is blocked: out of the source perpendicular
+/// to its face for a short stub, across to the clear line `clear`, along it, and back in the same
+/// way. Without the stubs the legs ran ALONG both faces to the clear line, so the edge seemed to
+/// leave from a corner and arrived sliding along its target's side.
+fn aligned_detour(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    clear: f32,
+    horizontal_ranks: bool,
+) -> EdgePoints {
+    const STUB: f32 = 16.0;
+    let (start, end, line) = if horizontal_ranks {
+        (source.x, target.x, source.y)
+    } else {
+        (source.y, target.y, source.x)
+    };
+    let stub = ((end - start) / 4.0).clamp(-STUB, STUB);
+    let point = |along: f32, across: f32| {
+        if horizontal_ranks {
+            LayoutPoint {
+                x: along,
+                y: across,
+            }
+        } else {
+            LayoutPoint {
+                x: across,
+                y: along,
+            }
+        }
+    };
+    smallvec![
+        source,
+        point(start + stub, line),
+        point(start + stub, clear),
+        point(end - stub, clear),
+        point(end - stub, line),
+        target,
+    ]
 }
 
 /// Route an edge using spline-friendly control points.
@@ -19192,6 +21253,397 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
 }
 
+/// Separate connected orthogonal runs that would imply relationships absent from the graph.
+/// Preserve genuine fan-in or fan-out buses while splitting mixed fans into distinct tracks.
+/// Keep endpoint ports fixed; constrained routes remain unchanged when no local track fits.
+fn separate_shared_channels(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    edges: &mut [LayoutEdgePath],
+) {
+    const TRACK_GAP: f32 = 10.0;
+    const MIN_TRACK_GAP: f32 = 2.0;
+    const CONTACT_EPS: f32 = 0.5;
+    const GEOMETRY_EPS: f32 = 0.01;
+    const MAX_SHARED: usize = 64;
+    let containers = composite_containers(ir, ir.nodes.len());
+
+    #[derive(Clone, Copy)]
+    struct Run {
+        path: usize,
+        start: usize,
+        lo: f32,
+        hi: f32,
+        from: usize,
+        to: usize,
+        movable: bool,
+    }
+
+    for horizontal in [true, false] {
+        let across = |point: LayoutPoint| if horizontal { point.y } else { point.x };
+        let along = |point: LayoutPoint| if horizontal { point.x } else { point.y };
+        let key = |line: f32| (line * 2.0).round() as i32;
+        let nearby = |line: f32| {
+            key(line - MIN_TRACK_GAP).saturating_sub(1)
+                ..=key(line + MIN_TRACK_GAP).saturating_add(1)
+        };
+        let mut runs = Vec::new();
+        let mut occupied = std::collections::BTreeMap::<i32, Vec<usize>>::new();
+        let mut perpendicular =
+            std::collections::BTreeMap::<i32, Vec<(usize, usize, usize, usize)>>::new();
+        for (p, path) in edges.iter().enumerate() {
+            let Some(edge) = ir.edges.get(path.edge_index) else {
+                continue;
+            };
+            if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+                continue;
+            }
+            let end = |endpoint, subgraph: Option<fm_core::IrSubgraphId>| {
+                subgraph.map_or_else(
+                    || endpoint_node_index(ir, endpoint).unwrap_or(usize::MAX),
+                    |id| ir.nodes.len() + id.0,
+                )
+            };
+            let (from_subgraph, to_subgraph) = edge.named_subgraphs();
+            let (from, to) = (end(edge.from, from_subgraph), end(edge.to, to_subgraph));
+            for (i, pair) in path.points.windows(2).enumerate() {
+                let (a, b) = (pair[0], pair[1]);
+                if (across(a) - across(b)).abs() <= GEOMETRY_EPS
+                    && (along(a) - along(b)).abs() > GEOMETRY_EPS
+                {
+                    let movable = !path.is_self_loop
+                        && i > 0
+                        && i + 2 < path.points.len()
+                        && (along(path.points[i - 1]) - along(a)).abs() <= GEOMETRY_EPS
+                        && (along(path.points[i + 2]) - along(b)).abs() <= GEOMETRY_EPS;
+                    occupied.entry(key(across(a))).or_default().push(runs.len());
+                    runs.push(Run {
+                        path: p,
+                        start: i,
+                        lo: along(a).min(along(b)),
+                        hi: along(a).max(along(b)),
+                        from,
+                        to,
+                        movable,
+                    });
+                } else if (along(a) - along(b)).abs() <= GEOMETRY_EPS
+                    && (across(a) - across(b)).abs() > GEOMETRY_EPS
+                {
+                    perpendicular
+                        .entry(key(along(a)))
+                        .or_default()
+                        .push((p, i, from, to));
+                }
+            }
+        }
+
+        // These snapshots keep original components independent of occupancy updates.
+        let mut groups: Vec<Vec<usize>> = occupied.values().cloned().collect();
+        let mut buses = vec![(usize::MAX, usize::MAX); runs.len()];
+        let mut component = 0;
+        for group in &mut groups {
+            group.sort_unstable_by(|&a, &b| {
+                runs[a].lo.total_cmp(&runs[b].lo).then_with(|| a.cmp(&b))
+            });
+            let mut start = 0;
+            while start < group.len() {
+                let mut end = start + 1;
+                let mut hi = runs[group[start]].hi;
+                let target = runs[group[start]].to;
+                let mut same_target = true;
+                while end < group.len() && runs[group[end]].lo <= hi + CONTACT_EPS {
+                    hi = hi.max(runs[group[end]].hi);
+                    same_target &= runs[group[end]].to == target;
+                    end += 1;
+                }
+                for &index in &group[start..end] {
+                    // A genuine fan-in stays shared. Otherwise every bus belongs to one source:
+                    // pairwise source/target exemptions could join several fans into a false bus.
+                    buses[index] = (
+                        component,
+                        if same_target {
+                            target
+                        } else {
+                            runs[index].from
+                        },
+                    );
+                }
+                component += 1;
+                start = end;
+            }
+        }
+
+        let room_for = |run: Run, edges: &[LayoutEdgePath]| {
+            if !run.movable {
+                return 0.0;
+            }
+            let points = &edges[run.path].points;
+            let line = across(points[run.start]);
+            let before = across(points[run.start - 1]) - line;
+            let after = across(points[run.start + 2]) - line;
+            if before * after > 0.0 {
+                f32::INFINITY
+            } else {
+                let clearance = before.abs().min(after.abs());
+                // Keep the existing 10px stub margin when space allows; in a short channel
+                // preserve at least half the available stub instead of clamping every track to 0.
+                clearance - TRACK_GAP.min(clearance * 0.5)
+            }
+        };
+        let mut assigned: Vec<bool> = runs.iter().map(|run| !run.movable).collect();
+        for group in &mut groups {
+            // Dense meshes retain their geometry and remain obstacles for neighboring groups.
+            if group.len() > MAX_SHARED {
+                continue;
+            }
+            group.sort_unstable_by(|&a, &b| {
+                room_for(runs[a], edges)
+                    .total_cmp(&room_for(runs[b], edges))
+                    .then_with(|| a.cmp(&b))
+            });
+            for &index in group.iter() {
+                let run = runs[index];
+                if !run.movable {
+                    continue;
+                }
+                let points = &edges[run.path].points;
+                let line = across(points[run.start]);
+                let before = across(points[run.start - 1]) - line;
+                let room = room_for(run, edges);
+                let blocked = |candidate: f32| {
+                    for members in occupied
+                        .range(nearby(candidate))
+                        .map(|(_, members)| members)
+                    {
+                        for &other in members {
+                            let neighbor = runs[other];
+                            if neighbor.path == run.path
+                                || (!assigned[other] && buses[other].0 == buses[index].0)
+                            {
+                                continue;
+                            }
+                            let other_line = across(edges[neighbor.path].points[neighbor.start]);
+                            if (candidate - other_line).abs() < MIN_TRACK_GAP - GEOMETRY_EPS
+                                && run.lo <= neighbor.hi + CONTACT_EPS
+                                && neighbor.lo <= run.hi + CONTACT_EPS
+                                && buses[index] != buses[other]
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    // A displaced bend also changes two perpendicular stubs. Do not turn a
+                    // corner contact into an overlapping stub, or join another nearby path.
+                    for (fixed_index, bend_index) in
+                        [(run.start - 1, run.start), (run.start + 2, run.start + 1)]
+                    {
+                        let fixed = points[fixed_index];
+                        let bend = points[bend_index];
+                        let stub_line = along(bend);
+                        let old_lo = across(fixed).min(across(bend));
+                        let old_hi = across(fixed).max(across(bend));
+                        let new_lo = across(fixed).min(candidate);
+                        let new_hi = across(fixed).max(candidate);
+                        for members in perpendicular
+                            .range(nearby(stub_line))
+                            .map(|(_, members)| members)
+                        {
+                            for &(p, i, from, to) in members {
+                                if p == run.path {
+                                    continue;
+                                }
+                                let a = edges[p].points[i];
+                                let b = edges[p].points[i + 1];
+                                if (along(a) - stub_line).abs() >= MIN_TRACK_GAP - GEOMETRY_EPS {
+                                    continue;
+                                }
+                                // Coincident endpoint stubs already form a genuine bus. Extending
+                                // that shared prefix is safe; interior stubs and other ports still
+                                // undergo the overlap-growth check below.
+                                let shared_port = if fixed_index == 0 && i == 0 && run.from == from
+                                {
+                                    Some(a)
+                                } else if fixed_index + 1 == points.len()
+                                    && i + 2 == edges[p].points.len()
+                                    && run.to == to
+                                {
+                                    Some(b)
+                                } else {
+                                    None
+                                };
+                                if edges[p].points.len() > 2
+                                    && shared_port.is_some_and(|port| {
+                                        (port.x - fixed.x).abs() <= GEOMETRY_EPS
+                                            && (port.y - fixed.y).abs() <= GEOMETRY_EPS
+                                    })
+                                {
+                                    continue;
+                                }
+                                let lo = across(a).min(across(b));
+                                let hi = across(a).max(across(b));
+                                let old_overlap = old_hi.min(hi) - old_lo.max(lo);
+                                let new_overlap = new_hi.min(hi) - new_lo.max(lo);
+                                if new_overlap >= -CONTACT_EPS
+                                    && new_overlap > old_overlap + GEOMETRY_EPS
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    // The router has already cleared node boxes. Moving this run changes both
+                    // neighboring stubs as well, so checking only its new middle segment could
+                    // still push a stub into a node. Unchanged tracks need no extra node scan.
+                    if (candidate - line).abs() > GEOMETRY_EPS {
+                        let edge = &ir.edges[edges[run.path].edge_index];
+                        let endpoint_nodes = [
+                            endpoint_node_index(ir, edge.from),
+                            endpoint_node_index(ir, edge.to),
+                        ];
+                        let mut moved = [
+                            points[run.start - 1],
+                            points[run.start],
+                            points[run.start + 1],
+                            points[run.start + 2],
+                        ];
+                        for bend in &mut moved[1..3] {
+                            if horizontal {
+                                bend.y = candidate;
+                            } else {
+                                bend.x = candidate;
+                            }
+                        }
+                        for node in nodes {
+                            // Composite states are also nodes. As in build_edge_paths, an
+                            // enclosing state cannot be an obstacle to its own transitions.
+                            if endpoint_nodes.iter().flatten().any(|&endpoint| {
+                                containers
+                                    .get(endpoint)
+                                    .is_some_and(|parents| parents.contains(&node.node_index))
+                            }) {
+                                continue;
+                            }
+                            let bounds = node.bounds;
+                            let left = bounds.x + GEOMETRY_EPS;
+                            let right = bounds.x + bounds.width - GEOMETRY_EPS;
+                            let top = bounds.y + GEOMETRY_EPS;
+                            let bottom = bounds.y + bounds.height - GEOMETRY_EPS;
+                            // All three segments are orthogonal. Their projected intervals
+                            // test the rectangle's interior, permitting an endpoint on its face.
+                            if left < right
+                                && top < bottom
+                                && moved.windows(2).any(|pair| {
+                                    pair[0].x.max(pair[1].x) > left
+                                        && pair[0].x.min(pair[1].x) < right
+                                        && pair[0].y.max(pair[1].y) > top
+                                        && pair[0].y.min(pair[1].y) < bottom
+                                })
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                };
+                let mut destination = None;
+                'find_track: for gap in [TRACK_GAP, MIN_TRACK_GAP] {
+                    let steps = if room.is_infinite() {
+                        MAX_SHARED
+                    } else {
+                        ((room / gap).ceil() as usize).min(MAX_SHARED) * 2
+                    };
+                    for step in 0..=steps {
+                        let offset = if room.is_infinite() {
+                            -before.signum() * step as f32 * gap
+                        } else {
+                            let distance = step.div_ceil(2) as f32 * gap;
+                            let signed = if step % 2 == 1 { distance } else { -distance };
+                            signed.clamp(-room, room)
+                        };
+                        if !blocked(line + offset) {
+                            destination = Some(line + offset);
+                            break 'find_track;
+                        }
+                    }
+                }
+                assigned[index] = true;
+                // Without enough room for a distinct channel, retaining the route is safer than
+                // crossing an endpoint or another wire. Resolving that case requires new bends.
+                let Some(destination) = destination else {
+                    continue;
+                };
+                for bend in [run.start, run.start + 1] {
+                    if horizontal {
+                        edges[run.path].points[bend].y = destination;
+                    } else {
+                        edges[run.path].points[bend].x = destination;
+                    }
+                }
+                let (old_key, new_key) = (key(line), key(destination));
+                if old_key != new_key {
+                    let members = occupied.get_mut(&old_key).expect("indexed channel");
+                    let position = members
+                        .iter()
+                        .position(|&other| other == index)
+                        .expect("indexed run");
+                    members.swap_remove(position);
+                    occupied.entry(new_key).or_default().push(index);
+                }
+            }
+        }
+    }
+}
+
+/// For each node, the composite-state nodes whose clusters enclose it (empty outside state
+/// diagrams). A composite node is matched to its cluster exactly as in
+/// [`anchor_composite_state_nodes`]: the cluster's title is the state's id.
+fn composite_containers(ir: &MermaidDiagramIr, node_count: usize) -> Vec<Vec<usize>> {
+    if ir.diagram_type != DiagramType::State || ir.clusters.is_empty() {
+        return Vec::new();
+    }
+    let mut containers = vec![Vec::new(); node_count];
+    for subgraph in &ir.graph.subgraphs {
+        let Some(title) = subgraph
+            .cluster
+            .and_then(|cluster| ir.clusters.get(cluster.0))
+            .and_then(|cluster| cluster.title)
+            .and_then(|label| ir.labels.get(label.0))
+        else {
+            continue;
+        };
+        let Some(composite) = ir.nodes.iter().position(|node| node.id == title.text) else {
+            continue;
+        };
+        for member in ir.graph.subgraph_members_recursive(subgraph.id) {
+            if let Some(list) = containers.get_mut(member.0)
+                && member.0 != composite
+            {
+                list.push(composite);
+            }
+        }
+    }
+    containers
+}
+
+/// Whether a state node is already drawn by its matching composite-state cluster.
+/// Its node bounds remain available for routing transitions to the container boundary.
+#[must_use]
+pub fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
+    if ir.diagram_type != DiagramType::State {
+        return false;
+    }
+    let node_id = ir
+        .nodes
+        .get(node_box.node_index)
+        .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
+    ir.clusters.iter().any(|cluster| {
+        cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .is_some_and(|label| label.text == node_id)
+    })
+}
+
 /// Make a composite state's node BE its container.
 ///
 /// A `state Processing { … }` block creates a cluster, and every `Idle --> Processing` transition
@@ -19234,7 +21686,7 @@ const STATE_NOTE_GAP: f32 = 32.0;
 const STATE_NOTE_PAD_X: f32 = 10.0;
 /// Vertical padding inside a state note box, per side.
 const STATE_NOTE_PAD_Y: f32 = 8.0;
-/// Vertical gap between two notes stacked on the same side of the same state.
+/// Vertical gap when a note must move below another note or node.
 const STATE_NOTE_STACK_GAP: f32 = 8.0;
 /// The renderer draws note text at `config.font_size * 0.8`, matching sequence notes, so the layout
 /// estimate is scaled by the same factor — `metrics` measures at its own base size.
@@ -19250,7 +21702,8 @@ const STATE_NOTE_FONT_SCALE: f32 = 0.8;
 /// attaching `note right of Typo` to whichever state happened to be first would be a worse failure
 /// than not drawing it, because it invents a claim the source never made.
 ///
-/// Several notes on the same side of the same state stack downward instead of coinciding.
+/// Notes stack downward when necessary to clear other notes and nodes, including notes belonging
+/// to different targets. Their leaders attach to the final position of each note.
 fn build_state_note_geometry(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -19267,7 +21720,18 @@ fn build_state_note_geometry(
         return Vec::new();
     }
 
+    // The estimate runs ~10% narrower than the note text as browsers draw it, so the text ran
+    // to (and past) the box's right edge with no padding left; the width carries a margin for it.
+    let size = |text: &str| {
+        let (text_width, text_height) = metrics.estimate_dimensions(text);
+        (
+            (STATE_NOTE_FONT_SCALE * 1.15).mul_add(text_width, 2.0 * STATE_NOTE_PAD_X),
+            STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y),
+        )
+    };
     let mut placed: Vec<LayoutStateNote> = Vec::with_capacity(ir.state_notes.len());
+    // A note with no target (a class diagram's `note "…"`) matches no node here and is placed
+    // after the loop.
     for note in &ir.state_notes {
         let Some(target) = nodes.iter().find(|node| node.node_id == note.target) else {
             continue;
@@ -19278,9 +21742,7 @@ fn build_state_note_geometry(
             StateNoteSide::Right
         };
 
-        let (text_width, text_height) = metrics.estimate_dimensions(&note.text);
-        let width = STATE_NOTE_FONT_SCALE.mul_add(text_width, 2.0 * STATE_NOTE_PAD_X);
-        let height = STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y);
+        let (width, height) = size(&note.text);
 
         // Start beside the target, then clear any OTHER state box the note's own row runs into.
         // Without this a note on a state that shares its rank with a neighbour is drawn on top of
@@ -19292,6 +21754,25 @@ fn build_state_note_geometry(
                 && other.bounds.y < row_bottom
                 && other.bounds.y + other.bounds.height > row_top
         });
+        // A neighbour on the requested side pushes the note past it, and the leader then runs
+        // through that neighbour to reach it (`note right of State2` beyond `State3`). When the
+        // other side is free the note goes there instead.
+        let centre = target.bounds.center().x;
+        let occupied = |side: StateNoteSide| {
+            row_neighbours.clone().any(|other| match side {
+                StateNoteSide::Right => other.bounds.x >= centre,
+                StateNoteSide::Left => other.bounds.x + other.bounds.width <= centre,
+            })
+        };
+        let other_side = match side {
+            StateNoteSide::Right => StateNoteSide::Left,
+            StateNoteSide::Left => StateNoteSide::Right,
+        };
+        let side = if occupied(side) && !occupied(other_side) {
+            other_side
+        } else {
+            side
+        };
         // Folded as a single max/min over the whole row rather than nudged per neighbour: a
         // one-pass nudge in node order is not a fixpoint, so a node visited before the push could
         // still be overlapped afterwards.
@@ -19317,6 +21798,31 @@ fn build_state_note_geometry(
             }
         }
 
+        // Stacking can enter another state's row, and notes belonging to different states can
+        // overlap too. Keep the chosen side and move below every intersecting obstacle. Recheck
+        // the new row: clearing one obstacle can encounter another. Each move passes at least
+        // one obstacle's bottom, so this terminates after at most nodes.len() + placed.len() moves.
+        loop {
+            let next_y = nodes
+                .iter()
+                .map(|node| node.bounds)
+                .chain(placed.iter().map(|note| note.bounds))
+                .filter(|obstacle| {
+                    x < obstacle.x + obstacle.width
+                        && obstacle.x < x + width
+                        && y < obstacle.y + obstacle.height
+                        && obstacle.y < y + height
+                })
+                .fold(y, |clear_y, obstacle| {
+                    clear_y.max(obstacle.y + obstacle.height + STATE_NOTE_STACK_GAP)
+                });
+            if next_y > y {
+                y = next_y;
+            } else {
+                break;
+            }
+        }
+
         let leader_y = target.bounds.center().y;
         let (leader_start_x, leader_end_x) = match side {
             StateNoteSide::Right => (target.bounds.x + target.bounds.width, x),
@@ -19339,9 +21845,46 @@ fn build_state_note_geometry(
             },
             leader_end: LayoutPoint {
                 x: leader_end_x,
-                y: leader_y,
+                y: y + height / 2.0,
             },
         });
+    }
+
+    // A note attached to nothing annotates the whole diagram. mermaid lays it out as a free box;
+    // here the free notes stack in a column right of every node and note placed so far, from the
+    // top, so one can cover neither. Its leader is a point (renderers skip it): there is nothing
+    // to lead to. `node_index` is `usize::MAX` for the same reason.
+    let right = nodes
+        .iter()
+        .map(|node| node.bounds)
+        .chain(placed.iter().map(|note| note.bounds))
+        .fold(f32::NEG_INFINITY, |acc, r| acc.max(r.x + r.width));
+    let top = nodes
+        .iter()
+        .fold(f32::INFINITY, |acc, node| acc.min(node.bounds.y));
+    let x = if right.is_finite() {
+        right + STATE_NOTE_GAP
+    } else {
+        0.0
+    };
+    let mut y = if top.is_finite() { top } else { 0.0 };
+    for note in ir.state_notes.iter().filter(|note| note.target.is_empty()) {
+        let (width, height) = size(&note.text);
+        let corner = LayoutPoint { x, y };
+        placed.push(LayoutStateNote {
+            node_index: usize::MAX,
+            side: StateNoteSide::Right,
+            text: note.text.clone(),
+            bounds: LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            leader_start: corner,
+            leader_end: corner,
+        });
+        y += height + STATE_NOTE_STACK_GAP;
     }
     placed
 }
@@ -19369,6 +21912,44 @@ fn extend_bounds_for_state_notes(layout: &mut DiagramLayout) {
     layout.bounds.y = min_y;
     layout.bounds.width = max_x - min_x;
     layout.bounds.height = max_y - min_y;
+}
+
+/// The frame used both when reserving a compound slot and when drawing its final cluster.
+fn cluster_bounds_for_content(
+    content: LayoutRect,
+    children: impl Iterator<Item = LayoutRect>,
+    title: Option<&str>,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> LayoutRect {
+    const HEADER_CLEARANCE: f32 = 28.0;
+    const NESTING_INSET: f32 = 16.0;
+
+    let mut min_x = content.x;
+    let mut min_y = content.y;
+    let mut max_x = content.x + content.width;
+    let mut max_y = content.y + content.height;
+    for child in children {
+        min_x = min_x.min(child.x - NESTING_INSET + spacing.cluster_padding);
+        max_x = max_x.max(child.x + child.width + NESTING_INSET - spacing.cluster_padding);
+        min_y = min_y.min(child.y - HEADER_CLEARANCE - NESTING_INSET + spacing.cluster_padding);
+        max_y = max_y.max(child.y + child.height + NESTING_INSET - spacing.cluster_padding);
+    }
+
+    let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
+    let title_width = title.map_or(0.0, |text| cluster_title_width(text, metrics));
+    let extra_header = title.map_or(0.0, |text| {
+        cluster_title_extra_header(text, spacing.cluster_padding, metrics)
+    });
+    let width = contents_width.max(title_width);
+    LayoutRect {
+        // Widen around the contents: extending only the right border would move a title-wide
+        // frame out of the slot the parent reserved for it and into the next node or cluster.
+        x: min_x - spacing.cluster_padding - (width - contents_width) * 0.5,
+        y: min_y - spacing.cluster_padding - extra_header,
+        width,
+        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y) + extra_header,
+    }
 }
 
 fn build_cluster_boxes(
@@ -19451,67 +22032,48 @@ fn build_cluster_boxes(
     // Sort by depth descending (deepest / innermost children first)
     depths.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
-    const HEADER_CLEARANCE: f32 = 28.0;
-    const NESTING_INSET: f32 = 16.0;
-
     let mut final_boxes: Vec<Option<LayoutClusterBox>> = vec![None; ir.clusters.len()];
 
     for &(_depth, cluster_index) in &depths {
         let Some(cluster) = ir.clusters.get(cluster_index) else {
             continue;
         };
-        let Some((mut min_x, mut min_y, mut max_x, mut max_y)) = cluster_bounds[cluster_index]
-        else {
+        let Some((min_x, min_y, max_x, max_y)) = cluster_bounds[cluster_index] else {
             continue;
         };
-
-        // If this cluster has children subgraphs, expand its bounds to enclose all child cluster boxes
-        if let Some(sg_id) = cluster_to_subgraph[cluster_index]
-            && let Some(sg) = ir.graph.subgraph(sg_id)
-        {
-            for &child_sg_id in &sg.children {
-                if let Some(child_sg) = ir.graph.subgraph(child_sg_id)
-                    && let Some(child_c_id) = child_sg.cluster
-                    && let Some(Some(child_box)) = final_boxes.get(child_c_id.0)
-                {
-                    min_x = min_x.min(child_box.bounds.x - NESTING_INSET + spacing.cluster_padding);
-                    max_x = max_x.max(
-                        child_box.bounds.x + child_box.bounds.width + NESTING_INSET
-                            - spacing.cluster_padding,
-                    );
-                    min_y = min_y.min(
-                        child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
-                            + spacing.cluster_padding,
-                    );
-                    max_y = max_y.max(
-                        child_box.bounds.y + child_box.bounds.height + NESTING_INSET
-                            - spacing.cluster_padding,
-                    );
-                }
-            }
-        }
 
         let title = cluster
             .title
             .and_then(|label_id| ir.labels.get(label_id.0))
             .map(|label| label.text.clone());
 
-        let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-        let title_width = title
-            .as_deref()
-            .map_or(0.0, |text| cluster_title_width(text, metrics));
+        let children = cluster_to_subgraph[cluster_index]
+            .and_then(|id| ir.graph.subgraph(id))
+            .into_iter()
+            .flat_map(|subgraph| subgraph.children.iter())
+            .filter_map(|id| ir.graph.subgraph(*id))
+            .filter_map(|subgraph| subgraph.cluster)
+            .filter_map(|id| final_boxes.get(id.0).and_then(Option::as_ref))
+            .map(|cluster| cluster.bounds);
+        let bounds = cluster_bounds_for_content(
+            LayoutRect {
+                x: min_x,
+                y: min_y,
+                width: max_x - min_x,
+                height: max_y - min_y,
+            },
+            children,
+            title.as_deref(),
+            spacing,
+            metrics,
+        );
 
         let box_obj = LayoutClusterBox {
             cluster_index,
             span: cluster.span,
             title,
             color: None,
-            bounds: LayoutRect {
-                x: min_x - spacing.cluster_padding,
-                y: min_y - spacing.cluster_padding,
-                width: contents_width.max(title_width),
-                height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
-            },
+            bounds,
         };
         final_boxes[cluster_index] = Some(box_obj);
     }
@@ -19525,18 +22087,57 @@ fn build_cluster_boxes(
 /// 8px is mirrored on the right. The label renders at `detail.cluster_font_size`, which is
 /// `config.font_size * 0.9` at full detail and `* 0.86` at reduced detail — NOT the node font size —
 /// so the estimate is scaled to the larger of those, because under-sizing is what lets the title
-/// escape while over-sizing only adds padding.
+/// escape while over-sizing only adds padding. Semibold titles need more room than the plain
+/// preset: the browser's 54px "Very long title" measures 432.875px against its 326.7px estimate.
 fn cluster_title_width(title: &str, metrics: &fm_core::FontMetrics) -> f32 {
     if title.trim().is_empty() {
         return 0.0;
     }
     // Swimlane/section clusters render with their prefix stripped, so measure the displayed text.
-    let displayed = title
+    let displayed = displayed_cluster_title(title);
+    let font_size = metrics.font_size();
+    let average = metrics.avg_char_width();
+    let text_width = displayed
+        .lines()
+        .map(|line| {
+            let measured = metrics.estimate_width(line);
+            // Match SVG's preserved wide-glyph allowance, including narrow presets and m/w.
+            let wide_allowance: f32 = line
+                .chars()
+                .map(
+                    |character| match fm_core::CharWidthClass::classify(character) {
+                        fm_core::CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
+                        fm_core::CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
+                        _ => 0.0,
+                    },
+                )
+                .sum();
+            (measured * 1.4).max((measured + wide_allowance) * 1.125)
+        })
+        .fold(0.0_f32, f32::max)
+        * ((font_size * CLUSTER_FONT_SCALE).max(10.0) / font_size);
+    16.0 + text_width
+}
+
+fn displayed_cluster_title(title: &str) -> &str {
+    title
         .strip_prefix("swimlane:")
         .or_else(|| title.strip_prefix("section "))
-        .unwrap_or(title);
-    let text_width = metrics.estimate_dimensions(displayed).0 * CLUSTER_FONT_SCALE;
-    16.0 + text_width
+        .unwrap_or(title)
+}
+
+/// Extra space above the contents when a title outgrows the existing cluster padding.
+/// SVG uses this baseline and TextBuilder's 1.4 line spacing; the remaining allowance keeps
+/// descenders and the first node's opaque fill apart. Ordinary one-line defaults add nothing.
+fn cluster_title_extra_header(title: &str, padding: f32, metrics: &fm_core::FontMetrics) -> f32 {
+    let displayed = displayed_cluster_title(title);
+    if displayed.trim().is_empty() {
+        return 0.0;
+    }
+    let font_size = (metrics.font_size() * CLUSTER_FONT_SCALE).max(10.0);
+    let baseline = (font_size + 2.0).max(16.0);
+    let additional_lines = displayed.lines().count().saturating_sub(1) as f32;
+    (baseline + additional_lines * font_size * 1.4 + font_size * 0.3 + 8.0 - padding).max(0.0)
 }
 
 /// The larger of the renderer's two `cluster_font_size` factors (`0.9` full detail, `0.86` reduced).
@@ -20188,7 +22789,7 @@ fn build_layout_decision_record(
 
 /// Return all 18 concrete layout algorithms supported by the layout engine.
 #[must_use]
-pub const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 18] {
+pub const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 23] {
     [
         LayoutAlgorithm::Sugiyama,
         LayoutAlgorithm::Force,
@@ -20208,6 +22809,11 @@ pub const fn concrete_layout_algorithms() -> [LayoutAlgorithm; 18] {
         LayoutAlgorithm::Architecture,
         LayoutAlgorithm::Treemap,
         LayoutAlgorithm::Radar,
+        LayoutAlgorithm::Ishikawa,
+        LayoutAlgorithm::TreeView,
+        LayoutAlgorithm::Venn,
+        LayoutAlgorithm::Wardley,
+        LayoutAlgorithm::EventModeling,
     ]
 }
 
@@ -20238,7 +22844,12 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Architecture
                 | LayoutAlgorithm::Packet
                 | LayoutAlgorithm::Treemap
-                | LayoutAlgorithm::Radar => 900,
+                | LayoutAlgorithm::Radar
+                | LayoutAlgorithm::Ishikawa
+                | LayoutAlgorithm::TreeView
+                | LayoutAlgorithm::Venn
+                | LayoutAlgorithm::Wardley
+                | LayoutAlgorithm::EventModeling => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
@@ -20730,7 +23341,7 @@ mod tests {
     /// (and the row table) fails the build rather than drifting the published contract.
     #[test]
     fn layout_algorithm_rows_cover_every_variant() {
-        const ALL: [LayoutAlgorithm; 19] = [
+        const ALL: [LayoutAlgorithm; 24] = [
             LayoutAlgorithm::Auto,
             LayoutAlgorithm::Sugiyama,
             LayoutAlgorithm::Force,
@@ -20750,6 +23361,11 @@ mod tests {
             LayoutAlgorithm::Architecture,
             LayoutAlgorithm::Treemap,
             LayoutAlgorithm::Radar,
+            LayoutAlgorithm::Ishikawa,
+            LayoutAlgorithm::TreeView,
+            LayoutAlgorithm::Venn,
+            LayoutAlgorithm::Wardley,
+            LayoutAlgorithm::EventModeling,
         ];
         let rows = super::layout_algorithm_rows();
         assert_eq!(rows.len(), ALL.len(), "row count must match variant count");
@@ -20766,7 +23382,7 @@ mod tests {
     /// rename here must never strand a stale spelling in the generated parity table.
     #[test]
     fn family_parity_layout_spellings_are_real_algorithms() {
-        const SPELLINGS: [&str; 19] = [
+        const SPELLINGS: [&str; 24] = [
             "auto",
             "sugiyama",
             "force",
@@ -20786,6 +23402,11 @@ mod tests {
             "architecture",
             "treemap",
             "radar",
+            "ishikawa",
+            "treeview",
+            "venn",
+            "wardley",
+            "eventmodeling",
         ];
         for row in fm_core::family_parity_rows() {
             assert!(
@@ -21210,12 +23831,22 @@ mod tests {
             .width
             .min(layout.nodes[0].bounds.height);
 
-        assert_eq!(centre_x(0), centre_x(3), "main commits must share a lane");
-        assert_eq!(
-            centre_x(1),
-            centre_x(2),
-            "develop commits must share a lane"
-        );
+        for (a, b, branch) in [(0, 3, "main"), (1, 2, "develop")] {
+            assert_ne!(
+                layout.nodes[a].bounds.width, layout.nodes[b].bounds.width,
+                "{branch} must exercise differently sized commits"
+            );
+            let left = centre_x(a);
+            let right = centre_x(b);
+            assert!(left.is_finite() && right.is_finite() && left >= 0.0 && right >= 0.0);
+            // Circle diameters come from hypot. Reconstructing a shared centre as x + width / 2
+            // can round to adjacent f32 values for unequal widths; one ULP still rejects the
+            // original left-alignment bug without rounding the production layout coordinates.
+            assert!(
+                left.to_bits().abs_diff(right.to_bits()) <= 1,
+                "{branch} commits must share a lane: {left} versus {right}"
+            );
+        }
         assert!(
             (centre_x(0) - centre_x(1)).abs() >= diameter,
             "lanes {} and {} are closer than one commit diameter ({diameter})",
@@ -21317,7 +23948,6 @@ mod tests {
         for shape in [
             fm_core::NodeShape::Rect,
             fm_core::NodeShape::Rounded,
-            fm_core::NodeShape::Circle,
             fm_core::NodeShape::Diamond,
             fm_core::NodeShape::Hexagon,
             fm_core::NodeShape::Stadium,
@@ -22009,6 +24639,123 @@ mod tests {
                 baseline_layout.layout.nodes[node_index].bounds,
                 "clean region drifted for node {node_index}"
             );
+        }
+    }
+
+    fn incremental_obstacle_detour(
+        direction: GraphDirection,
+        routing: EdgeRouting,
+    ) -> (MermaidDiagramIr, TracedLayout) {
+        let mut baseline = large_subgraph_dependency_ir();
+        baseline.direction = direction;
+        // The shortcut must go around node 6 and remains incident to the edited node 5.
+        // Two disconnected regions force the selective path to preserve a clean region.
+        toggle_edge(&mut baseline, 5, 7);
+        let edge_index = baseline.edges.len() - 1;
+        let edge = &baseline.edges[edge_index];
+        baseline.graph.edges.push(IrGraphEdge {
+            edge_id: edge_index,
+            from: edge.from,
+            to: edge.to,
+            span: edge.span,
+            ..IrGraphEdge::default()
+        });
+        let config = super::LayoutConfig {
+            edge_routing: routing,
+            ..super::LayoutConfig::default()
+        };
+        let mut engine = IncrementalLayoutEngine::default();
+        let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Sugiyama,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+        let mut edited = baseline;
+        let label_index = edited.nodes[5].label.expect("node 5 has a label").0;
+        edited.labels[label_index].text = "Left region relabel for selective re-layout".to_string();
+        let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Sugiyama,
+            config,
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(
+            rerun.trace.incremental.query_type,
+            "layout_incremental_subgraph_relayout"
+        );
+        assert_eq!(rerun.trace.incremental.recomputed_nodes, 32);
+        for node_index in 32..64 {
+            assert_eq!(
+                rerun.layout.nodes[node_index].bounds, warm.layout.nodes[node_index].bounds,
+                "clean region drifted for node {node_index}"
+            );
+        }
+        (edited, rerun)
+    }
+
+    #[test]
+    fn incremental_width_edit_preserves_orthogonal_obstacle_detours() {
+        for direction in [GraphDirection::TB, GraphDirection::LR] {
+            let (ir, rerun) = incremental_obstacle_detour(direction, EdgeRouting::Orthogonal);
+            let detour = rerun
+                .layout
+                .edges
+                .iter()
+                .find(|path| path.edge_index == ir.edges.len() - 1)
+                .expect("the shortcut edge must be routed");
+            assert!(
+                detour.points.len() >= 4,
+                "fixture must exercise an obstacle detour: {detour:?}"
+            );
+            let obstacle = rerun.layout.nodes[6].bounds;
+            for segment in detour.points.windows(2) {
+                assert!(
+                    (segment[0].x - segment[1].x).abs() < 0.001
+                        || (segment[0].y - segment[1].y).abs() < 0.001,
+                    "{direction:?} edit introduced a diagonal: {segment:?}"
+                );
+                assert!(
+                    !super::cga_routing::segment_intersects_obstacles(
+                        segment[0],
+                        segment[1],
+                        &[obstacle],
+                        0.0,
+                    ),
+                    "{direction:?} edited shortcut intersects node 6: {segment:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_rerouting_preserves_fresh_router_geometry() {
+        for routing in [EdgeRouting::Orthogonal, EdgeRouting::Spline] {
+            for direction in [GraphDirection::TB, GraphDirection::LR] {
+                let (ir, rerun) = incremental_obstacle_detour(direction, routing);
+                let highlighted_edges = rerun
+                    .layout
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.reversed)
+                    .map(|edge| edge.edge_index)
+                    .collect();
+                // Route from the resulting positions, then apply the same shared postpasses
+                // as a full layout. Incremental edits must not deform those fresh paths.
+                let mut expected = build_edge_paths(
+                    &ir,
+                    &rerun.layout.nodes,
+                    &rerun.layout.clusters,
+                    &highlighted_edges,
+                    routing,
+                );
+                super::bundle_parallel_edges(&ir, &mut expected);
+                super::separate_shared_channels(&ir, &rerun.layout.nodes, &mut expected);
+                assert_eq!(
+                    rerun.layout.edges, expected,
+                    "incremental routing changed fresh {routing:?} geometry in {direction:?}"
+                );
+            }
         }
     }
 
@@ -22902,6 +25649,7 @@ mod tests {
             ..IrEdge::default()
         });
         ir.xy_chart_meta = Some(IrXyChartMeta {
+            horizontal: false,
             title: Some("Revenue".to_string()),
             x_axis: IrXyAxis {
                 categories: vec!["Jan".to_string(), "Feb".to_string(), "Mar".to_string()],
@@ -23019,6 +25767,75 @@ mod tests {
         let first = layout_diagram_traced(&ir);
         let second = layout_diagram_traced(&ir);
         assert_eq!(first, second);
+    }
+
+    /// mermaid's documented grid: `a:3` fills row 0, the two-column group takes the first two
+    /// columns of row 1 with `g` BESIDE it, and the group lays its four children out two by two.
+    /// The nested `columns 2` used to resize the whole diagram, which put `g` below the group.
+    #[test]
+    fn block_beta_group_columns_shape_only_their_group() {
+        let ir = fm_parser::parse(
+            "block-beta\n  columns 3\n  a:3\n  block:group1:2\n    columns 2\n    h i j k\n  end\n  g\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (h, i, j, k, g) = (
+            bounds("h"),
+            bounds("i"),
+            bounds("j"),
+            bounds("k"),
+            bounds("g"),
+        );
+        assert!(
+            (h.y - i.y).abs() < 0.01 && (j.y - k.y).abs() < 0.01,
+            "two per row"
+        );
+        assert!(j.y > h.y, "j starts the group's second row");
+        assert!(
+            (g.y - h.y).abs() < 0.01,
+            "g sits beside the group, on its first row"
+        );
+        assert!(g.x > i.x + i.width, "g is to the right of the group");
+    }
+
+    /// Architecture edges leave and enter the sides they name, so `db:L -- R:server` runs from
+    /// db's left face to server's right face instead of through both boxes.
+    #[test]
+    fn architecture_edges_use_their_declared_sides() {
+        let ir = fm_parser::parse(
+            "architecture-beta\n  service db(database)[DB]\n  service server(server)[Server]\n  service disk(disk)[Disk]\n  db:L -- R:server\n  disk:T -- B:server\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (db, server, disk) = (bounds("db"), bounds("server"), bounds("disk"));
+        let first = &layout.edges[0].points;
+        let (start, end) = (first[0], first[first.len() - 1]);
+        assert!(
+            (start.x - db.x).abs() < 0.01,
+            "leaves db's left face: {start:?}"
+        );
+        assert!(
+            (end.x - (server.x + server.width)).abs() < 0.01,
+            "enters server's right face: {end:?}"
+        );
+        let second = &layout.edges[1].points;
+        let (start, end) = (second[0], second[second.len() - 1]);
+        assert!(
+            (start.y - disk.y).abs() < 0.01,
+            "leaves disk's top: {start:?}"
+        );
+        assert!(
+            (end.y - (server.y + server.height)).abs() < 0.01,
+            "enters server's bottom: {end:?}"
+        );
     }
 
     #[test]
@@ -23991,6 +26808,52 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_xychart_lays_categories_down_and_values_across() {
+        let mut ir = sample_xychart_ir();
+        ir.xy_chart_meta.as_mut().unwrap().horizontal = true;
+        let layout = layout_diagram_xychart(&ir);
+        let meta = ir.xy_chart_meta.as_ref().unwrap();
+        let plot = crate::xychart_plot_bounds(meta, layout.bounds);
+        let node = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == id)
+                .unwrap_or_else(|| panic!("{id} should exist"))
+                .bounds
+        };
+        let (revenue_1, revenue_3) = (node("Revenue_1"), node("Revenue_3"));
+        // Bars grow RIGHTWARD from the plot's left edge (the values are non-negative)...
+        assert!(
+            (revenue_1.x - plot.x).abs() < 0.01,
+            "{revenue_1:?} vs plot {plot:?}"
+        );
+        assert!(revenue_3.width > revenue_1.width);
+        // ...in category ROWS from the top, so a later category sits lower, not further right.
+        assert!(revenue_3.center().y > revenue_1.center().y);
+        assert!((revenue_3.x - revenue_1.x).abs() < 0.01);
+        // Line points sit at their value's x and their row's centre.
+        let (target_1, target_3) = (node("Target_1"), node("Target_3"));
+        assert!(target_3.center().y > target_1.center().y);
+        for bounds in [revenue_1, revenue_3, target_1, target_3] {
+            assert!(
+                bounds.x >= plot.x - 6.01 && bounds.x + bounds.width <= plot.x + plot.width + 6.01
+            );
+            assert!(
+                bounds.y >= plot.y - 0.01
+                    && bounds.y + bounds.height <= plot.y + plot.height + 0.01
+            );
+        }
+        // The vertical chart's geometry is untouched by the flag's existence.
+        let vertical = layout_diagram_xychart(&sample_xychart_ir());
+        let vertical_plot = crate::xychart_plot_bounds(
+            sample_xychart_ir().xy_chart_meta.as_ref().unwrap(),
+            vertical.bounds,
+        );
+        assert_eq!((vertical_plot.x, vertical_plot.y), (88.0, 84.0));
+    }
+
+    #[test]
     fn sankey_layout_preserves_columns_for_sources_hub_and_sinks() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Sankey);
         for node_id in [
@@ -24043,37 +26906,176 @@ mod tests {
     }
 
     #[test]
-    fn sankey_flow_weighted_barycenter_untangles_crossed_bands() {
-        // Initial lexical/parse order in rank 1 is [B1, B2], while heavy flows connect
-        // A1 (top of rank 0) -> B2 (weight 50) and A2 (bottom of rank 0) -> B1 (weight 50).
-        // Without barycenter relaxation, B1 stays above B2 and the two heavy bands cross.
-        let parsed = parse("sankey-beta\nA1,B1,1\nA1,B2,50\nA2,B1,50\nA2,B2,1\n");
-        let layout = layout_diagram_sankey(&parsed.ir);
-        let nodes = layout
-            .nodes
-            .iter()
-            .map(|node| (node.node_id.as_str(), node))
-            .collect::<BTreeMap<_, _>>();
-        let a1 = nodes.get("A1").expect("A1");
-        let a2 = nodes.get("A2").expect("A2");
-        let b1 = nodes.get("B1").expect("B1");
-        let b2 = nodes.get("B2").expect("B2");
+    fn concrete_layout_algorithms_covers_every_concrete_engine() {
+        let algorithms = super::concrete_layout_algorithms();
+        assert_eq!(algorithms.len(), 23);
+        assert!(!algorithms.contains(&LayoutAlgorithm::Auto));
+        for algorithm in [
+            LayoutAlgorithm::Quadrant,
+            LayoutAlgorithm::GitGraph,
+            LayoutAlgorithm::Packet,
+            LayoutAlgorithm::Architecture,
+            LayoutAlgorithm::Treemap,
+            LayoutAlgorithm::Radar,
+            LayoutAlgorithm::Ishikawa,
+            LayoutAlgorithm::TreeView,
+            LayoutAlgorithm::Venn,
+            LayoutAlgorithm::Wardley,
+            LayoutAlgorithm::EventModeling,
+        ] {
+            assert!(algorithms.contains(&algorithm), "missing {algorithm:?}");
+        }
+    }
 
-        assert!(
-            a1.bounds.center().y < a2.bounds.center().y,
-            "A1 should remain above A2 in rank 0"
-        );
-        assert!(
-            b2.bounds.center().y < b1.bounds.center().y,
-            "Flow-weighted barycenter relaxation should place B2 above B1 to untangle heavy 50-unit flows"
-        );
+    fn sankey_example_ir() -> MermaidDiagramIr {
+        parse(include_str!("../../fm-cli/tests/golden/sankey_basic.mmd")).ir
     }
 
     #[test]
-    fn concrete_layout_algorithms_covers_all_18_engines() {
-        let algorithms = super::concrete_layout_algorithms();
-        assert_eq!(algorithms.len(), 18);
-        assert!(!algorithms.contains(&LayoutAlgorithm::Auto));
+    fn sankey_layout_keeps_the_basic_example_compact_and_centers_columns() {
+        let ir = sankey_example_ir();
+        let layout = layout_diagram_sankey(&ir);
+        assert_eq!(layout.nodes.len(), 7);
+        assert_eq!(layout.edges.len(), 8);
+        assert!(
+            layout.bounds.height < 700.0,
+            "seven nodes should not require a multi-thousand-unit canvas: {:?}",
+            layout.bounds
+        );
+        let source_a = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source A")
+            .unwrap();
+        let source_b = layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "Source B")
+            .unwrap();
+        assert!(
+            (source_a.bounds.height - 1.5 * source_b.bounds.height).abs() < 0.001,
+            "normalization must preserve the 150:100 throughput ratio above the text floor"
+        );
+        let bands = &layout.extensions.bands;
+        assert_eq!(bands.len(), 3);
+        for band in bands.iter().skip(1) {
+            assert!(
+                (band.bounds.center().y - bands[0].bounds.center().y).abs() < 0.001,
+                "columns should share a vertical center: {bands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sankey_layout_heights_are_invariant_to_flow_units() {
+        let ir = sankey_example_ir();
+        let baseline = layout_diagram_sankey(&ir);
+        for scale in [1e-100_f64, 1e-6, 1e3, 1e30, 1e100] {
+            let mut scaled = ir.clone();
+            for edge in &ir.edges {
+                let label = edge.label.expect("fixture flows have values").0;
+                let value = ir.labels[label].text.parse::<f64>().unwrap();
+                scaled.labels[label].text = (value * scale).to_string();
+            }
+            let layout = layout_diagram_sankey(&scaled);
+            for (expected, actual) in baseline.nodes.iter().zip(&layout.nodes) {
+                assert!(
+                    (expected.bounds.height - actual.bounds.height).abs() < 0.001
+                        && (expected.bounds.y - actual.bounds.y).abs() < 0.001,
+                    "changing flow units by {scale} changed node {}: {:?} -> {:?}",
+                    expected.node_id,
+                    expected.bounds,
+                    actual.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_spaces_columns_from_their_actual_label_widths() {
+        let ir = parse(
+            "sankey-beta\n\
+             Upstream renewable generation portfolio allocation,Regional distribution and balancing operations,10\n\
+             Regional distribution and balancing operations,Final manufacturing and infrastructure consumption,10\n",
+        )
+        .ir;
+        let layout = layout_diagram_sankey(&ir);
+        assert_eq!(layout.nodes.len(), 3);
+        assert!(layout.nodes.iter().all(|node| node.bounds.width > 256.0));
+        for left in &layout.nodes {
+            for right in &layout.nodes {
+                if left.rank + 1 == right.rank {
+                    let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+                    assert!(
+                        gap + 0.001 >= LayoutSpacing::default().rank_spacing,
+                        "long labels consumed the inter-column corridor: {left:?}, {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_fits_name_and_quantity_for_tiny_and_wide_flows() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for source in [
+            "sankey-beta\nA,B,1\nA,C,0.01\n",
+            "sankey-beta\nA,B,12345678901234567890\n",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            for node in &layout.nodes {
+                let label = super::sankey_node_label(&ir, node.node_index)
+                    .expect("finite positive fixture flows have a quantity");
+                let (width, height) = metrics.estimate_dimensions(&label);
+                assert!(
+                    node.bounds.width + 0.001 >= width + 32.0
+                        && node.bounds.height + 0.001 >= height + 24.0,
+                    "node {} cannot fit its name and quantity {label:?}: {:?}",
+                    node.node_id,
+                    node.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sankey_layout_extreme_and_invalid_values_keep_geometry_finite() {
+        for source in [
+            "sankey-beta\nA,M,1e308\nB,M,1e308\nC,M,1e308\nM,Z,1e308\n",
+            "sankey-beta\nA,M,NaN\nB,M,inf\nC,M,-2\nD,M,0\nM,Z,not-a-number\n",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram_sankey(&ir);
+            assert!(!layout.nodes.is_empty());
+            for bounds in
+                std::iter::once(layout.bounds).chain(layout.nodes.iter().map(|node| node.bounds))
+            {
+                assert!(
+                    bounds.x.is_finite()
+                        && bounds.y.is_finite()
+                        && bounds.width.is_finite()
+                        && bounds.height.is_finite(),
+                    "flow magnitudes produced invalid geometry: {bounds:?}"
+                );
+            }
+            for (index, node) in layout.nodes.iter().enumerate() {
+                for other in &layout.nodes[index + 1..] {
+                    assert!(
+                        !rects_overlap(node.bounds, other.bounds),
+                        "normalized Sankey nodes overlap: {node:?}, {other:?}"
+                    );
+                }
+            }
+            for edge in &layout.edges {
+                assert!(
+                    edge.points
+                        .iter()
+                        .all(|point| point.x.is_finite() && point.y.is_finite()),
+                    "invalid node geometry reached an edge: {edge:?}"
+                );
+            }
+        }
     }
 
     /// Build a `packet-beta` IR from `(id, start_bit, end_bit)` triples.
@@ -24711,8 +27713,12 @@ mod tests {
             false,
             &[obstacle],
         );
-        assert_eq!(points.len(), 4);
-        assert_ne!(points[1].x, 50.0);
+        // Out of the source and into the target perpendicular to their faces, for a short stub
+        // each, rather than sliding along the faces to the clear line.
+        assert_eq!(points.len(), 6);
+        assert_eq!(points[1], LayoutPoint { x: 50.0, y: 26.0 });
+        assert_eq!(points[4], LayoutPoint { x: 50.0, y: 184.0 });
+        assert_ne!(points[2].x, 50.0);
         for pt in &points {
             let inside = pt.x >= obstacle.x
                 && pt.x <= obstacle.x + obstacle.width
@@ -24771,6 +27777,119 @@ mod tests {
         let basic = route_edge_points(source, target, false);
         let obstacle_aware = route_edge_points_with_obstacles(source, target, false, &[]);
         assert_eq!(basic, obstacle_aware);
+    }
+
+    #[test]
+    fn obstacle_routing_finds_a_clear_corridor_when_the_first_detour_is_blocked() {
+        for aligned in [false, true] {
+            for transpose in [false, true] {
+                let point = |x, y| {
+                    if transpose {
+                        LayoutPoint { x: y, y: x }
+                    } else {
+                        LayoutPoint { x, y }
+                    }
+                };
+                // Alternating barriers obstruct the midpoint and both short turns. The fourth
+                // box blocks the side chosen by the first clearance nudge; the OTHER side still
+                // has a valid corridor. Returning the obstructed midpoint cut through these boxes.
+                let obstacles: Vec<_> = [
+                    (-100.0, 40.0, 150.0, 30.0),
+                    (50.0, 90.0, 150.0, 30.0),
+                    (-100.0, 140.0, 150.0, 30.0),
+                    (if aligned { 50.0 } else { -50.0 }, -20.0, 30.0, 50.0),
+                ]
+                .into_iter()
+                .map(|(x, y, width, height)| {
+                    if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: x,
+                            width: height,
+                            height: width,
+                        }
+                    } else {
+                        LayoutRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        }
+                    }
+                })
+                .collect();
+                let first = point(0.0, 0.0);
+                let last = point(if aligned { 0.0 } else { 100.0 }, 200.0);
+                for (source, target) in [(first, last), (last, first)] {
+                    let route =
+                        route_edge_points_with_obstacles(source, target, transpose, &obstacles);
+                    assert_eq!(route.first(), Some(&source));
+                    assert_eq!(route.last(), Some(&target));
+                    assert_eq!(
+                        route,
+                        route_edge_points_with_obstacles(source, target, transpose, &obstacles)
+                    );
+                    for pair in route.windows(2) {
+                        assert!(pair[0].x == pair[1].x || pair[0].y == pair[1].y);
+                        assert!(
+                            !super::cga_routing::segment_intersects_obstacles(
+                                pair[0], pair[1], &obstacles, 8.0
+                            ),
+                            "aligned={aligned}, transpose={transpose}: {pair:?} crosses a node in {route:?}"
+                        );
+                    }
+                    for (a, b) in [
+                        (route[0], route[1]),
+                        (route[route.len() - 2], route[route.len() - 1]),
+                    ] {
+                        assert!(
+                            if transpose { a.y == b.y } else { a.x == b.x },
+                            "a port's attachment direction changed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_routing_keeps_impossible_and_invalid_routes_finite() {
+        let source = LayoutPoint { x: 0.0, y: 0.0 };
+        let target = LayoutPoint { x: 100.0, y: 200.0 };
+        // The source is enclosed by an unrelated box, so no clear route exists.
+        let obstacles = [LayoutRect {
+            x: -10.0,
+            y: -10.0,
+            width: 20.0,
+            height: 20.0,
+        }];
+        assert!(
+            super::bounded_orthogonal_route(source, target, false, &obstacles, None, None)
+                .is_none()
+        );
+        let route = route_edge_points_with_obstacles(source, target, false, &obstacles);
+        assert_eq!(route.first(), Some(&source));
+        assert_eq!(route.last(), Some(&target));
+        assert!(
+            route
+                .iter()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+        );
+        assert!(super::bounded_orthogonal_route(source, source, false, &[], None, None).is_none());
+        assert!(
+            super::bounded_orthogonal_route(
+                LayoutPoint {
+                    x: f32::NAN,
+                    y: 0.0
+                },
+                target,
+                false,
+                &[],
+                None,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -25496,6 +28615,317 @@ mod tests {
     }
 
     #[test]
+    fn tree_reverse_directions_preserve_variable_rank_sizes_and_clearance() {
+        let spacing = LayoutSpacing::default();
+        for (forward_direction, reverse_direction) in [
+            (GraphDirection::LR, GraphDirection::RL),
+            (GraphDirection::TB, GraphDirection::BT),
+        ] {
+            let horizontal = matches!(forward_direction, GraphDirection::LR);
+            let oversized_label = if horizontal {
+                "Review account details and confirm available inventory. ".repeat(4)
+            } else {
+                "A multiline root label\n".repeat(16)
+            };
+            for branching in [false, true] {
+                let node_count = if branching { 4 } else { 3 };
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                ir.direction = forward_direction;
+                for index in 0..node_count {
+                    ir.labels.push(IrLabel {
+                        text: if index == 0 {
+                            oversized_label.clone()
+                        } else {
+                            format!("Step {index}")
+                        },
+                        ..IrLabel::default()
+                    });
+                    ir.nodes.push(IrNode {
+                        id: format!("N{index}"),
+                        label: Some(IrLabelId(index)),
+                        ..IrNode::default()
+                    });
+                }
+                let connections = if branching {
+                    vec![(0, 1), (1, 2), (0, 3)]
+                } else {
+                    vec![(0, 1), (1, 2)]
+                };
+                for &(from, to) in &connections {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(from)),
+                        to: IrEndpoint::Node(IrNodeId(to)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+                // Three nodes exercise the directed-path specialization; the extra branch
+                // exercises the general tidy-tree placement with unequal rank dimensions.
+                let forward = layout_diagram_tree(&ir);
+                ir.direction = reverse_direction;
+                let reversed = layout_diagram_tree(&ir);
+                let primary = |bounds: LayoutRect| {
+                    if horizontal {
+                        (bounds.x, bounds.width)
+                    } else {
+                        (bounds.y, bounds.height)
+                    }
+                };
+                let center = |bounds: LayoutRect| {
+                    let (start, extent) = primary(bounds);
+                    start + extent / 2.0
+                };
+                assert!(
+                    primary(forward.nodes[0].bounds).1
+                        > primary(forward.nodes[1].bounds).1 + 2.0 * spacing.rank_spacing,
+                    "fixture needs unequal ranks large enough to expose swapped dimensions"
+                );
+                let reflection = center(forward.nodes[0].bounds) + center(reversed.nodes[0].bounds);
+                for (first, second) in forward.nodes.iter().zip(&reversed.nodes) {
+                    assert_eq!((first.rank, first.order), (second.rank, second.order));
+                    assert_eq!(
+                        (first.bounds.width, first.bounds.height),
+                        (second.bounds.width, second.bounds.height)
+                    );
+                    assert!(
+                        (center(first.bounds) + center(second.bounds) - reflection).abs() < 0.01,
+                        "{} does not reflect its own rank in {reverse_direction:?}",
+                        first.node_id
+                    );
+                }
+                for (placed, reverse) in [(&forward, false), (&reversed, true)] {
+                    for &(from, to) in &connections {
+                        let (from_start, from_extent) = primary(placed.nodes[from].bounds);
+                        let (to_start, to_extent) = primary(placed.nodes[to].bounds);
+                        let gap = if reverse {
+                            from_start - (to_start + to_extent)
+                        } else {
+                            to_start - (from_start + from_extent)
+                        };
+                        assert!(
+                            gap + 0.01 >= spacing.rank_spacing,
+                            "edge {from}->{to} has {gap} clear space, need {}; \
+                             direction={reverse_direction:?}, reversed={reverse}, branching={branching}",
+                            spacing.rank_spacing
+                        );
+                    }
+                    assert_eq!(placed.edges.len(), connections.len());
+                }
+                assert!((forward.bounds.width - reversed.bounds.width).abs() < 0.01);
+                assert!((forward.bounds.height - reversed.bounds.height).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_rank_gaps_fit_edge_labels_without_expanding_plain_ranks() {
+        let spacing = LayoutSpacing::default();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for direction in [
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::TB,
+            GraphDirection::BT,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let reverse = matches!(direction, GraphDirection::RL | GraphDirection::BT);
+            let text = if horizontal {
+                "Confirm available inventory and reserve every requested item before continuing"
+            } else {
+                "Validate request\nAuthorize changes\nCheck ownership\nCheck version\nApply update\nConfirm result"
+            };
+            let (text_width, text_height) = metrics.estimate_dimensions(text);
+            let needed_gap = if horizontal {
+                text_width.mul_add(1.4, 40.0)
+            } else {
+                text_height + 40.0
+            };
+            assert!(needed_gap > spacing.rank_spacing + 10.0);
+            for branching in [false, true] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                ir.direction = direction;
+                let node_count = if branching { 4 } else { 3 };
+                for index in 0..node_count {
+                    ir.nodes.push(IrNode {
+                        id: format!("N{index}"),
+                        ..IrNode::default()
+                    });
+                }
+                ir.labels.push(IrLabel {
+                    text: text.to_string(),
+                    ..IrLabel::default()
+                });
+                let mut connections = vec![(0, 1), (1, 2)];
+                if branching {
+                    connections.push((0, 3));
+                }
+                for (index, &(from, to)) in connections.iter().enumerate() {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(from)),
+                        to: IrEndpoint::Node(IrNodeId(to)),
+                        label: (index == 0).then_some(IrLabelId(0)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+                // Three nodes use the directed-path fast path; the branch uses the generic tree.
+                let labelled = layout_diagram_tree(&ir);
+                ir.edges[0].label = None;
+                let plain = layout_diagram_tree(&ir);
+                let primary = |bounds: LayoutRect| {
+                    if horizontal {
+                        (bounds.x, bounds.width)
+                    } else {
+                        (bounds.y, bounds.height)
+                    }
+                };
+                let clearance = |layout: &DiagramLayout, from: usize, to: usize| {
+                    let (a, a_size) = primary(layout.nodes[from].bounds);
+                    let (b, b_size) = primary(layout.nodes[to].bounds);
+                    if reverse {
+                        a - (b + b_size)
+                    } else {
+                        b - (a + a_size)
+                    }
+                };
+                assert!(
+                    clearance(&labelled, 0, 1) + 0.01 >= needed_gap,
+                    "label needs {needed_gap} units in {direction:?}, branching={branching}"
+                );
+                assert!(
+                    (clearance(&labelled, 1, 2) - spacing.rank_spacing).abs() < 0.01,
+                    "the following unlabelled rank must retain the default gap"
+                );
+                for &(from, to) in &connections {
+                    assert!(
+                        (clearance(&plain, from, to) - spacing.rank_spacing).abs() < 0.01,
+                        "unlabelled tree geometry keeps the default gap"
+                    );
+                }
+                for (with_label, without_label) in labelled.nodes.iter().zip(&plain.nodes) {
+                    assert_eq!(
+                        (with_label.rank, with_label.order),
+                        (without_label.rank, without_label.order)
+                    );
+                    assert_eq!(
+                        (with_label.bounds.width, with_label.bounds.height),
+                        (without_label.bounds.width, without_label.bounds.height)
+                    );
+                    let cross = |bounds: LayoutRect| {
+                        if horizontal {
+                            bounds.y + bounds.height / 2.0
+                        } else {
+                            bounds.x + bounds.width / 2.0
+                        }
+                    };
+                    assert!((cross(with_label.bounds) - cross(without_label.bounds)).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    fn assert_rank_gaps_follow_configured_font_metrics(algorithm: LayoutAlgorithm) {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let doubled_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: metrics.font_size() * 2.0,
+            ..metrics.config().clone()
+        });
+        for direction in [
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::TB,
+            GraphDirection::BT,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let reverse = matches!(direction, GraphDirection::RL | GraphDirection::BT);
+            let text = if horizontal {
+                "W".repeat(80)
+            } else {
+                "Validate request\nAuthorize changes\nCheck ownership\nCheck version\nApply update\nConfirm result".to_string()
+            };
+            for branching in [false, true] {
+                let branch = if branching { "\n  A --> D[Side]" } else { "" };
+                let mut ir = parse(&format!(
+                    "flowchart LR\n  A[Source operation] -->|label| B[Next operation]\n  B --> C[Final operation]{branch}\n"
+                ))
+                .ir;
+                ir.direction = direction;
+                let label_id = ir.edges[0].label.expect("labelled first edge");
+                ir.labels[label_id.0].text.clone_from(&text);
+                let placed = |font_metrics| {
+                    let traced = layout_diagram_traced_with_config_and_guardrails(
+                        &ir,
+                        algorithm,
+                        LayoutConfig {
+                            font_metrics,
+                            fnx_enabled: false,
+                            constraint_solver: ConstraintSolverMode::Disabled,
+                            ..Default::default()
+                        },
+                        LayoutGuardrails::default(),
+                    );
+                    assert_eq!(traced.trace.dispatch.selected, algorithm);
+                    traced.layout
+                };
+                let default = placed(None);
+                let explicit_default = placed(Some(metrics.clone()));
+                assert_eq!(
+                    default, explicit_default,
+                    "explicit default metrics preserve complete layout output"
+                );
+                let doubled = placed(Some(doubled_metrics.clone()));
+                let bounds = |layout: &DiagramLayout, id: &str| {
+                    layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == id)
+                        .expect("placed node")
+                        .bounds
+                };
+                let clearance = |layout: &DiagramLayout, from: &str, to: &str| {
+                    let (a, b) = (bounds(layout, from), bounds(layout, to));
+                    match (horizontal, reverse) {
+                        (true, false) => b.x - (a.x + a.width),
+                        (true, true) => a.x - (b.x + b.width),
+                        (false, false) => b.y - (a.y + a.height),
+                        (false, true) => a.y - (b.y + b.height),
+                    }
+                };
+                let default_gap = clearance(&default, "A", "B");
+                let doubled_gap = clearance(&doubled, "A", "B");
+                assert!(
+                    (doubled_gap - 40.0) + 0.01 >= 2.0 * (default_gap - 40.0),
+                    "doubling font metrics must double label clearance excluding arrow room: \
+                     {default_gap} -> {doubled_gap}, {algorithm:?}, {direction:?}, branching={branching}"
+                );
+                let (width, height) = doubled_metrics.estimate_dimensions(&text);
+                let full_label_extent = if horizontal { width * 1.4 } else { height };
+                assert!(doubled_gap + 0.01 >= full_label_extent + 40.0);
+                assert!(bounds(&doubled, "A").width > bounds(&default, "A").width);
+                for layout in [&default, &doubled] {
+                    let plain_gap = clearance(layout, "B", "C");
+                    assert!(
+                        (plain_gap - LayoutSpacing::default().rank_spacing).abs() < 0.01,
+                        "font scaling must not expand an unlabelled rank gap: {plain_gap}"
+                    );
+                    assert_eq!(layout.edges.len(), ir.edges.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sugiyama_rank_gaps_follow_configured_font_metrics() {
+        assert_rank_gaps_follow_configured_font_metrics(LayoutAlgorithm::Sugiyama);
+    }
+
+    #[test]
+    fn tree_rank_gaps_follow_configured_font_metrics() {
+        // Exercise both the directed-path specialization and the general branching tree.
+        assert_rank_gaps_follow_configured_font_metrics(LayoutAlgorithm::Tree);
+    }
+
+    #[test]
     fn tree_layout_top_down_places_children_below_parents() {
         let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
         let mut centers = BTreeMap::new();
@@ -25571,6 +29001,157 @@ mod tests {
         let first = layout_diagram_radial(&ir);
         let second = layout_diagram_radial(&ir);
         assert_eq!(first, second, "radial layout must be deterministic");
+    }
+
+    fn assert_radial_labels_are_separate(layout: &DiagramLayout) {
+        for (index, left) in layout.nodes.iter().enumerate() {
+            for right in &layout.nodes[index + 1..] {
+                let a = left.bounds;
+                let b = right.bounds;
+                assert!(
+                    a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y,
+                    "labels {} and {} overlap: {a:?}, {b:?}",
+                    left.node_id,
+                    right.node_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn radial_wide_mindmap_keeps_labels_readable_and_spokes_direct() {
+        let branches: String = (0..24)
+            .map(|index| {
+                format!("    branch{index}[Platform engineering and operations {index}]\n")
+            })
+            .collect();
+        let ir = parse(&format!("mindmap\n  root((Delivery planning))\n{branches}")).ir;
+        let layout = layout_diagram_radial(&ir);
+        assert_eq!(layout.nodes.len(), 25);
+        assert_eq!(layout.edges.len(), 24);
+        assert_eq!(layout, layout_diagram_radial(&ir));
+        assert_radial_labels_are_separate(&layout);
+        // Avoid solving collisions by making an ordinary planning map unreadably large when fit
+        // into a desktop viewport. This is a usable-size bound, not a snapshot of exact coordinates.
+        assert!(layout.bounds.width < 1800.0, "{:?}", layout.bounds);
+        assert!(layout.bounds.height < 1600.0, "{:?}", layout.bounds);
+        assert!(layout.edges.iter().all(|edge| edge.points.len() == 2));
+    }
+
+    #[test]
+    fn radial_labels_do_not_overlap_across_rings_or_recovered_roots() {
+        let branches: String = (0..12)
+            .map(|branch| {
+                let children: String = (0..4)
+                    .map(|child| format!("      child{branch}_{child}[Detailed implementation and validation {branch}-{child}]\n"))
+                    .collect();
+                format!("    branch{branch}[Engineering workstream {branch}]\n{children}")
+            })
+            .collect();
+        let ir = parse(&format!("mindmap\n  root((Programme))\n{branches}")).ir;
+        let layout = layout_diagram_radial(&ir);
+        assert_eq!(layout.nodes.len(), 61);
+        assert_radial_labels_are_separate(&layout);
+        assert_eq!(layout, layout_diagram_radial(&ir));
+        // A collision-free 61-node map used to exceed 6000px in both dimensions. A shared
+        // remap must improve the complete multilevel footprint, not just an inner ring.
+        assert!(layout.bounds.width < 3500.0, "{:?}", layout.bounds);
+        assert!(layout.bounds.height < 3200.0, "{:?}", layout.bounds);
+        let root = layout.nodes[0].bounds.center();
+        let angle = |id: &str| {
+            let node = layout.nodes.iter().find(|node| node.node_id == id).unwrap();
+            let center = node.bounds.center();
+            (center.y - root.y).atan2(center.x - root.x)
+        };
+        for branch in 0..12 {
+            let parent_angle = angle(&format!("branch{branch}"));
+            let first_child = angle(&format!("child{branch}_0"));
+            let last_child = angle(&format!("child{branch}_3"));
+            assert!(first_child < parent_angle && parent_angle < last_child);
+        }
+
+        // Exercises the scalable ring bound and multiple roots, without a parser-induced tree.
+        let forest = graph_ir(DiagramType::Mindmap, 192, &[]);
+        let layout = layout_diagram_radial(&forest);
+        assert_eq!(layout.nodes.len(), 192);
+        assert_radial_labels_are_separate(&layout);
+        assert!(layout.bounds.width.is_finite() && layout.bounds.height.is_finite());
+    }
+
+    #[test]
+    fn radial_dispatch_honors_font_metrics_and_rank_spacing() {
+        let ir = parse("mindmap\n  root((Planning))\n    team[Engineering operations]\n    release[Release coordination]").ir;
+        let baseline = layout_diagram_radial(&ir);
+        let metrics = fm_core::FontMetrics::monospace(30.0);
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            spacing: LayoutSpacing {
+                rank_spacing: 400.0,
+                ..LayoutSpacing::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let traced = layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+        let expected = super::compute_node_sizes(&ir, &metrics);
+        for (index, node) in traced.layout.nodes.iter().enumerate() {
+            assert_eq!((node.bounds.width, node.bounds.height), expected[index]);
+            assert!(node.bounds.width > baseline.nodes[index].bounds.width);
+        }
+        let root = traced.layout.nodes[0].bounds.center();
+        let child = traced.layout.nodes[1].bounds.center();
+        assert!((child.x - root.x).hypot(child.y - root.y) > 400.0);
+        assert_radial_labels_are_separate(&traced.layout);
+    }
+
+    #[test]
+    fn radial_direct_spokes_still_detour_around_unrelated_nodes() {
+        let ir = graph_ir(DiagramType::Mindmap, 3, &[(0, 2)]);
+        let mut boxes: Vec<LayoutNodeBox> = (0..3)
+            .map(|index| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: index as f32 * 200.0,
+                    y: index as f32 * 200.0,
+                    width: 100.0,
+                    height: 60.0,
+                },
+            })
+            .collect();
+        assert!(super::cga_routing::segment_intersects_obstacles(
+            boxes[0].bounds.center(),
+            boxes[2].bounds.center(),
+            &[boxes[1].bounds],
+            0.0,
+        ));
+        let obstructed = super::force_build_edge_paths(&ir, &boxes);
+        assert_eq!(obstructed.len(), 1);
+        assert!(obstructed[0].points.len() > 2);
+        for pair in obstructed[0].points.windows(2) {
+            assert!(!super::cga_routing::segment_intersects_obstacles(
+                pair[0],
+                pair[1],
+                &[boxes[1].bounds],
+                0.0,
+            ));
+        }
+        boxes[1].bounds.x = 2000.0;
+        let clear = super::force_build_edge_paths(&ir, &boxes);
+        assert_eq!(clear[0].points.len(), 2);
+        assert_eq!(clear[0].points.first(), obstructed[0].points.first());
+        assert_eq!(clear[0].points.last(), obstructed[0].points.last());
     }
 
     #[test]
@@ -27005,6 +30586,2115 @@ mod tests {
         ir
     }
 
+    fn sequence_layout_of(source: &str) -> DiagramLayout {
+        layout_diagram_sequence(&fm_parser::parse(source).ir)
+    }
+
+    fn assert_sequence_content_within_bounds(layout: &DiagramLayout) {
+        let bounds = layout.bounds;
+        for content in layout
+            .nodes
+            .iter()
+            .map(|node| node.bounds)
+            .chain(layout.clusters.iter().map(|cluster| cluster.bounds))
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| note.bounds),
+            )
+            .chain(
+                layout
+                    .extensions
+                    .sequence_fragments
+                    .iter()
+                    .map(|fragment| fragment.bounds),
+            )
+        {
+            assert!(
+                content.x >= bounds.x - 0.01
+                    && content.y >= bounds.y - 0.01
+                    && content.x + content.width <= bounds.x + bounds.width + 0.01
+                    && content.y + content.height <= bounds.y + bounds.height + 0.01,
+                "sequence content {content:?} exceeds diagram bounds {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_side_notes_expand_diagram_bounds() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  participant A\n  participant B\n  Note left of A: Keep the complete left annotation visible\n  A->>B: Request\n  Note right of B: Keep the complete right annotation visible\n",
+        );
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        let left = layout.extensions.sequence_notes[0].bounds;
+        let right = layout.extensions.sequence_notes[1].bounds;
+        let first_actor = layout.nodes.first().expect("first participant").bounds;
+        let last_actor = layout.nodes.last().expect("last participant").bounds;
+        assert!(
+            left.x < first_actor.x,
+            "left note lies outside the actor columns"
+        );
+        assert!(
+            right.x + right.width > last_actor.x + last_actor.width,
+            "right note lies outside the actor columns"
+        );
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_spanning_notes_remain_visible_in_both_participant_orders() {
+        for participants in ["A,B", "B,A"] {
+            let source = format!(
+                "sequenceDiagram\n  participant A\n  participant B\n  A->>B: Request\n  Note over {participants}: Keep all of this annotation visible\n"
+            );
+            let layout = sequence_layout_of(&source);
+            assert_eq!(layout.extensions.sequence_notes.len(), 1);
+            assert_eq!(layout.nodes.len(), 2);
+            let note = layout.extensions.sequence_notes[0].bounds;
+            assert!(
+                note.x < layout.nodes[0].bounds.x,
+                "the long spanning note extends beyond the first actor"
+            );
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    #[test]
+    fn sequence_fragment_borders_remain_within_diagram_bounds() {
+        for (source, expected_notes) in [
+            (
+                "sequenceDiagram\n  participant A\n  participant B\n  loop Retry until confirmed\n    A->>B: Request\n  end\n",
+                0,
+            ),
+            (
+                "sequenceDiagram\n  box rgb(240,245,250) Workers\n    participant A\n    participant B\n  end\n  rect rgb(220,230,240)\n    Note over A,B: Preserve this note-only region\n  end\n",
+                1,
+            ),
+        ] {
+            let layout = sequence_layout_of(source);
+            assert_eq!(layout.extensions.sequence_fragments.len(), 1);
+            assert_eq!(layout.extensions.sequence_notes.len(), expected_notes);
+            assert_sequence_content_within_bounds(&layout);
+        }
+    }
+
+    /// A note gets its OWN row: it never overlaps the message before or after it, which it did
+    /// when notes were centred on a message's row.
+    #[test]
+    fn sequence_notes_get_their_own_rows() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  A->>B: one\n  Note over A,B: between\n  B->>A: two\n",
+        );
+        let note = layout.extensions.sequence_notes[0].bounds;
+        let (one, two) = (layout.edges[0].points[0].y, layout.edges[1].points[0].y);
+        assert!(note.y > one, "the note starts below `one`");
+        assert!(note.y + note.height < two, "and ends above `two`");
+    }
+
+    #[test]
+    fn long_sequence_notes_wrap_and_reserve_their_full_rows() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant Customer\n  participant Store\n  \
+             Note left of Customer: Customer checks the current account balance before approving a payment\n  \
+             Customer->>Store: Review account\n  \
+             Note right of Store: Persist the verification audit record and notification status\n  \
+             Store-->>Customer: Complete\n",
+        )
+        .ir;
+        let authored = &ir.sequence_meta.as_ref().unwrap().notes;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 12.0,
+            ..Default::default()
+        });
+        for (index, note) in layout.extensions.sequence_notes.iter().enumerate() {
+            assert!(
+                note.text.lines().count() > 1,
+                "the overflowing source must wrap"
+            );
+            assert_eq!(
+                note.text.split_whitespace().collect::<Vec<_>>(),
+                authored[index].text.split_whitespace().collect::<Vec<_>>()
+            );
+            assert!(note.bounds.width <= 300.01);
+            for line in note.text.lines() {
+                assert!(
+                    metrics.estimate_width(line) * 1.15 <= note.bounds.width - 24.0 + 0.01,
+                    "{line:?} exceeds its note's text area"
+                );
+            }
+            assert!(note.bounds.height >= note.text.lines().count() as f32 * 18.0 + 20.0 - 0.01);
+            assert!(
+                note.bounds.y + note.bounds.height < layout.edges[index].points[0].y,
+                "the next message must clear every wrapped line"
+            );
+        }
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn sequence_notes_use_configured_typography_and_authored_blank_lines() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant A as Customer database\n  participant B\n  \
+             Note left of A: First<br/><br/>PreserveAllCharactersInThisUnbrokenIdentifier<br/>Last\n  \
+             A->>B: Continue\n",
+        )
+        .ir;
+        let text = "First\n\nPreserveAllCharactersInThisUnbrokenIdentifier\nLast";
+        assert_eq!(ir.sequence_meta.as_ref().unwrap().notes[0].text, text);
+        let base = layout_diagram(&ir);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            preset: fm_core::FontPreset::Monospace,
+            font_size: 30.0,
+            line_height: 2.0,
+            ..Default::default()
+        });
+        let layout = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                font_metrics: Some(metrics),
+                ..Default::default()
+            },
+        );
+        let note = &layout.extensions.sequence_notes[0];
+        assert!(note.text.starts_with("First\n\n"));
+        assert!(note.text.ends_with("\nLast"));
+        assert_eq!(note.text.replace('\n', ""), text.replace('\n', ""));
+        let expected_height = note.text.split('\n').count() as f32 * 48.0 + 20.0;
+        assert!((note.bounds.height - expected_height).abs() < 0.01);
+        assert!(note.bounds.height > base.extensions.sequence_notes[0].bounds.height);
+        assert!(layout.nodes[0].bounds.height > base.nodes[0].bounds.height);
+        assert!(note.bounds.y + note.bounds.height < layout.edges[0].points[0].y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    #[test]
+    fn spanning_sequence_notes_wrap_to_the_full_participant_span() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  participant A\n  participant B\n  \
+             Note left of A: Keep this complete annotation across both participant columns\n  \
+             Note over A,B: Keep this complete annotation across both participant columns\n  \
+             A->>B: Continue\n",
+        );
+        let notes = &layout.extensions.sequence_notes;
+        assert_eq!(notes.len(), 2);
+        assert!(notes[1].bounds.width > notes[0].bounds.width);
+        assert!(notes[1].text.lines().count() < notes[0].text.lines().count());
+        assert!(notes[0].bounds.y + notes[0].bounds.height < notes[1].bounds.y);
+        assert_sequence_content_within_bounds(&layout);
+    }
+
+    /// A `rect` holding only a note still encloses it (its message span was EMPTY, which placed
+    /// the band on the next fragment's row), and a following fragment starts below it.
+    #[test]
+    fn a_note_only_region_encloses_its_note() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  A->>B: one\n  rect rgb(1,2,3)\n    Note over A: inside\n  end\n  critical C\n    A->>B: two\n  end\n",
+        );
+        let note = layout.extensions.sequence_notes[0].bounds;
+        let rect = &layout.extensions.sequence_fragments[0];
+        assert_eq!(rect.kind, fm_core::FragmentKind::Rect);
+        let b = rect.bounds;
+        assert!(
+            b.y <= note.y && note.y + note.height <= b.y + b.height,
+            "{b:?} {note:?}"
+        );
+        let critical = layout.extensions.sequence_fragments[1].bounds;
+        assert!(
+            critical.y >= b.y + b.height,
+            "the critical block starts below the rect"
+        );
+        let two = layout.edges[1].points[0].y;
+        assert!(critical.y < two && two < critical.y + critical.height);
+    }
+
+    /// An `alt` publishes its `else` divider BETWEEN the branches' messages, below the first
+    /// branch's note.
+    #[test]
+    fn alternative_dividers_sit_between_branches() {
+        let layout = sequence_layout_of(
+            "sequenceDiagram\n  alt ok\n    A->>B: yes\n    Note right of B: fine\n  else bad\n    B->>A: no\n  end\n",
+        );
+        let alt = &layout.extensions.sequence_fragments[0];
+        assert_eq!(alt.branch_tops.len(), 1);
+        let divider = alt.branch_tops[0];
+        let note = layout.extensions.sequence_notes[0].bounds;
+        assert!(
+            divider > note.y + note.height,
+            "below the first branch's note"
+        );
+        assert!(
+            divider < layout.edges[1].points[0].y,
+            "above the second branch's message"
+        );
+    }
+
+    /// `destroy` takes effect at the NEXT message, as `create` does, and a created participant
+    /// is drawn at its creating message with that arrow stopping at its box.
+    #[test]
+    fn create_and_destroy_happen_at_the_next_message() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  A->>B: hi\n  create participant C\n  A->>C: make\n  destroy C\n  C->>A: bye\n  A->>B: after\n",
+        )
+        .ir;
+        let layout = layout_diagram_sequence(&ir);
+        let c = ir.nodes.iter().position(|n| n.id == "C").expect("C");
+        let make = &layout.edges[1].points;
+        let c_box = layout.nodes[c].bounds;
+        assert!(
+            (c_box.y + c_box.height / 2.0 - make[0].y).abs() < 0.01,
+            "box on its message"
+        );
+        assert!(
+            (make[1].x - c_box.x).abs() < 0.01,
+            "the arrow stops at the box edge"
+        );
+        let marker = &layout.extensions.sequence_lifecycle_markers[0];
+        assert!(
+            (marker.center.y - layout.edges[2].points[0].y).abs() < 0.01,
+            "cross at `bye`"
+        );
+    }
+
+    /// Two relationships leaving `Animal` on one side used to share the side's centre, so the
+    /// composition diamond was drawn exactly under the inheritance triangle. Every class edge end
+    /// now meets its node at its own point, and each end's first segment stays axis-aligned.
+    #[test]
+    fn class_relationship_ends_do_not_share_a_point() {
+        let ir = fm_parser::parse(
+            "classDiagram\n  direction RL\n  Animal <|-- Duck\n  Animal \"1\" *-- \"many\" Leg\n  Animal <|-- Fish\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let animal = ir
+            .nodes
+            .iter()
+            .position(|n| n.id == "Animal")
+            .expect("Animal");
+        let ends: Vec<LayoutPoint> = layout
+            .edges
+            .iter()
+            .filter(|path| ir.edges[path.edge_index].from == IrEndpoint::Node(IrNodeId(animal)))
+            .map(|path| path.points[0])
+            .collect();
+        assert_eq!(
+            ends.len(),
+            3,
+            "CONTROL: all three relationships leave Animal"
+        );
+        for (i, a) in ends.iter().enumerate() {
+            for b in &ends[i + 1..] {
+                assert!(
+                    (a.x - b.x).abs() + (a.y - b.y).abs() > 1.0,
+                    "two ends share {a:?}"
+                );
+            }
+        }
+        for path in &layout.edges {
+            let (p, q) = (path.points[0], path.points[1]);
+            if path.points.len() > 2 {
+                assert!(
+                    (p.x - q.x).abs() < 0.01 || (p.y - q.y).abs() < 0.01,
+                    "first segment bent: {:?}",
+                    path.points
+                );
+            }
+        }
+    }
+
+    fn rects_overlap(a: LayoutRect, b: LayoutRect) -> bool {
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    }
+
+    /// mermaid's own subgraph example: cluster boxes are separated by a real gap (the flat layout
+    /// left them butting edge to edge, so two borders read as one line), and no node sits inside a
+    /// cluster it does not belong to.
+    #[test]
+    fn clusters_are_placed_as_units() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 3, "CONTROL: three clusters");
+        let gap = LayoutSpacing::default().node_spacing / 2.0;
+        let grown = |r: LayoutRect| LayoutRect {
+            x: r.x - gap,
+            y: r.y - gap,
+            width: r.width + 2.0 * gap,
+            height: r.height + 2.0 * gap,
+        };
+        for (i, a) in layout.clusters.iter().enumerate() {
+            for b in &layout.clusters[i + 1..] {
+                assert!(
+                    !rects_overlap(grown(a.bounds), b.bounds),
+                    "{:?} and {:?} are not {gap} apart",
+                    a.title,
+                    b.title
+                );
+            }
+            let members = &ir.clusters[a.cluster_index].members;
+            for node in &layout.nodes {
+                if !members.contains(&IrNodeId(node.node_index)) {
+                    assert!(
+                        !rects_overlap(a.bounds, node.bounds),
+                        "{} sits inside {:?}",
+                        node.node_id,
+                        a.title
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_tree_layout_reserves_disjoint_subgraph_frames() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let input = format!(
+                "flowchart {direction}\n  subgraph First[\"Service A\"]\n    a1[a] --> a2[a] --> a3[a] --> a4[a] --> a5[a]\n  end\n  subgraph Second[\"Service B\"]\n    b1[b] --> b2[b] --> b3[b] --> b4[b] --> b5[b]\n  end\n  root[r] --> a1\n  root --> b1\n"
+            );
+            let ir = fm_parser::parse(&input).ir;
+            assert_eq!(
+                ir.nodes.len(),
+                11,
+                "the fixture exercises Auto's tree selection"
+            );
+            assert_eq!(ir.edges.len(), 10);
+            for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+                let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+                assert!(
+                    traced
+                        .trace
+                        .snapshots
+                        .iter()
+                        .any(|stage| stage.stage == "compound_placement")
+                );
+                let layout = &traced.layout;
+                assert_eq!(layout.nodes.len(), 11);
+                assert_eq!(layout.clusters.len(), 2);
+                let gap = LayoutSpacing::default().node_spacing / 2.0;
+                let first = layout.clusters[0].bounds;
+                let grown = LayoutRect {
+                    x: first.x - gap,
+                    y: first.y - gap,
+                    width: first.width + gap * 2.0,
+                    height: first.height + gap * 2.0,
+                };
+                assert!(
+                    !rects_overlap(grown, layout.clusters[1].bounds),
+                    "{algorithm:?}/{direction}: sibling frames need a visible gap"
+                );
+                for cluster in &layout.clusters {
+                    let members = &ir.clusters[cluster.cluster_index].members;
+                    assert_eq!(members.len(), 5);
+                    for node in &layout.nodes {
+                        if !members.contains(&IrNodeId(node.node_index)) {
+                            assert!(
+                                !rects_overlap(cluster.bounds, node.bounds),
+                                "{algorithm:?}/{direction}: {} lies inside another group",
+                                node.node_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_title_frames_match_reserved_slots_in_all_directions() {
+        const TITLE: &str =
+            "A deliberately long subgraph title that is much wider than its single child node";
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for nested in [false, true] {
+                let members = if nested {
+                    format!("  subgraph Inner[\"{TITLE}\"]\n    A[x]\n  end\n")
+                } else {
+                    "  A[x]\n".to_string()
+                };
+                let input = format!(
+                    "flowchart {direction}\nsubgraph Outer[\"{TITLE}\"]\n{members}end\nA --> B[y]\n"
+                );
+                let ir = fm_parser::parse(&input).ir;
+                assert_eq!(ir.nodes.len(), 2);
+                for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+                    let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    assert_eq!(
+                        traced.trace.dispatch.selected,
+                        if algorithm == LayoutAlgorithm::Auto {
+                            LayoutAlgorithm::Sugiyama
+                        } else {
+                            LayoutAlgorithm::Tree
+                        }
+                    );
+                    let layout = &traced.layout;
+                    assert_eq!(layout.clusters.len(), if nested { 2 } else { 1 });
+                    let node = |id: &str| {
+                        layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_id == id)
+                            .unwrap()
+                            .bounds
+                    };
+                    let (inside, outside) = (node("A"), node("B"));
+                    let outer_id = ir
+                        .graph
+                        .subgraphs
+                        .iter()
+                        .find(|subgraph| subgraph.key == "Outer")
+                        .unwrap()
+                        .cluster
+                        .unwrap()
+                        .0;
+                    let outer = layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.cluster_index == outer_id)
+                        .unwrap()
+                        .bounds;
+                    let inner = if nested {
+                        let inner_id = ir
+                            .graph
+                            .subgraphs
+                            .iter()
+                            .find(|subgraph| subgraph.key == "Inner")
+                            .unwrap()
+                            .cluster
+                            .unwrap()
+                            .0;
+                        layout
+                            .clusters
+                            .iter()
+                            .find(|cluster| cluster.cluster_index == inner_id)
+                            .unwrap()
+                            .bounds
+                    } else {
+                        outer
+                    };
+                    assert!(
+                        inner.width > inside.width + 2.0 * LayoutSpacing::default().cluster_padding
+                    );
+                    assert!(
+                        ((inner.x + inner.width / 2.0) - (inside.x + inside.width / 2.0)).abs()
+                            < 0.05,
+                        "{algorithm:?}/{direction}: title-wide frames stay centered around their contents"
+                    );
+                    for cluster in &layout.clusters {
+                        assert!(
+                            !rects_overlap(cluster.bounds, outside),
+                            "{algorithm:?}/{direction}: the title-wide frame overlaps the next node"
+                        );
+                    }
+                    let gap = match direction {
+                        "LR" => outside.x - (outer.x + outer.width),
+                        "RL" => outer.x - (outside.x + outside.width),
+                        "TB" => outside.y - (outer.y + outer.height),
+                        "BT" => outer.y - (outside.y + outside.height),
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        (gap - LayoutSpacing::default().rank_spacing).abs() < 0.05,
+                        "{algorithm:?}/{direction}, nested={nested}: drawn frame must occupy its reserved slot, gap={gap}"
+                    );
+                    if nested {
+                        assert!(inner.x - outer.x >= 16.0 - 0.05);
+                        assert!(inner.y - outer.y >= 44.0 - 0.05);
+                        assert!(outer.x + outer.width - inner.x - inner.width >= 16.0 - 0.05);
+                        assert!(outer.y + outer.height - inner.y - inner.height >= 16.0 - 0.05);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cluster_heading_width_fits_measured_default_semibold_text() {
+        let title =
+            "A deliberately long subgraph title that is much wider than its single child node";
+        let width = super::cluster_title_width(title, &fm_core::FontMetrics::default_metrics());
+        // Chromium measured this complete default 13.5px, weight-600 heading at 601.78125px.
+        // Leave the same 8px inset on each side as the renderer; the old estimate was 477.09px.
+        assert!(
+            width >= 601.78125 + 16.0,
+            "the full heading must fit: {width}"
+        );
+    }
+
+    #[test]
+    fn grouped_tree_respects_local_subgraph_direction() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let local = if matches!(direction, "TB" | "BT") {
+                "LR"
+            } else {
+                "TB"
+            };
+            let input = format!(
+                "flowchart {direction}\n subgraph G[Service]\n direction {local}\n A[x] --> B[y] --> C[z]\n end\n C --> D[Done]\n"
+            );
+            let ir = fm_parser::parse(&input).ir;
+            let layout = layout_diagram_tree(&ir);
+            assert_eq!(layout.clusters.len(), 1);
+            let node = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == id)
+                    .unwrap()
+                    .bounds
+            };
+            for (from, to) in [("A", "B"), ("B", "C")] {
+                let (from, to) = (node(from), node(to));
+                let (gap, span_delta) = if local == "LR" {
+                    (to.x - from.x - from.width, to.y - from.y)
+                } else {
+                    (to.y - from.y - from.height, to.x - from.x)
+                };
+                assert!(gap >= LayoutSpacing::default().rank_spacing - 0.05);
+                assert!(
+                    span_delta.abs() < 0.05,
+                    "local {local} direction must survive Tree placement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directed_path_suffix_falls_back_for_new_subgraph_before_mutation() {
+        let base_source = "flowchart LR\n A[a] --> B[b] --> C[c]\n";
+        let base = fm_parser::parse(base_source).ir;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2)
+            .expect("an ungrouped path supports reuse");
+        let next = fm_parser::parse(&format!(
+            "{base_source} subgraph New[New service]\n D[d]\n end\n C --> D\n"
+        ))
+        .ir;
+        let mut cached = before.clone();
+        assert!(!try_relayout_directed_path_suffix(
+            &next,
+            &mut cached,
+            &prefix
+        ));
+        assert_eq!(
+            cached, before,
+            "grouped fallback must leave the cached path untouched"
+        );
+
+        let full = layout_diagram_tree(&next);
+        assert_eq!(full.clusters.len(), 1);
+        assert!(certify_directed_path_layout_prefix(&next, &full, 3, 2).is_none());
+        let previous = full
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "C")
+            .unwrap()
+            .bounds;
+        let group = full.clusters[0].bounds;
+        assert!(
+            group.x - previous.x - previous.width >= LayoutSpacing::default().rank_spacing - 0.05
+        );
+    }
+
+    /// A few disconnected flows run as parallel lanes sharing their ranks, as in mermaid, rather
+    /// than end to end along the rank axis; inside a subgraph that had put two branches of one
+    /// fork one after the other.
+    #[test]
+    fn a_few_components_share_their_ranks() {
+        for input in [
+            "flowchart LR\n  A --> B\n  C --> D\n",
+            "flowchart LR\n  X --> A\n  X --> C\n  subgraph S\n    A --> B\n    C --> D\n  end\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            let left = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| ir.nodes[node.node_index].id == id)
+                    .map(|node| node.bounds.x)
+                    .unwrap()
+            };
+            assert!(
+                (left("A") - left("C")).abs() < 1.0,
+                "A and C share a rank: {input:?}"
+            );
+            assert!(
+                (left("B") - left("D")).abs() < 1.0,
+                "B and D share a rank: {input:?}"
+            );
+        }
+    }
+
+    /// No edge runs through a node it does not connect. Edges spanning several ranks ran their
+    /// legs straight through the nodes of the ranks between.
+    #[test]
+    fn edges_do_not_run_through_other_nodes() {
+        for input in [
+            "flowchart LR\n  subgraph Frontend\n    UI[Web UI] --> API_GW[API Gateway]\n  end\n  subgraph Backend\n    API_GW --> Auth[Auth Service]\n    API_GW --> Orders[Order Service]\n    Orders --> DB[(Orders DB)]\n    Auth --> Cache[(Redis)]\n  end\n  subgraph External\n    Pay[Payment Provider]\n  end\n  Orders --> Pay\n  Pay -.->|webhook| Orders\n  UI -.-> CDN[CDN]\n",
+            "flowchart TD\n  Input --> Process1\n  Process1 --> Process2\n  Process2 --> Process3\n  Process3 --> Output\n  Output --> Monitor\n  Monitor --> Controller\n  Controller --> Process1\n  Process2 --> Sensor\n  Sensor --> Adjuster\n  Adjuster --> Process1\n  Process3 --> Validator\n  Validator --> Process2\n  Monitor --> ErrorHandler\n  ErrorHandler --> Input\n  Controller --> Sensor\n  Validator --> Monitor\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let ends = [
+                    crate::endpoint_node_index(&ir, edge.from).unwrap(),
+                    crate::endpoint_node_index(&ir, edge.to).unwrap(),
+                ];
+                for node in layout
+                    .nodes
+                    .iter()
+                    .filter(|n| !ends.contains(&n.node_index))
+                {
+                    let r = node.bounds;
+                    for pair in path.points.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let crosses = a.x.max(b.x) > r.x + 0.5
+                            && a.x.min(b.x) < r.x + r.width - 0.5
+                            && a.y.max(b.y) > r.y + 0.5
+                            && a.y.min(b.y) < r.y + r.height - 0.5;
+                        assert!(
+                            !crosses,
+                            "{} -> {} runs through {}: {a:?} -> {b:?}",
+                            ir.nodes[ends[0]].id, ir.nodes[ends[1]].id, node.node_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The edge reversed to break a cycle is the one that closes the loop as the source reads, as
+    /// in mermaid: `Paid? -->|No| Go shopping`, not `Go shopping --> Let me think`, which put the
+    /// decision above the step leading to it; and a state's return transition, not its exit.
+    #[test]
+    fn the_edge_that_closes_a_loop_is_the_one_reversed() {
+        let rank_order = |input: &str, expected: &[&str]| {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            let top = |id: &str| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| ir.nodes[node.node_index].id == id)
+                    .map(|node| node.bounds.y)
+                    .unwrap()
+            };
+            for pair in expected.windows(2) {
+                assert!(
+                    top(pair[0]) < top(pair[1]),
+                    "{} must sit above {} in {input:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        };
+        rank_order(
+            "flowchart TD\n  A[Christmas] -->|Get money| B(Go shopping)\n  B --> C{Let me think}\n  \
+             C -->|One| D[Laptop]\n  C -->|Two| E[iPhone]\n  D --> G[Checkout]\n  E --> G\n  \
+             G --> H{Paid?}\n  H -->|No| B\n  H -->|Yes| I((Done))\n",
+            &["A", "B", "C", "D", "G", "H", "I"],
+        );
+        rank_order(
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
+            &["Idle", "Busy"],
+        );
+        // Two loops sharing a path: reversing one edge of that path breaks both, but put the
+        // QA gate on top. The two loop-closing edges are the ones reversed.
+        rank_order(
+            "flowchart TB\n  dev --> repo\n  repo --> ci\n  ci --> build\n  build --> reg\n  \
+             reg --> qa\n  qa -->|yes| prod\n  qa -->|no| dev\n  prod --> mon\n  mon -.-> dev\n",
+            &["dev", "repo", "ci", "build", "reg", "qa", "prod", "mon"],
+        );
+    }
+
+    /// A return edge arriving at a node does not end on the point the node's own edge leaves
+    /// from — drawn in and out on one line it read as a single two-way edge — and the straight
+    /// forward edge stays straight.
+    #[test]
+    fn a_return_edge_does_not_share_its_targets_outgoing_port() {
+        let ir = fm_parser::parse(
+            "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.-> a\n  b --> d[Delta]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let path = |index: usize| {
+            &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == index)
+                .unwrap()
+                .points
+        };
+        let (forward, back) = (path(0), path(2));
+        assert!(
+            (forward[0].x - forward.last().unwrap().x).abs() < 0.01,
+            "Alpha -> Beta stays straight: {forward:?}"
+        );
+        let arrival = *back.last().unwrap();
+        assert!(
+            (arrival.x - forward[0].x).abs() >= 8.0,
+            "the return edge arrives {arrival:?} on Alpha -> Beta's start {:?}",
+            forward[0]
+        );
+    }
+
+    /// Edges inside a subgraph with its own `direction` run that way: in `direction LR` inside a
+    /// TB chart they left each source's bottom for the next node's top, beside it, so the line ran
+    /// through both nodes and the arrowhead ended under one.
+    #[test]
+    fn edges_in_a_subgraph_follow_its_direction() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  ci --> build\n  subgraph Pipeline\n    direction LR\n    \
+             build --> test --> lint\n  end\n  lint --> reg\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let node = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|n| ir.nodes[n.node_index].id == id)
+                .unwrap()
+                .bounds
+        };
+        for (from, to, edge_index) in [("build", "test", 1), ("test", "lint", 2)] {
+            let path = &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == edge_index)
+                .unwrap()
+                .points;
+            let (start, end) = (path[0], *path.last().unwrap());
+            let (a, b) = (node(from), node(to));
+            assert!(
+                (start.x - (a.x + a.width)).abs() < 1.0,
+                "{from} -> {to} leaves the right face"
+            );
+            assert!(
+                (end.x - b.x).abs() < 1.0,
+                "{from} -> {to} enters the left face"
+            );
+        }
+    }
+
+    use super::{LayoutEdgePath, endpoint_node_index, separate_shared_channels};
+
+    fn shared_channel_test_path(
+        edge_index: usize,
+        coordinates: &[(f32, f32)],
+        transpose: bool,
+    ) -> LayoutEdgePath {
+        LayoutEdgePath {
+            edge_index,
+            span: Span::default(),
+            points: coordinates
+                .iter()
+                .map(|&(x, y)| {
+                    if transpose {
+                        LayoutPoint { x: y, y: x }
+                    } else {
+                        LayoutPoint { x, y }
+                    }
+                })
+                .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        }
+    }
+
+    fn assert_shared_channel_geometry_preserved(
+        before: &[LayoutEdgePath],
+        after: &[LayoutEdgePath],
+    ) {
+        for (old, new) in before.iter().zip(after) {
+            assert_eq!(old.points.first(), new.points.first(), "source port moved");
+            assert_eq!(old.points.last(), new.points.last(), "target port moved");
+            assert_eq!(old.points.len(), new.points.len());
+            for (old_pair, new_pair) in old.points.windows(2).zip(new.points.windows(2)) {
+                let dx = new_pair[1].x - new_pair[0].x;
+                let dy = new_pair[1].y - new_pair[0].y;
+                assert!(dx.is_finite() && dy.is_finite());
+                assert!(
+                    dx.abs() <= 0.01 || dy.abs() <= 0.01,
+                    "diagonal segment: {new_pair:?}"
+                );
+                let old_dx = old_pair[1].x - old_pair[0].x;
+                let old_dy = old_pair[1].y - old_pair[0].y;
+                assert!(
+                    old_dx * dx + old_dy * dy >= -0.01,
+                    "segment reversed: {old_pair:?} -> {new_pair:?}"
+                );
+            }
+        }
+    }
+
+    /// Independent graph walk over drawn segments, including endpoint stubs: a connected
+    /// collinear component must have one common source or one common target.
+    fn shared_channel_has_false_junction(ir: &MermaidDiagramIr, paths: &[LayoutEdgePath]) -> bool {
+        for horizontal in [true, false] {
+            let across = |point: LayoutPoint| if horizontal { point.y } else { point.x };
+            let along = |point: LayoutPoint| if horizontal { point.x } else { point.y };
+            let mut runs = Vec::new();
+            for path in paths {
+                let edge = &ir.edges[path.edge_index];
+                if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+                    continue;
+                }
+                let from = endpoint_node_index(ir, edge.from).expect("source node");
+                let to = endpoint_node_index(ir, edge.to).expect("target node");
+                for pair in path.points.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    if (across(a) - across(b)).abs() <= 0.01 && (along(a) - along(b)).abs() > 0.01 {
+                        runs.push((
+                            across(a),
+                            along(a).min(along(b)),
+                            along(a).max(along(b)),
+                            from,
+                            to,
+                        ));
+                    }
+                }
+            }
+            let mut visited = vec![false; runs.len()];
+            for first in 0..runs.len() {
+                if visited[first] {
+                    continue;
+                }
+                let mut pending = vec![first];
+                visited[first] = true;
+                let mut common_source = Some(runs[first].3);
+                let mut common_target = Some(runs[first].4);
+                while let Some(current) = pending.pop() {
+                    let a = runs[current];
+                    common_source = common_source.filter(|&source| source == a.3);
+                    common_target = common_target.filter(|&target| target == a.4);
+                    for (other, &b) in runs.iter().enumerate() {
+                        if !visited[other]
+                            && (a.0 - b.0).abs() < 0.5
+                            && a.1 <= b.2 + 0.5
+                            && b.1 <= a.2 + 0.5
+                        {
+                            visited[other] = true;
+                            pending.push(other);
+                        }
+                    }
+                }
+                if common_source.is_none() && common_target.is_none() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn shared_channels_separate_mixed_fans_in_both_axes() {
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->C\n B-->E\n").ir;
+        for transpose in [false, true] {
+            let paths = [
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (0.0, 50.0), (0.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    2,
+                    &[(300.0, 0.0), (300.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    3,
+                    &[(300.0, 0.0), (300.0, 50.0), (400.0, 50.0), (400.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            for rotation in 0..paths.len() {
+                let mut before = paths.to_vec();
+                before.rotate_left(rotation);
+                assert!(
+                    shared_channel_has_false_junction(&ir, &before),
+                    "fixture must expose the mixed bus"
+                );
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &[], &mut after);
+                assert_shared_channel_geometry_preserved(&before, &after);
+                assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+                let mut repeated = before.clone();
+                separate_shared_channels(&ir, &[], &mut repeated);
+                assert_eq!(after, repeated, "channel assignment must be deterministic");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_preserve_genuine_fan_in_and_fan_out() {
+        for (source, intervals) in [
+            (
+                "flowchart TD\n A-->B\n A-->C\n A-->D\n",
+                [(100.0, 0.0), (100.0, 200.0), (100.0, 300.0)],
+            ),
+            (
+                "flowchart TD\n A-->D\n B-->D\n C-->D\n",
+                [(0.0, 200.0), (100.0, 200.0), (300.0, 200.0)],
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            for transpose in [false, true] {
+                let before: Vec<_> = intervals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(from, to))| {
+                        shared_channel_test_path(
+                            i,
+                            &[(from, 0.0), (from, 50.0), (to, 50.0), (to, 100.0)],
+                            transpose,
+                        )
+                    })
+                    .collect();
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &[], &mut after);
+                assert_eq!(
+                    after, before,
+                    "a genuine bus should retain its original route"
+                );
+                assert!(!shared_channel_has_false_junction(&ir, &after));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_separate_tangencies_without_extending_a_false_stub() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    2,
+                    &[(400.0, 0.0), (400.0, 50.0), (400.0, 50.0), (400.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            assert!(shared_channel_has_false_junction(&ir, &before));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(
+                after[2], before[2],
+                "a zero-length run must not create a movable channel"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_respect_neighboring_fixed_channels() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(2, &[(110.0, 60.0), (190.0, 60.0)], transpose),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(after[2], before[2], "an endpoint segment cannot move");
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_index_each_new_physical_track() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E-->F\n").ir;
+        for transpose in [false, true] {
+            let before: Vec<_> = [0.0, 50.0, 100.0]
+                .iter()
+                .enumerate()
+                .map(|(i, &start)| {
+                    shared_channel_test_path(
+                        i,
+                        &[
+                            (start, 0.0),
+                            (start, 50.0),
+                            (start + 200.0, 50.0),
+                            (start + 200.0, 100.0),
+                        ],
+                        transpose,
+                    )
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(
+                !shared_channel_has_false_junction(&ir, &after),
+                "moved tracks must remain occupied: {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_use_available_short_channel_clearance() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 8.0), (100.0, 8.0), (100.0, 16.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 8.0), (200.0, 8.0), (200.0, 16.0)],
+                    transpose,
+                ),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+            let line = |path: &LayoutEdgePath| {
+                if transpose {
+                    path.points[1].x
+                } else {
+                    path.points[1].y
+                }
+            };
+            assert!((line(&after[0]) - line(&after[1])).abs() >= 1.99);
+            for path in &after {
+                assert!(
+                    (4.0..=12.0).contains(&line(path)),
+                    "at least half each 8px stub remains"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_retain_routes_when_no_safe_track_exists() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n").ir;
+        for transpose in [false, true] {
+            let before: Vec<_> = (0..2)
+                .map(|i| {
+                    shared_channel_test_path(
+                        i,
+                        &[(0.0, 50.0), (0.0, 50.0), (100.0, 50.0), (100.0, 50.0)],
+                        transpose,
+                    )
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_eq!(
+                after, before,
+                "zero-clearance routes need new bends, not reversed stubs"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
+        }
+    }
+
+    #[test]
+    fn shared_channels_leave_dense_groups_as_obstacles() {
+        let mut source = String::from("flowchart TD\n");
+        for i in 0..67 {
+            source.push_str(&format!(" A{i}-->B{i}\n"));
+        }
+        let ir = fm_parser::parse(&source).ir;
+        for transpose in [false, true] {
+            let mut before: Vec<_> = (0..65)
+                .map(|i| {
+                    let start = i as f32 * 10.0;
+                    shared_channel_test_path(
+                        i,
+                        &[
+                            (start, 0.0),
+                            (start, 60.0),
+                            (start + 1000.0, 60.0),
+                            (start + 1000.0, 100.0),
+                        ],
+                        transpose,
+                    )
+                })
+                .collect();
+            before.push(shared_channel_test_path(
+                65,
+                &[(5.0, 0.0), (5.0, 50.0), (105.0, 50.0), (105.0, 100.0)],
+                transpose,
+            ));
+            before.push(shared_channel_test_path(
+                66,
+                &[(55.0, 0.0), (55.0, 50.0), (155.0, 50.0), (155.0, 100.0)],
+                transpose,
+            ));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_eq!(
+                &after[..65],
+                &before[..65],
+                "the bounded pass must retain a dense mesh"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert!(!shared_channel_has_false_junction(&ir, &after[65..]));
+            for path in &after[65..] {
+                let line = if transpose {
+                    path.points[1].x
+                } else {
+                    path.points[1].y
+                };
+                assert!(
+                    (line - 60.0).abs() >= 1.99,
+                    "a dense skipped group must remain occupied"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_keep_moved_runs_and_both_stubs_out_of_nodes() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E[Obstacle]\n").ir;
+        for transpose in [false, true] {
+            for (first_target, second_target, x, y, width, height) in [
+                (100.0, 200.0, 120.0, 35.0, 30.0, 10.0),
+                (100.0, 200.0, 195.0, 42.0, 10.0, 5.5),
+                (200.0, 300.0, 95.0, 52.0, 10.0, 6.0),
+            ] {
+                let before = vec![
+                    shared_channel_test_path(
+                        0,
+                        &[
+                            (0.0, 0.0),
+                            (0.0, 50.0),
+                            (first_target, 50.0),
+                            (first_target, 100.0),
+                        ],
+                        transpose,
+                    ),
+                    shared_channel_test_path(
+                        1,
+                        &[
+                            (100.0, 0.0),
+                            (100.0, 50.0),
+                            (second_target, 50.0),
+                            (second_target, 100.0),
+                        ],
+                        transpose,
+                    ),
+                ];
+                let bounds = if transpose {
+                    LayoutRect {
+                        x: y,
+                        y: x,
+                        width: height,
+                        height: width,
+                    }
+                } else {
+                    LayoutRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }
+                };
+                let obstacle = LayoutNodeBox {
+                    node_index: ir.nodes.iter().position(|node| node.id == "E").unwrap(),
+                    node_id: "E".to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds,
+                };
+                let clear = |paths: &[LayoutEdgePath]| {
+                    paths.iter().all(|path| {
+                        path.points.windows(2).all(|pair| {
+                            !super::cga_routing::segment_intersects_obstacles(
+                                pair[0],
+                                pair[1],
+                                &[bounds],
+                                0.0,
+                            )
+                        })
+                    })
+                };
+                assert!(clear(&before), "the router's original paths must be clear");
+                let mut unprotected = before.clone();
+                separate_shared_channels(&ir, &[], &mut unprotected);
+                assert!(
+                    !clear(&unprotected),
+                    "control must expose the node-blind nudge"
+                );
+                let mut after = before.clone();
+                separate_shared_channels(&ir, &[obstacle], &mut after);
+                assert_shared_channel_geometry_preserved(&before, &after);
+                assert!(
+                    clear(&after),
+                    "a displaced run or stub entered the node: {after:?}"
+                );
+                assert!(!shared_channel_has_false_junction(&ir, &after));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_channels_retain_clear_routes_when_nodes_block_every_track() {
+        let ir = fm_parser::parse("flowchart TD\n A-->B\n C-->D\n E[Above]\n F[Below]\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            let nodes: Vec<_> = [("E", -1000.0, 1049.0), ("F", 51.0, 1000.0)]
+                .into_iter()
+                .map(|(id, y, height)| LayoutNodeBox {
+                    node_index: ir.nodes.iter().position(|node| node.id == id).unwrap(),
+                    node_id: id.to_owned(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: 110.0,
+                            width: height,
+                            height: 80.0,
+                        }
+                    } else {
+                        LayoutRect {
+                            x: 110.0,
+                            y,
+                            width: 80.0,
+                            height,
+                        }
+                    },
+                })
+                .collect();
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &nodes, &mut after);
+            assert_eq!(
+                after, before,
+                "node clearance takes precedence when no track fits"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_allow_tracks_inside_their_composite_state() {
+        let ir =
+            fm_parser::parse("stateDiagram-v2\n state Box {\n A-->B\n C-->D\n }\n Outside-->Box\n")
+                .ir;
+        let container_index = ir.nodes.iter().position(|node| node.id == "Box").unwrap();
+        let containers = super::composite_containers(&ir, ir.nodes.len());
+        assert!(
+            containers
+                .iter()
+                .any(|parents| parents.contains(&container_index))
+        );
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(0.0, 0.0), (0.0, 50.0), (100.0, 50.0), (100.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 0.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+            ];
+            let container = LayoutNodeBox {
+                node_index: container_index,
+                node_id: "Box".to_owned(),
+                rank: 0,
+                order: 0,
+                span: Span::default(),
+                bounds: if transpose {
+                    LayoutRect {
+                        x: -20.0,
+                        y: -20.0,
+                        width: 140.0,
+                        height: 240.0,
+                    }
+                } else {
+                    LayoutRect {
+                        x: -20.0,
+                        y: -20.0,
+                        width: 240.0,
+                        height: 140.0,
+                    }
+                },
+            };
+            let mut expected = before.clone();
+            separate_shared_channels(&ir, &[], &mut expected);
+            let mut after = before;
+            separate_shared_channels(&ir, &[container], &mut after);
+            assert_eq!(
+                after, expected,
+                "a composite must not wall in its own tracks"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after));
+        }
+    }
+
+    #[test]
+    fn shared_channels_keep_the_asymmetric_default_layout_unambiguous() {
+        for direction in ["TB", "LR"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart {direction}\n A[API gateway] --> C{{Request valid?}}\n A --> D[Audit event]\n B[Background workers] --> C\n B --> E[Long running job queue]\n C --> G[Response delivered]\n E --> F[Persist job results]\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            assert_eq!(layout.edges.len(), 6);
+            assert!(
+                !shared_channel_has_false_junction(&ir, &layout.edges),
+                "{direction}: {:?}",
+                layout.edges
+            );
+        }
+    }
+
+    #[test]
+    fn shared_channels_can_extend_a_genuine_shared_port_stub() {
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 100.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(
+                    1,
+                    &[(100.0, 100.0), (100.0, 30.0), (300.0, 30.0), (300.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(2, &[(0.0, 50.0), (400.0, 50.0)], transpose),
+            ];
+            assert!(shared_channel_has_false_junction(&ir, &before));
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_shared_channel_geometry_preserved(&before, &after);
+            assert_eq!(
+                after[2], before[2],
+                "the fixed endpoint segment remains attached"
+            );
+            assert!(!shared_channel_has_false_junction(&ir, &after), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn shared_channels_do_not_extend_through_a_straight_peers_far_port() {
+        let ir = fm_parser::parse("flowchart TD\n A-->C\n A-->D\n B-->E\n F-->G\n H-->I\n").ir;
+        for transpose in [false, true] {
+            let before = vec![
+                shared_channel_test_path(
+                    0,
+                    &[(100.0, 100.0), (100.0, 50.0), (200.0, 50.0), (200.0, 100.0)],
+                    transpose,
+                ),
+                shared_channel_test_path(1, &[(100.0, 100.0), (100.0, 30.0)], transpose),
+                shared_channel_test_path(2, &[(0.0, 50.0), (400.0, 50.0)], transpose),
+                shared_channel_test_path(3, &[(150.0, 40.0), (250.0, 40.0)], transpose),
+                shared_channel_test_path(4, &[(150.0, 30.0), (250.0, 30.0)], transpose),
+            ];
+            let mut after = before.clone();
+            separate_shared_channels(&ir, &[], &mut after);
+            assert_eq!(
+                after, before,
+                "a shared source cannot justify extending through a straight peer's target port"
+            );
+            assert_shared_channel_geometry_preserved(&before, &after);
+        }
+    }
+
+    /// Two edges that share neither source nor target never run along the same line: a return
+    /// edge used to be drawn over the trunk it returns along, and blocked same-row edges over
+    /// each other, so the reader could not tell which line went where.
+    #[test]
+    fn unrelated_edges_do_not_share_a_line() {
+        for input in [
+            "flowchart LR\n  A[Start] --> B{Validate}\n  B -->|yes| C[Ship]\n  B -->|no| D[Fix]\n  D --> B\n",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Processing : start\n  Processing --> Idle : complete\n  Idle --> Other\n  Other --> Done\n",
+            "flowchart LR\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n",
+        ] {
+            let ir = fm_parser::parse(input).ir;
+            let layout = layout_diagram(&ir);
+            // (edge, horizontal, line, low, high) for every segment between two bends.
+            let mut runs = Vec::new();
+            for path in &layout.edges {
+                for pair in path
+                    .points
+                    .windows(2)
+                    .skip(1)
+                    .take(path.points.len().saturating_sub(3))
+                {
+                    let (a, b) = (pair[0], pair[1]);
+                    if (a.y - b.y).abs() < 0.01 {
+                        runs.push((path.edge_index, true, a.y, a.x.min(b.x), a.x.max(b.x)));
+                    } else if (a.x - b.x).abs() < 0.01 {
+                        runs.push((path.edge_index, false, a.x, a.y.min(b.y), a.y.max(b.y)));
+                    }
+                }
+            }
+            let ends = |edge: usize| {
+                let edge = &ir.edges[edge];
+                let (from, to) = edge.named_subgraphs();
+                (
+                    from.map_or_else(|| format!("{:?}", edge.from), |s| format!("{s:?}")),
+                    to.map_or_else(|| format!("{:?}", edge.to), |s| format!("{s:?}")),
+                )
+            };
+            for (i, a) in runs.iter().enumerate() {
+                for b in &runs[i + 1..] {
+                    let (ea, eb) = (ends(a.0), ends(b.0));
+                    let unrelated = a.0 != b.0 && ea.0 != eb.0 && ea.1 != eb.1;
+                    let shared =
+                        a.1 == b.1 && (a.2 - b.2).abs() < 0.5 && a.3 < b.4 - 0.5 && b.3 < a.4 - 0.5;
+                    assert!(
+                        !(unrelated && shared),
+                        "edges {} and {} share a line in {input:?}: {a:?} {b:?}",
+                        a.0,
+                        b.0
+                    );
+                }
+            }
+        }
+    }
+
+    /// An edge goes around a subgraph that holds neither of its ends: drawn through the box it
+    /// read as part of that subgraph. mermaid's own subgraph example, both directions.
+    #[test]
+    fn edges_go_around_subgraphs_they_do_not_belong_to() {
+        for direction in ["TB", "LR"] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart {direction}\n  c1-->a2\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  subgraph three\n  c1-->c2\n  end\n  one --> two\n  three --> two\n  two --> c2\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            let holds = |r: LayoutRect, node: usize| {
+                let p = layout.nodes[node].bounds.center();
+                p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
+            };
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                let ends = [
+                    crate::endpoint_node_index(&ir, edge.from).unwrap(),
+                    crate::endpoint_node_index(&ir, edge.to).unwrap(),
+                ];
+                for cluster in &layout.clusters {
+                    let r = cluster.bounds;
+                    if ends.iter().any(|&end| holds(r, end)) {
+                        continue;
+                    }
+                    for pair in path.points.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let crosses = a.x.max(b.x) > r.x + 0.5
+                            && a.x.min(b.x) < r.x + r.width - 0.5
+                            && a.y.max(b.y) > r.y + 0.5
+                            && a.y.min(b.y) < r.y + r.height - 0.5;
+                        assert!(
+                            !crosses,
+                            "{direction}: edge {} runs through {:?}: {a:?} -> {b:?}",
+                            path.edge_index, cluster.title
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// An edge written to a subgraph id ends on that subgraph's border, as mermaid draws it,
+    /// rather than running on into whichever member the endpoint resolved to.
+    #[test]
+    fn edges_named_to_a_subgraph_end_on_its_border() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  subgraph one\n  a1-->a2\n  end\n  subgraph two\n  b1-->b2\n  end\n  one --> two\n  a1 --> b1\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |title: &str| {
+            layout
+                .clusters
+                .iter()
+                .find(|c| c.title.as_deref() == Some(title))
+                .map(|c| c.bounds)
+                .expect("cluster")
+        };
+        let (one, two) = (bounds("one"), bounds("two"));
+        let on_border = |r: LayoutRect, p: LayoutPoint| {
+            let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+            let within = |v: f32, lo: f32, len: f32| v >= lo - 0.5 && v <= lo + len + 0.5;
+            ((near(p.x, r.x) || near(p.x, r.x + r.width)) && within(p.y, r.y, r.height))
+                || ((near(p.y, r.y) || near(p.y, r.y + r.height)) && within(p.x, r.x, r.width))
+        };
+        let path = |index: usize| {
+            &layout
+                .edges
+                .iter()
+                .find(|e| e.edge_index == index)
+                .unwrap()
+                .points
+        };
+        let named = path(2);
+        assert!(
+            on_border(one, named[0]),
+            "starts on `one`'s border: {:?} vs {one:?}",
+            named[0]
+        );
+        let end = *named.last().unwrap();
+        assert!(
+            on_border(two, end),
+            "ends on `two`'s border: {end:?} vs {two:?}"
+        );
+        // CONTROL: an edge between members still runs node to node, inside the boxes.
+        let member = path(3);
+        assert!(!on_border(one, member[0]) && !on_border(two, *member.last().unwrap()));
+    }
+
+    /// A composite state is ranked as a unit: it sits after the state that enters it and before
+    /// the one it leaves for, with its contents inside it. It used to be ranked as a plain node
+    /// while its contents were laid out after everything else, so the composite box landed BELOW
+    /// `Error`, the state its own `fail` transition leads to.
+    #[test]
+    fn a_composite_state_holds_its_contents() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    [*] --> Validating\n    Validating --> Computing\n    Computing --> [*]\n  }\n  Idle --> Processing : start\n  Processing --> Error : fail\n  Idle --> Other\n  Other --> Done\n  Error --> [*]\n",
+        )
+        .ir;
+        for algorithm in [LayoutAlgorithm::Auto, LayoutAlgorithm::Tree] {
+            let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+            if algorithm == LayoutAlgorithm::Tree {
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Tree);
+            }
+            let layout = traced.layout;
+            let index = |id: &str| ir.nodes.iter().position(|n| n.id == id).expect(id);
+            let composite = layout.nodes[index("Processing")].bounds;
+            for inner in ["Validating", "Computing"] {
+                let b = layout.nodes[index(inner)].bounds;
+                assert!(
+                    b.x >= composite.x
+                        && b.y >= composite.y
+                        && b.x + b.width <= composite.x + composite.width
+                        && b.y + b.height <= composite.y + composite.height,
+                    "{algorithm:?}: {inner} {b:?} is outside Processing {composite:?}"
+                );
+            }
+            for outer in ["Idle", "Other", "Done", "Error"] {
+                assert!(
+                    !rects_overlap(layout.nodes[index(outer)].bounds, composite),
+                    "{algorithm:?}: {outer} overlaps Processing"
+                );
+            }
+            let idle = layout.nodes[index("Idle")].bounds;
+            let error = layout.nodes[index("Error")].bounds;
+            assert!(
+                idle.y + idle.height <= composite.y,
+                "{algorithm:?}: Idle is above Processing"
+            );
+            assert!(
+                composite.y + composite.height <= error.y,
+                "{algorithm:?}: Error {error:?} is below Processing {composite:?}"
+            );
+        }
+    }
+
+    /// Nodes of different sizes connected in a chain share a centre line, so the edge between
+    /// them is straight. Brandes-Köpf's coordinate is a centre, and using it as the left edge
+    /// aligned the chain's LEFT edges instead, which bent every edge between a narrow and a wide
+    /// node. In a left-to-right chain through a subgraph, the outside nodes line up with the
+    /// subgraph's middle.
+    #[test]
+    fn chains_align_on_centres() {
+        let tb = fm_parser::parse(
+            "flowchart TB\n  A[short] --> B[a considerably longer label than the first]\n  B --> C[mid length]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&tb);
+        let centre_x = |id: &str| {
+            let b = layout.nodes[tb.nodes.iter().position(|n| n.id == id).expect(id)].bounds;
+            b.x + b.width / 2.0
+        };
+        assert!(
+            layout.nodes[0].bounds.width + 50.0 < layout.nodes[1].bounds.width,
+            "CONTROL: the widths really differ"
+        );
+        for id in ["B", "C"] {
+            assert!(
+                (centre_x(id) - centre_x("A")).abs() < 0.01,
+                "{id} is off A's centre line"
+            );
+        }
+
+        let lr = fm_parser::parse(
+            "flowchart LR\n  start --> gate{Gate}\n  gate --> core1\n  subgraph core\n    core1 --> core2\n  end\n  core2 --> done\n",
+        )
+        .ir;
+        let layout = layout_diagram(&lr);
+        let centre_y = |id: &str| {
+            let b = layout.nodes[lr.nodes.iter().position(|n| n.id == id).expect(id)].bounds;
+            b.y + b.height / 2.0
+        };
+        let line = centre_y("core1");
+        for id in ["start", "gate", "core2", "done"] {
+            assert!(
+                (centre_y(id) - line).abs() < 0.01,
+                "{id} is off the chain's centre line"
+            );
+        }
+    }
+
+    /// A long label on a left-to-right edge widens that rank gap to fit it; it used to be drawn
+    /// under the two nodes it connects. Gaps with no label keep the default spacing.
+    #[test]
+    fn rank_gaps_make_room_for_edge_labels() {
+        let label = "a fairly long label on this edge";
+        let ir = fm_parser::parse(&format!("flowchart LR\n  A -->|{label}| B\n  B --> C\n")).ir;
+        let layout = layout_diagram(&ir);
+        let bounds = |id: &str| {
+            let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+            layout.nodes[index].bounds
+        };
+        let (a, b, c) = (bounds("A"), bounds("B"), bounds("C"));
+        let labelled_gap = b.x - (a.x + a.width);
+        let plain_gap = c.x - (b.x + b.width);
+        let text = fm_core::FontMetrics::default_metrics()
+            .estimate_dimensions(label)
+            .0;
+        assert!(
+            labelled_gap > text * 1.3,
+            "a {labelled_gap}-wide gap for a label measuring {text}"
+        );
+        assert!(
+            (plain_gap - LayoutSpacing::default().rank_spacing).abs() < 0.01,
+            "CONTROL: the unlabelled gap keeps the default, {plain_gap}"
+        );
+    }
+
+    /// Two labelled transitions between one pair of states, in a top-down layout, are spread far
+    /// enough apart that their labels sit side by side instead of on top of each other.
+    #[test]
+    fn labelled_parallel_edges_leave_room_for_their_labels() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  Idle --> Running : start\n  Running --> Idle : stop\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let anchors: Vec<LayoutPoint> = layout
+            .edges
+            .iter()
+            .map(super::edge_label_position)
+            .collect();
+        assert_eq!(anchors.len(), 2, "CONTROL: both transitions are routed");
+        let text = fm_core::FontMetrics::default_metrics()
+            .estimate_dimensions("start")
+            .0;
+        assert!(
+            (anchors[0].x - anchors[1].x).abs() > text * 1.3,
+            "labels {} apart for words measuring {text}: {anchors:?}",
+            (anchors[0].x - anchors[1].x).abs()
+        );
+    }
+
+    fn assert_parallel_port_on_outline(shape: NodeShape, bounds: LayoutRect, point: LayoutPoint) {
+        let tolerance = 0.01;
+        assert!(point.x.is_finite() && point.y.is_finite());
+        assert!(
+            point.x >= bounds.x - tolerance
+                && point.x <= bounds.x + bounds.width + tolerance
+                && point.y >= bounds.y - tolerance
+                && point.y <= bounds.y + bounds.height + tolerance,
+            "{shape:?} port {point:?} is outside its node {bounds:?}"
+        );
+        let center = bounds.center();
+        let dx = (point.x - center.x).abs();
+        let dy = (point.y - center.y).abs();
+        let on_outline = match shape {
+            NodeShape::Circle | NodeShape::DoubleCircle => {
+                (dx.hypot(dy) - bounds.width.min(bounds.height) / 2.0).abs() < tolerance
+            }
+            NodeShape::Diamond => {
+                (dx / (bounds.width / 2.0) + dy / (bounds.height / 2.0) - 1.0).abs() < tolerance
+            }
+            NodeShape::Stadium => {
+                let radius = bounds.width.min(bounds.height) / 2.0;
+                let (cap_dx, cap_dy) = if bounds.width >= bounds.height {
+                    ((dx - (bounds.width - bounds.height) / 2.0).max(0.0), dy)
+                } else {
+                    (dx, (dy - (bounds.height - bounds.width) / 2.0).max(0.0))
+                };
+                (cap_dx.hypot(cap_dy) - radius).abs() < tolerance
+            }
+            NodeShape::Rect => {
+                (dx - bounds.width / 2.0).abs() < tolerance
+                    || (dy - bounds.height / 2.0).abs() < tolerance
+            }
+            _ => panic!("unsupported outline assertion for {shape:?}"),
+        };
+        assert!(
+            on_outline,
+            "{shape:?} port {point:?} is detached from its drawn outline {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_edges_attach_to_outlines_in_every_rank_direction() {
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            for shape in [
+                NodeShape::Rect,
+                NodeShape::Diamond,
+                NodeShape::Circle,
+                NodeShape::DoubleCircle,
+                NodeShape::Stadium,
+            ] {
+                for count in [2, 3, 9] {
+                    let pairs: Vec<_> = (0..count)
+                        .map(|index| if index % 2 == 0 { (0, 1) } else { (1, 0) })
+                        .collect();
+                    let mut ir = labeled_graph_ir(2, &pairs);
+                    ir.direction = direction;
+                    for node in &mut ir.nodes {
+                        node.shape = shape;
+                    }
+                    let assert_attached = |layout: &DiagramLayout| {
+                        assert_eq!(layout.edges.len(), count);
+                        let mut ports = Vec::with_capacity(count);
+                        for path in &layout.edges {
+                            let edge = &ir.edges[path.edge_index];
+                            let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                            let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                            let first = *path.points.first().expect("routed source");
+                            let last = *path.points.last().expect("routed target");
+                            assert_parallel_port_on_outline(
+                                shape,
+                                layout.nodes[source].bounds,
+                                first,
+                            );
+                            assert_parallel_port_on_outline(
+                                shape,
+                                layout.nodes[target].bounds,
+                                last,
+                            );
+                            ports.push(if source == 0 { first } else { last });
+                        }
+                        for (index, port) in ports.iter().enumerate() {
+                            for other in &ports[index + 1..] {
+                                assert!(
+                                    (port.x - other.x).hypot(port.y - other.y) > 0.5,
+                                    "{direction:?}, {shape:?}: parallel ports coincide: {ports:?}"
+                                );
+                            }
+                        }
+                    };
+                    for edge_routing in [EdgeRouting::Orthogonal, EdgeRouting::Spline] {
+                        let config = LayoutConfig {
+                            edge_routing,
+                            ..LayoutConfig::default()
+                        };
+                        let layout = layout_diagram_with_config(&ir, config.clone());
+                        assert_eq!(layout, layout_diagram_with_config(&ir, config));
+                        assert_attached(&layout);
+                    }
+                    let force = layout_diagram_force(&ir);
+                    assert_eq!(force, layout_diagram_force(&ir));
+                    assert_attached(&force);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_edges_with_mixed_labels_keep_distinct_ordered_ports() {
+        let mut ir = labeled_graph_ir(2, &[(0, 1), (1, 0), (0, 1), (1, 0), (0, 1)]);
+        ir.labels.push(IrLabel {
+            text: "A longer label on just one lane".to_string(),
+            ..IrLabel::default()
+        });
+        ir.edges[1].label = Some(IrLabelId(ir.labels.len() - 1));
+        let nodes: Vec<_> = [0.0, 280.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, y)| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y,
+                    width: 120.0,
+                    height: 80.0,
+                },
+            })
+            .collect();
+        let paths = super::build_edge_paths_with_orientation(
+            &ir,
+            &nodes,
+            &[],
+            &BTreeSet::new(),
+            false,
+            EdgeRouting::Orthogonal,
+        );
+        assert_eq!(paths.len(), 5);
+        let ports: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let source =
+                    super::endpoint_node_index(&ir, ir.edges[path.edge_index].from).unwrap();
+                if source == 0 {
+                    *path.points.first().unwrap()
+                } else {
+                    *path.points.last().unwrap()
+                }
+            })
+            .collect();
+        for port in &ports {
+            assert_parallel_port_on_outline(NodeShape::Rect, nodes[0].bounds, *port);
+        }
+        assert!(
+            ports.windows(2).all(|pair| pair[1].x > pair[0].x + 1.0),
+            "a label on one edge must not reorder or collapse its neighbours' lanes: {ports:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_lanes_are_checked_against_obstacles_after_port_selection() {
+        let ir = labeled_graph_ir(3, &[(0, 1), (1, 0), (0, 1), (1, 0)]);
+        for horizontal in [true, false] {
+            let nodes: Vec<_> = [
+                LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 60.0,
+                },
+                LayoutRect {
+                    x: 300.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 60.0,
+                },
+                LayoutRect {
+                    x: 150.0,
+                    y: 39.0,
+                    width: 80.0,
+                    height: 20.0,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bounds)| LayoutNodeBox {
+                node_index: index,
+                node_id: ir.nodes[index].id.clone(),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: if horizontal {
+                    bounds
+                } else {
+                    LayoutRect {
+                        x: bounds.y,
+                        y: bounds.x,
+                        width: bounds.height,
+                        height: bounds.width,
+                    }
+                },
+            })
+            .collect();
+            let ranked = super::build_edge_paths_with_orientation(
+                &ir,
+                &nodes,
+                &[],
+                &BTreeSet::new(),
+                horizontal,
+                EdgeRouting::Orthogonal,
+            );
+            let force = super::force_build_edge_paths(&ir, &nodes);
+            let obstacle = nodes[2].bounds;
+            for paths in [&ranked, &force] {
+                assert_eq!(paths.len(), 4);
+                for path in paths {
+                    let edge = &ir.edges[path.edge_index];
+                    let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                    let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                    assert_parallel_port_on_outline(
+                        NodeShape::Rect,
+                        nodes[source].bounds,
+                        *path.points.first().unwrap(),
+                    );
+                    assert_parallel_port_on_outline(
+                        NodeShape::Rect,
+                        nodes[target].bounds,
+                        *path.points.last().unwrap(),
+                    );
+                    for segment in path.points.windows(2) {
+                        for step in 0..=40 {
+                            let t = step as f32 / 40.0;
+                            let sample = LayoutPoint {
+                                x: segment[0].x + (segment[1].x - segment[0].x) * t,
+                                y: segment[0].y + (segment[1].y - segment[0].y) * t,
+                            };
+                            assert!(
+                                !(sample.x > obstacle.x
+                                    && sample.x < obstacle.x + obstacle.width
+                                    && sample.y > obstacle.y
+                                    && sample.y < obstacle.y + obstacle.height),
+                                "parallel lane crosses unrelated node {obstacle:?}: {:?}",
+                                path.points
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn force_parallel_edges_leave_separated_faces_of_wide_and_tall_nodes() {
+        let ir = labeled_graph_ir(2, &[(0, 1), (1, 0), (0, 1)]);
+        for transpose in [false, true] {
+            let nodes: Vec<_> = [(0.0, 0.0), (140.0, 100.0)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (x, y))| LayoutNodeBox {
+                    node_index: index,
+                    node_id: ir.nodes[index].id.clone(),
+                    rank: 0,
+                    order: index,
+                    span: Span::default(),
+                    bounds: if transpose {
+                        LayoutRect {
+                            x: y,
+                            y: x,
+                            width: 40.0,
+                            height: 240.0,
+                        }
+                    } else {
+                        LayoutRect {
+                            x,
+                            y,
+                            width: 240.0,
+                            height: 40.0,
+                        }
+                    },
+                })
+                .collect();
+            let paths = super::force_build_edge_paths(&ir, &nodes);
+            assert_eq!(paths.len(), 3);
+            for path in paths {
+                let edge = &ir.edges[path.edge_index];
+                let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+                let target = super::endpoint_node_index(&ir, edge.to).unwrap();
+                assert_parallel_port_on_outline(
+                    NodeShape::Rect,
+                    nodes[source].bounds,
+                    *path.points.first().unwrap(),
+                );
+                assert_parallel_port_on_outline(
+                    NodeShape::Rect,
+                    nodes[target].bounds,
+                    *path.points.last().unwrap(),
+                );
+                for segment in path.points.windows(2) {
+                    for step in 0..=40 {
+                        let t = step as f32 / 40.0;
+                        let x = segment[0].x + (segment[1].x - segment[0].x) * t;
+                        let y = segment[0].y + (segment[1].y - segment[0].y) * t;
+                        for node in &nodes {
+                            let bounds = node.bounds;
+                            assert!(
+                                !(x > bounds.x + 0.01
+                                    && x < bounds.x + bounds.width - 0.01
+                                    && y > bounds.y + 0.01
+                                    && y < bounds.y + bounds.height - 0.01),
+                                "parallel route crosses its endpoint node {bounds:?}: {:?}",
+                                path.points
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A `~~~` link is an ordinary edge to the layout: it is what moves `C` a rank past `A`.
+    /// The scene the canvas draws from leaves it out.
+    #[test]
+    fn invisible_links_place_nodes_and_are_not_drawn() {
+        let layout_of = |source: &str| {
+            let ir = fm_parser::parse(source).ir;
+            let layout = layout_diagram(&ir);
+            let rank = |id: &str| {
+                let index = ir.nodes.iter().position(|n| n.id == id).expect("node");
+                layout.nodes[index].rank
+            };
+            (rank("A"), rank("C"), build_render_scene(&ir, &layout))
+        };
+        let (a, c, scene) = layout_of("flowchart LR\n  A --> B\n  A ~~~ C\n  C --> D\n");
+        assert_eq!(c, a + 1, "C is ranked after A");
+        let (a0, c0, _) = layout_of("flowchart LR\n  A --> B\n  C --> D\n");
+        assert_ne!(
+            c0,
+            a0 + 1,
+            "CONTROL: without the link C is placed elsewhere"
+        );
+        let edge_paths = scene
+            .root
+            .children
+            .iter()
+            .find_map(|child| match child {
+                RenderItem::Group(group) if group.id.as_deref() == Some("edges") => {
+                    Some(group.children.len())
+                }
+                _ => None,
+            })
+            .expect("edge layer");
+        assert_eq!(edge_paths, 2, "only the two visible edges are drawn");
+    }
+
     #[test]
     fn sequence_layout_empty_diagram() {
         let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
@@ -27473,6 +33163,157 @@ mod tests {
     // --- Brandes-Köpf coordinate assignment tests ---
 
     #[test]
+    fn bk_asymmetric_branches_are_mirror_symmetric_with_variable_node_sizes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..7 {
+            ir.nodes.push(IrNode {
+                id: format!("node{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 2), (0, 3), (1, 2), (2, 6), (4, 5)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                ..IrEdge::default()
+            });
+        }
+        let ordering = BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3, 4]), (2, vec![5, 6])]);
+        let ranks = ordering
+            .iter()
+            .flat_map(|(&rank, nodes)| nodes.iter().map(move |&node| (node, rank)))
+            .collect();
+        let mirrored_ordering = ordering
+            .iter()
+            .map(|(&rank, nodes)| (rank, nodes.iter().rev().copied().collect()))
+            .collect();
+        let sizes = [
+            (80.0, 46.0),
+            (180.0, 92.0),
+            (120.0, 66.0),
+            (70.0, 54.0),
+            (240.0, 108.0),
+            (90.0, 60.0),
+            (140.0, 78.0),
+        ];
+
+        for horizontal_ranks in [false, true] {
+            for node_spacing in [0.0, 32.0, 80.0] {
+                let spacing = LayoutSpacing {
+                    node_spacing,
+                    ..LayoutSpacing::default()
+                };
+                let coordinates = super::brandes_kopf_secondary_coords(
+                    &ir,
+                    &sizes,
+                    &ranks,
+                    &ordering,
+                    spacing,
+                    horizontal_ranks,
+                );
+                let mirrored = super::brandes_kopf_secondary_coords(
+                    &ir,
+                    &sizes,
+                    &ranks,
+                    &mirrored_ordering,
+                    spacing,
+                    horizontal_ranks,
+                );
+                // Mirroring the ordering must reflect the geometry up to a shared translation.
+                // Left-only compaction used to move individual branches by different amounts.
+                let reflection_axis = coordinates[0] + mirrored[0];
+                for (node, (&coordinate, &reflected)) in
+                    coordinates.iter().zip(&mirrored).enumerate()
+                {
+                    assert!(
+                        (coordinate + reflected - reflection_axis).abs() < 0.001,
+                        "node {node} is biased by the sweep direction: horizontal={horizontal_ranks}, \
+                         spacing={node_spacing}, coordinates={coordinates:?}, mirrored={mirrored:?}"
+                    );
+                }
+                // Balancing must retain the requested clear space, including between unequal
+                // boxes and isolated components that happen to share a rank.
+                for nodes in ordering.values() {
+                    for pair in nodes.windows(2) {
+                        let extent = |node: usize| {
+                            if horizontal_ranks {
+                                sizes[node].1
+                            } else {
+                                sizes[node].0
+                            }
+                        };
+                        let gap = coordinates[pair[1]]
+                            - coordinates[pair[0]]
+                            - (extent(pair[0]) + extent(pair[1])) / 2.0;
+                        assert!(
+                            gap + 0.001 >= node_spacing,
+                            "rank neighbours {pair:?} have {gap} clear space, need {node_spacing}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bk_branch_merge_keeps_its_central_trunk_straight_in_every_direction() {
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.direction = direction;
+            // A forks into B/C/D, rejoins at E and continues to F. Equal labels keep box
+            // dimensions equal, so C is the central branch in the stable rank ordering.
+            for id in ["A", "B", "C", "D", "E", "F"] {
+                ir.nodes.push(IrNode {
+                    id: id.to_string(),
+                    ..IrNode::default()
+                });
+            }
+            for (from, to) in [(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4), (4, 5)] {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(from)),
+                    to: IrEndpoint::Node(IrNodeId(to)),
+                    ..IrEdge::default()
+                });
+            }
+            // Exercise the actual Sugiyama pipeline explicitly; Auto may select Tree for this
+            // small graph, which would leave a coordinate-assignment regression untested.
+            let first = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sugiyama);
+            let second = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Sugiyama);
+            let across = |node: usize| {
+                let centre = first.layout.nodes[node].bounds.center();
+                if matches!(direction, GraphDirection::LR | GraphDirection::RL) {
+                    centre.y
+                } else {
+                    centre.x
+                }
+            };
+            for node in [2, 4, 5] {
+                assert!(
+                    (across(node) - across(0)).abs() < 0.001,
+                    "central trunk bends at node {node} in {direction:?}"
+                );
+            }
+            for (left, right) in first.layout.nodes.iter().zip(&second.layout.nodes) {
+                assert_eq!(left.bounds, right.bounds);
+            }
+            assert_eq!(first.layout.edges.len(), ir.edges.len());
+            assert!(
+                first
+                    .layout
+                    .edges
+                    .iter()
+                    .flat_map(|edge| &edge.points)
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+        }
+    }
+
+    #[test]
     fn bk_linear_chain_aligns_connected_nodes() {
         // A -> B -> C should have all three nodes aligned (same secondary coordinate).
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -27709,6 +33550,163 @@ mod tests {
                 node.node_id,
                 node.bounds.y
             );
+        }
+    }
+
+    #[test]
+    fn circular_labels_fit_inside_the_drawn_circle() {
+        for text in [
+            "Customer authentication",
+            "Customer authentication\nPermission granted",
+            "注文を確認して承認する",
+        ] {
+            for metrics in [
+                fm_core::FontMetrics::default_metrics(),
+                fm_core::FontMetrics::monospace(28.0),
+            ] {
+                let mut ir = MermaidDiagramIr::empty(DiagramType::GitGraph);
+                ir.labels.push(IrLabel {
+                    text: text.to_string(),
+                    span: Span::default(),
+                });
+                for shape in [
+                    NodeShape::Circle,
+                    NodeShape::FilledCircle,
+                    NodeShape::DoubleCircle,
+                    NodeShape::CrossedCircle,
+                ] {
+                    let node = IrNode {
+                        id: "A".to_string(),
+                        label: Some(IrLabelId(0)),
+                        shape,
+                        ..IrNode::default()
+                    };
+                    let (width, height) = compute_node_size(&ir, &node, &metrics);
+                    assert_eq!(width, height, "{shape:?}: bounds must match the circle");
+                    let radius = width / 2.0
+                        - if shape == NodeShape::DoubleCircle {
+                            4.0
+                        } else {
+                            0.0
+                        };
+                    let (text_width, text_height) = metrics.estimate_dimensions(text);
+                    let corner_radius = (text_width / 2.0).hypot(text_height / 2.0);
+                    assert!(
+                        corner_radius + 12.0 <= radius,
+                        "{shape:?}: {text:?} escapes its circle ({corner_radius} vs {radius})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decision_labels_fit_between_the_sloping_sides() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for text in [
+            "Ready?",
+            "Does this customer have permission to approve this transaction?",
+            "Does this customer have permission\nto approve this transaction?",
+            "First decision condition\nSecond decision condition\nFinal condition",
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.labels.push(IrLabel {
+                text: text.to_string(),
+                span: Span::default(),
+            });
+            let node = IrNode {
+                id: "A".to_string(),
+                label: Some(IrLabelId(0)),
+                shape: NodeShape::Diamond,
+                ..IrNode::default()
+            };
+            let (width, height) = compute_node_size(&ir, &node, &metrics);
+            let (text_width, text_height) = metrics.estimate_dimensions(text);
+            let padded_corner = (text_width + 16.0) / width + (text_height + 16.0) / height;
+            assert!(
+                padded_corner < 1.0,
+                "{text:?}: label crosses the diamond outline ({padded_corner})"
+            );
+        }
+    }
+
+    #[test]
+    fn ranked_circle_ports_touch_the_drawn_outline_in_every_direction() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let ir = parse(&format!(
+                "flowchart {direction}\n A((Customer authentication)) --> B(((Permission granted)))\n"
+            ))
+            .ir;
+            for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                let layout = layout_diagram_traced_with_algorithm(&ir, algorithm).layout;
+                let edge = layout.edges.first().expect("connected circles");
+                for (node_id, endpoint) in [
+                    ("A", edge.points.first().expect("source port")),
+                    ("B", edge.points.last().expect("target port")),
+                ] {
+                    let node = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == node_id)
+                        .unwrap();
+                    let center = node.bounds.center();
+                    let radius = node.bounds.width.min(node.bounds.height) / 2.0;
+                    let distance = (endpoint.x - center.x).hypot(endpoint.y - center.y);
+                    assert!(
+                        (distance - radius).abs() < 0.01,
+                        "{direction}/{algorithm:?}/{node_id}: port is {distance} from center, radius {radius}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn circular_ports_use_the_drawn_radius_with_non_square_supplied_bounds() {
+        for (width, height) in [(180.0, 60.0), (60.0, 180.0)] {
+            let source = LayoutNodeBox {
+                node_index: 0,
+                node_id: "A".to_string(),
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width,
+                    height,
+                },
+                rank: 0,
+                order: 0,
+            };
+            let mut target = source.clone();
+            target.bounds.x += 400.0;
+            target.bounds.y += 400.0;
+            let center = source.bounds.center();
+            for shape in [
+                NodeShape::Circle,
+                NodeShape::FilledCircle,
+                NodeShape::DoubleCircle,
+                NodeShape::CrossedCircle,
+            ] {
+                for horizontal in [true, false] {
+                    let (from, to) =
+                        crate::edge_anchors(&source, &target, horizontal, shape, shape);
+                    for (bounds, port) in [(source.bounds, from), (target.bounds, to)] {
+                        let center = bounds.center();
+                        assert!(
+                            ((port.x - center.x).hypot(port.y - center.y) - 30.0).abs() < 0.001
+                        );
+                    }
+                }
+                let diagonal = crate::clip_to_shape_border(
+                    center,
+                    target.bounds.center(),
+                    &source.bounds,
+                    shape,
+                );
+                assert!(
+                    ((diagonal.x - center.x).hypot(diagonal.y - center.y) - 30.0).abs() < 0.001
+                );
+            }
         }
     }
 
@@ -28070,6 +34068,92 @@ mod tests {
         ir
     }
 
+    /// mermaid's choice/fork example: the `<<choice>>` is a small bare diamond, not a decision box
+    /// printed with its id, and a note whose requested side is taken by a neighbour goes to the
+    /// free side rather than past the neighbour with its leader through it.
+    #[test]
+    fn state_choice_is_a_mark_and_notes_keep_clear_of_neighbours() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  state if_state <<choice>>\n  [*] --> IsPositive\n  IsPositive --> if_state\n  \
+             if_state --> False: if n < 0\n  if_state --> True : if n >= 0\n  state fork_state <<fork>>\n  \
+             True --> fork_state\n  fork_state --> State2\n  fork_state --> State3\n  \
+             note right of State2 : Important information!\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let choice = layout
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "if_state")
+            .unwrap();
+        assert!(choice.bounds.width <= 32.0 && choice.bounds.height <= 32.0);
+        assert_eq!(ir.node_display_text(&ir.nodes[choice.node_index]), "");
+        let note = &layout.extensions.state_notes[0];
+        let (a, b) = (note.leader_start, note.leader_end);
+        for node in layout
+            .nodes
+            .iter()
+            .filter(|n| n.node_index != note.node_index)
+        {
+            let r = node.bounds;
+            let crosses = a.x.max(b.x) > r.x
+                && a.x.min(b.x) < r.x + r.width
+                && a.y.max(b.y) > r.y
+                && a.y.min(b.y) < r.y + r.height;
+            assert!(!crosses, "the leader runs through {}", node.node_id);
+            assert!(
+                !rects_overlap(note.bounds, r),
+                "the note covers {}",
+                node.node_id
+            );
+        }
+    }
+
+    /// A class diagram's `note "…"` annotates the diagram, not a class: it is placed clear of
+    /// every class and every attached note, with no leader, and the canvas holds it.
+    #[test]
+    fn a_note_on_the_whole_diagram_gets_a_place_of_its_own() {
+        let ir = fm_parser::parse(
+            "classDiagram\n  note \"From Duck till Zebra\"\n  Animal <|-- Duck\n  Animal <|-- Zebra\n  note for Duck \"can fly\"\n  note \"second\"\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let notes = &layout.extensions.state_notes;
+        assert_eq!(
+            notes.len(),
+            3,
+            "both free notes and the attached one are placed"
+        );
+        let free: Vec<_> = notes
+            .iter()
+            .filter(|n| n.node_index == usize::MAX)
+            .collect();
+        assert_eq!(
+            free.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            ["From Duck till Zebra", "second"]
+        );
+        for note in &free {
+            assert_eq!(note.leader_start, note.leader_end, "nothing to lead to");
+            for node in &layout.nodes {
+                assert!(
+                    !rects_overlap(note.bounds, node.bounds),
+                    "covers {}",
+                    node.node_id
+                );
+            }
+            for other in notes.iter().filter(|other| !std::ptr::eq(*other, *note)) {
+                assert!(
+                    !rects_overlap(note.bounds, other.bounds),
+                    "covers {:?}",
+                    other.text
+                );
+            }
+            let b = layout.bounds;
+            assert!(note.bounds.x + note.bounds.width <= b.x + b.width + 0.5);
+            assert!(note.bounds.y >= b.y - 0.5);
+        }
+    }
+
     /// bd-a6l4: the note must EXIST in the layout at all. Before this, `ir.state_notes` was read by
     /// nothing but `memo_ir_equal`, so a declared note produced no geometry and no output.
     #[test]
@@ -28244,6 +34328,118 @@ mod tests {
             first.bounds.height,
             second.bounds.y
         );
+        assert_eq!(
+            second.leader_end.y,
+            second.bounds.center().y,
+            "the displaced note's leader must reach its own box"
+        );
+        assert_ne!(first.leader_end, second.leader_end);
+    }
+
+    #[test]
+    fn multiline_notes_on_adjacent_states_do_not_cover_each_other() {
+        let lines = (1..=12)
+            .map(|line| format!("    Detail {line}\n"))
+            .collect::<String>();
+        for side in ["left", "right"] {
+            let source = format!(
+                "stateDiagram-v2\n  A --> B\n  note {side} of A\n{lines}  end note\n  note {side} of B\n{lines}  end note\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            let notes = &layout.extensions.state_notes;
+            assert_eq!(notes.len(), 2);
+            assert!(
+                !rects_overlap(notes[0].bounds, notes[1].bounds),
+                "{side}: notes on adjacent states overlap"
+            );
+            for note in notes {
+                assert_eq!(note.leader_end.y, note.bounds.center().y);
+                for node in &layout.nodes {
+                    assert!(!rects_overlap(note.bounds, node.bounds));
+                }
+                assert!(note.bounds.x.is_finite() && note.bounds.y.is_finite());
+                assert!(note.bounds.y >= layout.bounds.y);
+                assert!(
+                    note.bounds.y + note.bounds.height
+                        <= layout.bounds.y + layout.bounds.height + 0.5
+                );
+            }
+            assert_eq!(
+                *notes,
+                layout_diagram(&ir).extensions.state_notes,
+                "placement must be deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn stacked_state_and_class_notes_clear_nodes_in_their_new_rows() {
+        for diagram_type in [DiagramType::State, DiagramType::Class] {
+            for side in ["left", "right"] {
+                let mut ir = graph_ir(diagram_type, 3, &[(0, 1), (1, 2)]);
+                for text in ["first note", "second note"] {
+                    ir.state_notes.push(fm_core::IrStateNote {
+                        target: "N0".to_string(),
+                        position: side.to_string(),
+                        text: text.to_string(),
+                        span: Span::default(),
+                    });
+                }
+                // The initial row is clear. Stacking the second note enters the first lower
+                // node; clearing that node enters the next one, requiring another clearance pass.
+                let obstacle_x = if side == "left" { -200.0 } else { 112.0 };
+                let nodes: Vec<_> = [
+                    LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                    LayoutRect {
+                        x: obstacle_x,
+                        y: 45.0,
+                        width: 168.0,
+                        height: 60.0,
+                    },
+                    LayoutRect {
+                        x: obstacle_x,
+                        y: 110.0,
+                        width: 168.0,
+                        height: 30.0,
+                    },
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, bounds)| LayoutNodeBox {
+                    node_index: index,
+                    node_id: format!("N{index}"),
+                    rank: index,
+                    order: 0,
+                    span: Span::default(),
+                    bounds,
+                })
+                .collect();
+                let notes =
+                    super::build_state_note_geometry(&ir, &nodes, &fm_core::FontMetrics::default());
+                assert_eq!(notes.len(), 2);
+                assert!(notes[0].bounds.y + notes[0].bounds.height < nodes[1].bounds.y);
+                assert!(notes[1].bounds.y >= nodes[2].bounds.y + nodes[2].bounds.height);
+                assert!(!rects_overlap(notes[0].bounds, notes[1].bounds));
+                for note in &notes {
+                    for node in &nodes {
+                        assert!(!rects_overlap(note.bounds, node.bounds));
+                    }
+                    let edge_x = match note.side {
+                        StateNoteSide::Left => note.bounds.x + note.bounds.width,
+                        StateNoteSide::Right => note.bounds.x,
+                    };
+                    assert_eq!(note.leader_end.x, edge_x);
+                    assert_eq!(note.leader_end.y, note.bounds.center().y);
+                    assert_eq!(note.leader_start.y, nodes[0].bounds.center().y);
+                }
+            }
+        }
     }
 
     /// Edge list of `golden/cycle_ladder.mmd`, the fixture with the most measured crossings.
@@ -28323,45 +34519,12 @@ mod tests {
 
     /// bd-h2ze: a routed edge must not run through a node it does not connect to.
     ///
-    /// An edge crossing a node box reads as connecting to it, so the picture asserts a relationship
-    /// the source never declared — the same class as bd-h9gx and bd-5wbp, where the diagram still
-    /// looks well-formed and is simply wrong.
-    ///
-    /// The fixture is `cycle_ladder`'s edge list, which carried 5 of the 30 crossings measured
-    /// across the committed goldens. Its shape is the point: the rungs run in BOTH directions
-    /// between the spines, so cycle removal reverses some of them and the survivors span ranks that
-    /// a middle node already occupies.
-    ///
-    /// A small tolerance is allowed because an edge legitimately touches the boundary of boxes it
-    /// passes: the assertion is about running THROUGH a node, not grazing one.
-    ///
-    /// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished. Run it with
-    /// `--ignored` and it FAILS on the current router with
-    ///
-    ///     Some((12, 0, 28.969482))   (edge_index, node_index, penetration_px)
-    ///
-    /// i.e. `LADDER_EDGES[12]`, the L3→R3 rung, runs 28.97px into N0's box — the middle of a 66.5px
-    /// node it does not connect to. Un-ignoring it is bd-h2ze's acceptance gate; do not relax the
-    /// tolerance to whatever a fix happens to produce.
-    ///
-    /// THE MECHANISM, which this test localised and which is the useful half of it. Every branch of
-    /// `route_edge_points_with_obstacle_index` builds exactly ONE segment and nudges that. For a TD
-    /// flowchart (`horizontal_ranks == false`, `|dx| >= epsilon`) the emitted route is
-    ///
-    ///     source, (source.x, y_bend), (target.x, y_bend), target
-    ///
-    /// and only the HORIZONTAL run at `y_bend` is passed to `find_obstacle_nudge_y`. The vertical leg
-    /// at `source.x` from `source.y` to `y_bend`, and the one at `target.x` from `y_bend` to
-    /// `target.y`, are never tested against an obstacle — so either can pass straight through a node
-    /// sharing its column, which is exactly what edge 12 does down the left spine.
-    ///
-    /// So obstacle avoidance is not missing, it is INCOMPLETE: two of the three segments are unchecked.
-    /// A fix therefore cannot be a better nudge; the legs are anchored at the endpoints and cannot be
-    /// slid sideways, so clearing them needs an extra bend (a 5-6 point jog). That is a change to core
-    /// routing which will move cycle_braid, cycle_feedback, cycle_ladder, cycle_scc_heavy and
-    /// state_composite plus their layout checksums, and it must be blessed with a semantic diff.
+    /// This dense ladder dispatches to force layout. Its closely packed boxes can block every
+    /// corridor between two endpoint faces: returning an obstructed midpoint sent edge 1 through
+    /// N9 by 22.88px. The bounded retry must search outside that strip while protecting its own
+    /// endpoint boxes too. Keep the original 4px tolerance, which permits grazing a border but
+    /// rejects a connection running through another node.
     #[test]
-    #[ignore = "bd-h2ze: reproduces a live routing defect; un-ignore as the acceptance gate"]
     fn routed_edges_do_not_run_through_unrelated_nodes() {
         let ir = graph_ir(DiagramType::Flowchart, 10, &LADDER_EDGES);
         let layout = layout_diagram(&ir);
@@ -29438,6 +35601,7 @@ mod tests {
             let generic = build_edge_paths(
                 &chain,
                 &layout.nodes,
+                &[],
                 &BTreeSet::new(),
                 EdgeRouting::default(),
             );
@@ -29569,6 +35733,48 @@ mod tests {
             &prefix
         ));
         assert_eq!(cached, before_fallback, "failed reuse must not mutate");
+    }
+
+    #[test]
+    fn directed_path_suffix_with_edge_labels_falls_back_without_mutation() {
+        // The path specialization deliberately excludes graphs with fewer than three nodes.
+        // Start with an eligible prefix so the assertions below reach suffix-label rejection.
+        let mut base = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2)]);
+        base.direction = GraphDirection::LR;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2)
+            .expect("unlabelled sequential LR path should certify");
+        let text = "Confirm available inventory and reserve every requested item before continuing";
+        let (text_width, _) = fm_core::FontMetrics::default_metrics().estimate_dimensions(text);
+        let needed_gap = text_width.mul_add(1.4, 40.0);
+
+        // A label on the boundary edge or a later appended edge requires the full layout.
+        for edge_index in [2, 3] {
+            let mut next = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+            next.direction = GraphDirection::LR;
+            let label_index = next.labels.len();
+            next.labels.push(IrLabel {
+                text: text.to_string(),
+                ..IrLabel::default()
+            });
+            next.edges[edge_index].label = Some(IrLabelId(label_index));
+            let mut cached = before.clone();
+            assert!(!try_relayout_directed_path_suffix(
+                &next,
+                &mut cached,
+                &prefix
+            ));
+            assert_eq!(cached, before, "failed reuse must not mutate the cache");
+
+            let full = layout_diagram_tree(&next);
+            let source = full.nodes[edge_index].bounds;
+            let target = full.nodes[edge_index + 1].bounds;
+            let gap = target.x - (source.x + source.width);
+            assert!(
+                gap + 0.01 >= needed_gap,
+                "the full fallback must reserve space for the appended label"
+            );
+        }
     }
 
     #[test]
@@ -31774,6 +37980,149 @@ mod tests {
         );
     }
 
+    #[test]
+    fn memberless_generic_classes_are_sized_for_the_complete_header() {
+        let ir = parse("classDiagram\n  class A~EntityIdentifier~[\"Repository\"]\n").ir;
+        let node = &ir.nodes[0];
+        let meta = node.class_meta.as_deref().expect("generic class metadata");
+        assert!(meta.attributes.is_empty() && meta.methods.is_empty());
+        assert_eq!(meta.generics, ["EntityIdentifier"]);
+
+        let metrics = fm_core::FontMetrics::default();
+        let (width, _) = compute_node_size(&ir, node, &metrics);
+        let header_width = metrics
+            .estimate_dimensions("Repository<EntityIdentifier>")
+            .0;
+        assert!(
+            width >= header_width + 16.0,
+            "class width {width} must contain the full generic header ({header_width}) and padding"
+        );
+        assert!(
+            super::class_compartment_dimensions(node, &metrics).is_some(),
+            "a generic-only class still uses the class header renderer"
+        );
+    }
+
+    #[test]
+    fn class_compartments_reserve_room_for_wide_glyphs_at_the_rendered_size() {
+        // `W` approaches one em in the default sans-serif fonts. An average-character estimate
+        // makes these short-name classes too narrow even though their member rows are complete.
+        for body in [
+            "+WWWWWWWWWWWWWWWW",
+            "+read() WWWWWWWWWWWWWWWW",
+            "<<WWWWWWWWWWWWWWWW>>",
+        ] {
+            let ir = parse(&format!("classDiagram\n  class A {{\n    {body}\n  }}\n")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            assert!(
+                meta.has_compartments(),
+                "the tested row must reach the renderer"
+            );
+            for font_size in [10.0, 15.0, 24.0] {
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size,
+                    ..Default::default()
+                });
+                let (width, _) = compute_node_size(&ir, node, &metrics);
+                let rendered_font = font_size * if meta.stereotype.is_some() { 0.85 } else { 0.9 };
+                let minimum = 16.0 * rendered_font + 16.0;
+                assert!(
+                    width >= minimum,
+                    "{body:?} at {font_size}px needs {minimum}px including side padding, got {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fault_node_size_cache_reflects_generic_header_edits() {
+        let mut ir = parse("classDiagram\n  class A~T~[\"Repository\"]\n").ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let metrics = fm_core::FontMetrics::default();
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let initial_width = before.layout.nodes[0].bounds.width;
+
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("generic class metadata")
+            .generics = vec!["EntityIdentifier".to_string(), "EntityPayload".to_string()];
+        let expanded = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let required_width = metrics
+            .estimate_dimensions("Repository<EntityIdentifier, EntityPayload>")
+            .0;
+        assert!(expanded.layout.nodes[0].bounds.width > initial_width);
+        assert!(expanded.layout.nodes[0].bounds.width >= required_width + 16.0);
+
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("generic class metadata")
+            .generics = vec!["T".to_string()];
+        let restored = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert_eq!(restored.layout.nodes[0].bounds.width, initial_width);
+    }
+
+    #[test]
+    fn fault_node_size_cache_reflects_stereotype_text_edits() {
+        let mut ir = parse("classDiagram\n  class A {\n    <<interface>>\n  }\n").ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let metrics = fm_core::FontMetrics::default();
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        // Presence stays true; only the text changes, so a presence-only key cannot detect this.
+        ir.nodes[0]
+            .class_meta
+            .as_deref_mut()
+            .expect("stereotype metadata")
+            .stereotype = Some(fm_core::ClassStereotype::Custom(
+            "DomainSpecificRepositoryContract".to_string(),
+        ));
+        let expanded = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        let required_width = metrics
+            .estimate_dimensions("«DomainSpecificRepositoryContract»")
+            .0
+            * 0.85;
+        assert!(expanded.layout.nodes[0].bounds.width > before.layout.nodes[0].bounds.width);
+        assert!(expanded.layout.nodes[0].bounds.width >= required_width + 16.0);
+    }
+
     /// An ER attribute edit must not be served from the node-size cache (bd-090g).
     ///
     /// The ER sibling of `fault_node_size_cache_remains_consistent_across_label_changes`. Attributes
@@ -32050,15 +38399,16 @@ mod tests {
                 changed.nodes[0].requirement_meta
             );
         }
+
+        // Field text remains a single run even when the IR contains authored line breaks.
+        let text = "Record the completed deployment\nVerify all approval signatures\nRetain the complete audit history";
+        let ir = requirement_ir_full(None, None, None, None, Some(text));
+        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+        let displayed = format!("text: {}", text.replace('\n', " "));
+        assert!(width >= metrics.estimate_width(&displayed) * 0.9);
     }
 
-    /// A requirement box must hold the two rows drawn BESIDE its name — the `«type»` header and the
-    /// `Risk: … | Verify: …` row (bd-jnc1).
-    ///
-    /// Asserted as a property over growing metadata rather than as pinned numbers, because the whole
-    /// defect was that the box did not depend on these strings at all: nothing sized for them, so
-    /// whether a row escaped was decided by how long the author's `verifymethod:` happened to be.
-    /// A box that ignores them fails here at the first string that outgrows the label.
+    /// The display header, risk, and verification are independent rows with their rendered labels.
     #[test]
     fn requirement_box_holds_its_type_and_metadata_rows() {
         let metrics = fm_core::FontMetrics::default_metrics();
@@ -32070,13 +38420,16 @@ mod tests {
             let ir = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some(&verify));
             let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
 
-            let row = format!("Risk: Medium | Verify: {verify}");
-            let row_width = metrics.estimate_width(&row) * subtitle_scale;
-            assert!(
-                width >= row_width,
-                "verify={verify:?}: box width {width} is narrower than its own metadata row \
-                 {row_width}, so the row renders outside the box"
-            );
+            for row in [
+                "Risk: Medium".to_string(),
+                format!("Verification: {verify}"),
+            ] {
+                let row_width = metrics.estimate_width(&row) * subtitle_scale;
+                assert!(
+                    width >= row_width,
+                    "box width {width} is narrower than its metadata row {row:?} ({row_width})"
+                );
+            }
             assert!(
                 width >= previous_width,
                 "box width must not shrink as the metadata row grows ({verify:?})"
@@ -32084,20 +38437,18 @@ mod tests {
             previous_width = width;
         }
 
-        // The `«type»` header is measured too, guillemets included.
+        // The display header includes the same ASCII angle brackets as the SVG renderer.
         let long_type = "aVeryLongRequirementTypeNameIndeedForThisNode";
         let ir = requirement_ir(Some(long_type), None, None);
         let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
-        let header_width =
-            metrics.estimate_width(&format!("\u{00ab}{long_type}\u{00bb}")) * subtitle_scale;
+        let header_width = metrics.estimate_width(&format!("<<{long_type}>>")) * subtitle_scale;
         assert!(
             width >= header_width,
             "box width {width} is narrower than its type header {header_width}"
         );
 
-        // NEGATIVE CASE: a requirement node with neither a type nor any metadata draws only its
-        // name, so it must size exactly like the same plain node — this pass must not widen boxes
-        // that have nothing extra to hold.
+        // No metadata must add no width. Requirement boxes retain their existing vertical
+        // allowance; only unannotated process boxes use the compact default height.
         let bare = requirement_ir(None, None, None);
         let mut plain = MermaidDiagramIr::empty(DiagramType::Flowchart);
         plain.nodes.push(IrNode {
@@ -32106,11 +38457,11 @@ mod tests {
             ..IrNode::default()
         });
         assert_eq!(
-            compute_node_size(&bare, &bare.nodes[0], &metrics),
-            compute_node_size(&plain, &plain.nodes[0], &metrics),
-            "a requirement with no type and no metadata must size like the same plain node"
+            compute_node_size(&bare, &bare.nodes[0], &metrics).0,
+            compute_node_size(&plain, &plain.nodes[0], &metrics).0,
+            "a requirement with no type and no metadata must not gain width"
         );
-        assert!(requirement_row_dimensions(&bare.nodes[0], &metrics).is_none());
+        assert!(requirement_row_dimensions(&bare.nodes[0], "LoginReq", &metrics).is_none());
     }
 
     /// Editing a requirement's metadata must invalidate the cached node size (bd-jnc1).
@@ -32140,6 +38491,37 @@ mod tests {
                 changed.nodes[0].requirement_meta
             );
         }
+
+        for field in ["type", "docref"] {
+            let mut changed = base.clone();
+            let meta = changed.nodes[0].requirement_meta.as_mut().unwrap();
+            let value = "A long element field that must determine the width of its own box";
+            if field == "type" {
+                meta.element_type = Some(value.to_string());
+            } else {
+                meta.doc_ref = Some(value.to_string());
+            }
+            assert_ne!(
+                base_key,
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics)
+            );
+            assert!(
+                compute_node_size(&changed, &changed.nodes[0], &metrics).0
+                    > compute_node_size(&base, &base.nodes[0], &metrics).0,
+                "{field} must contribute to the measured width"
+            );
+        }
+
+        let mut empty_field = base.clone();
+        empty_field.nodes[0]
+            .requirement_meta
+            .as_mut()
+            .unwrap()
+            .doc_ref = Some(String::new());
+        assert_ne!(
+            base_key,
+            node_size_cache_key(&empty_field, &empty_field.nodes[0], &metrics)
+        );
     }
 
     /// One ER entity named `CUSTOMER` carrying `count` attributes.

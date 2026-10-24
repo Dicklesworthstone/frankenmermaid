@@ -550,24 +550,201 @@
     body.pg-maximized #pg-root {
       position: fixed;
       inset: 0;
+      width: 100%;
+      height: 100vh;
+      height: 100dvh;
       z-index: 9999;
       margin: 0;
+      border: 0;
       border-radius: 0;
       padding: 0;
+      overflow: hidden;
       background: #020a06;
       display: flex;
       flex-direction: column;
+      transition: none;
     }
     body.pg-maximized #pg-shell {
-      height: 100vh;
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 0;
       border-radius: 0;
       border: none;
       display: flex;
       flex-direction: column;
     }
+    body.pg-maximized #pg-shell > :not(.pg-panes) {
+      flex-shrink: 0;
+      min-width: 0;
+    }
     body.pg-maximized .pg-panes {
-      flex: 1;
+      flex: 1 1 0;
+      grid-template-rows: minmax(0, 1fr);
+      min-width: 0;
       min-height: 0;
+      overflow: hidden;
+    }
+    body.pg-maximized .pane-editor,
+    body.pg-maximized .pane-visualizer {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    body.pg-maximized .pane-editor > :not(.editor-wrapper),
+    body.pg-maximized .pane-visualizer > :first-child {
+      flex-shrink: 0;
+      min-width: 0;
+    }
+    body.pg-maximized .pane-editor > :first-child,
+    body.pg-maximized .pane-visualizer > :first-child {
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    /* Each flexible ancestor must shrink; the line-number gutter and the normal
+       page's minimum heights must not determine the maximized grid row height. */
+    body.pg-maximized .editor-wrapper,
+    body.pg-maximized .editor-textarea-container {
+      min-height: 0 !important;
+      height: auto;
+    }
+    body.pg-maximized .editor-wrapper {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+    body.pg-maximized .editor-gutter {
+      flex-shrink: 0;
+      min-height: 0;
+    }
+    body.pg-maximized .editor-highlight,
+    body.pg-maximized .editor-textarea {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+    }
+    body.pg-maximized .pane-visualizer > [id^="view-"] {
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+    }
+    body.pg-maximized #view-svg-container {
+      overflow: hidden;
+    }
+    body.pg-maximized #studio-pan-container {
+      flex: 1 1 0;
+      height: auto;
+      min-width: 0;
+      min-height: 0 !important;
+    }
+    body.pg-maximized .terminal-window,
+    body.pg-maximized #terminal-output {
+      min-width: 0;
+      min-height: 0;
+    }
+    body.pg-maximized .terminal-header {
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    body.pg-maximized #terminal-output {
+      overflow: auto;
+    }
+    body.pg-maximized #pg-shell > div > .overflow-x-auto,
+    body.pg-maximized #studio-theme-strip .overflow-x-auto {
+      min-width: 0;
+    }
+
+    /* Short windows need room for the document as well as the fixed controls.
+       Keep every action available in horizontal scrollers without shrinking
+       button text or letting the chrome consume the entire flexible pane. */
+    @media (max-height: 700px) {
+      body.pg-maximized #pg-shell > :first-child,
+      body.pg-maximized #pg-shell > :nth-child(2),
+      body.pg-maximized #studio-theme-strip,
+      body.pg-maximized #pg-shell > :last-child {
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+      }
+      body.pg-maximized #pg-shell > :first-child {
+        gap: 0.375rem;
+      }
+      body.pg-maximized #pg-shell > :nth-child(2),
+      body.pg-maximized #studio-theme-strip > div {
+        flex-direction: row;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      body.pg-maximized #pg-shell > :nth-child(2) > div,
+      body.pg-maximized #studio-theme-strip > div > div {
+        flex: 1 1 0;
+        min-width: 0;
+      }
+      body.pg-maximized #mobile-pane-switcher {
+        padding: 0.25rem 0.5rem;
+      }
+      body.pg-maximized #mobile-pane-switcher > div {
+        padding: 0.125rem;
+      }
+      body.pg-maximized .pane-editor > :first-child,
+      body.pg-maximized .pane-visualizer > :first-child {
+        padding: 0.25rem 0.75rem;
+        gap: 0.25rem;
+      }
+      body.pg-maximized .pane-editor > :nth-child(2),
+      body.pg-maximized .pane-editor > :last-child {
+        padding-top: 0.25rem;
+        padding-bottom: 0.25rem;
+      }
+      body.pg-maximized .editor-gutter,
+      body.pg-maximized .editor-highlight,
+      body.pg-maximized .editor-textarea {
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+      }
+      body.pg-maximized #pg-shell > :last-child {
+        flex-wrap: nowrap;
+        gap: 0.75rem;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      body.pg-maximized #pg-shell > :last-child > div {
+        flex-shrink: 0;
+      }
+      body.pg-maximized #studio-pan-container .canvas-hud {
+        bottom: 0.5rem;
+        right: 0.5rem;
+      }
+    }
+    @media (max-height: 500px) {
+      body.pg-maximized #pg-shell > :first-child,
+      body.pg-maximized #pg-shell > :nth-child(2),
+      body.pg-maximized #studio-theme-strip,
+      body.pg-maximized #pg-shell > :last-child {
+        padding-top: 0;
+        padding-bottom: 0;
+      }
+    }
+    @media (max-height: 500px) and (max-width: 1023px) {
+      body.pg-maximized .pg-panes.show-editor .pane-editor {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+      body.pg-maximized .pane-editor > :first-child {
+        grid-area: 1 / 1 / 2 / 3;
+      }
+      body.pg-maximized .pane-editor > .editor-wrapper {
+        grid-area: 2 / 1 / 3 / 3;
+      }
+      body.pg-maximized .pane-editor > :nth-child(2) {
+        grid-area: 3 / 1 / 4 / 2;
+      }
+      body.pg-maximized .pane-editor > :last-child {
+        grid-area: 3 / 2 / 4 / 3;
+        display: flex;
+        align-items: center;
+        white-space: nowrap;
+      }
     }
 
     /* Mobile Navigation Drawer Overlay */
@@ -754,7 +931,7 @@
         </div>
         <div>
           <span class="text-base sm:text-lg font-extrabold tracking-tight text-white group-hover:text-emerald-400 transition">frankenmermaid</span>
-          <span class="hidden sm:inline-block ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.3.0</span>
+          <span class="hidden sm:inline-block ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.4.0</span>
         </div>
       </a>
 
@@ -3449,6 +3626,9 @@ Shared IR,Terminal ANSI,20`
         this.startX = 0;
         this.startY = 0;
         this.hasFitted = false;
+        this.isFitView = true;
+        this.fittedSvg = null;
+        this.minScale = 0.15;
         this.rafPending = false;
         this.setup();
       }
@@ -3466,6 +3646,7 @@ Shared IR,Terminal ANSI,20`
 
         window.addEventListener("mousemove", (e) => {
           if (!this.isDragging) return;
+          this.isFitView = false;
           this.panX = e.clientX - this.startX;
           this.panY = e.clientY - this.startY;
           this.applyTransform();
@@ -3529,6 +3710,7 @@ Shared IR,Terminal ANSI,20`
 
         this.container.addEventListener("touchmove", (e) => {
           if (e.touches.length === 1 && this.isDragging) {
+            this.isFitView = false;
             this.panX = e.touches[0].clientX - this.startX;
             this.panY = e.touches[0].clientY - this.startY;
             this.applyTransform();
@@ -3550,29 +3732,32 @@ Shared IR,Terminal ANSI,20`
           this.isDragging = false;
           lastTouchDist = 0;
         }, { passive: true });
+
+        // Maximizing and pane switches resize the stage without a window resize.
+        // Follow the stage while fitted; preserve a deliberately zoomed/panned camera.
+        this.resizeObserver = new ResizeObserver(() => this.fitToView(false));
+        this.resizeObserver.observe(this.container);
       }
 
       fitToView(force = false, requestedPadding = null) {
         if (!this.container || !this.viewport) return;
         const svg = this.viewport.querySelector("svg");
         if (!svg) return;
+        if (!force && svg === this.fittedSvg && !this.isFitView) return;
 
-        const cWidth = this.container.clientWidth || this.container.getBoundingClientRect().width || 800;
-        const cHeight = this.container.clientHeight || this.container.getBoundingClientRect().height || 560;
+        const cWidth = this.container.clientWidth;
+        const cHeight = this.container.clientHeight;
+        if (cWidth <= 0 || cHeight <= 0) return;
 
         const padding = requestedPadding !== null ? requestedPadding : (cWidth < 640 ? 12 : 24);
 
         let vbW = 0;
         let vbH = 0;
-        let minX = 0;
-        let minY = 0;
 
         const vbAttr = svg.getAttribute("viewBox");
         if (vbAttr) {
           const parts = vbAttr.trim().split(/[\s,]+/).map(Number);
           if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
-            minX = parts[0];
-            minY = parts[1];
             vbW = parts[2];
             vbH = parts[3];
           }
@@ -3582,10 +3767,9 @@ Shared IR,Terminal ANSI,20`
           try {
             const b = svg.getBBox();
             if (b.width > 0 && b.height > 0) {
-              minX = b.x;
-              minY = b.y;
               vbW = b.width;
               vbH = b.height;
+              svg.setAttribute("viewBox", `${b.x} ${b.y} ${vbW} ${vbH}`);
             }
           } catch (e) {}
         }
@@ -3602,45 +3786,39 @@ Shared IR,Terminal ANSI,20`
         svg.style.maxWidth = "none";
         svg.style.maxHeight = "none";
 
-        const availW = Math.max(80, cWidth - padding * 2);
-        const availH = Math.max(80, cHeight - padding * 2);
+        const availW = Math.max(1, cWidth - padding * 2);
+        const availH = Math.max(1, cHeight - padding * 2);
 
         const scaleX = availW / vbW;
         const scaleY = availH / vbH;
-        let targetScale = Math.min(scaleX, scaleY);
-
-        const isMobile = window.innerWidth < 768;
-
-        // Auto zoom to fit comfortably: on mobile viewports, keep diagram legible while allowing easy pan
-        if (isMobile && targetScale < 0.40) {
-          targetScale = Math.max(0.40, Math.min(1.0, scaleY * 0.95));
-        } else {
-          targetScale = Math.max(0.20, Math.min(3.0, targetScale));
-        }
+        // Fit means the whole SVG fits, including on a narrow or short viewport.
+        // A fixed minimum zoom can make a large diagram taller than its visible stage.
+        const targetScale = Math.min(3.0, scaleX, scaleY);
 
         const renderedW = vbW * targetScale;
         const renderedH = vbH * targetScale;
 
         this.scale = targetScale;
-        if (isMobile && renderedW > cWidth) {
-          this.panX = Math.round(padding - minX * targetScale);
-        } else {
-          this.panX = Math.round((cWidth - renderedW) / 2 - minX * targetScale);
-        }
-        this.panY = Math.round((cHeight - renderedH) / 2 - minY * targetScale);
+        this.minScale = Math.min(0.15, targetScale / 2);
+        // The SVG viewBox already maps its origin into the element's pixel box.
+        this.panX = (cWidth - renderedW) / 2;
+        this.panY = (cHeight - renderedH) / 2;
         this.hasFitted = true;
+        this.isFitView = true;
+        this.fittedSvg = svg;
         this.applyTransform();
       }
 
       zoomAt(factor, cx, cy) {
         const oldScale = this.scale;
-        const newScale = Math.min(Math.max(0.15, oldScale * factor), 6.0);
+        const newScale = Math.min(Math.max(this.minScale, oldScale * factor), 6.0);
         if (newScale === oldScale) return;
 
         // Smooth cursor-anchored transformation
         this.panX = cx - (cx - this.panX) * (newScale / oldScale);
         this.panY = cy - (cy - this.panY) * (newScale / oldScale);
         this.scale = newScale;
+        this.isFitView = false;
         this.applyTransform();
       }
 
@@ -4264,6 +4442,8 @@ Shared IR,Terminal ANSI,20`
       const maxIcon = document.getElementById("pg-max-icon");
       if (maxLabel) maxLabel.textContent = state.isMaximized ? "Restore" : "Maximize";
       if (maxIcon) maxIcon.textContent = state.isMaximized ? "✕" : "⛶";
+      document.getElementById("pg-maximize")?.setAttribute("aria-pressed", String(state.isMaximized));
+      requestAnimationFrame(() => studioPanZoom?.fitToView(true));
     }
 
     // Event Listeners

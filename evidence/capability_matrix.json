@@ -3,8 +3,8 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 58,
-    "partial": 1
+    "implemented": 67,
+    "partial": 2
   },
   "claims": [
     {
@@ -39,7 +39,7 @@
       "id": "diagram-type/sequence",
       "category": "diagram_type",
       "title": "Support sequence diagrams",
-      "status": "implemented",
+      "status": "partial",
       "advertised_in": [
         "README.md#supported-diagram-types"
       ],
@@ -60,7 +60,7 @@
         }
       ],
       "notes": [
-        "README advertises this family; current code marks it as full capability"
+        "README advertises this family; current code marks it as partial capability"
       ]
     },
     {
@@ -764,6 +764,146 @@
       ]
     },
     {
+      "id": "diagram-type/ishikawa",
+      "category": "diagram_type",
+      "title": "Support ishikawa diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/treeView-beta",
+      "category": "diagram_type",
+      "title": "Support treeView-beta diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/venn-beta",
+      "category": "diagram_type",
+      "title": "Support venn-beta diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/wardley-beta",
+      "category": "diagram_type",
+      "title": "Support wardley-beta diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
+      "id": "diagram-type/eventmodeling",
+      "category": "diagram_type",
+      "title": "Support eventmodeling diagrams",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#supported-diagram-types"
+      ],
+      "code_paths": [
+        "crates/fm-core/src/lib.rs::DiagramType",
+        "crates/fm-parser/src/lib.rs::detect_type_with_confidence"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-core/src/lib.rs::DiagramType::support_level",
+          "note": "Source-of-truth support taxonomy"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-core/src/lib.rs::tests::diagram_type_support_contract_matches_surface_expectations",
+          "note": "Verifies advertised support level mapping"
+        }
+      ],
+      "notes": [
+        "README advertises this family; current code marks it as full capability"
+      ]
+    },
+    {
       "id": "surface/wasm-render-deck",
       "category": "surface",
       "title": "WASM API renders deck manifests",
@@ -1149,7 +1289,7 @@
         }
       ],
       "notes": [
-        "General graphs (flowchart, class, state, ER, C4, requirement, DOT)"
+        "General graphs (flowchart, class, state, ER, requirement, DOT)"
       ]
     },
     {
@@ -1569,7 +1709,7 @@
         }
       ],
       "notes": [
-        "Architecture-beta"
+        "Architecture-beta, C4 (conditional)"
       ]
     },
     {
@@ -1626,6 +1766,146 @@
       ],
       "notes": [
         "Radar-beta"
+      ]
+    },
+    {
+      "id": "layout/ishikawa",
+      "category": "layout",
+      "title": "Layout algorithm: ishikawa",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Ishikawa"
+      ]
+    },
+    {
+      "id": "layout/treeview",
+      "category": "layout",
+      "title": "Layout algorithm: treeview",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "TreeView-beta"
+      ]
+    },
+    {
+      "id": "layout/venn",
+      "category": "layout",
+      "title": "Layout algorithm: venn",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Venn-beta"
+      ]
+    },
+    {
+      "id": "layout/wardley",
+      "category": "layout",
+      "title": "Layout algorithm: wardley",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "Wardley-beta"
+      ]
+    },
+    {
+      "id": "layout/eventmodeling",
+      "category": "layout",
+      "title": "Layout algorithm: eventmodeling",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#layout-algorithms",
+        "docs/planning/FEATURE_PARITY.md#layout-algorithms"
+      ],
+      "code_paths": [
+        "crates/fm-layout/src/lib.rs::LayoutAlgorithm"
+      ],
+      "evidence": [
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-layout/src/lib.rs::preferred_layout_algorithm_with_config",
+          "note": "Dispatch site for the specialized algorithms"
+        },
+        {
+          "kind": "test",
+          "reference": "crates/fm-layout/src/lib.rs::tests::layout_algorithm_rows_cover_every_variant",
+          "note": "Every enum variant carries exactly one row"
+        }
+      ],
+      "notes": [
+        "EventModeling"
       ]
     }
   ]

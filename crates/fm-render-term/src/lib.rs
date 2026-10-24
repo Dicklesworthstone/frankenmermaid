@@ -76,7 +76,7 @@ pub use minimap::{
     viewport_to_minimap_rect,
 };
 pub use renderer::{
-    TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config,
+    TermDebugMetrics, TermRenderResult, TermRenderer, render_diagram, render_diagram_with_config,
     render_diagram_with_layout_and_config,
 };
 pub use transform::TermTransform;
@@ -454,6 +454,111 @@ mod tests {
         let (has_changes, total_changes) = diff_change_counts(&ir, &linear_ir(3));
         assert!(has_changes);
         assert!(total_changes > 0);
+    }
+
+    fn outline_degradation_is_a_real_textless_skeleton() {
+        let ir = sample_ir();
+        let mut config = TermRenderConfig::rich();
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Outline,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+
+        assert!(!config.show_labels);
+        let result = render_term_with_config(&ir, &config, 80, 24);
+
+        assert!(
+            !result.output.is_empty(),
+            "outline must retain structural geometry"
+        );
+        assert!(!result.output.contains("Start"));
+        assert!(!result.output.contains("End"));
+        assert!(result.width <= 80);
+        assert!(result.height <= 24);
+    }
+
+    #[test]
+    fn outline_suppresses_specialized_pie_title_and_legend_but_keeps_geometry() {
+        let ir = fm_parser::parse("pie title Snacks\n  \"Cats\" : 70\n  \"Dogs\" : 30\n").ir;
+        let mut config = TermRenderConfig::rich();
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            target_fidelity: fm_core::MermaidFidelity::Outline,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+        let result = render_term_with_config(&ir, &config, 80, 24);
+
+        assert!(
+            !result.output.is_empty(),
+            "pie outline must retain wedge geometry"
+        );
+        for text in ["Snacks", "Cats", "Dogs"] {
+            assert!(
+                !result.output.contains(text),
+                "outline leaked label {text:?}"
+            );
+        }
+        assert!(result.output.chars().any(|ch| "#*@+=~%&".contains(ch)));
+    }
+
+    #[test]
+    fn hide_labels_degradation_does_not_change_manual_label_limits() {
+        let mut config = TermRenderConfig::rich();
+        let limits = (config.max_label_chars, config.max_label_lines);
+        config.apply_degradation(&fm_core::MermaidDegradationPlan {
+            hide_labels: true,
+            ..fm_core::MermaidDegradationPlan::default()
+        });
+        assert!(!config.show_labels);
+        assert_eq!((config.max_label_chars, config.max_label_lines), limits);
+    }
+
+    #[test]
+    fn debug_overlay_is_opt_in_and_preserves_render_bounds() {
+        let ir = sample_ir();
+        let plain = render_term_with_config(&ir, &TermRenderConfig::default(), 80, 24);
+        assert!(plain.debug_metrics.is_none());
+
+        let config = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let debug = render_term_with_config(&ir, &config, 80, 24);
+        let metrics = debug
+            .debug_metrics
+            .expect("debug metrics must be exposed when enabled");
+
+        assert_eq!(debug.width, plain.width);
+        assert_eq!(debug.height, plain.height);
+        assert!(debug.width <= 80);
+        assert!(debug.height <= 24);
+        assert!(debug.output.contains("[layout debug]"));
+        assert!(debug.output.contains("crossings="));
+        assert!(debug.output.contains("bends="));
+        assert!(debug.output.contains("symmetry="));
+        assert!(!debug.output.contains('\u{1b}'));
+        assert!(metrics.symmetry_permille <= 1000);
+    }
+
+    #[test]
+    fn debug_overlay_reports_the_layout_stats_crossing_count() {
+        let ir = sample_ir();
+        let layout = fm_layout::layout_diagram(&ir);
+        let config = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let rendered = render_term_with_layout_and_config(&ir, &layout, &config, 80, 24);
+        let metrics = rendered.debug_metrics.expect("debug metrics");
+        assert_eq!(metrics.crossings, layout.stats.crossing_count);
+        assert_eq!(
+            metrics.bends,
+            layout
+                .edges
+                .iter()
+                .filter(|edge| !edge.bundled)
+                .map(|edge| edge.points.len().saturating_sub(2))
+                .sum::<usize>()
+        );
     }
 
     proptest! {

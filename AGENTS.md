@@ -74,9 +74,13 @@ mkdir -p dist/site/pkg dist/site/web dist/site/web_react dist/site/evidence
 cp index.html dist/site/
 cp frankenmermaid_demo_showcase.html dist/site/
 cp web/_headers dist/site/
-cp web/index.html web/playground.html dist/site/web/
-cp web/fm-render.worker.js web/fm-source-editor.js web/fm-document.js web/fm-deck-editor.js web/fm-image-export.js web/fm-share.js dist/site/web/
-cp web/mermaid.mjs web/mermaid-compat.mjs web/mermaid-svg.mjs dist/site/web/
+cp web/index.html dist/site/web/
+# The playground loads these modules lazily. Omitting any one breaks authoring, export,
+# sharing, or the public Mermaid browser API even though the showcase itself still loads.
+cp web/playground.html web/fm-config-editor.js web/fm-source-editor.js \
+  web/fm-render.worker.js web/fm-document.js web/fm-share.js \
+  web/fm-image-export.js web/fm-deck-editor.js web/mermaid.mjs \
+  web/mermaid-compat.mjs web/mermaid-svg.mjs dist/site/web/
 cp web_react/index.html dist/site/web_react/
 cp pkg/* dist/site/pkg/
 cp evidence/capability_scenario_matrix.json dist/site/evidence/
@@ -87,6 +91,7 @@ cp gh_og_share_image.png dist/site/
 # Graph-deck runtime (bd-z7g6k): the canonical copy ships beside the site so external users
 # can hotlink the exact runtime version matching the deployed WASM.
 cp crates/fm-cli/src/deck_runtime.js dist/site/web/fm-deck-runtime.js
+cp crates/fm-cli/src/deck_template.html dist/site/web/fm-deck-template.html
 
 # 2. Deploy directly to Cloudflare Pages via Wrangler
 wrangler pages deploy dist/site --project-name frankenmermaid --branch main
@@ -99,7 +104,7 @@ wrangler pages deploy dist/site --project-name frankenmermaid --branch main
   `curl -s -o /dev/null -w '%{content_type}\n' https://frankenmermaid.com/gh_og_share_image.png` must print `image/png`.
 - `scripts/cloudflare_pages_ops.py` (`REQUIRED_BUNDLE_FILES`, `RENAMED_BUNDLE_FILES`) lists the same files as the
   recipe above; when you add a file to one, add it to the other. Its route-integrity report fails if the root page
-  or the share image is missing.
+  or the share image is missing, or any authoring/browser/deck dependency is absent.
 
 ---
 
@@ -1000,4 +1005,4 @@ NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are cha
 
 Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.
 
-For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
+For any web requests you must make with curl or otherwise, identify yourself honestly: use a User-Agent that names this project, e.g. "frankenmermaid-agent (+https://github.com/Dicklesworthstone/frankenmermaid)". Never borrow another product's or company's crawler or client User-Agent, and never spoof a client to get past a block.

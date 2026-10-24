@@ -115,3 +115,13 @@ test("render validates IDs and requires a browser without silently inserting int
   await assert.rejects(f.api.render("good", "A-->B", () => {}), /container/u);
   await assert.rejects(f.api.render("good", "A-->B"), /browser Document/u);
 });
+
+
+test("new native diagram families are accepted and prototype names are not diagram types", async () => {
+  for (const [native, expected] of [["Ishikawa", "ishikawa"], ["TreeView", "treeView"]]) {
+    const f = fixture({ parse: () => ({ ir: { diagram_type: native, diagnostics: [] }, warnings: [] }) });
+    assert.equal((await f.api.parse("source")).diagramType, expected);
+  }
+  const f = fixture({ parse: () => ({ ir: { diagram_type: "constructor", diagnostics: [] }, warnings: [] }) });
+  await assert.rejects(f.api.parse("source"), /recognize this diagram/u);
+});

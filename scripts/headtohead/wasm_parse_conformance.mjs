@@ -14,15 +14,17 @@
 // same input succeeded, which is why the gap survived: nothing that rendered was broken.
 //
 //   node scripts/headtohead/wasm_parse_conformance.mjs
+//   node scripts/headtohead/wasm_parse_conformance.mjs /path/to/fresh/wasm/package
 //
-// Exit 0 = every case returned IR. Exit 1 = at least one family cannot cross the boundary.
+// Exit 0 = parsing and semantic edits crossed the real JS/WASM boundary for every case.
+import assert from "node:assert/strict";
 import fs from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PKG = join(HERE, "..", "..", "pkg");
-const fm = await import(join(PKG, "frankenmermaid.js"));
+const PKG = process.argv[2] ? resolve(process.argv[2]) : join(HERE, "..", "..", "pkg");
+const fm = await import(pathToFileURL(join(PKG, "frankenmermaid.js")).href);
 fm.initSync({ module: fs.readFileSync(join(PKG, "frankenmermaid_bg.wasm")) });
 
 // One case per family, plus the two that carry a non-string-keyed map. The markdown-label cases are
@@ -140,9 +142,114 @@ for (const [name, source, check] of FRONT_MATTER_CASES) {
   console.log(`${name.padEnd(26)} ${verdict}`);
 }
 
+// Semantic putback must accept the exact object emitted by parseLens, including maps and
+// family-specific metadata. JSON.stringify/parse would bypass the boundary this test protects.
+const LENS_CASES = [
+  {
+    name: "flowchart semantic lens",
+    source: 'flowchart LR\r\n  %% retain this comment\r\n  A["`**Client**`"] -->|request| B[Server]\r\n',
+    before: "request",
+    after: "authenticated 🦀 request",
+    check: ir => assert.ok(Object.keys(ir.label_markup ?? {}).length > 0),
+  },
+  {
+    name: "sequence semantic lens",
+    source: 'sequenceDiagram\r\n  autonumber 10 2\r\n  participant A as "Client"\r\n  participant B as Server\r\n  alt ready\r\n    A->>+B: request\r\n    B-->>-A: response\r\n  else waiting\r\n    A->>B: retry\r\n  end\r\n  Note right of A: retained note\r\n',
+    before: "request",
+    after: "authenticated 🦀 request",
+    check: ir => assert.equal(ir.sequence_meta.autonumber_start, 10),
+  },
+  {
+    name: "class semantic lens",
+    source: 'classDiagram\r\n  A["Client"]\r\n  B[Server]\r\n  A : +String name\r\n  A : +send() bool\r\n  A "1" *-- "many" B : request\r\n',
+    before: "request",
+    after: "authenticated 🦀 request",
+    check: ir => {
+      assert.equal(ir.nodes[0].class_meta.attributes.length, 1);
+      assert.equal(ir.nodes[0].class_meta.methods.length, 1);
+      assert.equal(ir.edges[0].extras.source_cardinality, "1");
+      assert.equal(ir.edges[0].extras.target_cardinality, "many");
+    },
+  },
+  {
+    name: "state semantic lens",
+    source: 'stateDiagram-v2\r\n  state "Session" as A\r\n  state "Done" as B\r\n  A --> B: "finish [ready] / cleanup()"\r\n  note right of A: retained note\r\n',
+    before: "finish [ready] / cleanup()",
+    after: "terminé 🦀 [ready] / cleanup()",
+    check: ir => {
+      assert.equal(ir.edges[0].extras.guard, "ready");
+      assert.equal(ir.edges[0].extras.action, "cleanup()");
+      assert.equal(ir.state_notes.length, 1);
+    },
+  },
+  {
+    name: "ER semantic lens",
+    source: 'erDiagram\r\n  A["Client"] {\r\n    int id PK\r\n  }\r\n  B[Server]\r\n  A ||--o{ B : request\r\n',
+    before: "request",
+    after: "authenticated 🦀 request",
+    check: ir => {
+      assert.equal(ir.nodes[0].members.length, 1);
+      assert.equal(ir.edges[0].extras.er_notation, "||--o{");
+    },
+  },
+];
+
+for (const { name, source, before, after, check } of LENS_CASES) {
+  let verdict;
+  try {
+    assert.equal(typeof fm.applyIrLensEdit, "function", "missing semantic edit export");
+    const snapshot = fm.parseLens(source);
+    check(snapshot.parsed.ir);
+    const noop = fm.applyIrLensEdit(source, structuredClone(snapshot.parsed.ir));
+    assert.equal(noop.updatedSource, source);
+    assert.deepEqual(noop.snapshot, snapshot);
+
+    const edited = structuredClone(snapshot.parsed.ir);
+    const labelIndex = edited.edges[0].label;
+    assert.equal(edited.labels[labelIndex].text, before);
+    edited.labels[labelIndex].text = after;
+    const unchangedInput = structuredClone(edited);
+    const result = fm.applyIrLensEdit(source, edited);
+    assert.equal(result.updatedSource, source.replace(before, after));
+    assert.deepEqual(edited, unchangedInput, "putback must not mutate the caller's IR");
+    assert.deepEqual(result.snapshot, fm.parseLens(result.updatedSource));
+    assert.equal(
+      result.snapshot.parsed.ir.labels[result.snapshot.parsed.ir.edges[0].label].text,
+      after,
+    );
+    check(result.snapshot.parsed.ir);
+
+    const restored = structuredClone(result.snapshot.parsed.ir);
+    restored.labels[restored.edges[0].label].text = before;
+    assert.equal(fm.applyIrLensEdit(result.updatedSource, restored).updatedSource, source);
+    verdict = "ok   full IR, formatting, metadata, and repeated edits survived";
+  } catch (error) {
+    failures += 1;
+    verdict = `FAIL ${String(error).slice(0, 160)}`;
+  }
+  console.log(`${name.padEnd(26)} ${verdict}`);
+}
+
+try {
+  const source = "sequenceDiagram\nA->>B: request\n";
+  const edited = structuredClone(fm.parseLens(source).parsed.ir);
+  edited.labels[edited.edges[0].label].text = "changed\nB->>A: injected";
+  assert.throws(() => fm.applyIrLensEdit(source, edited), /re-emit/);
+  assert.throws(() => fm.applyIrLensEdit(source, {}), /invalid edited diagram IR/);
+  const unsupported = 'pie\n"Share": 10\n';
+  assert.throws(
+    () => fm.applyIrLensEdit(unsupported, fm.parseLens(unsupported).parsed.ir),
+    /unsupported for pie/,
+  );
+  console.log("semantic lens rejections   ok   malformed, injected, and unsupported edits rejected");
+} catch (error) {
+  failures += 1;
+  console.log(`semantic lens rejections   FAIL ${String(error).slice(0, 160)}`);
+}
+
 console.log(
   failures === 0
-    ? "\nALL FAMILIES CROSS THE BOUNDARY"
-    : `\n${failures} FAMILIES CANNOT CROSS THE BOUNDARY`,
+    ? "\nALL PARSE AND SEMANTIC EDIT CASES CROSS THE BOUNDARY"
+    : `\n${failures} PARSE OR SEMANTIC EDIT CASES FAILED`,
 );
 process.exit(failures === 0 ? 0 : 1);

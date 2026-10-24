@@ -483,6 +483,31 @@ impl FontMetrics {
         max_width
     }
 
+    /// Conservative width for labels whose complete text must remain visible.
+    ///
+    /// `avg_char_width` is the caller's calibration at this metrics instance's base font size.
+    /// Keep a larger calibration, account for wide Latin glyphs, and reserve one eighth for
+    /// differences between the preset and the font face actually used by the renderer.
+    #[must_use]
+    pub fn estimate_preserved_width(&self, text: &str, font_size: f32, avg_char_width: f32) -> f32 {
+        let scale = font_size / self.font_size().max(1.0);
+        let average = avg_char_width.max(self.avg_char_width) * scale;
+        text.lines()
+            .map(|line| {
+                let wide_allowance: f32 = line
+                    .chars()
+                    .map(|character| match CharWidthClass::classify(character) {
+                        CharWidthClass::VeryWide => (font_size - average * 1.5).max(0.0),
+                        CharWidthClass::Wide => (font_size - average * 1.2).max(0.0),
+                        _ => 0.0,
+                    })
+                    .sum();
+                (self.estimate_width(line) * (average / self.avg_char_width) + wide_allowance)
+                    * 1.125
+            })
+            .fold(0.0, f32::max)
+    }
+
     /// Get the height of a single line.
     #[must_use]
     pub fn line_height_px(&self) -> f32 {
@@ -580,49 +605,80 @@ impl FontMetrics {
         result
     }
 
-    /// Wrap text to fit within a maximum width.
+    /// Wrap text at word boundaries, retaining authored line breaks and every word.
+    ///
+    /// A word wider than the available space is split without truncation. Combining marks,
+    /// joined emoji, and flag pairs stay together, even when one glyph alone exceeds the width.
+    /// Non-positive or non-finite widths leave the authored lines unchanged.
     #[must_use]
     pub fn wrap_to_width(&self, text: &str, max_width: f32) -> Vec<String> {
         let mut lines = Vec::new();
 
-        for line in text.lines() {
-            if self.estimate_width(line) <= max_width {
+        let mut authored_lines = text.split('\n').peekable();
+        while let Some(line) = authored_lines.next() {
+            // Normalize CRLF as `str::lines` did, while preserving blank/trailing rows. A final
+            // standalone CR is authored content, so only strip CR when a newline follows it.
+            let line = if authored_lines.peek().is_some() {
+                line.strip_suffix('\r').unwrap_or(line)
+            } else {
+                line
+            };
+            if !max_width.is_finite() || max_width <= 0.0 || self.estimate_width(line) <= max_width
+            {
                 lines.push(line.to_string());
                 continue;
             }
 
-            // Word wrap
             let mut current_line = String::new();
             let mut current_width = 0.0;
+            let space_width = self.estimate_width(" ");
 
             for word in line.split_whitespace() {
                 let word_width = self.estimate_width(word);
-                let space_width = self.estimate_width(" ");
-
-                if current_line.is_empty() {
-                    // Start of line - add word even if it overflows
-                    current_line.push_str(word);
-                    current_width = word_width;
-                } else if current_width + space_width + word_width <= max_width {
-                    // Word fits
+                if !current_line.is_empty() && current_width + space_width + word_width <= max_width
+                {
                     current_line.push(' ');
                     current_line.push_str(word);
                     current_width += space_width + word_width;
-                } else {
-                    // Word doesn't fit - start new line
-                    lines.push(current_line);
-                    current_line = word.to_string();
-                    current_width = word_width;
+                    continue;
                 }
+
+                if !current_line.is_empty() {
+                    lines.push(std::mem::take(&mut current_line));
+                }
+                current_width = 0.0;
+                let mut start = 0;
+                let mut after_joiner = false;
+                let mut regional_count = 0;
+                for (offset, c) in word.char_indices() {
+                    let regional = matches!(c, '\u{1f1e6}'..='\u{1f1ff}');
+                    let advance = if after_joiner
+                        && is_east_asian_wide(c)
+                        && self.config.preset != FontPreset::Monospace
+                    {
+                        0.0
+                    } else {
+                        self.char_width(c)
+                    };
+                    let can_break = offset > start
+                        && current_width > 0.0
+                        && !is_zero_width(c)
+                        && !after_joiner
+                        && (!regional || regional_count % 2 == 0);
+                    if can_break && current_width + advance > max_width {
+                        lines.push(word[start..offset].to_string());
+                        start = offset;
+                        current_width = 0.0;
+                    }
+                    current_width += advance;
+                    after_joiner = c == ZERO_WIDTH_JOINER;
+                    regional_count = if regional { regional_count + 1 } else { 0 };
+                }
+                current_line.push_str(&word[start..]);
             }
 
-            if !current_line.is_empty() {
-                lines.push(current_line);
-            }
-        }
-
-        if lines.is_empty() {
-            lines.push(String::new());
+            // Empty authored lines still occupy a line in the note's layout.
+            lines.push(current_line);
         }
 
         lines
@@ -765,6 +821,59 @@ mod tests {
         let wrapped = metrics.wrap_to_width(text, 100.0);
 
         assert!(wrapped.len() > 1);
+    }
+
+    #[test]
+    fn wrap_preserves_authored_breaks_and_bounds_long_tokens() {
+        let metrics = FontMetrics::default();
+        let text = "First\n\nabcdefghijklmnopqrstuvwxyz0123456789\nLast\n";
+        let wrapped = metrics.wrap_to_width(text, 80.0);
+        assert_eq!(&wrapped[..2], &["First", ""]);
+        assert_eq!(&wrapped[wrapped.len() - 2..], &["Last", ""]);
+        assert_eq!(
+            wrapped[2..wrapped.len() - 2].concat(),
+            "abcdefghijklmnopqrstuvwxyz0123456789"
+        );
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| metrics.estimate_width(line) <= 80.01)
+        );
+
+        for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(metrics.wrap_to_width(text, width).join("\n"), text);
+        }
+    }
+
+    #[test]
+    fn wrap_keeps_combining_marks_and_emoji_with_their_glyphs() {
+        let metrics = FontMetrics::default();
+        for glyph in ["e\u{301}", "👨\u{200d}👩\u{200d}👧", "🇺🇸"] {
+            let text = glyph.repeat(3);
+            let wrapped = metrics.wrap_to_width(&text, metrics.estimate_width(glyph) + 0.01);
+            assert_eq!(wrapped, vec![glyph.to_string(); 3]);
+            assert_eq!(wrapped.concat(), text);
+        }
+        assert_eq!(metrics.wrap_to_width("界界", 1.0), ["界", "界"]);
+    }
+
+    #[test]
+    fn wrap_normalizes_crlf_without_losing_authored_rows() {
+        let metrics = FontMetrics::default();
+        for width in [0.0, 200.0] {
+            assert_eq!(
+                metrics.wrap_to_width("First\r\n\r\nLast\r\n", width),
+                ["First", "", "Last", ""]
+            );
+            assert_eq!(
+                metrics.wrap_to_width("First\r\nLast\r", width),
+                ["First", "Last\r"],
+                "a standalone CR is not a CRLF line ending"
+            );
+        }
+        let wrapped = metrics.wrap_to_width("abcdefghijklmnopqrstuvwxyz\r\nLast", 80.0);
+        assert!(wrapped.iter().all(|line| !line.contains('\r')));
+        assert_eq!(wrapped.concat(), "abcdefghijklmnopqrstuvwxyzLast");
     }
 
     #[test]

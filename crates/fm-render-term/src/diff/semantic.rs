@@ -175,6 +175,62 @@ pub(super) fn diff_metadata(old: &MermaidDiagramIr, new: &MermaidDiagramIr) -> V
         })
     };
     record(&mut changes, "radar", &radar(old), &radar(new));
+
+    // A Venn region is named by its sets, and its geometry by the sizes: a resized set or union is
+    // a real change with no node or edge to show it. Node indices are remapped to stable names so a
+    // reordered source is not reported as a different diagram.
+    let venn = |ir: &MermaidDiagramIr| {
+        ir.venn_meta.clone().map(|mut meta| {
+            let remap = |index: &mut usize| {
+                let mut id = IrNodeId(*index);
+                remap_node(ir, &names, &mut id);
+                *index = id.0;
+            };
+            for set in &mut meta.sets {
+                remap(&mut set.node);
+            }
+            for union in &mut meta.unions {
+                if let Some(node) = union.label_node.as_mut() {
+                    remap(node);
+                }
+            }
+            for text in &mut meta.texts {
+                remap(&mut text.node);
+            }
+            meta
+        })
+    };
+    record(&mut changes, "venn", &venn(old), &venn(new));
+    // A Wardley map's content IS its coordinates: moving a component changes no node or edge.
+    let wardley = |ir: &MermaidDiagramIr| {
+        ir.wardley_meta.clone().map(|mut meta| {
+            for mark in &mut meta.marks {
+                let mut id = IrNodeId(mark.node);
+                remap_node(ir, &names, &mut id);
+                mark.node = id.0;
+            }
+            meta
+        })
+    };
+    record(&mut changes, "wardley", &wardley(old), &wardley(new));
+    // An event model's lane membership and frame ORDER place every box; reordering frames moves
+    // the whole staircase without changing a node or an edge.
+    let event_model = |ir: &MermaidDiagramIr| {
+        ir.event_model_meta.clone().map(|mut meta| {
+            for (node, _) in &mut meta.frames {
+                let mut id = IrNodeId(*node);
+                remap_node(ir, &names, &mut id);
+                *node = id.0;
+            }
+            meta
+        })
+    };
+    record(
+        &mut changes,
+        "eventmodeling",
+        &event_model(old),
+        &event_model(new),
+    );
     let packet = |ir: &MermaidDiagramIr| {
         ir.packet_meta.clone().map(|mut meta| {
             for field in &mut meta.fields {

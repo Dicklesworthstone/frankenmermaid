@@ -4,6 +4,13 @@
 
 use std::{fmt::Write as _, str::FromStr};
 
+/// Local font stack shared by the theme and the SVG render configuration.
+///
+/// Diagram exports must be readable immediately, including when loaded from disk or converted
+/// to an image. Web fonts remain opt-in through [`FontConfig::web_font_url`].
+pub const DEFAULT_FONT_FAMILY: &str =
+    "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
 /// Theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemePreset {
@@ -118,23 +125,14 @@ impl ThemeColors {
     pub fn from_preset(preset: ThemePreset) -> Self {
         match preset {
             ThemePreset::Default => Self {
-                background: "#fafbfc".into(),
+                background: "#ffffff".into(),
                 text: "#1e293b".into(),
-                node_fill: "#ffffff".into(),
-                node_stroke: "#cbd5e1".into(),
+                node_fill: "#f8fafc".into(),
+                node_stroke: "#7c8da5".into(),
                 edge: "#64748b".into(),
-                cluster_fill: "rgba(241,245,249,0.65)".into(),
-                cluster_stroke: "#94a3b8".into(),
-                accents: [
-                    "#4f46e5".into(), // Indigo - primary
-                    "#0284c7".into(), // Sky
-                    "#0d9488".into(), // Teal
-                    "#7c3aed".into(), // Violet
-                    "#d97706".into(), // Amber
-                    "#db2777".into(), // Pink
-                    "#059669".into(), // Emerald
-                    "#e11d48".into(), // Rose
-                ],
+                cluster_fill: "#f1f5f9".into(),
+                cluster_stroke: "#cbd5e1".into(),
+                accents: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from),
             },
 
             ThemePreset::Mermaid => Self {
@@ -161,19 +159,21 @@ impl ThemeColors {
                 background: "#0f172a".into(),
                 text: "#f8fafc".into(),
                 node_fill: "#1e293b".into(),
-                node_stroke: "#334155".into(),
+                node_stroke: "#64748b".into(),
                 edge: "#94a3b8".into(),
                 cluster_fill: "rgba(30,41,59,0.6)".into(),
                 cluster_stroke: "#475569".into(),
+                // Keep each accent in the same hue family as the default palette so a
+                // mindmap branch or shape role keeps its identity when the theme changes.
                 accents: [
+                    "#818cf8".into(), // Indigo
                     "#38bdf8".into(), // Sky
-                    "#34d399".into(), // Emerald
+                    "#2dd4bf".into(), // Teal
                     "#a78bfa".into(), // Violet
                     "#fbbf24".into(), // Amber
-                    "#fb7185".into(), // Rose
-                    "#2dd4bf".into(), // Teal
-                    "#818cf8".into(), // Indigo
                     "#f472b6".into(), // Pink
+                    "#34d399".into(), // Emerald
+                    "#fb7185".into(), // Rose
                 ],
             },
 
@@ -439,11 +439,10 @@ pub struct FontConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            family: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-                .into(),
+            family: DEFAULT_FONT_FAMILY.into(),
             size: 15.0,
             weight: 500,
-            web_font_url: Some("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap".into()),
+            web_font_url: None,
         }
     }
 }
@@ -457,8 +456,8 @@ impl FontConfig {
         css
     }
 
-    /// Write the `.fm-text` font block (and optional `@import`) directly into `css`. Byte-identical
-    /// to [`Self::to_css`]; writes straight into the caller's buffer to avoid the temp `String` per
+    /// Write the inherited SVG font defaults (and optional `@import`) directly into `css`.
+    /// Byte-identical to [`Self::to_css`]; writes straight into the caller's buffer to avoid the temp `String` per
     /// declaration and the intermediate `String` + copy on the render path.
     /// ⚠️ EVERY BYTE WRITTEN HERE SHIPS IN EVERY SVG. Explanations belong in Rust comments like
     /// this one, never in a `/* … */` inside the emitted payload.
@@ -490,7 +489,10 @@ impl FontConfig {
             css.push_str("');\n");
         }
 
-        css.push_str(".fm-text {\n");
+        // Defaults belong on the root. A selector targeting a text element wins over its SVG
+        // presentation attributes, replacing fitted sizes and specialized heading weights with
+        // the base size. Inheritance lets each label keep the measurements used by layout.
+        css.push_str("svg {\n");
         let _ = writeln!(css, "  font-family: {};", self.family);
         let _ = writeln!(css, "  font-size: {}px;", self.size);
         let _ = writeln!(css, "  font-weight: {};", self.weight);
@@ -521,11 +523,12 @@ impl Theme {
     #[must_use]
     pub fn to_svg_style(&self, shadows: bool, has_edge_labels: bool) -> String {
         let mut css = String::with_capacity(4096);
-        self.colors.write_css_vars(&mut css);
+        // An explicitly requested web-font import must precede all ordinary CSS rules.
         self.font.write_css(&mut css);
+        self.colors.write_css_vars(&mut css);
 
         let shadow_filter = if shadows {
-            "filter: drop-shadow(0 1px 3px rgba(15, 23, 42, 0.08)) drop-shadow(0 1px 2px rgba(15, 23, 42, 0.04));"
+            "filter:drop-shadow(0 1px 2px rgba(15,23,42,.06));"
         } else {
             ""
         };
@@ -537,27 +540,82 @@ impl Theme {
         // hover/unhover. Motion belongs to the opt-in `.fm-animations-enabled` group hover,
         // which scales correctly via `transform-box: fill-box`.
         let hover_shadow_filter = if shadows {
-            "filter: drop-shadow(0 4px 12px rgba(15, 23, 42, 0.12)) drop-shadow(0 2px 4px rgba(15, 23, 42, 0.06));"
+            "filter:drop-shadow(0 2px 4px rgba(15,23,42,.10));"
         } else {
             ""
         };
 
-        let (svg_bg_style, cluster_dash) = if shadows {
-            (
-                "svg{shape-rendering:geometricPrecision;background:var(--fm-bg);background-image:radial-gradient(ellipse at 20% 0%,color-mix(in srgb,var(--fm-accent-1) 3%,transparent) 0%,transparent 50%),linear-gradient(180deg,var(--fm-bg) 0%,color-mix(in srgb,var(--fm-bg) 97%,var(--fm-node-stroke) 3%) 100%)}",
-                "4 4",
-            )
-        } else {
-            (
-                "svg{shape-rendering:geometricPrecision;background:var(--fm-bg)}",
-                "none",
-            )
-        };
-
-        // Add utility classes
+        // A quiet canvas and continuous cluster boundaries preserve the hierarchy between a
+        // diagram's content and its decoration. Shadows must not change grouping semantics.
+        // Keep typography inherited: individual SVG font-size/font-weight/fill attributes carry
+        // the node fitting and the class/C4 heading hierarchy, and a text selector overrides them.
         let _ = write!(
             css,
-            r#"svg{{--fm-edge-muted:var(--fm-cluster-stroke);--fm-edge-label-bg:var(--fm-bg);--fm-edge-label-border:var(--fm-cluster-stroke);--fm-edge-label-text:var(--fm-text-color);--fm-cluster-label-color:var(--fm-text-color);--fm-cluster-c4-fill:var(--fm-cluster-fill);--fm-cluster-c4-stroke:var(--fm-cluster-stroke);--fm-cluster-swimlane-fill:var(--fm-cluster-fill);--fm-cluster-swimlane-stroke:var(--fm-cluster-stroke);--fm-surface-shadow:rgba(15,23,42,.08)}}{svg_bg_style}.fm-node{{isolation:isolate;--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{fill:var(--fm-node-fill);stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}.fm-node.fm-node-user-mindmap-no-border rect,.fm-node.fm-node-user-mindmap-no-border path,.fm-node.fm-node-user-mindmap-no-border polygon{{stroke:none}}.fm-node line{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke}}.fm-node text{{fill:var(--fm-text-color);font-weight:500;letter-spacing:-.015em;text-rendering:optimizeLegibility;font-feature-settings:"kern" 1,"liga" 1,"calt" 1}}.fm-node:hover rect,.fm-node:hover path,.fm-node:hover circle,.fm-node:hover ellipse,.fm-node:hover polygon{{stroke:var(--fm-node-hover-accent);{hover_shadow_filter}}}.fm-node-accent-1{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-1) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-1)}}.fm-node-accent-2{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-2) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-2)}}.fm-node-accent-3{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-3) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-3)}}.fm-node-accent-4{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-4) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-4)}}.fm-node-accent-5{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-5) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-5)}}.fm-node-accent-6{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-6) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-6)}}.fm-node-accent-7{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-7) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-7)}}.fm-node-accent-8{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-8) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-8)}}.fm-node.fm-node-shape-note path,.fm-node.fm-node-shape-note rect{{fill:var(--fm-node-fill);fill:color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill))}}.fm-node.fm-node-shape-cloud path{{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-2) 15%,var(--fm-node-fill))}}.fm-node.fm-node-shape-cylinder path{{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-1) 12%,var(--fm-node-fill))}}.fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{{stroke-width:1.8}}.fm-edge{{fill:none;stroke:var(--fm-edge-color);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}}.fm-edge:hover{{stroke:var(--fm-accent-1);stroke-width:2.25;opacity:1}}.fm-edge-solid{{stroke-dasharray:none}}.fm-edge-dashed{{stroke-dasharray:5 5}}.fm-edge-thick{{stroke-width:2.25}}.fm-edge-thick:hover{{stroke-width:3}}.fm-edge-animation-fast,.fm-edge-animation-slow{{stroke-dasharray:9 5!important;stroke-dashoffset:900;stroke-linecap:round}}.fm-edge-animation-fast{{animation:fm-edge-dash-march 20s linear infinite}}.fm-edge-animation-slow{{animation:fm-edge-dash-march 50s linear infinite}}@keyframes fm-edge-dash-march{{to{{stroke-dashoffset:0}}}}@media (prefers-reduced-motion:reduce){{.fm-edge-animation-fast,.fm-edge-animation-slow{{animation:none!important}}}}.fm-edge-back{{stroke:var(--fm-edge-muted);opacity:.8;stroke-dasharray:4 4}}marker#arrow-end path,marker#arrow-filled path,marker#arrow-circle path,marker#arrow-diamond path{{fill:var(--fm-edge-color);stroke:none;transition:fill 150ms ease}}.fm-edge:hover~marker#arrow-end path,.fm-edge:hover~marker#arrow-filled path,.fm-edge:hover~marker#arrow-circle path,.fm-edge:hover~marker#arrow-diamond path{{fill:var(--fm-accent-1)}}marker#arrow-open path{{stroke:var(--fm-edge-muted);fill:none;stroke-width:1.5;transition:stroke 150ms ease}}marker#arrow-cross path{{stroke:var(--fm-edge-color);fill:none;stroke-width:1.5;transition:stroke 150ms ease}}.fm-cluster{{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:{cluster_dash};rx:10;ry:10}}.fm-cluster-label{{fill:var(--fm-cluster-label-color);font-weight:600;font-size:.85em;letter-spacing:.01em}}.fm-cluster-c4{{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke);stroke-dasharray:none}}.fm-cluster-swimlane{{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke);stroke-dasharray:none}}.fm-label{{fill:var(--fm-text-color)}}@media (prefers-reduced-motion:reduce){{.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon,.fm-edge{{transition:none;transform:none}}}}.fm-node:focus-visible{{outline:2px solid var(--fm-accent-1);outline-offset:3px}}"#
+            r"svg{{--fm-edge-muted:var(--fm-edge-color);--fm-edge-label-bg:var(--fm-bg);--fm-edge-label-border:none;--fm-edge-label-text:var(--fm-text-color);--fm-cluster-label-color:var(--fm-text-color);--fm-cluster-c4-fill:var(--fm-cluster-fill);--fm-cluster-c4-stroke:var(--fm-cluster-stroke);--fm-cluster-swimlane-fill:var(--fm-cluster-fill);--fm-cluster-swimlane-stroke:var(--fm-cluster-stroke);--fm-surface-shadow:rgba(15,23,42,.06)}}
+svg{{shape-rendering:geometricPrecision;background:var(--fm-bg)}}
+.fm-node{{isolation:isolate;fill:var(--fm-node-fill);--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}
+.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}
+.fm-node.fm-node-user-mindmap-no-border :where(rect,path,polygon){{stroke:none}}
+.fm-node line{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke}}
+.fm-node text{{text-rendering:optimizeLegibility;font-kerning:normal}}
+.fm-node:hover rect,.fm-node:hover path,.fm-node:hover circle,.fm-node:hover ellipse,.fm-node:hover polygon{{stroke:var(--fm-node-hover-accent);{hover_shadow_filter}}}
+"
+        );
+
+        // Stable identity classes are useful to interactive hosts, but an arbitrary identifier
+        // is not a category. Reserve their colors for hover rather than painting unrelated nodes
+        // as if they encoded eight different types. Diagram-specific semantic fills stay intact.
+        for index in 1..=8 {
+            let _ = write!(
+                css,
+                ".fm-node-accent-{index}{{--fm-node-hover-accent:var(--fm-accent-{index})}}"
+            );
+        }
+        // A mindmap branch is a semantic group: descendants inherit the first-level branch's
+        // palette. Set local theme variables so author classDef and inline paints still win.
+        for (branch, accent) in self.colors.accents.iter().enumerate() {
+            let fill = fm_core::mindmap::branch_fill(&self.colors.node_fill, accent, false);
+            let index = branch + 1;
+            let _ = write!(
+                css,
+                ".fm-node-user-mindmap-branch-{branch}{{--fm-node-fill:{fill};--fm-mindmap-fill:{fill};--fm-node-accent:var(--fm-accent-{index});--fm-node-hover-accent:var(--fm-accent-{index})}}"
+            );
+        }
+        let root_fill =
+            fm_core::mindmap::branch_fill(&self.colors.node_fill, &self.colors.accents[0], true);
+        let _ = write!(
+            css,
+            ".fm-node-user-mindmap-root{{--fm-node-fill:{root_fill};--fm-mindmap-fill:{root_fill}}}.fm-node-user-mindmap-root text{{font-weight:600}}"
+        );
+        // Mindmap fills encode branches; hollow shape details must remain hollow.
+        // Keep specificity low enough for later author classDef paint rules to win.
+        css.push_str(
+            r#".fm-node:where(.fm-node-user-mindmap-root,[class*="fm-node-user-mindmap-branch-"]) :where(rect,path,circle,ellipse,polygon):not([fill="none"]){fill:var(--fm-mindmap-fill)}
+"#,
+        );
+        css.push_str(
+            r".fm-node.fm-node-shape-star :where(path),.fm-node.fm-node-shape-pentagon :where(path){stroke-width:1.8}
+.fm-edge{fill:none;stroke:var(--fm-edge-color);stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}
+.fm-edge:hover{stroke:var(--fm-accent-1);opacity:1}
+.fm-edge-solid{stroke-dasharray:none}
+.fm-edge-dashed{stroke-dasharray:5 5}
+.fm-edge-animation-fast,.fm-edge-animation-slow{stroke-dasharray:9 5!important;stroke-dashoffset:900;stroke-linecap:round}
+.fm-edge-animation-fast{animation:fm-edge-dash-march 20s linear infinite}
+.fm-edge-animation-slow{animation:fm-edge-dash-march 50s linear infinite}
+@keyframes fm-edge-dash-march{to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion:reduce){.fm-edge-animation-fast,.fm-edge-animation-slow{animation:none!important}}
+.fm-edge-back{stroke:var(--fm-edge-muted);opacity:.8;stroke-dasharray:4 4}
+marker#arrow-end path,marker#arrow-filled path,marker#arrow-circle path,marker#arrow-diamond path{fill:var(--fm-edge-color);stroke:none;transition:fill 150ms ease}
+.fm-edge:hover~marker#arrow-end path,.fm-edge:hover~marker#arrow-filled path,.fm-edge:hover~marker#arrow-circle path,.fm-edge:hover~marker#arrow-diamond path{fill:var(--fm-accent-1)}
+marker#arrow-open path{stroke:var(--fm-edge-muted);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
+marker#arrow-cross path{stroke:var(--fm-edge-color);fill:none;stroke-width:1.5;transition:stroke 150ms ease}
+.fm-cluster{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:none;rx:12;ry:12}
+.fm-cluster-label{fill:var(--fm-cluster-label-color);font-weight:600}
+.fm-cluster-c4{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke);stroke-dasharray:none}
+.fm-cluster-swimlane{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke);stroke-dasharray:none}
+.fm-label{fill:var(--fm-text-color)}
+@media (prefers-reduced-motion:reduce){.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon,.fm-edge{transition:none;transform:none}}
+.fm-node:focus-visible{outline:2px solid var(--fm-accent-1);outline-offset:3px}",
         );
 
         // Edge-label rules apply only to `.fm-edge-labeled`/`.edge-label` elements, emitted only
@@ -569,21 +627,13 @@ impl Theme {
 .fm-edge-labeled > rect {
   fill: var(--fm-edge-label-bg);
   stroke: var(--fm-edge-label-border);
-  stroke-width: 0.85;
-  rx: 6px;
-  ry: 6px;
-}
-@supports (backdrop-filter: blur(4px)) {
-  .fm-edge-labeled > rect {
-    fill: color-mix(in srgb, var(--fm-edge-label-bg) 90%, transparent);
-    backdrop-filter: blur(8px);
-  }
+  stroke-width: 0.75;
+  rx: 4px;
+  ry: 4px;
 }
 .edge-label {
   fill: var(--fm-edge-label-text);
-  font-weight: 500;
-  font-size: 0.85em;
-  letter-spacing: -0.01em;
+  font-weight: 400;
   text-rendering: optimizeLegibility;
 }
 ",
@@ -681,6 +731,252 @@ fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn css_rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let marker = format!("{selector}{{");
+        css.split_once(&marker)
+            .expect("theme must emit the selected rule")
+            .1
+            .split_once('}')
+            .expect("theme rule must be complete")
+            .0
+    }
+
+    fn luminance(hex: &str) -> f64 {
+        let hex = hex.strip_prefix('#').expect("palette color must be hex");
+        let channel = |offset| {
+            let srgb = f64::from(
+                u8::from_str_radix(&hex[offset..offset + 2], 16)
+                    .expect("palette channel must be hexadecimal"),
+            ) / 255.0;
+            if srgb <= 0.04045 {
+                srgb / 12.92
+            } else {
+                ((srgb + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+    }
+
+    fn contrast_ratio(foreground: &str, background: &str) -> f64 {
+        let a = luminance(foreground);
+        let b = luminance(background);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn default_palette_keeps_labels_readable_on_every_surface() {
+        let colors = ThemeColors::default();
+        for background in [&colors.background, &colors.node_fill, &colors.cluster_fill] {
+            assert!(
+                contrast_ratio(&colors.text, background) >= 7.0,
+                "default labels must remain readable on {background}"
+            );
+            assert!(
+                contrast_ratio(&colors.edge, background) >= 3.0,
+                "connectors must remain distinguishable on {background}"
+            );
+            assert!(
+                contrast_ratio(&colors.node_stroke, background) >= 3.0,
+                "node outlines must remain distinguishable on {background}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_shape_palettes_keep_text_and_outlines_readable() {
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let colors = ThemeColors::from_preset(preset);
+            assert!(contrast_ratio(&colors.node_stroke, &colors.node_fill) >= 3.0);
+            let mut fills = std::collections::BTreeSet::new();
+            for shape in [
+                fm_core::NodeShape::Diamond,
+                fm_core::NodeShape::Stadium,
+                fm_core::NodeShape::Cylinder,
+                fm_core::NodeShape::Cloud,
+            ] {
+                let style = fm_core::semantic_shape_style(
+                    fm_core::DiagramType::Flowchart,
+                    shape,
+                    &colors.node_fill,
+                    &colors.node_stroke,
+                    &colors.text,
+                    &colors.accents,
+                )
+                .expect("default palettes must support semantic shape colors");
+                assert_ne!(style.fill, colors.node_fill);
+                assert!(
+                    contrast_ratio(&colors.text, &style.fill) >= 4.5,
+                    "{preset:?} {shape:?} must retain readable labels"
+                );
+                assert!(
+                    contrast_ratio(&style.stroke, &style.fill) >= 3.0,
+                    "{preset:?} {shape:?} must retain a visible outline"
+                );
+                fills.insert(style.fill);
+            }
+            assert_eq!(fills.len(), 4, "shape roles must have distinct surfaces");
+        }
+    }
+
+    #[test]
+    fn switching_to_dark_preserves_branch_and_shape_role_hues() {
+        let light = ThemeColors::default();
+        let dark = ThemeColors::from_preset(ThemePreset::Dark);
+        for (index, (light_accent, dark_accent)) in
+            light.accents.iter().zip(&dark.accents).enumerate()
+        {
+            let hue_difference = (hex_to_hsl(light_accent).0 - hex_to_hsl(dark_accent).0).abs();
+            let hue_distance = hue_difference.min(360.0 - hue_difference);
+            assert!(
+                hue_distance <= 20.0,
+                "accent slot {index} must keep its hue family across themes"
+            );
+            assert!(
+                luminance(dark_accent) > luminance(light_accent),
+                "accent slot {index} must brighten against the dark background"
+            );
+        }
+    }
+
+    #[test]
+    fn font_defaults_do_not_override_fitted_labels_or_heading_hierarchy() {
+        let theme = Theme {
+            font: FontConfig {
+                family: "Georgia, serif".to_string(),
+                size: 19.0,
+                weight: 450,
+                web_font_url: None,
+            },
+            ..Theme::default()
+        };
+        let css = crate::minify_css(&theme.to_svg_style(true, true));
+        let root = css_rule(&css, "svg");
+        assert!(root.contains("font-family: Georgia,serif"));
+        assert!(root.contains("font-size: 19px"));
+        assert!(root.contains("font-weight: 450"));
+        assert_eq!(
+            css.matches("font-size:").count(),
+            1,
+            "only the inherited root default may set a font size; text attributes carry fitting"
+        );
+        let node_text = css_rule(&css, ".fm-node text");
+        assert!(!node_text.contains("font-weight:"));
+        assert!(!node_text.contains("fill:"));
+        assert!(css_rule(&css, ".edge-label").contains("font-weight: 400"));
+        assert!(css_rule(&css, ".fm-cluster-label").contains("font-weight:600"));
+    }
+
+    #[test]
+    fn default_diagrams_need_no_remote_font_and_explicit_imports_are_valid() {
+        let default_css = Theme::default().to_svg_style(false, false);
+        assert!(!default_css.contains("@import"));
+        assert!(default_css.contains(DEFAULT_FONT_FAMILY));
+
+        let theme = Theme {
+            font: FontConfig {
+                web_font_url: Some("https://fonts.example.com/font.css".to_string()),
+                ..FontConfig::default()
+            },
+            ..Theme::default()
+        };
+        assert!(
+            theme
+                .to_svg_style(false, false)
+                .starts_with("@import url('https://fonts.example.com/font.css');"),
+            "CSS imports placed after ordinary rules are ignored by browsers"
+        );
+    }
+
+    #[test]
+    fn node_identity_does_not_change_its_resting_color() {
+        for preset in [
+            ThemePreset::Default,
+            ThemePreset::Dark,
+            ThemePreset::Monochrome,
+        ] {
+            let css = crate::minify_css(&Theme::from_preset(preset).to_svg_style(false, false));
+            assert!(css_rule(&css, ".fm-node").contains("--fm-node-accent:var(--fm-node-stroke)"));
+            for index in 1..=8 {
+                let rule = css_rule(&css, &format!(".fm-node-accent-{index}"));
+                assert!(rule.contains("--fm-node-hover-accent:"));
+                assert!(!rule.contains("--fm-node-accent:"));
+            }
+            assert!(!css.contains("color-mix("));
+        }
+    }
+
+    #[test]
+    fn theme_preserves_explicit_shape_paints_and_hollow_details() {
+        let shape_selector =
+            ".fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon";
+        let mindmap_selector = concat!(
+            ".fm-node:where(.fm-node-user-mindmap-root,",
+            "[class*=\"fm-node-user-mindmap-branch-\"]) ",
+            ":where(rect,path,circle,ellipse,polygon):not([fill=\"none\"])",
+        );
+
+        for preset in [ThemePreset::Default, ThemePreset::Dark] {
+            let css = crate::minify_css(&Theme::from_preset(preset).to_svg_style(false, false));
+            assert!(css_rule(&css, ".fm-node").contains("fill:var(--fm-node-fill)"));
+            assert!(
+                !css_rule(&css, shape_selector)
+                    .split(';')
+                    .any(|declaration| declaration.trim_start().starts_with("fill:")),
+                "generic shape rules must preserve explicit solid, gradient, and hollow paints"
+            );
+            assert_eq!(
+                css_rule(&css, mindmap_selector),
+                "fill:var(--fm-mindmap-fill)",
+                "mindmap branches retain semantic fills without repainting hollow details"
+            );
+        }
+    }
+
+    #[test]
+    fn mindmap_tints_keep_labels_readable_in_light_and_dark_presets() {
+        for preset in [
+            ThemePreset::Default,
+            ThemePreset::Mermaid,
+            ThemePreset::Dark,
+            ThemePreset::Pastel,
+            ThemePreset::Monochrome,
+        ] {
+            let colors = ThemeColors::from_preset(preset);
+            for accent in &colors.accents {
+                for is_root in [false, true] {
+                    let fill = fm_core::mindmap::branch_fill(&colors.node_fill, accent, is_root);
+                    let (foreground, background) = (luminance(&colors.text), luminance(&fill));
+                    let contrast =
+                        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                    assert!(
+                        contrast >= 4.5,
+                        "{preset:?}: {fill} against {}",
+                        colors.text
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_toggle_preserves_grouping_and_edge_label_clarity() {
+        let theme = Theme::default();
+        let with_shadows = crate::minify_css(&theme.to_svg_style(true, true));
+        let without_shadows = crate::minify_css(&theme.to_svg_style(false, true));
+        assert!(with_shadows.contains("drop-shadow("));
+        assert!(!without_shadows.contains("drop-shadow("));
+        assert_eq!(
+            css_rule(&with_shadows, ".fm-cluster"),
+            css_rule(&without_shadows, ".fm-cluster")
+        );
+        assert!(css_rule(&with_shadows, ".fm-cluster").contains("stroke-dasharray:none"));
+        for css in [&with_shadows, &without_shadows] {
+            assert!(css.contains("--fm-edge-label-border:none"));
+            assert!(!css.contains("backdrop-filter"));
+            assert!(!css.contains("background-image"));
+        }
+    }
 
     #[test]
     fn preset_from_str_works() {
@@ -792,7 +1088,7 @@ mod tests {
         assert!(style.contains(".fm-edge"));
         assert!(style.contains(".fm-cluster"));
         assert!(style.contains(".fm-node-accent-1"));
-        assert!(style.contains(".fm-node.fm-node-shape-note"));
+        assert!(style.contains(".fm-node.fm-node-shape-star"));
     }
 
     #[test]

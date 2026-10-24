@@ -8,7 +8,7 @@ use crate::shapes::{
     draw_er_cardinality_marker, draw_open_triangle_marker, draw_shape,
 };
 use crate::viewport::{Viewport, fit_to_viewport};
-use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
+use fm_core::{ArrowType, DiagramType, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr, NodeShape};
 use fm_layout::{
     DiagramLayout, FillStyle, LineCap as IrLineCap, LineJoin as IrLineJoin, MarkerKind, PathCmd,
     RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
@@ -23,6 +23,8 @@ pub struct CanvasRenderConfig {
     pub font_family: String,
     /// Font size in pixels.
     pub font_size: f64,
+    /// Line height for node labels and layout measurement, as a multiple of the font size.
+    pub line_height: f64,
     /// Padding around the diagram.
     pub padding: f64,
     /// Node fill color.
@@ -41,6 +43,10 @@ pub struct CanvasRenderConfig {
     pub cluster_stroke: String,
     /// Label text color.
     pub label_color: String,
+    /// Semantic branch accents, in the same order as the SVG theme palette.
+    pub accents: [String; 8],
+    /// Use restrained shape-role colors in flowcharts. Disable for exact named-theme palettes.
+    pub semantic_colors: bool,
     /// Whether to auto-fit the diagram to the canvas.
     pub auto_fit: bool,
     /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
@@ -62,7 +68,7 @@ impl CanvasRenderConfig {
         fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
             preset: fm_core::FontPreset::from_family(&self.font_family),
             font_size: self.font_size as f32,
-            line_height: 1.4, // Matches CanvasRenderConfig default implicitly
+            line_height: self.resolved_line_height(),
             fallback_chain: vec![
                 fm_core::FontPreset::SansSerif,
                 fm_core::FontPreset::Monospace,
@@ -70,24 +76,36 @@ impl CanvasRenderConfig {
             trace_fallbacks: false,
         })
     }
+
+    fn resolved_line_height(&self) -> f32 {
+        let line_height = self.line_height as f32;
+        if line_height.is_finite() && line_height > 0.0 {
+            line_height
+        } else {
+            1.5
+        }
+    }
 }
 
 impl Default for CanvasRenderConfig {
     fn default() -> Self {
         Self {
             font_family: String::from(
-                "'Inter', 'Avenir Next', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif",
+                "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
             ),
-            font_size: 14.0,
+            font_size: 15.0,
+            line_height: 1.5,
             padding: 28.0,
-            node_fill: String::from("#ffffff"),
-            node_stroke: String::from("#94a3b8"),
+            node_fill: String::from("#f8fafc"),
+            node_stroke: String::from("#7c8da5"),
             node_stroke_width: 1.5,
-            edge_stroke: String::from("#475569"),
+            edge_stroke: String::from("#64748b"),
             edge_stroke_width: 1.5,
-            cluster_fill: String::from("rgba(226,232,240,0.44)"),
-            cluster_stroke: String::from("rgba(148,163,184,0.78)"),
-            label_color: String::from("#0f172a"),
+            cluster_fill: String::from("#f1f5f9"),
+            cluster_stroke: String::from("#cbd5e1"),
+            label_color: String::from("#1e293b"),
+            accents: fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.map(String::from),
+            semantic_colors: true,
             auto_fit: true,
             gantt_today: None,
             debug_overlay: false,
@@ -129,6 +147,102 @@ pub struct CanvasRenderResult {
 pub struct Canvas2dRenderer {
     config: CanvasRenderConfig,
     draw_calls: usize,
+    edge_label_layout: Option<CanvasEdgeLabelLayout>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanvasEdgeLabel {
+    position: fm_layout::LayoutPoint,
+    width: f64,
+    height: f64,
+    line_height: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CanvasEdgeLabelLayout {
+    labels: Vec<Option<CanvasEdgeLabel>>,
+    bounds: fm_layout::LayoutRect,
+}
+
+/// Measure the labels the browser will actually draw before fitting the diagram. Placement is
+/// shared with SVG, while font measurement belongs to the Canvas context and honours linkStyle.
+fn measure_graph_edge_labels<C: Canvas2dContext>(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    ctx: &mut C,
+    config: &CanvasRenderConfig,
+) -> Option<CanvasEdgeLabelLayout> {
+    if !matches!(
+        ir.diagram_type,
+        DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
+    ) || !layout.edges.iter().any(|path| {
+        !path.bundled
+            && path.points.len() >= 2
+            && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                edge.arrow != ArrowType::Invisible
+                    && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
+            })
+    }) {
+        return None;
+    }
+
+    let mut result = CanvasEdgeLabelLayout {
+        labels: vec![None; ir.edges.len()],
+        bounds: layout.bounds,
+    };
+    let mut placer =
+        fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding as f32);
+    let default_font = secondary_label_font_css(config);
+    ctx.save();
+    for path in &layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            continue;
+        };
+        if path.bundled || path.points.len() < 2 || edge.arrow == ArrowType::Invisible {
+            continue;
+        }
+        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let declared_font = resolve_edge_label_font(ir, path.edge_index, config);
+        ctx.set_font(declared_font.as_deref().unwrap_or(&default_font));
+        let mut text_width = 0.0_f64;
+        let mut text_height = config.font_size * 0.85;
+        let mut line_count = 0;
+        for line in label.text.lines() {
+            let metrics = ctx.measure_text(line);
+            text_width = text_width.max(metrics.width);
+            text_height = text_height.max(metrics.height);
+            line_count += 1;
+        }
+        // Keep the usual secondary-label rhythm; an authored large face needs a taller plate
+        // and wider line spacing so its own next line cannot paint over it.
+        let line_height = (config.font_size * 1.2).max(text_height * 1.2);
+        let width = text_width + 8.0;
+        let height = line_count.max(1) as f64 * line_height + 4.0;
+        if !width.is_finite() || !height.is_finite() {
+            continue;
+        }
+        let position = placer.place(path, width as f32, height as f32);
+        result.labels[path.edge_index] = Some(CanvasEdgeLabel {
+            position,
+            width,
+            height,
+            line_height,
+        });
+        let left = result.bounds.x.min(position.x - width as f32 / 2.0);
+        let top = result.bounds.y.min(position.y - height as f32 / 2.0);
+        let right = (result.bounds.x + result.bounds.width).max(position.x + width as f32 / 2.0);
+        let bottom = (result.bounds.y + result.bounds.height).max(position.y + height as f32 / 2.0);
+        result.bounds = fm_layout::LayoutRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        };
+    }
+    ctx.restore();
+    Some(result)
 }
 
 const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
@@ -189,6 +303,7 @@ impl Canvas2dRenderer {
         Self {
             config,
             draw_calls: 0,
+            edge_label_layout: None,
         }
     }
 
@@ -203,12 +318,17 @@ impl Canvas2dRenderer {
 
         let canvas_width = ctx.width();
         let canvas_height = ctx.height();
+        self.edge_label_layout = measure_graph_edge_labels(ir, layout, ctx, &self.config);
+        let render_bounds = self
+            .edge_label_layout
+            .as_ref()
+            .map_or(layout.bounds, |labels| labels.bounds);
 
         // Compute viewport to fit diagram
-        let viewport = if self.config.auto_fit {
+        let mut viewport = if self.config.auto_fit {
             fit_to_viewport(
-                f64::from(layout.bounds.width),
-                f64::from(layout.bounds.height),
+                f64::from(render_bounds.width),
+                f64::from(render_bounds.height),
                 canvas_width,
                 canvas_height,
                 self.config.padding,
@@ -239,13 +359,33 @@ impl Canvas2dRenderer {
         // (screen space). Adding `padding` again here (diagram space) causes the diagram
         // to be mis-centered and margins to become asymmetric, especially when zoom != 1.
         let (offset_x, offset_y) = if self.config.auto_fit {
-            (-f64::from(layout.bounds.x), -f64::from(layout.bounds.y))
+            (-f64::from(render_bounds.x), -f64::from(render_bounds.y))
         } else {
             (
-                self.config.padding - f64::from(layout.bounds.x),
-                self.config.padding - f64::from(layout.bounds.y),
+                self.config.padding - f64::from(render_bounds.x),
+                self.config.padding - f64::from(render_bounds.y),
             )
         };
+
+        // XY marks are data, not labelled graph nodes. The generic path loses the numeric
+        // scale and axis titles, paints every series alike, and never fills area series.
+        if let Some(meta) = ir.xy_chart_meta.as_ref()
+            && ir.diagram_type == DiagramType::XyChart
+        {
+            let labels_drawn = self.draw_xychart_axes(ir, meta, layout, ctx, offset_x, offset_y);
+            let (nodes_drawn, edges_drawn) =
+                self.draw_xychart_series(meta, layout, ctx, offset_x, offset_y);
+            ctx.restore();
+            return CanvasRenderResult {
+                draw_calls: self.draw_calls,
+                nodes_drawn,
+                edges_drawn,
+                clusters_drawn: 0,
+                labels_drawn,
+                viewport,
+                hit_regions: crate::interaction::hit_regions(ir, layout),
+            };
+        }
 
         let mut labels_drawn = 0;
 
@@ -263,7 +403,7 @@ impl Canvas2dRenderer {
             self.draw_info_version(ctx, offset_x, offset_y, &mut labels_drawn);
         }
 
-        // Draw the time/category axis (gantt dates, xychart categories).
+        // Draw extension-provided axis labels, such as gantt dates.
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
 
         // Draw the gantt today marker, on top of the bands and under the bars.
@@ -320,6 +460,12 @@ impl Canvas2dRenderer {
             self.draw_debug_overlay_hud(layout, ctx, canvas_height);
             labels_drawn += 1;
         }
+
+        // The public entrypoint folds the original layout origin into this viewport. Account
+        // here only for the extra origin shift introduced by labels outside that layout, so
+        // pointer hit regions and selection overlays still follow the nodes that were drawn.
+        viewport.offset_x += f64::from(layout.bounds.x - render_bounds.x) * viewport.zoom;
+        viewport.offset_y += f64::from(layout.bounds.y - render_bounds.y) * viewport.zoom;
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -706,7 +852,7 @@ impl Canvas2dRenderer {
                 path.marker_start,
                 x + offset_x,
                 y + offset_y,
-                angle,
+                start_marker_angle(path.marker_start, angle),
                 stroke_color,
             );
         }
@@ -1349,6 +1495,285 @@ impl Canvas2dRenderer {
 }
 
 impl Canvas2dRenderer {
+    /// Draw the same value scale, category slots and titles used by the SVG chart.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_xychart_axes<C: Canvas2dContext>(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        meta: &IrXyChartMeta,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> usize {
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (left, top) = (f64::from(plot.x) + offset_x, f64::from(plot.y) + offset_y);
+        let (width, height) = (f64::from(plot.width), f64::from(plot.height));
+        let (right, bottom) = (left + width, top + height);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let categories = fm_layout::xychart_categories(meta);
+        let mut labels = 0;
+
+        ctx.set_fill_style("rgba(148,163,184,0.06)");
+        ctx.fill_rect(left, top, width, height);
+        ctx.set_stroke_style("rgba(148,163,184,0.16)");
+        ctx.set_line_width(1.0);
+        ctx.set_line_dash(&[]);
+        ctx.stroke_rect(left, top, width, height);
+        self.draw_calls += 2;
+
+        ctx.set_font(&format!(
+            "{}px {}",
+            (self.config.font_size * 0.72).max(8.0),
+            self.config.font_family
+        ));
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_text_baseline(TextBaseline::Alphabetic);
+        for value in fm_layout::xychart_y_ticks(min, max) {
+            let (x, y) = if meta.horizontal {
+                (
+                    f64::from(fm_layout::xychart_value_to_x(value, min, max, plot)) + offset_x,
+                    top,
+                )
+            } else {
+                (
+                    left,
+                    f64::from(fm_layout::xychart_value_to_y(value, min, max, plot)) + offset_y,
+                )
+            };
+            ctx.set_stroke_style("rgba(148,163,184,0.35)");
+            ctx.set_line_dash(&[4.0, 4.0]);
+            ctx.begin_path();
+            ctx.move_to(x, y);
+            if meta.horizontal {
+                ctx.line_to(x, bottom);
+            } else {
+                ctx.line_to(right, y);
+            }
+            ctx.stroke();
+
+            ctx.set_stroke_style(&self.config.label_color);
+            ctx.set_line_dash(&[]);
+            ctx.begin_path();
+            ctx.move_to(x, y);
+            if meta.horizontal {
+                ctx.line_to(x, top - 5.0);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(&fm_layout::format_xychart_tick_value(value), x, top - 11.0);
+            } else {
+                ctx.line_to(left - 5.0, y);
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(
+                    &fm_layout::format_xychart_tick_value(value),
+                    left - 10.0,
+                    y + 4.0,
+                );
+            }
+            ctx.stroke();
+            self.draw_calls += 3;
+            labels += 1;
+        }
+
+        ctx.set_stroke_style(&self.config.edge_stroke);
+        ctx.set_line_width(1.5);
+        ctx.begin_path();
+        ctx.move_to(left, top);
+        ctx.line_to(left, bottom);
+        if meta.horizontal {
+            ctx.move_to(left, top);
+            ctx.line_to(right, top);
+        } else {
+            ctx.move_to(left, bottom);
+            ctx.line_to(right, bottom);
+        }
+        ctx.stroke();
+        self.draw_calls += 1;
+
+        let category_font = (self.config.font_size * 0.74).max(8.0);
+        ctx.set_font(&format!("{category_font}px {}", self.config.font_family));
+        ctx.set_stroke_style(&self.config.label_color);
+        ctx.set_line_width(1.0);
+        let band = if meta.horizontal { height } else { width } / categories.len().max(1) as f64;
+        for (index, category) in categories.iter().enumerate() {
+            let position = band * (index as f64 + 0.5);
+            ctx.begin_path();
+            if meta.horizontal {
+                let y = top + position;
+                ctx.move_to(left - 5.0, y);
+                ctx.line_to(left, y);
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(category, left - 11.0, y + category_font * 0.35);
+            } else {
+                let x = left + position;
+                ctx.move_to(x, bottom);
+                ctx.line_to(x, bottom + 5.0);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(category, x, bottom + 24.0);
+            }
+            ctx.stroke();
+            self.draw_calls += 2;
+            labels += 1;
+        }
+
+        ctx.set_font(&format!(
+            "{}px {}",
+            (self.config.font_size * 0.76).max(8.0),
+            self.config.font_family
+        ));
+        if let Some(label) = meta.y_axis.label.as_deref() {
+            if meta.horizontal {
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(label, left + width / 2.0, top - 34.0);
+            } else {
+                ctx.set_text_align(TextAlign::Left);
+                ctx.fill_text(label, left - 52.0, top - 12.0);
+            }
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        if let Some(label) = meta.x_axis.label.as_deref() {
+            if meta.horizontal {
+                ctx.set_text_align(TextAlign::Right);
+                ctx.fill_text(label, left - 11.0, top - 34.0);
+            } else {
+                ctx.set_text_align(TextAlign::Center);
+                ctx.fill_text(label, left + width / 2.0, bottom + 48.0);
+            }
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        if let Some(title) = ir.declared_title_if_drawn() {
+            ctx.set_font(&format!(
+                "600 {}px {}",
+                (self.config.font_size * 1.18).max(8.0),
+                self.config.font_family
+            ));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.fill_text(
+                title,
+                f64::from(layout.bounds.x + layout.bounds.width / 2.0) + offset_x,
+                top - if meta.horizontal { 70.0 } else { 34.0 },
+            );
+            self.draw_calls += 1;
+            labels += 1;
+        }
+        labels
+    }
+
+    /// Paint data from the layout's exact mark boxes; never reconstruct their values or ordering.
+    fn draw_xychart_series<C: Canvas2dContext>(
+        &mut self,
+        meta: &IrXyChartMeta,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> (usize, usize) {
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let baseline = min.min(0.0).max(max.min(0.0));
+        let baseline_x =
+            f64::from(fm_layout::xychart_value_to_x(baseline, min, max, plot)) + offset_x;
+        let baseline_y =
+            f64::from(fm_layout::xychart_value_to_y(baseline, min, max, plot)) + offset_y;
+        let by_index: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        let (mut nodes_drawn, mut edges_drawn) = (0, 0);
+        ctx.set_line_dash(&[]);
+
+        for (series_index, series) in meta.series.iter().enumerate() {
+            let color = &self.config.accents[series_index % self.config.accents.len()];
+            let nodes: Vec<_> = series
+                .nodes
+                .iter()
+                .filter_map(|id| by_index.get(&id.0).copied())
+                .collect();
+            let Some(first) = nodes.first() else {
+                continue;
+            };
+            ctx.set_fill_style(color);
+            ctx.set_stroke_style(color);
+            nodes_drawn += nodes.len();
+            if series.kind == IrXySeriesKind::Bar {
+                ctx.set_line_width(1.0);
+                for node in nodes {
+                    let bounds = node.bounds;
+                    let (x, y) = (
+                        f64::from(bounds.x) + offset_x,
+                        f64::from(bounds.y) + offset_y,
+                    );
+                    let (w, h) = (f64::from(bounds.width), f64::from(bounds.height));
+                    ctx.set_global_alpha(0.78);
+                    ctx.fill_rect(x, y, w, h);
+                    ctx.set_global_alpha(1.0);
+                    ctx.stroke_rect(x, y, w, h);
+                    self.draw_calls += 2;
+                }
+                continue;
+            }
+
+            let center = |node: &fm_layout::LayoutNodeBox| {
+                let center = node.bounds.center();
+                (
+                    f64::from(center.x) + offset_x,
+                    f64::from(center.y) + offset_y,
+                )
+            };
+            let (first_x, first_y) = center(first);
+            if series.kind == IrXySeriesKind::Area {
+                ctx.begin_path();
+                if meta.horizontal {
+                    ctx.move_to(baseline_x, first_y);
+                } else {
+                    ctx.move_to(first_x, baseline_y);
+                }
+                let (mut last_x, mut last_y) = (first_x, first_y);
+                for node in &nodes {
+                    (last_x, last_y) = center(node);
+                    ctx.line_to(last_x, last_y);
+                }
+                if meta.horizontal {
+                    ctx.line_to(baseline_x, last_y);
+                } else {
+                    ctx.line_to(last_x, baseline_y);
+                }
+                ctx.close_path();
+                ctx.set_global_alpha(0.16);
+                ctx.fill();
+                ctx.set_global_alpha(1.0);
+                self.draw_calls += 1;
+            }
+            ctx.set_line_width(3.0);
+            ctx.set_line_cap(LineCap::Round);
+            ctx.set_line_join(LineJoin::Round);
+            ctx.begin_path();
+            ctx.move_to(first_x, first_y);
+            for node in nodes.iter().skip(1) {
+                let (x, y) = center(node);
+                ctx.line_to(x, y);
+            }
+            ctx.stroke();
+            self.draw_calls += 1;
+            edges_drawn += nodes.len().saturating_sub(1);
+
+            ctx.set_stroke_style(&self.config.node_fill);
+            ctx.set_line_width(2.0);
+            for node in nodes {
+                let (x, y) = center(node);
+                let radius = f64::from((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5));
+                ctx.begin_path();
+                ctx.arc(x, y, radius, 0.0, std::f64::consts::TAU);
+                ctx.fill();
+                ctx.stroke();
+                self.draw_calls += 2;
+            }
+        }
+        (nodes_drawn, edges_drawn)
+    }
+
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -1456,9 +1881,9 @@ impl Canvas2dRenderer {
     }
 
     /// Draw sequence activation bars from layout extensions.
-    /// Draw axis tick labels -- gantt dates and xychart categories.
+    /// Draw axis tick labels supplied by layout extensions, such as gantt dates.
     ///
-    /// `extensions.axis_ticks` is filled by the gantt and xychart layout arms and drawn by
+    /// `extensions.axis_ticks` is filled by the gantt layout arm and drawn by
     /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is the browser preview
     /// surface -- fm-wasm renders through `render_to_canvas_with_layout` -- so a gantt showed bars
     /// with nothing to measure them against, which is exactly the state bd-trsd fixed on the SVG side
@@ -1803,18 +2228,20 @@ impl Canvas2dRenderer {
             ctx.set_line_width(self.config.node_stroke_width);
             ctx.stroke_rect(x, y, w, h);
 
-            // Leader from the annotated state to the note.
-            ctx.set_stroke_style(&self.config.edge_stroke);
-            ctx.begin_path();
-            ctx.move_to(
-                f64::from(note.leader_start.x) + offset_x,
-                f64::from(note.leader_start.y) + offset_y,
-            );
-            ctx.line_to(
-                f64::from(note.leader_end.x) + offset_x,
-                f64::from(note.leader_end.y) + offset_y,
-            );
-            ctx.stroke();
+            // Leader from the annotated state to the note; a note on the whole diagram has none.
+            if note.leader_start != note.leader_end {
+                ctx.set_stroke_style(&self.config.edge_stroke);
+                ctx.begin_path();
+                ctx.move_to(
+                    f64::from(note.leader_start.x) + offset_x,
+                    f64::from(note.leader_start.y) + offset_y,
+                );
+                ctx.line_to(
+                    f64::from(note.leader_end.x) + offset_x,
+                    f64::from(note.leader_end.y) + offset_y,
+                );
+                ctx.stroke();
+            }
 
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
@@ -2057,6 +2484,9 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) {
         let mut note_font = None;
+        let font_size =
+            f64::from(self.config.font_size as f32 * fm_layout::LayoutSequenceNote::FONT_SCALE);
+        let line_height = font_size * f64::from(self.config.resolved_line_height());
 
         for note in &layout.extensions.sequence_notes {
             let x = f64::from(note.bounds.x) + offset_x;
@@ -2070,19 +2500,27 @@ impl Canvas2dRenderer {
             ctx.set_stroke_style(&self.config.node_stroke);
             ctx.set_line_width(1.0);
             ctx.stroke_rect(x, y, w, h);
+            self.draw_calls += 2;
 
             // Note text.
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
-                let note_font =
-                    note_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
+                let note_font = note_font
+                    .get_or_insert_with(|| format!("{font_size}px {}", self.config.font_family));
                 ctx.set_font(note_font.as_str());
-                ctx.set_text_align(TextAlign::Center);
-                ctx.set_text_baseline(TextBaseline::Middle);
-                ctx.fill_text(&note.text, x + w / 2.0, y + h / 2.0);
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                for (row, line) in note.text.split('\n').enumerate() {
+                    ctx.fill_text(
+                        line,
+                        x + f64::from(fm_layout::LayoutSequenceNote::PADDING_X),
+                        y + f64::from(fm_layout::LayoutSequenceNote::PADDING_Y)
+                            + row as f64 * line_height,
+                    );
+                    self.draw_calls += 1;
+                }
                 *labels_drawn += 1;
             }
-            self.draw_calls += 3;
         }
     }
 
@@ -2098,10 +2536,15 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
         let mut edge_label_font = None;
+        let sankey_widest = fm_layout::sankey_widest_flow(ir);
 
         for edge_path in &layout.edges {
             let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
+            // A `~~~` link has placed its nodes; it is not drawn, nor is its label.
+            if edge_path.bundled || arrow == ArrowType::Invisible {
+                continue;
+            }
 
             // Deref the point `SmallVec` to a slice ONCE — the edge draw below indexes it ~12× (path
             // loop, arrowhead direction, label anchor), and each `edge_path.points[i]` / `.len()` was a
@@ -2136,7 +2579,10 @@ impl Canvas2dRenderer {
             let stroke = declared_stroke
                 .as_deref()
                 .unwrap_or(&self.config.edge_stroke);
-            let stroke_width = declared_width.unwrap_or(legacy_width);
+            let quantity_width = fm_layout::sankey_flow_stroke_width(ir, ir_edge, sankey_widest)
+                .map(f64::from)
+                .unwrap_or(legacy_width);
+            let stroke_width = declared_width.unwrap_or(quantity_width);
             // A declared dash OVERRIDES the arrow-derived one: `legacy_edge_stroke` infers a
             // pattern from the arrow glyph (`-.->` is dotted), and an explicit `stroke-dasharray`
             // is the author answering the same question more specifically.
@@ -2156,14 +2602,19 @@ impl Canvas2dRenderer {
             ctx.set_line_width(stroke_width);
             ctx.set_line_dash(dash);
 
-            // Draw edge path
+            // Draw the same bounded connector geometry as SVG and the shared scene. Native
+            // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
+            // chart paths retain their polylines through the shared diagram-family policy.
             ctx.begin_path();
-            let first = &points[0];
-            ctx.move_to(f64::from(first.x) + offset_x, f64::from(first.y) + offset_y);
-
-            for point in points.iter().skip(1) {
-                ctx.line_to(f64::from(point.x) + offset_x, f64::from(point.y) + offset_y);
-            }
+            let path_endpoints =
+                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
+                    self.emit_path_commands(
+                        ctx,
+                        std::slice::from_ref(&command),
+                        offset_x,
+                        offset_y,
+                    );
+                });
             ctx.stroke();
             self.draw_calls += 1;
 
@@ -2178,24 +2629,24 @@ impl Canvas2dRenderer {
             //
             // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
             // the same pair fm-render-svg and the GPU plan select with, not a second table.
-            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation) {
+            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
+                && let Some(endpoints) = path_endpoints
+            {
                 let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-                let start = &points[0];
-                let next = &points[1];
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
+                let start = endpoints.start;
+                let end = endpoints.end;
                 let placements = [
                     (
                         left.map(|form| MarkerKind::er_pair(form).0),
-                        f64::from(start.x) + offset_x,
-                        f64::from(start.y) + offset_y,
-                        f64::from(next.y - start.y).atan2(f64::from(next.x - start.x)),
+                        f64::from(start.point.x) + offset_x,
+                        f64::from(start.point.y) + offset_y,
+                        f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
                     ),
                     (
                         right.map(|form| MarkerKind::er_pair(form).1),
-                        f64::from(end.x) + offset_x,
-                        f64::from(end.y) + offset_y,
-                        f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x)),
+                        f64::from(end.point.x) + offset_x,
+                        f64::from(end.point.y) + offset_y,
+                        f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
                     ),
                 ];
                 for (kind, mx, my, angle) in placements {
@@ -2228,22 +2679,22 @@ impl Canvas2dRenderer {
                     .and_then(legacy_uml_markers);
                 merge_uml_markers(primary, co)
             };
-            if let Some((marker_start, marker_end)) = uml_markers {
-                let start = &points[0];
-                let next = &points[1];
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
+            if let Some((marker_start, marker_end)) = uml_markers
+                && let Some(endpoints) = path_endpoints
+            {
+                let start = endpoints.start;
+                let end = endpoints.end;
 
                 if marker_start != MarkerKind::None {
-                    let sx = f64::from(start.x) + offset_x;
-                    let sy = f64::from(start.y) + offset_y;
-                    let angle = f64::from(next.y - start.y).atan2(f64::from(next.x - start.x));
+                    let sx = f64::from(start.point.x) + offset_x;
+                    let sy = f64::from(start.point.y) + offset_y;
+                    let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
                     let marker_calls = draw_marker_primitive(
                         ctx,
                         marker_start,
                         sx,
                         sy,
-                        angle,
+                        start_marker_angle(marker_start, angle),
                         &self.config.node_fill,
                         stroke,
                     );
@@ -2251,9 +2702,9 @@ impl Canvas2dRenderer {
                 }
 
                 if marker_end != MarkerKind::None {
-                    let ex = f64::from(end.x) + offset_x;
-                    let ey = f64::from(end.y) + offset_y;
-                    let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+                    let ex = f64::from(end.point.x) + offset_x;
+                    let ey = f64::from(end.point.y) + offset_y;
+                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
                     let marker_calls = draw_marker_primitive(
                         ctx,
                         marker_end,
@@ -2265,13 +2716,12 @@ impl Canvas2dRenderer {
                     );
                     self.draw_calls += marker_calls;
                 }
-            } else {
-                let end = &points[points.len() - 1];
-                let prev = &points[points.len() - 2];
-                let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+            } else if let Some(endpoints) = path_endpoints {
+                let end = endpoints.end;
+                let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
 
-                let ex = f64::from(end.x) + offset_x;
-                let ey = f64::from(end.y) + offset_y;
+                let ex = f64::from(end.point.x) + offset_x;
+                let ey = f64::from(end.point.y) + offset_y;
 
                 match arrow {
                     ArrowType::Line => {}
@@ -2297,12 +2747,11 @@ impl Canvas2dRenderer {
                         | ArrowType::DoubleThickArrow
                         | ArrowType::DoubleDottedArrow
                 ) {
-                    let start = &points[0];
-                    let next = &points[1];
+                    let start = endpoints.start;
                     let start_angle =
-                        f64::from(start.y - next.y).atan2(f64::from(start.x - next.x));
-                    let sx = f64::from(start.x) + offset_x;
-                    let sy = f64::from(start.y) + offset_y;
+                        f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
+                    let sx = f64::from(start.point.x) + offset_x;
+                    let sy = f64::from(start.point.y) + offset_y;
 
                     draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
                     self.draw_calls += 1;
@@ -2366,8 +2815,10 @@ impl Canvas2dRenderer {
                 place(edge.target_cardinality(), &last, &penultimate);
             }
 
-            // Draw edge label if present
-            if let Some(label_id) = ir_edge.and_then(|e| e.label)
+            // A Sankey edge label stores its quantity. The ribbon width and node totals
+            // communicate that value; SVG likewise omits a separate number on each link.
+            if ir.diagram_type != DiagramType::Sankey
+                && let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
                 && points.len() >= 2
             {
@@ -2380,26 +2831,24 @@ impl Canvas2dRenderer {
                     Cow::Borrowed(&label.text)
                 };
                 let label_offset = self.config.font_size * 0.8;
-                let (lx, ly) = if points.len() == 4 {
-                    let p1 = &points[1];
-                    let p2 = &points[2];
+                let planned = self
+                    .edge_label_layout
+                    .as_ref()
+                    .and_then(|plan| plan.labels.get(edge_path.edge_index))
+                    .copied()
+                    .flatten();
+                // Generic graph labels use the same collision solver as SVG. Sequence messages
+                // and chart annotations keep their existing specialized anchor and offset.
+                let (lx, ly) = if let Some(label) = planned {
                     (
-                        f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
-                        f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
-                    )
-                } else if points.len() == 2 {
-                    let p1 = &points[0];
-                    let p2 = &points[1];
-                    (
-                        f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
-                        f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
+                        f64::from(label.position.x) + offset_x,
+                        f64::from(label.position.y) + offset_y,
                     )
                 } else {
-                    let mid_idx = points.len() / 2;
-                    let mid = &points[mid_idx];
+                    let anchor = fm_layout::edge_label_position(edge_path);
                     (
-                        f64::from(mid.x) + offset_x,
-                        f64::from(mid.y) + offset_y - label_offset,
+                        f64::from(anchor.x) + offset_x,
+                        f64::from(anchor.y) + offset_y - label_offset,
                     )
                 };
 
@@ -2417,7 +2866,8 @@ impl Canvas2dRenderer {
                     }
                 }
 
-                let line_height = self.config.font_size * 1.2;
+                let line_height =
+                    planned.map_or(self.config.font_size * 1.2, |label| label.line_height);
 
                 // The common single-line edge label (`:has`, `-->|x|`, …) draws exactly `label.text` at
                 // `ly`, so measure it directly and skip the `Vec<&str>` collect. Only a genuinely
@@ -2425,8 +2875,11 @@ impl Canvas2dRenderer {
                 // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
                 // `total_height == line_height`, and `start_y == ly`.
                 if !label_text.contains('\n') {
-                    let label_width = ctx.measure_text(&label_text).width + 8.0;
-                    let label_height = line_height + 4.0;
+                    let label_width = planned.map_or_else(
+                        || ctx.measure_text(&label_text).width + 8.0,
+                        |label| label.width,
+                    );
+                    let label_height = planned.map_or(line_height + 4.0, |label| label.height);
 
                     ctx.set_fill_style(&self.config.node_fill);
                     ctx.fill_rect(
@@ -2456,15 +2909,18 @@ impl Canvas2dRenderer {
                 } else {
                     // Background for label
                     let lines: Vec<&str> = label_text.lines().collect();
-                    let mut max_text_width = 0.0_f64;
-                    for line in &lines {
-                        let text_metrics = ctx.measure_text(line);
-                        max_text_width = max_text_width.max(text_metrics.width);
-                    }
-
-                    let label_width = max_text_width + 8.0;
+                    let label_width = planned.map_or_else(
+                        || {
+                            lines
+                                .iter()
+                                .map(|line| ctx.measure_text(line).width)
+                                .fold(0.0_f64, f64::max)
+                                + 8.0
+                        },
+                        |label| label.width,
+                    );
                     let total_height = lines.len() as f64 * line_height;
-                    let label_height = total_height + 4.0;
+                    let label_height = planned.map_or(total_height + 4.0, |label| label.height);
 
                     ctx.set_fill_style(&self.config.node_fill);
                     ctx.fill_rect(
@@ -2541,6 +2997,11 @@ impl Canvas2dRenderer {
         };
 
         for node_box in &layout.nodes {
+            // Referenced composite states share their cluster's box. The cluster was already
+            // painted behind its children; drawing the duplicate node here would cover them.
+            if fm_layout::is_composite_state_node(ir, node_box) {
+                continue;
+            }
             let ir_node = ir.nodes.get(node_box.node_index);
             let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
 
@@ -2556,7 +3017,8 @@ impl Canvas2dRenderer {
             // only 3-4 distinct fills for an ENTIRE diagram no matter what the source said. Counted
             // at the time — fm-render-svg reads `inline_style` 30 times, `classes` 19 and
             // `style_refs` 11; this crate read all three ZERO times.
-            let (fill, stroke) = resolve_node_colors(ir, node_box.node_index);
+            let (fill, stroke) =
+                resolve_node_colors_with_defaults(ir, node_box.node_index, &self.config);
             // Resolved ONCE for the whole node: the four label sites below (plain label, class
             // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
             // node, so they must agree about its colour. Resolving per-site would let a later
@@ -2621,9 +3083,15 @@ impl Canvas2dRenderer {
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
             }
+            let is_state_terminal =
+                ir.diagram_type == DiagramType::State && shape == NodeShape::DoubleCircle;
             draw_shape(
                 ctx,
-                shape,
+                if is_state_terminal {
+                    NodeShape::Circle
+                } else {
+                    shape
+                },
                 x,
                 y,
                 w,
@@ -2632,6 +3100,21 @@ impl Canvas2dRenderer {
                 stroke.as_deref().unwrap_or(&self.config.node_stroke),
                 stroke_width,
             );
+            if is_state_terminal {
+                // Draw the solid terminal disc once; ordinary double circles keep a hollow ring.
+                let radius = w.min(h) / 2.0;
+                ctx.set_fill_style(fill.as_deref().unwrap_or(&self.config.edge_stroke));
+                ctx.begin_path();
+                ctx.arc(
+                    x + w / 2.0,
+                    y + h / 2.0,
+                    (radius - 4.0).max(radius * 0.5),
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                ctx.fill();
+                ctx.stroke();
+            }
             if dash.is_some() {
                 ctx.set_line_dash(&[]);
             }
@@ -2640,9 +3123,7 @@ impl Canvas2dRenderer {
             // Check for class diagram three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty()
-                    || !meta.methods.is_empty()
-                    || meta.stereotype.is_some())
+                && meta.has_compartments()
             {
                 let line_h = self.config.font_size * 1.3;
                 let member_font = self.config.font_size * 0.9;
@@ -2657,11 +3138,7 @@ impl Canvas2dRenderer {
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let display_name = if meta.generics.is_empty() {
-                    class_name.to_string()
-                } else {
-                    format!("{class_name}<{}>", meta.generics.join(", "))
-                };
+                let display_name = meta.display_header(class_name);
 
                 let class_fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
@@ -3012,12 +3489,12 @@ impl Canvas2dRenderer {
                 }
             } else {
                 // Standard single-label rendering.
-                let label_text = ir_node
-                    .and_then(|n| n.label)
-                    .and_then(|lid| ir.labels.get(lid.0))
-                    .map(|l| l.text.as_str())
-                    .or_else(|| ir_node.map(|n| n.id.as_str()))
-                    .unwrap_or("");
+                // Layout and SVG use the same rule: state ornaments and junctions draw no text,
+                // while gitGraph commits keep their labels even when they use those shapes.
+                let sankey_label = fm_layout::sankey_node_label(ir, node_box.node_index);
+                let label_text = sankey_label.as_deref().unwrap_or_else(|| {
+                    ir_node.map(|node| ir.node_display_text(node)).unwrap_or("")
+                });
 
                 if !label_text.is_empty() {
                     // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
@@ -3090,7 +3567,8 @@ impl Canvas2dRenderer {
                         *labels_drawn += 1;
                     } else {
                         let lines: Vec<&str> = label_text.lines().collect();
-                        let line_height = self.config.font_size * 1.2;
+                        let line_height = declared_parts.size.unwrap_or(self.config.font_size)
+                            * f64::from(self.config.resolved_line_height());
                         let total_height = lines.len() as f64 * line_height;
                         let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
 
@@ -3283,168 +3761,50 @@ fn draw_marker_primitive<C: Canvas2dContext>(
     }
 }
 
-fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
-    let mut current = None;
-    let mut subpath_start = None;
-
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => {
-                let point = (f64::from(x), f64::from(y));
-                current = Some(point);
-                subpath_start = Some(point);
-            }
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                let end = (f64::from(x), f64::from(y));
-                return Some((start.0, start.1, angle_between(start, end)));
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                return Some((
-                    start.0,
-                    start.1,
-                    angle_from_start_tangent(start, control, end),
-                ));
-            }
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x: _,
-                c2y: _,
-                x,
-                y,
-            } => {
-                let start = current?;
-                let control = (f64::from(c1x), f64::from(c1y));
-                let end = (f64::from(x), f64::from(y));
-                return Some((
-                    start.0,
-                    start.1,
-                    angle_from_start_tangent(start, control, end),
-                ));
-            }
-            PathCmd::Close => {
-                current = subpath_start;
-            }
-        }
+/// Source arrow tips face against the path's forward tangent. Diamonds also extend behind
+/// their tip and must turn out of the owning node. `TriangleOpenStart` turns in its primitive;
+/// ER glyphs already encode which endpoint they belong to.
+pub(crate) fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
+    if matches!(
+        marker,
+        MarkerKind::Diamond
+            | MarkerKind::DiamondOpen
+            | MarkerKind::Arrow
+            | MarkerKind::ThickArrow
+            | MarkerKind::DottedArrow
+            | MarkerKind::Open
+            | MarkerKind::HalfArrowTop
+            | MarkerKind::HalfArrowBottom
+            | MarkerKind::StickArrowTop
+            | MarkerKind::StickArrowBottom
+    ) {
+        angle + std::f64::consts::PI
+    } else {
+        angle
     }
+}
 
-    None
+fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.start;
+    Some((
+        f64::from(endpoint.point.x),
+        f64::from(endpoint.point.y),
+        f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x)),
+    ))
 }
 
 fn path_marker_end_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
-    if matches!(commands.first(), Some(PathCmd::MoveTo { .. }))
-        && let Some((last_command, preceding_commands)) = commands.split_last()
-    {
-        match *last_command {
-            PathCmd::LineTo { x, y } => {
-                let start = match preceding_commands.last().copied() {
-                    Some(
-                        PathCmd::MoveTo { x, y }
-                        | PathCmd::LineTo { x, y }
-                        | PathCmd::QuadTo { x, y, .. }
-                        | PathCmd::CubicTo { x, y, .. },
-                    ) => Some((f64::from(x), f64::from(y))),
-                    Some(PathCmd::Close) | None => None,
-                };
-                if let Some(start) = start {
-                    let end = (f64::from(x), f64::from(y));
-                    return Some((end.0, end.1, angle_between(start, end)));
-                }
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                if points_are_distinct(control, end) {
-                    return Some((end.0, end.1, angle_between(control, end)));
-                }
-            }
-            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
-                let control = (f64::from(c2x), f64::from(c2y));
-                let end = (f64::from(x), f64::from(y));
-                if points_are_distinct(control, end) {
-                    return Some((end.0, end.1, angle_between(control, end)));
-                }
-            }
-            PathCmd::MoveTo { .. } | PathCmd::Close => {}
-        }
-    }
-
-    let mut current = None;
-    let mut subpath_start = None;
-    let mut last = None;
-
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => {
-                let point = (f64::from(x), f64::from(y));
-                current = Some(point);
-                subpath_start = Some(point);
-            }
-            PathCmd::LineTo { x, y } => {
-                let start = current?;
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_between(start, end)));
-                current = Some(end);
-            }
-            PathCmd::QuadTo { cx, cy, x, y } => {
-                let start = current?;
-                let control = (f64::from(cx), f64::from(cy));
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_from_end_tangent(start, control, end)));
-                current = Some(end);
-            }
-            PathCmd::CubicTo {
-                c1x: _,
-                c1y: _,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => {
-                let start = current?;
-                let control = (f64::from(c2x), f64::from(c2y));
-                let end = (f64::from(x), f64::from(y));
-                last = Some((end.0, end.1, angle_from_end_tangent(start, control, end)));
-                current = Some(end);
-            }
-            PathCmd::Close => {
-                if let (Some(start), Some(end)) = (subpath_start, current) {
-                    last = Some((start.0, start.1, angle_between(end, start)));
-                    current = Some(start);
-                }
-            }
-        }
-    }
-
-    last
+    let endpoint = fm_layout::edge_paths::path_endpoints(commands)?.end;
+    Some((
+        f64::from(endpoint.point.x),
+        f64::from(endpoint.point.y),
+        f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x)),
+    ))
 }
 
+#[cfg(test)]
 fn angle_between(start: (f64, f64), end: (f64, f64)) -> f64 {
     (end.1 - start.1).atan2(end.0 - start.0)
-}
-
-fn angle_from_start_tangent(start: (f64, f64), control: (f64, f64), end: (f64, f64)) -> f64 {
-    if points_are_distinct(start, control) {
-        angle_between(start, control)
-    } else {
-        angle_between(start, end)
-    }
-}
-
-fn angle_from_end_tangent(start: (f64, f64), control: (f64, f64), end: (f64, f64)) -> f64 {
-    if points_are_distinct(control, end) {
-        angle_between(control, end)
-    } else {
-        angle_between(start, end)
-    }
-}
-
-fn points_are_distinct(a: (f64, f64), b: (f64, f64)) -> bool {
-    (a.0 - b.0).abs() > f64::EPSILON || (a.1 - b.1).abs() > f64::EPSILON
 }
 
 fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
@@ -3721,10 +4081,11 @@ fn parse_stroke_width(raw: Option<&str>) -> Option<f64> {
 
 /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
 ///
-/// Three channels, merged in the order mermaid applies them — later wins:
-///   1. `classDef` definitions named by the node's `classes`
-///   2. `style <id> ...` directives targeting this node (`ir.style_refs`)
-///   3. the node's own `inline_style`
+/// Four channels, merged in the order mermaid applies them — later wins:
+///   1. the implicit `classDef default`, when defined
+///   2. `classDef` definitions named by the node's `classes`
+///   3. `style <id> ...` directives targeting this node (`ir.style_refs`)
+///   4. the node's own `inline_style`
 ///
 /// fm-render-svg gets `classDef` support for free by emitting a CSS class and letting the BROWSER
 /// cascade it. A canvas has no cascade, so the class must be resolved here — which is why porting
@@ -3747,30 +4108,7 @@ fn merged_node_style(
     ir: &MermaidDiagramIr,
     node_index: usize,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let Some(node) = ir.nodes.get(node_index) else {
-        return merged;
-    };
-
-    for class_name in &node.classes {
-        if let Some(def) = ir.style_defs.iter().find(|d| &d.name == class_name) {
-            merged.extend(def.properties.clone());
-        }
-    }
-
-    for style_ref in &ir.style_refs {
-        if let fm_core::IrStyleTarget::Node(target) = style_ref.target
-            && target == fm_core::IrNodeId(node_index)
-        {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    if let Some(inline) = node.inline_style.as_ref() {
-        merged.extend(inline.properties.clone());
-    }
-
-    merged
+    ir.resolved_node_style(node_index)
 }
 
 pub(crate) fn resolve_node_colors(
@@ -3778,7 +4116,122 @@ pub(crate) fn resolve_node_colors(
     node_index: usize,
 ) -> (Option<String>, Option<String>) {
     let merged = merged_node_style(ir, node_index);
-    (merged.get("fill").cloned(), merged.get("stroke").cloned())
+    // `fill-opacity` fades the FILL alone — the outline and label keep full strength, which is
+    // what separates it from `opacity`. A canvas has one `fillStyle` per shape, so the fade has to
+    // travel inside the colour itself; folding it into an `rgba()` here gives the Canvas2D pass and
+    // the GPU plan (which reads this same function) one answer. Overlapping translucent shapes —
+    // venn-beta's set circles are the reason this exists — would otherwise paint opaque and bury
+    // each other.
+    let fill = merged.get("fill").map(|fill| {
+        parse_opacity(merged.get("fill-opacity").map(String::as_str))
+            .and_then(|opacity| hex_fill_with_opacity(fill, opacity))
+            .unwrap_or_else(|| fill.clone())
+    });
+    (fill, merged.get("stroke").cloned())
+}
+
+/// Semantic defaults are fallbacks for each paint channel, never author declarations.
+/// A fill-only class retains its role border, and a stroke-only class retains its role fill.
+pub(crate) fn resolve_node_colors_with_defaults(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    config: &CanvasRenderConfig,
+) -> (Option<String>, Option<String>) {
+    let (fill, stroke) = resolve_node_colors(ir, node_index);
+    if config.semantic_colors
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.meta.theme_overrides.theme.as_deref().is_none_or(|name| {
+            name.eq_ignore_ascii_case("default") || name.eq_ignore_ascii_case("dark")
+        })
+        && let Some(node) = ir.nodes.get(node_index)
+        && let Some(role) = fm_core::semantic_shape_style(
+            ir.diagram_type,
+            node.shape,
+            &config.node_fill,
+            &config.node_stroke,
+            &config.label_color,
+            &config.accents,
+        )
+    {
+        let variables = &ir.meta.theme_overrides.theme_variables;
+        let theme_fill = variables
+            .get("primaryColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        let theme_stroke = variables
+            .get("primaryBorderColor")
+            .and_then(|value| sanitize_canvas_paint(value));
+        return (
+            fill.or(theme_fill).or(Some(role.fill)),
+            stroke.or(theme_stroke).or(Some(role.stroke)),
+        );
+    }
+    let Some(role) = fm_core::mindmap::node_role(ir, node_index) else {
+        let solid_marker = ir.nodes.get(node_index).is_some_and(|node| {
+            matches!(
+                node.shape,
+                NodeShape::FilledCircle | NodeShape::HorizontalBar
+            )
+        });
+        return (
+            fill.or_else(|| solid_marker.then(|| config.edge_stroke.clone())),
+            stroke,
+        );
+    };
+    let accent = &config.accents[role.branch];
+    (
+        fill.or_else(|| {
+            Some(fm_core::mindmap::branch_fill(
+                &config.node_fill,
+                accent,
+                role.is_root,
+            ))
+        }),
+        stroke.or_else(|| {
+            Some(if role.borderless {
+                // Canvas rejects CSS `none`; transparent paint removes the border reliably.
+                String::from("transparent")
+            } else {
+                accent.clone()
+            })
+        }),
+    )
+}
+
+/// A `#rgb`/`#rrggbb` (with optional alpha) colour as `rgba()` with `opacity` multiplied into its
+/// alpha; `None` for anything that is not a hex colour, so the caller keeps the declaration as is.
+fn hex_fill_with_opacity(fill: &str, opacity: f64) -> Option<String> {
+    let hex = fill.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |text: &str| u8::from_str_radix(text, 16).ok();
+    let doubled = |c: char| channel(&format!("{c}{c}"));
+    let chars: Vec<char> = hex.chars().collect();
+    let (r, g, b, a) = match chars.len() {
+        3 | 4 => (
+            doubled(chars[0])?,
+            doubled(chars[1])?,
+            doubled(chars[2])?,
+            chars.get(3).map_or(Some(255), |c| doubled(*c))?,
+        ),
+        6 | 8 => (
+            channel(&hex[0..2])?,
+            channel(&hex[2..4])?,
+            channel(&hex[4..6])?,
+            hex.get(6..8).map_or(Some(255), channel)?,
+        ),
+        _ => return None,
+    };
+    // Thousandths as an INTEGER: formatting the f64 would link core's float formatter into the
+    // WASM bundle for this one string.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let milli = (f64::from(a) / 255.0 * opacity.clamp(0.0, 1.0) * 1000.0).round() as u32;
+    let alpha = match milli {
+        0 => "0".to_string(),
+        1000.. => "1".to_string(),
+        _ => format!("0.{}", format!("{milli:03}").trim_end_matches('0')),
+    };
+    Some(format!("rgba({r}, {g}, {b}, {alpha})"))
 }
 
 /// The author's declared TEXT colour for this node, if any (bd-lvj3).
@@ -4072,7 +4525,12 @@ pub(crate) fn resolve_declared_node_font(
         weight: merged
             .get("font-weight")
             .map(String::as_str)
-            .and_then(sanitize_font_weight),
+            .and_then(sanitize_font_weight)
+            .or_else(|| {
+                fm_core::mindmap::node_role(ir, node_index)
+                    .filter(|role| role.is_root)
+                    .map(|_| "600")
+            }),
         style: merged
             .get("font-style")
             .map(String::as_str)
@@ -4241,8 +4699,8 @@ fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
-    // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
-    // the generic node/edge path, so the generic title fallback remains enabled.
+    // XY charts draw their title in the plot's reserved margin and return before this
+    // screen-space overlay. Other families keep the shared title fallback.
     //
     // ⚠️ WHICH FAMILIES TAKE A TITLE IS NOT THIS BACKEND'S DECISION. This used to return
     // `ir.meta.title` outright, so the canvas drew a title on every family — including the ones
@@ -4328,6 +4786,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fill_opacity_fades_only_the_fill_colour() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "a".to_string(),
+            inline_style: Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+                ("fill".to_string(), "#4f6bed".to_string()),
+                ("fill-opacity".to_string(), "0.1".to_string()),
+                ("stroke".to_string(), "#4f6bed".to_string()),
+            ]))),
+            ..IrNode::default()
+        });
+        let (fill, stroke) = resolve_node_colors(&ir, 0);
+        assert_eq!(fill.as_deref(), Some("rgba(79, 107, 237, 0.1)"));
+        assert_eq!(
+            stroke.as_deref(),
+            Some("#4f6bed"),
+            "the outline keeps full strength"
+        );
+        // Short hex, an existing alpha channel, and a non-hex colour left untouched.
+        assert_eq!(
+            hex_fill_with_opacity("#f00", 0.5).as_deref(),
+            Some("rgba(255, 0, 0, 0.5)")
+        );
+        assert_eq!(
+            hex_fill_with_opacity("#ff000080", 0.5).as_deref(),
+            Some("rgba(255, 0, 0, 0.251)")
+        );
+        assert_eq!(hex_fill_with_opacity("red", 0.5), None);
+        assert_eq!(hex_fill_with_opacity("#ggg", 0.5), None);
+    }
+
     fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
         (
             geometry.0.to_bits(),
@@ -4405,6 +4895,265 @@ mod tests {
             1
         );
         ctx.operations().to_vec()
+    }
+
+    fn first_stroked_path(operations: &[DrawOperation]) -> Vec<PathCmd> {
+        operations
+            .iter()
+            .skip_while(|operation| !matches!(operation, DrawOperation::BeginPath))
+            .take_while(|operation| !matches!(operation, DrawOperation::Stroke))
+            .filter_map(|operation| match *operation {
+                DrawOperation::MoveTo(x, y) => Some(PathCmd::MoveTo {
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::LineTo(x, y) => Some(PathCmd::LineTo {
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => Some(PathCmd::QuadTo {
+                    cx: cx as f32,
+                    cy: cy as f32,
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                DrawOperation::BezierCurveTo(c1x, c1y, c2x, c2y, x, y) => Some(PathCmd::CubicTo {
+                    c1x: c1x as f32,
+                    c1y: c1y as f32,
+                    c2x: c2x as f32,
+                    c2y: c2y as f32,
+                    x: x as f32,
+                    y: y as f32,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn scene_edge_path(group: &RenderGroup, edge_index: usize) -> Option<&[PathCmd]> {
+        group.children.iter().find_map(|item| match item {
+            RenderItem::Group(group) => scene_edge_path(group, edge_index),
+            RenderItem::Path(path) if path.source == RenderSource::Edge(edge_index) => {
+                Some(path.commands.as_slice())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn graph_connectors_draw_real_rounded_elbows_matching_the_shared_scene() {
+        let expected = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 34.0, y: 0.0 },
+            PathCmd::QuadTo {
+                cx: 40.0,
+                cy: 0.0,
+                x: 40.0,
+                y: 6.0,
+            },
+            PathCmd::LineTo { x: 40.0, y: 74.0 },
+            PathCmd::QuadTo {
+                cx: 40.0,
+                cy: 80.0,
+                x: 46.0,
+                y: 80.0,
+            },
+            PathCmd::LineTo { x: 120.0, y: 80.0 },
+        ];
+        for source in [
+            "flowchart LR\nA --> B",
+            "classDiagram\nA --> B",
+            "stateDiagram-v2\nA --> B",
+            "erDiagram\nA ||--o{ B : owns",
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let mut layout = layout_diagram(&ir);
+            assert_eq!(
+                layout.edges.len(),
+                1,
+                "fixture must contain one real parsed edge"
+            );
+            layout.edges[0].points = [(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let actual = first_stroked_path(ctx.operations());
+            assert_eq!(actual, expected, "{source}");
+            let scene = build_render_scene(&ir, &layout);
+            assert_eq!(
+                scene_edge_path(&scene.root, 0).unwrap(),
+                actual,
+                "scene diverged for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn connector_markers_follow_collapsed_geometry_and_skip_zero_length_routes() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 1.0),
+            (120.0, 1.0),
+            (120.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+        .collect();
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+        renderer.draw_edges(&layout, &ir, &mut ctx, 7.0, -3.0, &mut 0);
+        assert_eq!(
+            first_stroked_path(ctx.operations()),
+            vec![
+                PathCmd::MoveTo { x: 7.0, y: -3.0 },
+                PathCmd::LineTo { x: 127.0, y: -2.0 },
+            ]
+        );
+        let rotations: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                if let DrawOperation::Rotate(angle) = operation {
+                    Some(*angle)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(rotations.len(), 2);
+        for expected in [1.0_f64.atan2(120.0), (-1.0_f64).atan2(-120.0)] {
+            assert!(
+                rotations
+                    .iter()
+                    .any(|angle| (*angle - expected).abs() < 1e-10),
+                "marker ignored the drawn tangent: {rotations:?}"
+            );
+        }
+
+        let scene = build_render_scene(&ir, &layout);
+        ctx.clear();
+        renderer.render_scene(&scene, &mut ctx);
+        let scene_rotations: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::Rotate(angle) => Some(*angle),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scene_rotations.len(), rotations.len());
+        for angle in &rotations {
+            assert!(
+                scene_rotations.iter().any(|scene_angle| {
+                    (scene_angle - angle).sin().abs() < 1e-10
+                        && (scene_angle - angle).cos() > 0.99999
+                }),
+                "scene arrow direction differs from Canvas: {scene_rotations:?}"
+            );
+        }
+
+        layout.edges[0].points = [fm_layout::LayoutPoint { x: 5.0, y: 9.0 }; 4]
+            .into_iter()
+            .collect();
+        ctx.clear();
+        renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+        assert!(
+            !ctx.operations()
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(_))),
+            "a point has no arrow direction"
+        );
+        let scene = build_render_scene(&ir, &layout);
+        ctx.clear();
+        renderer.render_scene(&scene, &mut ctx);
+        assert!(
+            !ctx.operations()
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(_))),
+            "a scene must not invent an arrow direction for a point"
+        );
+    }
+
+    #[test]
+    fn curved_connector_scene_markers_ignore_repeated_terminal_points() {
+        let ir = fm_parser::parse("flowchart LR\nA <--> B").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.edges[0].points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (40.0, 80.0),
+            (120.0, 80.0),
+            (120.0, 80.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+        .collect();
+        let scene = build_render_scene(&ir, &layout);
+        assert!(
+            scene_edge_path(&scene.root, 0)
+                .unwrap()
+                .iter()
+                .any(|command| matches!(command, PathCmd::CubicTo { .. }))
+        );
+        for use_scene in [false, true] {
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            if use_scene {
+                renderer.render_scene(&scene, &mut ctx);
+            } else {
+                renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            }
+            let rotations: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::Rotate(angle) => Some(*angle),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rotations.len(), 2);
+            for expected in [(-2.0_f64).atan2(-1.0), 0.0] {
+                assert!(
+                    rotations.iter().any(|angle| {
+                        (angle - expected).sin().abs() < 1e-10 && (angle - expected).cos() > 0.99999
+                    }),
+                    "scene={use_scene} used a degenerate segment's direction: {rotations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_self_message_keeps_its_rectangular_route() {
+        let ir = fm_parser::parse("sequenceDiagram\nA->>A: retry").ir;
+        let layout = layout_diagram(&ir);
+        assert!(
+            layout.edges[0].points.len() > 2,
+            "fixture must exercise a self-message bend"
+        );
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+        renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+        let commands = first_stroked_path(ctx.operations());
+        assert_eq!(commands.len(), layout.edges[0].points.len());
+        assert!(
+            commands[1..]
+                .iter()
+                .all(|command| matches!(command, PathCmd::LineTo { .. }))
+        );
+        for (command, point) in commands.iter().zip(&layout.edges[0].points) {
+            let (PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y }) = command else {
+                unreachable!()
+            };
+            assert_eq!((*x, *y), (point.x, point.y));
+        }
     }
 
     #[test]
@@ -4519,6 +5268,17 @@ mod tests {
                 |operation| matches!(operation, DrawOperation::Translate(x, y)
                     if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
             ));
+        }
+
+        // A start diamond is turned to face back along the path (the edge runs +x from the
+        // owner), so its body lies on the edge rather than inside the owning node.
+        for arrow in [ArrowType::Aggregation, ArrowType::Composition] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(
+                operations.iter().any(|operation| matches!(operation,
+                    DrawOperation::Rotate(angle) if (*angle - std::f64::consts::PI).abs() < 0.001)),
+                "{arrow:?}: {operations:?}"
+            );
         }
     }
 
@@ -4651,7 +5411,384 @@ mod tests {
         let config = CanvasRenderConfig::default();
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
+        assert!(config.line_height >= 1.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn default_canvas_palette_and_typography_match_svg() {
+        let canvas = CanvasRenderConfig::default();
+        let svg = fm_render_svg::SvgRenderConfig::default();
+        let colors = fm_render_svg::ThemeColors::default();
+        assert_eq!(canvas.font_family, svg.font_family);
+        assert_eq!(canvas.font_size, f64::from(svg.font_size));
+        assert_eq!(canvas.line_height, f64::from(svg.line_height));
+        assert_eq!(canvas.node_fill, colors.node_fill);
+        assert_eq!(canvas.node_stroke, colors.node_stroke);
+        assert_eq!(canvas.edge_stroke, colors.edge);
+        assert_eq!(canvas.cluster_fill, colors.cluster_fill);
+        assert_eq!(canvas.cluster_stroke, colors.cluster_stroke);
+        assert_eq!(canvas.label_color, colors.text);
+        assert_eq!(canvas.accents, colors.accents);
+        assert_eq!(
+            canvas.font_metrics().estimate_dimensions("First\nSecond"),
+            svg.font_metrics().estimate_dimensions("First\nSecond")
+        );
+    }
+
+    #[test]
+    fn mindmap_defaults_follow_branches_and_preserve_author_channels() {
+        let mut ir = fm_parser::parse(
+            "mindmap\n  root((Root))\n    A[Research]\n      Child[Child]\n    B[Design]\n    Plain\n",
+        )
+        .ir;
+        let index = |id: &str| ir.nodes.iter().position(|node| node.id == id).unwrap();
+        let (root, a, child, b, plain) = (
+            index("root"),
+            index("A"),
+            index("Child"),
+            index("B"),
+            index("Plain"),
+        );
+        for preset in [
+            fm_render_svg::ThemePreset::Default,
+            fm_render_svg::ThemePreset::Dark,
+        ] {
+            let colors = fm_render_svg::ThemeColors::from_preset(preset);
+            let config = CanvasRenderConfig {
+                node_fill: colors.node_fill,
+                accents: colors.accents,
+                ..Default::default()
+            };
+            let branch = resolve_node_colors_with_defaults(&ir, a, &config);
+            assert_eq!(
+                branch,
+                resolve_node_colors_with_defaults(&ir, child, &config)
+            );
+            assert_ne!(branch, resolve_node_colors_with_defaults(&ir, b, &config));
+            assert_eq!(branch.1.as_deref(), Some(config.accents[1].as_str()));
+            assert_eq!(resolve_declared_node_font(&ir, root).weight, Some("600"));
+            assert_eq!(resolve_declared_node_font(&ir, a).weight, None);
+            assert_eq!(
+                resolve_node_colors_with_defaults(&ir, plain, &config)
+                    .1
+                    .as_deref(),
+                Some("transparent")
+            );
+            ir.nodes[a].inline_style = Some(Box::new(fm_core::parse_style_string("fill:#ffcc00")));
+            let styled = resolve_node_colors_with_defaults(&ir, a, &config);
+            assert_eq!(styled.0.as_deref(), Some("#ffcc00"));
+            assert_eq!(styled.1, branch.1);
+            ir.nodes[a].inline_style = None;
+        }
+        ir.nodes[root].inline_style =
+            Some(Box::new(fm_core::parse_style_string("font-weight:400")));
+        assert_eq!(resolve_declared_node_font(&ir, root).weight, Some("400"));
+        let styled = fm_parser::parse(
+            "mindmap\n  root((Root))\n    Plain:::custom\nclassDef custom stroke:#b45309\n",
+        )
+        .ir;
+        let plain = styled
+            .nodes
+            .iter()
+            .position(|node| node.id == "Plain")
+            .unwrap();
+        assert_eq!(
+            resolve_node_colors_with_defaults(&styled, plain, &CanvasRenderConfig::default())
+                .1
+                .as_deref(),
+            Some("#b45309")
+        );
+    }
+
+    #[test]
+    fn state_markers_have_solid_fills_and_terminal_rings() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  state fork_point <<fork>>\n  [*] --> fork_point\n  fork_point --> [*]\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 3);
+        for preset in [
+            fm_render_svg::ThemePreset::Default,
+            fm_render_svg::ThemePreset::Dark,
+        ] {
+            let colors = fm_render_svg::ThemeColors::from_preset(preset);
+            let config = CanvasRenderConfig {
+                node_fill: colors.node_fill,
+                node_stroke: colors.node_stroke,
+                edge_stroke: colors.edge,
+                ..Default::default()
+            };
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            let result = crate::render_to_canvas(&ir, &mut ctx, &config);
+            assert_eq!(result.nodes_drawn, 3);
+            let mut active_fill = "";
+            let mut curved_path = false;
+            let mut curved_fills = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetFillStyle(fill) => active_fill = fill,
+                    DrawOperation::BeginPath => curved_path = false,
+                    DrawOperation::Arc(..) | DrawOperation::ArcTo(..) => curved_path = true,
+                    DrawOperation::Fill if curved_path => curved_fills.push(active_fill),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                curved_fills
+                    .iter()
+                    .filter(|fill| **fill == config.edge_stroke)
+                    .count(),
+                3,
+                "start, fork, and terminal disc must have contrasting solid fills"
+            );
+            assert_eq!(
+                curved_fills
+                    .iter()
+                    .filter(|fill| **fill == config.node_fill)
+                    .count(),
+                1,
+                "the terminal outer ring must retain its background"
+            );
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                    .count(),
+                3,
+                "the terminal disc must be drawn only once"
+            );
+        }
+    }
+
+    #[test]
+    fn solid_marker_defaults_preserve_class_and_inline_fill_overrides() {
+        for declaration in [
+            "style A fill:#f97316,stroke:#020617",
+            "classDef marker fill:#f97316,stroke:#020617\n  class A marker",
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "flowchart LR\n  A@{{ shape: f-circ }}\n  {declaration}\n"
+            ))
+            .ir;
+            assert_eq!(ir.nodes.len(), 1);
+            assert_eq!(ir.nodes[0].shape, NodeShape::FilledCircle);
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+            let mut active_fill = "";
+            let mut fills = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetFillStyle(fill) => active_fill = fill,
+                    DrawOperation::Fill => fills.push(active_fill),
+                    _ => {}
+                }
+            }
+            assert_eq!(fills, ["#f97316"]);
+        }
+    }
+
+    #[test]
+    fn canvas_ornaments_do_not_draw_internal_ids() {
+        for (source, minimum_ornaments, visible_labels) in [
+            (
+                "stateDiagram-v2\n  [*] --> Idle\n  state fork_point <<fork>>\n  \
+                 state join_point <<join>>\n  state decision <<choice>>\n  \
+                 Idle --> fork_point\n  fork_point --> Working\n  Working --> join_point\n  \
+                 join_point --> decision\n  decision --> Done\n  Done --> [*]\n",
+                5,
+                ["Idle", "Working", "Done"].as_slice(),
+            ),
+            (
+                "flowchart LR\n  A[Receive] --> J@{ shape: f-circ, label: \"Junction plumbing\" }\n  \
+                 J --> B[Continue]\n",
+                1,
+                ["Receive", "Continue"].as_slice(),
+            ),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let ornaments: Vec<_> = ir
+                .nodes
+                .iter()
+                .filter(|node| ir.is_textless_ornament_node(node))
+                .collect();
+            assert!(
+                ornaments.len() >= minimum_ornaments,
+                "the fixture must contain the ornament shapes being tested"
+            );
+
+            let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+            let result = crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+            assert_eq!(result.nodes_drawn, ir.nodes.len());
+            let texts: Vec<_> = ctx
+                .operations()
+                .iter()
+                .filter_map(|operation| match operation {
+                    DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for label in visible_labels {
+                assert!(texts.contains(label), "visible label {label:?} was lost");
+            }
+            for node in ornaments {
+                assert!(
+                    !texts.contains(&node.id.as_str()),
+                    "ornament id {:?} was drawn over its glyph",
+                    node.id
+                );
+                if let Some(label) = node.label.and_then(|id| ir.labels.get(id.0)) {
+                    assert!(
+                        !texts.contains(&label.text.as_str()),
+                        "an ornament label was drawn despite the shared display rule"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_keeps_labels_on_reversed_and_highlighted_git_commits() {
+        let ir = fm_parser::parse(
+            "gitGraph\n  commit id: \"reverted\" type: REVERSE\n  \
+             commit id: \"highlighted\" type: HIGHLIGHT\n",
+        )
+        .ir;
+        assert!(
+            ir.nodes
+                .iter()
+                .any(|node| node.shape == NodeShape::FilledCircle)
+        );
+        assert!(
+            ir.nodes
+                .iter()
+                .any(|node| node.shape == NodeShape::DoubleCircle)
+        );
+
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas(&ir, &mut ctx, &CanvasRenderConfig::default());
+        for label in ["reverted", "highlighted"] {
+            assert!(ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::FillText(text, _, _) if text == label)
+            }));
+        }
+    }
+
+    #[test]
+    fn multiline_node_labels_use_the_resolved_font_and_keep_their_center() {
+        let ir = fm_parser::parse(
+            "flowchart TB\n  A[\"First<br/>Second\"] --> B[\"Other<br/>Lines\"]\n  \
+             style A font-size:32px\n",
+        )
+        .ir;
+        assert!(ir.labels.iter().any(|label| label.text == "First\nSecond"));
+        assert!(ir.labels.iter().any(|label| label.text == "Other\nLines"));
+        let config = CanvasRenderConfig {
+            font_size: 18.0,
+            line_height: 1.75,
+            padding: 12.0,
+            auto_fit: false,
+            ..CanvasRenderConfig::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+        let mut font = String::new();
+        let mut text_runs = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::FillText(text, _, y) => {
+                    text_runs.push((text.as_str(), *y, font.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        for (node_id, first, second, font_size) in [
+            ("A", "First", "Second", 32.0),
+            ("B", "Other", "Lines", 18.0),
+        ] {
+            let first = text_runs.iter().find(|run| run.0 == first).unwrap();
+            let second = text_runs.iter().find(|run| run.0 == second).unwrap();
+            assert!(first.2.starts_with(&format!("{font_size}px ")));
+            assert_eq!(first.2, second.2);
+            assert!((second.1 - first.1 - font_size * config.line_height).abs() < 1e-6);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .unwrap();
+            let center = config.padding - f64::from(layout.bounds.y)
+                + f64::from(node.bounds.y)
+                + f64::from(node.bounds.height) * 0.5;
+            assert!(((first.1 + second.1) * 0.5 - center).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn sequence_notes_draw_each_measured_line_inside_the_note() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant A\n  participant B\n  \
+             Note left of A: Customer checks the current account balance before approving a payment<br/><br/>Finish\n  \
+             A->>B: Continue\n",
+        )
+        .ir;
+        let config = CanvasRenderConfig {
+            font_size: 20.0,
+            line_height: 1.75,
+            padding: 12.0,
+            auto_fit: false,
+            ..Default::default()
+        };
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
+        let note = &layout.extensions.sequence_notes[0];
+        let lines: Vec<_> = note.text.split('\n').collect();
+        assert!(
+            lines.len() >= 4,
+            "wrapping and the authored blank line both survive"
+        );
+        assert!(lines.contains(&""));
+        let mut ctx = MockCanvas2dContext::new(1600.0, 1200.0);
+        Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+
+        let mut font = String::new();
+        let mut align = TextAlign::Center;
+        let mut baseline = TextBaseline::Alphabetic;
+        let mut runs = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetFont(value) => font.clone_from(value),
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::SetTextBaseline(value) => baseline = *value,
+                DrawOperation::FillText(text, x, y) if font.starts_with("16px ") => {
+                    assert_eq!(align, TextAlign::Left);
+                    assert_eq!(baseline, TextBaseline::Top);
+                    runs.push((text.as_str(), *x, *y));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(runs.iter().map(|run| run.0).collect::<Vec<_>>(), lines);
+        let x = config.padding + f64::from(note.bounds.x - layout.bounds.x) + 12.0;
+        let top = config.padding + f64::from(note.bounds.y - layout.bounds.y);
+        for (row, (_, actual_x, actual_y)) in runs.iter().enumerate() {
+            assert!((actual_x - x).abs() < 0.01);
+            assert!((actual_y - (top + 10.0 + row as f64 * 28.0)).abs() < 0.01);
+            assert!(*actual_y + 16.0 <= top + f64::from(note.bounds.height) - 10.0 + 0.01);
+        }
     }
 
     #[test]
@@ -5204,6 +6341,44 @@ mod tests {
     }
 
     #[test]
+    fn generic_class_headers_reach_canvas_with_and_without_members() {
+        for members in ["", "  A : +go()\n"] {
+            let source = format!("classDiagram\n  class A~T~[\"Repository\"]\n{members}");
+            let ir = fm_parser::parse(&source).ir;
+            let meta = ir.nodes[0]
+                .class_meta
+                .as_deref()
+                .expect("generic class metadata");
+            assert_eq!(meta.generics, ["T"]);
+            assert_eq!(meta.methods.len(), usize::from(!members.is_empty()));
+            let layout = layout_diagram(&ir);
+
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+                let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+                if use_scene {
+                    renderer.render_scene(&build_render_scene(&ir, &layout), &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                assert!(
+                    ctx.operations().iter().any(
+                        |operation| matches!(operation, DrawOperation::FillText(text, _, _)
+                            if text == "Repository<T>")
+                    ),
+                    "canvas (scene: {use_scene}) lost the complete generic heading"
+                );
+                if !use_scene && !members.is_empty() {
+                    assert!(ctx.operations().iter().any(
+                        |operation| matches!(operation, DrawOperation::FillText(text, _, _)
+                            if text == "+go()")
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn render_draws_generic_diagram_title() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.meta.title = Some("Shipping History".to_string());
@@ -5326,6 +6501,232 @@ mod tests {
             * (CanvasRenderConfig::default().font_size * 0.85 * 0.57)
             + 8.0;
         assert!((label_background_width - expected_width).abs() < 1.0);
+    }
+
+    fn crossing_label_fixture(diagram_type: DiagramType) -> (MermaidDiagramIr, DiagramLayout) {
+        let source = match diagram_type {
+            DiagramType::Flowchart => {
+                "flowchart LR\nA[Alpha] -->|crossing| B[Beta]\nC[Blocker]\nD[Top] -->|secondary| E[Bottom]"
+            }
+            DiagramType::Class => {
+                "classDiagram\nclass A\nclass B\nclass C\nclass D\nclass E\nA --> B : crossing\nD --> E : secondary"
+            }
+            DiagramType::State => {
+                "stateDiagram-v2\nA --> B : crossing\nstate \"Blocker\" as C\nD --> E : secondary"
+            }
+            DiagramType::Er => {
+                "erDiagram\nA ||--|| B : crossing\nD ||--|| E : secondary\nC {\n string id\n}"
+            }
+            _ => unreachable!(),
+        };
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(
+            ir.edges.len(),
+            2,
+            "fixture parse failed for {diagram_type:?}"
+        );
+        let mut layout = layout_diagram(&ir);
+        for node in &mut layout.nodes {
+            let (x, y, width, height) = match ir.nodes[node.node_index].id.as_str() {
+                "A" => (20.0, 120.0, 60.0, 40.0),
+                "B" => (300.0, 120.0, 60.0, 40.0),
+                "C" => (150.0, 100.0, 80.0, 80.0),
+                "D" => (180.0, 20.0, 60.0, 40.0),
+                "E" => (180.0, 240.0, 60.0, 40.0),
+                id => panic!("unexpected fixture node {id}"),
+            };
+            node.bounds = LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            };
+        }
+        for edge in &mut layout.edges {
+            let points = if edge.edge_index == 0 {
+                [(80.0, 140.0), (300.0, 140.0)]
+            } else {
+                [(210.0, 60.0), (210.0, 240.0)]
+            };
+            edge.points = points
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+        }
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        (ir, layout)
+    }
+
+    fn drawn_edge_plate(ctx: &MockCanvas2dContext, label: &str) -> (f64, f64, f64, f64) {
+        let text_index = ctx
+            .operations()
+            .iter()
+            .position(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == label))
+            .unwrap_or_else(|| panic!("edge label {label} was not drawn"));
+        ctx.operations()[..text_index]
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                DrawOperation::FillRect(x, y, width, height) => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .expect("edge text needs its backing plate")
+    }
+
+    #[test]
+    fn graph_edge_label_plates_avoid_nodes_foreign_routes_and_each_other() {
+        for diagram_type in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::State,
+            DiagramType::Er,
+        ] {
+            let (ir, layout) = crossing_label_fixture(diagram_type);
+            let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            });
+            renderer.render(&layout, &ir, &mut ctx);
+            let plan = renderer.edge_label_layout.as_ref().unwrap();
+            let plates = [
+                drawn_edge_plate(&ctx, "crossing"),
+                drawn_edge_plate(&ctx, "secondary"),
+            ];
+            for (edge_index, &(x, y, width, height)) in plates.iter().enumerate() {
+                // Convert the actual draw commands back from the expanded render frame.
+                let left = x + f64::from(plan.bounds.x);
+                let top = y + f64::from(plan.bounds.y);
+                let right = left + width;
+                let bottom = top + height;
+                for node in &layout.nodes {
+                    let rect = node.bounds;
+                    assert!(
+                        right <= f64::from(rect.x)
+                            || left >= f64::from(rect.x + rect.width)
+                            || bottom <= f64::from(rect.y)
+                            || top >= f64::from(rect.y + rect.height),
+                        "{diagram_type:?} label {edge_index} overlaps node {}",
+                        node.node_id,
+                    );
+                }
+                let foreign_path = &layout.edges[1 - edge_index];
+                let a = foreign_path.points[0];
+                let b = foreign_path.points[1];
+                let crosses = if a.x == b.x {
+                    left < f64::from(a.x)
+                        && f64::from(a.x) < right
+                        && top < f64::from(a.y.max(b.y))
+                        && f64::from(a.y.min(b.y)) < bottom
+                } else {
+                    top < f64::from(a.y)
+                        && f64::from(a.y) < bottom
+                        && left < f64::from(a.x.max(b.x))
+                        && f64::from(a.x.min(b.x)) < right
+                };
+                assert!(!crosses, "{diagram_type:?} label covers an unrelated route");
+            }
+            let (a, b) = (plates[0], plates[1]);
+            assert!(
+                a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1,
+                "{diagram_type:?} label plates overlap",
+            );
+        }
+    }
+
+    #[test]
+    fn graph_edge_label_plate_measures_authored_multiline_font() {
+        let ir =
+            fm_parser::parse("flowchart LR\nA -->|first<br/>second| B\nlinkStyle 0 font-size:36px")
+                .ir;
+        assert_eq!(
+            ir.labels[ir.edges[0].label.unwrap().0].text,
+            "first\nsecond"
+        );
+        let layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        renderer.render(&layout, &ir, &mut ctx);
+        let (_, _, width, height) = drawn_edge_plate(&ctx, "first");
+        assert!(width >= 6.0 * 36.0 * 0.57 + 8.0 - 0.001);
+        assert!(height >= 2.0 * 36.0 * 1.2 + 4.0 - 0.001);
+        let rows: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::FillText(text, _, y) if text == "first" || text == "second" => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1] - rows[0] >= 36.0 * 1.2 - 0.001);
+    }
+
+    #[test]
+    fn bundled_and_invisible_edges_do_not_reserve_or_draw_label_plates() {
+        let (mut ir, mut layout) = crossing_label_fixture(DiagramType::Flowchart);
+        ir.edges[1].arrow = ArrowType::Invisible;
+        layout.edges[0].bundled = true;
+        let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let result = renderer.render(&layout, &ir, &mut ctx);
+        assert_eq!(result.edges_drawn, 0);
+        assert!(renderer.edge_label_layout.is_none());
+        assert!(!ctx.operations().iter().any(|op| matches!(
+            op,
+            DrawOperation::FillText(text, _, _) if text == "crossing" || text == "secondary"
+        )));
+    }
+
+    #[test]
+    fn nested_composite_states_keep_internal_labels_and_do_not_overpaint_children() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n [*] --> Inner\n state Inner {\n  A --> B : ready\n }\n Inner --> Finished : complete\n}\nOuter --> [*]",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let composite_count = layout
+            .nodes
+            .iter()
+            .filter(|node| fm_layout::is_composite_state_node(&ir, node))
+            .count();
+        assert_eq!(composite_count, 2, "fixture must reference both containers");
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let result = renderer.render(&layout, &ir, &mut ctx);
+        assert_eq!(result.nodes_drawn, layout.nodes.len() - composite_count);
+        for title in ["Outer", "Inner"] {
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == title))
+                    .count(),
+                1,
+                "a composite title belongs to its cluster, with no overlaid node",
+            );
+        }
+        let inner = layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.title.as_deref() == Some("Inner"))
+            .expect("nested cluster exists")
+            .bounds;
+        let plan = renderer.edge_label_layout.as_ref().unwrap();
+        let (x, y, width, height) = drawn_edge_plate(&ctx, "ready");
+        let left = x + f64::from(plan.bounds.x);
+        let top = y + f64::from(plan.bounds.y);
+        assert!(left >= f64::from(inner.x));
+        assert!(left + width <= f64::from(inner.x + inner.width));
+        assert!(top >= f64::from(inner.y));
+        assert!(top + height <= f64::from(inner.y + inner.height));
     }
 
     #[test]

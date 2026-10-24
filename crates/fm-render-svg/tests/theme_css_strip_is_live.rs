@@ -1,8 +1,8 @@
 //! `strip_unused_theme_css` must actually STRIP, not silently no-op.
 //!
 //! The lever removes theme rule blocks a diagram cannot use — the `.fm-cluster*` rules when there
-//! are no clusters, the special-node-shape rules when none are present, the `.fm-edge-dashed` /
-//! `.fm-edge-thick` rules when no edge is dotted or thick. It works by finding each block as an
+//! are no clusters, the special-node-shape rules when none are present, and the dashed-edge rules
+//! when no edge uses them. Thick edges retain their resolved width attributes. Each block uses an
 //! EXACT substring of the emitted stylesheet, and its constants carry a deliberate
 //! safe-no-op-if-it-drifts contract: an unmatched constant strips nothing rather than corrupting
 //! the CSS.
@@ -53,6 +53,8 @@ const DEAD_SELECTORS: &[&str] = &[
     ".fm-node-shape-note",
     ".fm-node-shape-cloud",
     ".fm-node-shape-cylinder",
+    ".fm-node.fm-node-shape-star :where(path)",
+    ".fm-node.fm-node-shape-pentagon :where(path)",
     ".fm-edge-dashed{",
     ".fm-edge-thick{",
 ];
@@ -101,14 +103,25 @@ fn a_diagram_that_uses_a_gated_feature_keeps_its_rules() {
     );
 
     let thick = render("flowchart LR\n  A ==> B\n", ThemePreset::Default);
+    let path = thick
+        .split("<path")
+        .filter_map(|fragment| fragment.split_once('>'))
+        .map(|(tag, _)| tag)
+        .find(|tag| tag.contains("fm-edge-thick"))
+        .expect("the thick edge must still be emitted");
+    assert!(path.contains("stroke-width=\"2.50\""));
     assert!(
-        thick.contains(".fm-edge-thick{"),
-        "a diagram WITH a thick edge lost the rule that thickens it"
+        !thick.contains(".fm-edge-thick{"),
+        "the resolved width must not be overwritten by a class-level CSS constant"
     );
 
-    let cylinder = render("flowchart LR\n  A[(Store)] --> B\n", ThemePreset::Default);
+    // Exercise the renderer's actual gated shape without depending on expanded-shape parsing.
+    let mut star_ir = fm_parser::parse("flowchart LR\n  A --> B\n").ir;
+    star_ir.nodes[0].shape = fm_core::NodeShape::Star;
+    assert_eq!(star_ir.nodes[0].shape, fm_core::NodeShape::Star);
+    let star = render_svg_with_config(&star_ir, &SvgRenderConfig::default());
     assert!(
-        cylinder.contains(".fm-node-shape-cylinder"),
-        "a diagram WITH a cylinder shape lost the rule that tints it"
+        star.contains(".fm-node.fm-node-shape-star :where(path)"),
+        "a diagram WITH a star shape lost its gated outline rule"
     );
 }

@@ -76,7 +76,202 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
 # measured-justification procedure, not a correctness gate to be quietly relaxed — if a future
 # change cannot say what it cost and why, it should shrink instead of raising.
-MAX_GZIP_BYTES=$((701 * 1024))
+#
+# Raised 701K -> 706K on 2026-10-06 for two new diagram families, MEASURED per family from the
+# committed pkg/ at each step (`gzip -c | wc -c`, the measurement below):
+#   702544 gzip  before (1e5ed69)
+#   709388 gzip  + ishikawa and treeView-beta families, terminal text-block fix  (+6844, PASSED)
+#   722087 gzip  + venn-beta family and canvas `fill-opacity`                    (+12699, 4263 over)
+# So the raise is attributable to venn-beta alone: a lexer/statement parser, the IR meta and its
+# serialisation, and a geometry engine (lens-area inversion, greedy placement, stress refinement,
+# largest-margin region search, text grids). Shrink levers were applied FIRST and are what brought
+# it from 726452 to 722087 (-4365): dropping the generic `[String]::sort` and an index `sort_by`
+# for hand-rolled scans, building styles through the shared CSS parser instead of a new
+# BTreeMap-from-iterator instantiation, f32 geometry instead of f64 libm trig, and one shared
+# warning formatter. Measured function-by-function against the pre-venn build with names kept, the
+# remainder is the family's own inlined layout (~8.4K pre-opt) and parser (~6.6K pre-opt).
+# Headroom after raise: 857 bytes.
+#
+# Raised 706K -> 712K on 2026-10-06 for four syntax gaps in existing families, measured the same
+# way from the committed pkg/ (c9ad966, 722087 gzip):
+#   728708 gzip  + `xychart-beta horizontal`, gitGraph `branch … order:`, quadrant point styling
+#                  (`radius`/`color`/`stroke-*`, `classDef` + `:::class`), requirement `style`
+#                  statements                                                    (+6621, 5764 over)
+#   727729 gzip  after shrink levers                                             (+5642, 4785 over)
+# The levers: a hand-rolled stable insertion sort for the branch-order remap instead of a `sort_by`
+# instantiation (~3.3K pre-opt of drift/quicksort/smallsort monomorphs), and `strip_suffix("px")`
+# instead of `trim_end_matches("px")`, which pulled in a reverse `StrSearcher` (~1.2K pre-opt).
+# Function-by-function against c9ad966 with names kept, what remains is the features' own code:
+# the parser (~4.9K pre-opt: quadrant classDef/`:::` resolution and node styling, the branch-order
+# remap), the horizontal axis furniture in `render_xychart_svg` (~3.5K pre-opt; the vertical path
+# is the hand-streamed hot path and was deliberately not refactored for bytes), the xychart layout
+# branch and plot-bounds helpers (~1.0K), and quadrant point style parse/serialise/paint (~1.6K).
+# Headroom after raise: 1359 bytes.
+#
+# Raised 712K -> 726K on 2026-10-06 for the `wardley-beta` family, measured the same way from the
+# committed pkg/ (6b8e3ea, 728519 gzip):
+#   742177 gzip  + wardley-beta: grammar, IR meta + serialisation, projection layout,
+#                  linear guardrail pricing, renderer inline-style fix        (+13658, 13089 over)
+#   742134 gzip  after merging the four `Name [v, e]` statement arms        (-43)
+# Function-by-function against 6b8e3ea with names kept: `parse_wardley` with its inlined builder
+# and link splitter ~15.4K pre-opt (the whole statement grammar — size, evolution stages and
+# boundaries, anchors, components with labels / sourcing / inertia, pipelines, six link spellings
+# with flows and annotations, evolve, notes, annotations, (de)accelerators — plus lowering to
+# ~10 kinds of marks), the projection inlined into `compute_traced_layout_with_config_and_guardrails`
+# ~4.4K, and serde for the five new IR structs ~2.5K. No shared machinery was added; the remainder
+# is the family. Headroom after raise: 1290 bytes.
+#
+# Raised 726K -> 733K on 2026-10-06 for the `eventmodeling` family, the last mermaid 11.15.0 type
+# this renderer lacked, measured the same way from the committed pkg/ (5ac1939, 742134 gzip):
+#   749987 gzip  + eventmodeling: whitespace-insensitive lexer and statement grammar, lane keying,
+#                  labels with markup, flow rules, IR meta + serialisation, swimlane layout (+7853)
+#   748995 gzip  after replacing the lane `sort_unstable_by_key` with an insertion sort (-992;
+#                  ~1.6K pre-opt of quicksort/smallsort/ipnsort instantiations)
+# Function-by-function against 5ac1939 with names kept: the parser inlined into
+# `parse_mermaid_with_detection_and_config` ~6.3K pre-opt plus the lexer's data reader 0.7K, the
+# layout inlined into the guardrail dispatcher ~2.9K, serde for the new meta ~0.4K. The remainder
+# is the family. Headroom after raise: 1597 bytes.
+#
+# Raised 733K -> 734K on 2026-10-07 for sequence diagrams, measured from the committed pkg/:
+#   748995 gzip  (53f8063)
+#   750542 gzip  + source-order timeline: notes, fragment headers and branches get their own
+#                  rows, note-only regions, created participants at their message (dcb63ff, fit)
+#   751261 gzip  + `actor` drawn as a stick figure in its own `render_node` arm   (+719, 669 over)
+# No lever was found inside the figure itself — a circle, one path and the shared label writer —
+# so the raise is that arm. Headroom after raise: 355 bytes.
+#
+# Raised 734K -> 737K on 2026-10-07 for class/ER relationship ends, measured against 700a609
+# (751261 gzip, rebuilt by this script in the same session):
+#   753918 gzip  + ends sharing one point on a node side are fanned apart, cardinality labels are
+#                  stepped out of the node along the path, start diamonds face along the path
+#   753572 gzip  after replacing the fan's stable `sort_by` with an insertion sort (-346; ~11.6K
+#                  pre-opt of driftsort/quicksort/smallsort instantiations)
+# Function-by-function against 700a609 with names kept: the fan inlined into
+# `compute_traced_layout_with_config_and_guardrails` ~2.8K pre-opt, the direction-aware
+# cardinality writer +0.3K net. Headroom after raise: 1116 bytes, of which the same commit's
+# flowchart `~~~` invisible links then took 1033 (+461 pre-opt: the tilde run in the link grammar,
+# the skip in the SVG edge writer and scene builder, and leaving them out of the `<desc>`):
+#   754944 gzip  with the skip in `render_edge_into`, which changed how wasm-opt inlined it
+#   754605 gzip  after moving the skip onto the arrow already read in `render_edge_body_into` and
+#                folding the `<desc>` filter into its existing `filter_map`              (-339)
+#
+# Raised 737K -> 739K on 2026-10-07 for architecture/block/C4 rendering fixes, measured against
+# 919766a (754605 gzip, the committed pkg/):
+#   756219 gzip  + architecture edges routed between their declared sides, junctions as points,
+#                  `disk`/`internet` icon glyphs, block arrows (`id<["…"]>(dir)`: parse, shared
+#                  outline, SVG/canvas/layout-boundary arms), per-group block `columns`, C4 card
+#                  text painted for its card                                              (+1614)
+#   756133 gzip  after drawing each new glyph as ONE path, building the arrow outline in one
+#                transform loop, and matching the direction without allocating            (-86)
+#   756132 gzip  after building the arrow's boundary path in a plain loop                 (-1)
+# Removing the router's `dedup_by` shrank raw wasm 505 B but GREW gzip 403 B, so it stayed.
+# Function-by-function against 919766a under this script's own opt-level=z profile, names kept:
+# the side router inlined into `compute_traced_layout_with_config_and_guardrails` ~1.4K plus its
+# closures and dedup ~0.5K, the icon glyphs ~1.2K, the block-arrow token parser ~0.8K, the outline
+# ~0.8K, the shape arms in node_path / render_node / canvas ~1.4K, NodeShape serde names 0.3K.
+# Headroom after raise: 604 bytes.
+#
+# Raised 739K -> 750K on 2026-10-07 for compound (cluster-aware) layered layout, measured against
+# d35716d (756665 gzip, the committed pkg/):
+#   768769 gzip  + clusters laid out recursively and placed in the parent graph as single nodes
+#                  (`fm-layout/src/compound.rs`), composite-state boxes no longer obstacles to their
+#                  own contents, Brandes-Köpf coordinates read as centres            (+12104)
+#   768973 gzip  after routing both placements through one `flat_placement` (+204: the phases
+#                were already compiled once, inside the Sugiyama entry, so this bought nothing)
+#   766923 gzip  after building sub-diagrams without sorts or sorted maps and copying only the
+#                four meta fields layout reads instead of cloning the meta              (-2050)
+# Function-by-function against d35716d under this script's opt-level=z profile, names kept: the
+# layered phases moved out of `layout_diagram_sugiyama_traced_with_config` (27.1K) into
+# `flat_placement` + `cycle_preparation` (21.6K) and its caller (+6.1K), net +0.6K; compound
+# placement ~15K pre-opt (sub-diagram construction and drop glue, the per-cluster recursion,
+# parent-graph assembly), the router's composite-container parking ~1.2K. Headroom: 1077 bytes.
+#
+# Raised 750K -> 751K on 2026-10-07 for flowchart edges written to a subgraph id (`one --> two`)
+# ending on the subgraph's border, measured against 0675e62 (766923 gzip, the committed pkg/):
+#   768542 gzip  + which edge ends named a subgraph (recorded per statement, resolved once
+#                  lowering ends so forward references work), the two `IrEdgeExtras` fields, and
+#                  the cut where the route crosses the named cluster's box             (+1619)
+#   768500 gzip  after clipping both ends through one loop with index mapping instead of a
+#                second copy (raw -1046) and resolving the recorded ends in place     (-42)
+# Function-by-function against 0675e62 under this script's opt-level=z profile, names kept: the
+# clip ~1.0K, the end bookkeeping inlined into `parse_flowchart_with_line_offset` / `push_edge` /
+# `resolve_subgraph_endpoint` ~0.9K, extras serde/eq/clone ~0.3K. Headroom: 524 bytes.
+#
+# Raised 751K -> 753K on 2026-10-07 for three layout-correctness fixes, measured against b866942
+# (768796 gzip, the committed pkg/):
+#   770277 gzip  + a flowchart node kept in one subgraph (mermaid's first-closed rule; two
+#                  subgraphs naming one node built two overlapping boxes), a few disconnected
+#                  components sharing their ranks (they were laid end to end along the rank axis),
+#                  and route legs checked against obstacles (an edge spanning ranks ran through the
+#                  nodes between; it now turns early or late, or crosses on a line cleared of every
+#                  obstacle rather than the first)                                       (+1481)
+#   770260 gzip  after removing members by position instead of three `retain` instantiations and
+#                iterating the held subgraphs as a slice                                  (-17)
+# Function-by-function against b866942 under this script's opt-level=z profile, names kept: the
+# two CGA nudges (2x1.2K) now inline once into `segment_blocked` (2.1K), the router +0.6K with
+# `turning_route` inlined, `clear_line` 0.5K and its closures 0.4K: routing net +0.9K; the
+# membership pass inlined into `parse_flowchart_with_line_offset` ~1.0K plus its iterator chain
+# 0.3K; shared component ranks ~0.4K. Headroom: 812 bytes.
+# Raised 753K -> 776K on 2026-10-18 for the fresh package and GH#14 browser label preservation.
+# MEASURED with this script's gzip command; see evidence/issue14_browser_regression.md:
+#   771021 gzip  last committed pkg/ (01666a65, source fingerprint verified)
+#   790765 gzip  unchanged source at 4e6dea85, rebuilt with the same pinned toolchain (+19744)
+#   790696 gzip  that baseline with --strip-producers in the existing optimizer pass (-69)
+#   794451 gzip  GH#14 full text and node/label-plate clearance with the same flags (+3755)
+#   794414 gzip  plus scoped geometricPrecision to retain glyph metrics through zoom (-37)
+# The first delta is accumulated Canvas selection/session bindings since pkg/ was last built;
+# the complete issue fix adds 3718 bytes over the stripped baseline. Shrink preceded this raise:
+# every noncustom section stayed byte-identical; a separate strip-only pass grew gzip by 3012.
+# Existing -Oz --converge, LTO, one codegen unit and immediate-abort std remain in force.
+# This is the smallest whole-KiB ceiling that fits the measured artifact: headroom 210 bytes.
+# Raised 776K -> 785K on 2026-10-19 after measuring current main and GH#14 font geometry:
+#   794414 gzip  committed c2ba665b package from f85cf30d
+#   802138 gzip  unchanged main 41afadc rebuilt with the same canonical flags (+7724)
+#   803604 gzip  calibrated font overrides, font-aware tree/rank spacing, glyph/diamond
+#                  fitting, clear label placement, export bounds and title-sized cluster
+#                  headers/compound frames (+1466 over fresh main)
+# The first delta belongs to eight already-landed layout/style/class/routing changes. Both
+# baseline modules have zero custom sections and the same 89 imports / 50 exports; their code
+# section grew 22017 raw bytes while data shrank 2306. No metadata remains to strip. Keep the
+# existing -Oz --converge, LTO, one codegen unit and immediate-abort std; the additional optimizer
+# replays rejected above are not a size reduction. This smallest whole-KiB ceiling leaves 236
+# bytes. Browser/API correctness and artifact/source freshness gates remain unchanged.
+# See evidence/issue14_font_regression.md for before/after rendering and size evidence.
+# Raised 785K -> 787K on 2026-10-20 after measuring integrated current main and GH#14:
+#   803958 gzip  unchanged main 29536a, compiled in a fresh isolated target
+#   805290 gzip  integrated label/font geometry fixes (+1332 over fresh main)
+# The fresh main baseline itself is 118 bytes above the previous 785K ceiling. The issue
+# fixes add 2844 raw bytes: code-section bytes +2810, type-section bytes +24, and
+# function-section bytes +10. Data-section size remains 158119 bytes; both modules have
+# zero custom sections, 89 imports, and 50 exports, so no metadata remains to strip.
+# Keep the canonical -Oz --converge, LTO, one codegen unit, and immediate-abort std flags.
+# 787K is the smallest whole-KiB ceiling that fits this measured output, with 598 bytes
+# of headroom. Browser/API correctness and source-freshness gates remain unchanged.
+# See evidence/issue14_font_regression.md for the independent size and runtime evidence.
+# Raised 787K -> 792K on 2026-10-21 for compact collision-safe mindmaps, branch/root
+# styling, inline mindmap classes, and State/Class note clearance. A same-tools build
+# of unchanged db9d0299 in an empty isolated target reproduced all five committed
+# package artifacts exactly: 2010209 raw / 805290 gzip bytes. The feature build measured
+# 810695 gzip; sharing the radial comparator reduced it to 810333 (-362 gzip / -3923 raw).
+# A u8 channel formatter grew gzip by 56 bytes and was rejected. Net feature growth is
+# 16083 raw / 5043 gzip: code +15420, data +601, types +30, function section +32.
+# Both modules retain 89 imports, 50 exports, and zero custom sections. Keep canonical
+# -Oz --converge, LTO, one codegen unit, and immediate-abort std. 792K is the smallest
+# whole-KiB ceiling fitting this output, with 675 bytes headroom. Correctness and
+# artifact/source freshness gates remain unchanged. See evidence/mindmap_browser_validation.json.
+#
+# Raised 792K -> 935K on 2026-10-24 while harmonizing local main with origin/main.
+# Same tools, measured `gzip -c pkg/frankenmermaid_bg.wasm | wc -c`:
+#   810310 gzip  origin/main blob (inside 811008)
+#   717642 gzip  local main blob
+#   957153 gzip / 2455470 raw  rebuilt from the merged Rust source
+# The 146843 gzip bytes over origin are local behavior that stayed reachable from
+# fm-wasm after the union (parse lens, selectedNodeId, layout/parser/canvas helpers
+# origin does not implement) on top of origin's newer diagram families. Default
+# features still exclude fnx-integration. No shrink that would drop that behavior
+# was applied. 935K is the smallest whole-KiB ceiling that fits 957153, with 287
+# bytes of headroom. Correctness and artifact/source freshness gates are unchanged.
+MAX_GZIP_BYTES=$((935 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
@@ -172,6 +367,9 @@ echo "==> Optimizing wasm with wasm-opt"
 # (custom-descriptors proposal), producing a module Node and current browsers refuse to
 # instantiate ("invalid heap type 'exact'"). The explicit list keeps the output inside the
 # widely-shipped wasm feature set.
+# Strip producer metadata inside this same pass. A paired build at 4e6dea85 removed 74 raw
+# bytes / 69 gzip bytes with every noncustom section byte-identical. A separate strip-only
+# round trip grew gzip by 3012 bytes, so do not add a second optimizer invocation.
 wasm-opt -Oz \
   --enable-bulk-memory \
   --enable-mutable-globals \
@@ -179,6 +377,7 @@ wasm-opt -Oz \
   --enable-sign-ext \
   --enable-reference-types \
   --enable-multivalue \
+  --strip-producers \
   --converge "$WASM_PATH" -o "$WASM_PATH"
 
 SOURCE_SHA256_AFTER="$(compute_source_sha256)"

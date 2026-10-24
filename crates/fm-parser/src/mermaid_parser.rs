@@ -24,7 +24,9 @@ use crate::{
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
 
-const FLOW_OPERATORS: [(&str, ArrowType); 26] = [
+const FLOW_OPERATORS: [(&str, ArrowType); 27] = [
+    // `~~~` is here for the first-byte gate: `match_mermaid_flow_link` reads the whole tilde run.
+    ("~~~", ArrowType::Invisible),
     ("-.->", ArrowType::DottedArrow),
     ("<-.->", ArrowType::DoubleDottedArrow),
     ("-.-", ArrowType::DottedLine),
@@ -595,7 +597,10 @@ pub fn parse_mermaid_with_detection_and_config(
 
     match diagram_type {
         DiagramType::Flowchart => parse_flowchart(content, &mut builder),
-        DiagramType::Sequence => parse_sequence(content, &mut builder),
+        DiagramType::Sequence => {
+            parse_sequence(content, &mut builder);
+            builder.finish_sequence_timeline();
+        }
         DiagramType::Class => parse_class(content, &mut builder),
         DiagramType::State => parse_state(content, &mut builder),
         DiagramType::Requirement => parse_requirement(content, &mut builder),
@@ -621,6 +626,11 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::Treemap => parse_treemap(content, &mut builder),
         DiagramType::Radar => parse_radar(content, &mut builder),
         DiagramType::Info => parse_info(content, &mut builder),
+        DiagramType::Ishikawa => parse_ishikawa(content, &mut builder),
+        DiagramType::TreeView => parse_tree_view(content, &mut builder),
+        DiagramType::Venn => parse_venn(content, &mut builder),
+        DiagramType::Wardley => parse_wardley(content, &mut builder),
+        DiagramType::EventModeling => parse_event_model(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -636,7 +646,9 @@ pub fn parse_mermaid_with_detection_and_config(
     // Extract style/classDef/linkStyle directives for all diagram types.
     // (Previously only called from parse_flowchart; now runs generically
     // so that class, state, block-beta, etc. all support styling.)
-    if diagram_type != DiagramType::Flowchart {
+    // `venn-beta` owns its `style` statement: its targets are SET ids and REGIONS, not node ids,
+    // and the generic pass would read `style A,B fill: …` as a node directive naming `A,B`.
+    if diagram_type != DiagramType::Flowchart && diagram_type != DiagramType::Venn {
         extract_style_directives(content, &mut builder);
     }
 
@@ -1323,6 +1335,8 @@ fn lower_flow_ast(
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);
                 }
+            } else {
+                builder.discard_pending_subgraph_endpoints();
             }
         }
         FlowAst::ClassAssign { nodes, class } => {
@@ -1464,6 +1478,7 @@ fn lower_flow_document_item(
     // a subgraph body), so it is a no-op called ~2400×/parse (both endpoints per edge + each node).
     // Gate the calls on this once-computed flag — byte-identical (skips a provable no-op).
     let in_groups = !active_clusters.is_empty() || !active_subgraphs.is_empty();
+    builder.begin_flow_statement();
     match item {
         FlowDocumentItem::FastEdge {
             from,
@@ -1491,6 +1506,8 @@ fn lower_flow_document_item(
                     add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
                 }
                 builder.push_edge(f, t, arrow, None, span);
+            } else {
+                builder.discard_pending_subgraph_endpoints();
             }
         }
         FlowDocumentItem::FastNode {
@@ -2134,6 +2151,8 @@ fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &m
     for item in document.items {
         lower_flow_document_item(item, builder, &[], &[]);
     }
+    builder.finish_subgraph_edge_ends();
+    builder.finish_unique_subgraph_membership();
 
     // Extract style directives from the raw input and add to IR.
     // This runs AFTER lowering so node IDs are resolved for `style nodeId` lookups.
@@ -2193,15 +2212,120 @@ fn byte_lines(input: &str) -> ByteLines<'_> {
     ByteLines { input, start: 0 }
 }
 
+/// Where a flowchart line leaves the string lexer: outside any string, inside a `"…"` string, or
+/// inside a markdown ``"`…`"`` string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlowQuoteState {
+    Closed,
+    Plain,
+    Markdown,
+}
+
+/// Run the incumbent's string lexer states over one line, starting from `state`.
+fn scan_flow_quotes(line: &str, mut state: FlowQuoteState) -> FlowQuoteState {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            FlowQuoteState::Closed if byte == b'"' => {
+                if next == Some(b'`') {
+                    state = FlowQuoteState::Markdown;
+                    index += 1;
+                } else {
+                    state = FlowQuoteState::Plain;
+                }
+            }
+            FlowQuoteState::Plain if byte == b'"' => state = FlowQuoteState::Closed,
+            FlowQuoteState::Markdown if byte == b'`' && next == Some(b'"') => {
+                state = FlowQuoteState::Closed;
+                index += 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    state
+}
+
+/// The flowchart's logical lines: physical lines, except that a quoted label still open at a line's
+/// end continues through the line that closes it.
+///
+/// ⚠️ A LABEL SPANNING LINES WAS SPLIT INTO NODES. Mermaid's string lexer (`["][`]` … `` [`]["] ``
+/// and `["]` … `["]`) runs across newlines, and its docs show markdown strings written over
+/// several lines; `markdownToLines` / `nonMarkdownToLines` then draw each source line as a line of
+/// the label. Read line by line, ``B["`Line 1`` ended the statement mid-label and every following
+/// line became a node of its own (`Line_2`, …), with a DROPPED-syntax warning for the tail.
+///
+/// A joined line is one contiguous slice of `input` (its newlines included) carrying the first
+/// line's number. A string that never closes is NOT joined — that stays the recovery path it was —
+/// and once one is found, joining stops, so a stray quote cannot make this quadratic. Comment lines
+/// and the body of a multi-line `accDescr { … }` are opaque to the lexer, as upstream.
+fn flowchart_logical_lines(input: &str, line_offset: usize) -> Vec<(usize, &str)> {
+    let lines: Vec<(usize, &str)> = byte_lines(input)
+        .enumerate()
+        .map(|(i, line)| (line_offset + i + 1, line))
+        .collect();
+    // Fast path: without a `"` there is no string to leave open.
+    if memchr::memchr(b'"', input.as_bytes()).is_none() {
+        return lines;
+    }
+    let base = input.as_ptr() as usize;
+    let offset_of = |line: &str| line.as_ptr() as usize - base;
+    let mut merged = Vec::with_capacity(lines.len());
+    let mut in_acc_descr_block = false;
+    let mut joining = true;
+    let mut index = 0;
+    while index < lines.len() {
+        let (number, line) = lines[index];
+        index += 1;
+        let trimmed = trim_fast(line);
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.contains('}');
+            merged.push((number, line));
+            continue;
+        }
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            merged.push((number, line));
+            continue;
+        }
+        if !joining || is_comment(trimmed) || memchr::memchr(b'"', line.as_bytes()).is_none() {
+            merged.push((number, line));
+            continue;
+        }
+        let mut state = scan_flow_quotes(line, FlowQuoteState::Closed);
+        if state == FlowQuoteState::Closed {
+            merged.push((number, line));
+            continue;
+        }
+        let mut end = index;
+        while end < lines.len() && state != FlowQuoteState::Closed {
+            state = scan_flow_quotes(lines[end].1, state);
+            end += 1;
+        }
+        if state != FlowQuoteState::Closed {
+            joining = false;
+            merged.push((number, line));
+            continue;
+        }
+        let last = lines[end - 1].1;
+        merged.push((
+            number,
+            &input[offset_of(line)..offset_of(last) + last.len()],
+        ));
+        index = end;
+    }
+    merged
+}
+
 fn parse_flowchart_document<'a>(
     input: &'a str,
     line_offset: usize,
     config: &ParserConfig,
 ) -> FlowDocumentParseResult<'a> {
-    let lines: Vec<(usize, &str)> = byte_lines(input)
-        .enumerate()
-        .map(|(i, line)| (line_offset + i + 1, line))
-        .collect();
+    let lines = flowchart_logical_lines(input, line_offset);
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let mut header_direction = None;
@@ -5623,29 +5747,34 @@ fn lower_class_statement(
     }
 }
 
-/// Parse `note for <class> "<text>"`, mermaid's class-diagram note.
+/// Parse `note for <class> "<text>"`, mermaid's class-diagram note, or the standalone
+/// `note "<text>"`, which annotates the diagram rather than a class and comes back with an EMPTY
+/// target (layout gives it a place of its own; it is never attached to some class).
 ///
 /// The text is taken WHOLE after the target token and only its surrounding quotes are stripped, so
 /// a note containing a colon survives — `mermaid_parser.rs` already flags that exact case as a
 /// hazard for the member shorthand, which splits on the first colon. Splitting here would turn
 /// `note for A "text: here"` into a truncated note or, worse, a member of a class named `note`.
-///
-/// Returns `None` for the standalone `note "<text>"` form, which has no target: placing an
-/// unattached note needs geometry the targeted path has no notion of. It stays dropped, and
-/// visibly so, rather than being silently reattached to an arbitrary class.
+/// A `\n` or `<br>` in the text breaks the line, as mermaid draws it.
 fn parse_class_note(statement: &str) -> Option<(String, String)> {
-    let rest = trim_fast(trim_fast(statement).strip_prefix("note for ")?);
-    let (target, remainder) = rest.split_once(char::is_whitespace)?;
-    let target = trim_fast(target);
-    let text = trim_fast(remainder);
+    let statement = trim_fast(statement);
+    let (target, text) = if let Some(rest) = statement.strip_prefix("note for ") {
+        let (target, remainder) = trim_fast(rest).split_once(char::is_whitespace)?;
+        (trim_fast(target), trim_fast(remainder))
+    } else {
+        let text = trim_fast(statement.strip_prefix("note ")?);
+        // Only the quoted form: `note` followed by anything else is not a note statement.
+        text.starts_with('"').then_some(("", text))?
+    };
     let text = text
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
         .map_or(text, trim_fast);
-    if target.is_empty() || text.is_empty() {
+    if text.is_empty() {
         return None;
     }
-    Some((target.to_string(), text.to_string()))
+    let text = replace_br_with_newlines(text).replace("\\n", "\n");
+    Some((target.to_string(), text))
 }
 
 fn parse_state(input: &str, builder: &mut IrBuilder) {
@@ -6133,7 +6262,11 @@ fn lower_state_flow_ast(
                 //
                 // The structured fields stay: they are the right shape for a consumer that wants
                 // the parts, and keeping them costs nothing now that the label is whole.
-                let (_clean_label, guard, action) = extract_state_guard_action(label.as_deref());
+                // Structured metadata must describe the same normalized text as the visible
+                // label, rather than retaining quote wrappers or encoded entities in the action.
+                let normalized_label = clean_label(label.as_deref());
+                let (_clean_label, guard, action) =
+                    extract_state_guard_action(normalized_label.as_deref());
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
                 if let Some(edge_id) = edge_id {
                     builder.set_last_edge_id(edge_id);
@@ -6451,6 +6584,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) {
             continue;
         }
+        // ⚠️ AND SO ARE THE STYLING STATEMENTS. mermaid's requirement grammar accepts `style`,
+        // `classDef` and `class`, and `extract_style_directives` already applies all three to the
+        // requirement nodes — the fill reached the SVG while this loop reported the line as
+        // unsupported, the same working-directive-called-broken shape as bd-xym5x.
+        if is_non_graph_statement(trimmed)
+            || trimmed
+                .strip_prefix("class")
+                .is_some_and(|rest| rest.starts_with([' ', '\t']))
+        {
+            continue;
+        }
 
         builder.add_warning(format!(
             "Line {line_number}: unsupported requirement syntax: {trimmed}"
@@ -6629,6 +6773,16 @@ fn mindmap_token_is_default_shaped(trimmed: &str) -> bool {
 }
 
 fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+    let mut token = parse_mindmap_node_token_core(raw, config)?;
+    // Every shape matcher consumes only the core token. Preserve the suffix in one place,
+    // just as the flowchart wrapper does, so a classDef can override the branch defaults.
+    if token.classes.is_empty() {
+        token.classes = inline_class_names(raw);
+    }
+    Some(token)
+}
+
+fn parse_mindmap_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -6662,16 +6816,9 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
             return Some(parsed);
         }
 
-        // Circle shape: id((text)) - reuse existing double-circle parser
-        if let Some(parsed) = parse_double_circle_with_config(core, config) {
-            // For mindmap, (( )) is just a circle, not double-circle
-            return Some(NodeToken {
-                id: parsed.id,
-                label: parsed.label,
-                icon: parsed.icon,
-                shape: NodeShape::Circle,
-                classes: Vec::new(),
-            });
+        // Circle shape: id((text)); mindmap has no `(((…)))` double circle.
+        if let Some(parsed) = parse_circle_with_config(core, config, false) {
+            return Some(parsed);
         }
 
         // Rounded shape: id(text)
@@ -7766,6 +7913,2079 @@ fn parse_info(content: &str, builder: &mut IrBuilder) {
             line_number + 1
         ));
     }
+}
+
+/// Strip an `ishikawa` / `ishikawa-beta` header, returning whatever follows it on the same line.
+///
+/// `None` when the line is not a header. The incumbent's lexer matches `ishikawa-beta\b` and
+/// `ishikawa\b` case-insensitively and then lexes the rest of the line as an ordinary statement,
+/// so `ishikawa Late delivery` is a header FOLLOWED BY the effect, not a malformed header.
+fn strip_ishikawa_header(trimmed: &str) -> Option<&str> {
+    let head = trimmed.get(..8)?;
+    if !head.eq_ignore_ascii_case("ishikawa") {
+        return None;
+    }
+    let mut rest = &trimmed[8..];
+    if rest
+        .get(..5)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("-beta"))
+    {
+        rest = &rest[5..];
+    }
+    // `\b`: the keyword must end at a non-word character, or `ishikawas` would be a header.
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(trim_fast(rest))
+}
+
+/// Parse an `ishikawa` (fishbone) document: an indentation tree whose FIRST line is the effect.
+///
+/// Mirrors the pinned 11.15.0 `IshikawaDB::addNode` exactly, because indentation is the whole
+/// syntax and any other reading would hang causes off different parents than the author sees:
+///
+/// - the first statement is the root (the effect, drawn in the fish head) whatever its indent;
+/// - the indent of the FIRST CAUSE becomes the base level, so a document whose effect line is
+///   indented deeper than its causes still nests correctly;
+/// - every later line's level is `indent - base + 1`, clamped to at least 1, and it attaches to
+///   the nearest preceding line with a STRICTLY smaller level.
+///
+/// Indentation counts characters, as the incumbent's `SPACELIST.length` does — a tab is one.
+///
+/// Edges run cause → effect (child → parent): every bone in a fishbone points at what it causes.
+///
+/// `accTitle`/`accDescr` are consumed as directives rather than drawn as a bone. The incumbent's
+/// grammar has no accessibility rule for this family, so it would draw them as causes; drawing an
+/// author's own directive as diagram content is the phantom-node class of defect this repository
+/// refuses everywhere else (bd-yfcfv), and the shared accessibility pass already records them.
+fn parse_ishikawa(content: &str, builder: &mut IrBuilder) {
+    let mut header_seen = false;
+    let mut root: Option<fm_core::IrNodeId> = None;
+    let mut base_level: Option<usize> = None;
+    // (level, node) — the incumbent's StackEntry list. The root sits at level 0 and is never popped.
+    let mut stack: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
+    let mut ordinal = 0_usize;
+    let mut in_acc_descr_block = false;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let (indent, text) = if header_seen {
+            (indent, trimmed)
+        } else if let Some(rest) = strip_ishikawa_header(trimmed) {
+            header_seen = true;
+            if rest.is_empty() {
+                continue;
+            }
+            // Text on the header line: the incumbent lexes the whitespace before it as the
+            // statement's SPACELIST, so its level is that whitespace's length.
+            let after_keyword = &trimmed[..trimmed.len() - rest.len()];
+            let gap = after_keyword.len() - after_keyword.trim_end().len();
+            (gap, rest)
+        } else {
+            header_seen = true;
+            (indent, trimmed)
+        };
+        if in_acc_descr_block {
+            in_acc_descr_block = !text.ends_with('}');
+            continue;
+        }
+        if let Some(rest) = flowchart_accessibility_directive(text) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+
+        let span = span_for(line_number, line);
+        // `<br>` is a line break upstream (`splitLines`), in the effect and in every cause.
+        let text = replace_br_with_newlines(text);
+        let Some(&(_, root_id)) = stack.first() else {
+            let Some(node_id) = builder.intern_fresh_node_owned_label(
+                "effect".to_string(),
+                text.into_owned(),
+                NodeShape::HalfRoundedRect,
+                span,
+            ) else {
+                continue;
+            };
+            builder.add_class_to_node_id(node_id, "ishikawa-head");
+            root = Some(node_id);
+            stack.push((0, node_id));
+            continue;
+        };
+
+        let base = *base_level.get_or_insert(indent);
+        let level = (indent + 1).saturating_sub(base).max(1);
+        while stack.len() > 1 && stack.last().is_some_and(|(top, _)| *top >= level) {
+            stack.pop();
+        }
+        let (parent_level, parent_id) = stack.last().copied().unwrap_or((0, root_id));
+        // Only the first ring of causes is boxed upstream; a bone below it carries its text alone.
+        let (shape, class) = if parent_level == 0 {
+            (NodeShape::Rect, "ishikawa-cause")
+        } else {
+            (NodeShape::TextBlock, "ishikawa-sub-cause")
+        };
+        ordinal += 1;
+        let Some(node_id) = builder.intern_fresh_node_owned_label(
+            format!("cause_{ordinal}"),
+            text.into_owned(),
+            shape,
+            span,
+        ) else {
+            continue;
+        };
+        builder.add_class_to_node_id(node_id, class);
+        builder.push_edge(node_id, parent_id, ArrowType::Arrow, None, span);
+        stack.push((level, node_id));
+    }
+
+    if root.is_none() {
+        builder.add_warning("ishikawa declared no effect (the first line names the problem)");
+    }
+}
+
+/// Is this line the `treeView-beta` header?
+///
+/// The incumbent's detector is `/^\s*treeView-beta/` and its grammar keyword is the same literal; a
+/// bare `treeView` is rejected upstream, so it is not a header here either.
+fn is_tree_view_header(trimmed: &str) -> bool {
+    trimmed
+        .get(..13)
+        .is_some_and(|head| head.eq_ignore_ascii_case("treeview-beta"))
+        && trimmed[13..].chars().next().is_none_or(char::is_whitespace)
+}
+
+/// Parse a `treeView-beta` document: one quoted name per line, nested by indentation.
+///
+/// Mirrors the pinned 11.15.0 `treeView` db: an implicit root named `/` at level -1 that the
+/// renderer always draws, and every line attaching to the nearest preceding line whose indent is
+/// STRICTLY smaller (`while level <= top.level: pop`). Indentation is a character count, as the
+/// grammar's `INDENTATION` value converter returns it.
+///
+/// Names are `"…"` or `'…'` upstream (`STRING2`). An unquoted name is accepted best-effort with a
+/// warning, because the incumbent rejects the whole document over it and an author deserves to know
+/// why their diagram would not render there.
+fn parse_tree_view(content: &str, builder: &mut IrBuilder) {
+    // Upstream draws the `/` root even for a document with no entries, so it exists unconditionally.
+    let Some(root_id) = builder.intern_fresh_node_owned_label(
+        "root".to_string(),
+        "/".to_string(),
+        NodeShape::TextBlock,
+        Span::default(),
+    ) else {
+        return;
+    };
+    builder.add_class_to_node_id(root_id, "tree-view-root");
+    // The root sits at level 0 here and every real line at `indent + 1`, which keeps upstream's
+    // `level <= top.level` pop rule against a level -1 root without a signed level.
+    let mut stack: Vec<(usize, fm_core::IrNodeId)> = vec![(0, root_id)];
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+    let mut ordinal = 0_usize;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen && is_tree_view_header(trimmed) {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        if is_diagram_level_directive_statement(trimmed) {
+            continue;
+        }
+
+        let bytes = trimmed.as_bytes();
+        let quoted = bytes.len() >= 2
+            && matches!(bytes[0], b'"' | b'\'')
+            && bytes[bytes.len() - 1] == bytes[0];
+        let name = if quoted {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            builder.add_warning(format!(
+                "Line {line_number}: treeView-beta names are quoted upstream; accepted unquoted: \
+                 {trimmed}"
+            ));
+            trimmed
+        };
+        let level = line.len() - line.trim_start().len() + 1;
+        while stack.len() > 1 && stack.last().is_some_and(|(top, _)| level <= *top) {
+            stack.pop();
+        }
+        let parent_id = stack.last().map_or(root_id, |&(_, id)| id);
+        let span = span_for(line_number, line);
+        ordinal += 1;
+        let Some(node_id) = builder.intern_fresh_node_owned_label(
+            format!("entry_{ordinal}"),
+            name.to_string(),
+            NodeShape::TextBlock,
+            span,
+        ) else {
+            continue;
+        };
+        builder.add_class_to_node_id(node_id, "tree-view-node");
+        builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
+        stack.push((level, node_id));
+    }
+}
+
+/// Stroke / label colour pairs cycled per `venn-beta` set, in declaration order.
+///
+/// Upstream derives its eight `venn1..venn8` colours from the theme's primary/secondary/tertiary
+/// colours darkened by 30% lightness; for the default theme two of those land on pale yellows that
+/// fail contrast against a white page. These keep the upstream SHAPE — a saturated stroke, the same
+/// colour as a faint fill, a darker shade for the set's own label — at readable contrast.
+const VENN_PALETTE: [(&str, &str); 8] = [
+    ("#4f6bed", "#2b3fae"),
+    ("#e08a1e", "#8a5212"),
+    ("#2f9e72", "#1d6449"),
+    ("#d64541", "#8e2a27"),
+    ("#8e6cd8", "#55369a"),
+    ("#2a9fc4", "#1a6680"),
+    ("#c4589a", "#7f3a66"),
+    ("#6f8291", "#46535e"),
+];
+
+/// One lexed `venn-beta` token. The grammar is small enough that a hand lexer mirroring the
+/// incumbent's jison rules is clearer than a combinator parser.
+#[derive(Debug, Clone, PartialEq)]
+enum VennToken<'a> {
+    Word(&'a str),
+    Quoted(&'a str),
+    Bracket(&'a str),
+    /// A number, with the text it was written as: ids and style values keep the author's
+    /// spelling, and re-printing the float would also link the float formatter into the WASM.
+    Number(f64, &'a str),
+    Comma,
+    Colon,
+    /// Anything else (a colour, a unit) kept verbatim for `style` values.
+    Other(&'a str),
+}
+
+fn lex_venn(text: &str) -> Vec<VennToken<'_>> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        match c {
+            b',' => {
+                tokens.push(VennToken::Comma);
+                i += 1;
+            }
+            b':' => {
+                tokens.push(VennToken::Colon);
+                i += 1;
+            }
+            b'"' => {
+                let end = text[i + 1..].find('"').map_or(bytes.len(), |e| i + 1 + e);
+                tokens.push(VennToken::Quoted(&text[i + 1..end.min(bytes.len())]));
+                i = (end + 1).min(bytes.len());
+            }
+            b'[' => {
+                let end = text[i..].find(']').map_or(bytes.len(), |e| i + e);
+                let inner = text[i + 1..end].trim();
+                // `["label"]` and `[label]` are both labels upstream.
+                let inner = inner
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(inner);
+                tokens.push(VennToken::Bracket(inner));
+                i = (end + 1).min(bytes.len());
+            }
+            _ if c.is_ascii_alphabetic() || c == b'_' => {
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'-'))
+                {
+                    i += 1;
+                }
+                tokens.push(VennToken::Word(&text[start..i]));
+            }
+            _ => {
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b',' {
+                    // A colour like `rgb(1, 2, 3)` keeps its commas: they are inside parentheses.
+                    if bytes[i] == b'(' {
+                        while i < bytes.len() && bytes[i] != b')' {
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+                let raw = &text[start..i.min(bytes.len())];
+                match raw.parse::<f64>() {
+                    Ok(value) if value.is_finite() => tokens.push(VennToken::Number(value, raw)),
+                    _ => tokens.push(VennToken::Other(raw)),
+                }
+            }
+        }
+    }
+    tokens
+}
+
+/// A set identifier: a bare word or a quoted string, as upstream's `identifier`.
+fn venn_identifier<'a>(token: Option<&VennToken<'a>>) -> Option<&'a str> {
+    match token? {
+        VennToken::Word(word) => Some(word),
+        VennToken::Quoted(text) => Some(text.trim()),
+        _ => None,
+    }
+}
+
+/// `A, B, "C"` → identifiers, plus the index of the first token after the list.
+fn venn_identifier_list<'a>(tokens: &[VennToken<'a>], start: usize) -> (Vec<String>, usize) {
+    let mut ids = Vec::new();
+    let mut i = start;
+    while let Some(id) = venn_identifier(tokens.get(i)) {
+        ids.push(id.to_string());
+        i += 1;
+        if tokens.get(i) == Some(&VennToken::Comma) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    (ids, i)
+}
+
+/// `[label] [: size]` after a set or union.
+fn venn_label_and_size<'a>(
+    tokens: &[VennToken<'a>],
+    mut i: usize,
+) -> (Option<&'a str>, Option<f64>, usize) {
+    let mut label = None;
+    if let Some(VennToken::Bracket(text)) = tokens.get(i) {
+        label = Some(*text);
+        i += 1;
+    }
+    let mut size = None;
+    if tokens.get(i) == Some(&VennToken::Colon)
+        && let Some(VennToken::Number(value, _)) = tokens.get(i + 1)
+    {
+        size = Some(*value);
+        i += 2;
+    }
+    (label, size, i)
+}
+
+/// One `style` statement: its sorted targets and its `key: value` fields in source order.
+type VennStyle = (Vec<String>, Vec<(String, String)>);
+
+/// Parse a `venn-beta` document.
+///
+/// Mirrors the pinned 11.15.0 grammar and `vennDB`:
+///
+/// - `set A`, `set A["Label"]`, `set A:20`, `set A["Label"]:20` — a circle whose area is its size
+///   (default 10);
+/// - `union A,B[…][:size]` — the region where those sets overlap (default size `10 / k²`), naming
+///   only sets already declared, as upstream requires;
+/// - `text A,B id["label"]`, or an INDENTED `text id["label"]` directly under a `set`/`union`,
+///   which places text inside that region. Upstream's indent mode switches on at a `set`/`union`
+///   and off at the next line that starts in column 0;
+/// - `style A,B fill: …, color: …` — colours for a set's circle, a region's label or a text entry;
+/// - `title …` up to a `#` or `;`, as the incumbent's lexer reads it.
+///
+/// Every set is a circle node and every labelled region and text entry a text-block node, so all
+/// backends draw the diagram from node geometry; the sizes and memberships the layout needs travel
+/// in `ir.venn_meta`.
+fn parse_venn(content: &str, builder: &mut IrBuilder) {
+    let mut meta = fm_core::IrVennMeta::default();
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+    // The sets the most recent `set`/`union` named, while indent mode is on.
+    let mut current_sets: Option<Vec<String>> = None;
+    let mut ordinal = 0_usize;
+    let mut styles: Vec<VennStyle> = Vec::new();
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen
+            && trimmed
+                .get(..9)
+                .is_some_and(|head| head.eq_ignore_ascii_case("venn-beta"))
+        {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        let indented = line.starts_with([' ', '\t']);
+        if !indented {
+            current_sets = None;
+        }
+        let span = span_for(line_number, line);
+        let tokens = lex_venn(trimmed);
+        let Some(VennToken::Word(keyword)) = tokens.first() else {
+            venn_warning(builder, line_number, "unsupported venn syntax", trimmed);
+            continue;
+        };
+        match keyword.to_ascii_lowercase().as_str() {
+            "title" => {
+                let title = trimmed[5..].split(['#', ';']).next().map_or("", trim_fast);
+                if !title.is_empty() {
+                    builder.set_title(title.to_string());
+                }
+            }
+            "set" => {
+                let Some(id) = venn_identifier(tokens.get(1)) else {
+                    venn_warning(builder, line_number, "`set` needs a name", trimmed);
+                    continue;
+                };
+                let (label, size, _) = venn_label_and_size(&tokens, 2);
+                if meta.sets.iter().any(|set| set.id == id) {
+                    venn_warning(builder, line_number, "set declared twice", trimmed);
+                    continue;
+                }
+                let Some(node_id) = builder.intern_fresh_node_owned_label(
+                    format!("set_{id}"),
+                    label.unwrap_or(id).to_string(),
+                    NodeShape::Circle,
+                    span,
+                ) else {
+                    continue;
+                };
+                builder.add_class_to_node_id(node_id, "venn-set");
+                meta.sets.push(fm_core::IrVennSet {
+                    id: id.to_string(),
+                    node: node_id.0,
+                    size: size.filter(|size| *size > 0.0).unwrap_or(10.0),
+                });
+                current_sets = Some(vec![id.to_string()]);
+            }
+            "union" => {
+                let (mut ids, next) = venn_identifier_list(&tokens, 1);
+                let (label, size, _) = venn_label_and_size(&tokens, next);
+                sort_venn_ids(&mut ids);
+                ids.dedup();
+                if ids.len() < 2 {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "a union names at least two sets",
+                        trimmed,
+                    );
+                    continue;
+                }
+                if !venn_sets_declared(&meta, &ids) {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "union names an undeclared set",
+                        trimmed,
+                    );
+                    continue;
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let default_size = 10.0 / (ids.len() * ids.len()) as f64;
+                let label_node = label.and_then(|label| {
+                    ordinal += 1;
+                    let node_id = builder.intern_fresh_node_owned_label(
+                        format!("region_{ordinal}"),
+                        label.to_string(),
+                        NodeShape::TextBlock,
+                        span,
+                    )?;
+                    builder.add_class_to_node_id(node_id, "venn-region-label");
+                    Some(node_id.0)
+                });
+                current_sets = Some(ids.clone());
+                meta.unions.push(fm_core::IrVennUnion {
+                    sets: ids,
+                    size: size.filter(|size| *size >= 0.0).unwrap_or(default_size),
+                    label_node,
+                });
+            }
+            "text" => {
+                let (mut sets, next) = match current_sets.clone().filter(|_| indented) {
+                    Some(sets) => (sets, 1),
+                    None => venn_identifier_list(&tokens, 1),
+                };
+                // Without indent mode the identifier list is greedy, so `text A x` reads `A` as
+                // the region and `x` as the id; a list that swallowed the id has none left.
+                let id = match tokens.get(next) {
+                    Some(VennToken::Word(word)) => (*word).to_string(),
+                    Some(VennToken::Quoted(text)) => text.trim().to_string(),
+                    Some(VennToken::Number(_, raw)) => (*raw).to_string(),
+                    _ => {
+                        venn_warning(
+                            builder,
+                            line_number,
+                            "`text` names its region, then its id",
+                            trimmed,
+                        );
+                        continue;
+                    }
+                };
+                sort_venn_ids(&mut sets);
+                if sets.is_empty() || !venn_sets_declared(&meta, &sets) {
+                    venn_warning(
+                        builder,
+                        line_number,
+                        "`text` names an undeclared set",
+                        trimmed,
+                    );
+                    continue;
+                }
+                let label = match tokens.get(next + 1) {
+                    Some(VennToken::Bracket(text)) => (*text).to_string(),
+                    _ => id.clone(),
+                };
+                ordinal += 1;
+                let Some(node_id) = builder.intern_fresh_node_owned_label(
+                    format!("text_{ordinal}"),
+                    label,
+                    NodeShape::TextBlock,
+                    span,
+                ) else {
+                    continue;
+                };
+                builder.add_class_to_node_id(node_id, "venn-text");
+                meta.texts.push(fm_core::IrVennText {
+                    sets,
+                    id,
+                    node: node_id.0,
+                });
+            }
+            "style" => {
+                let (mut ids, next) = venn_identifier_list(&tokens, 1);
+                sort_venn_ids(&mut ids);
+                styles.push((ids, venn_style_fields(&tokens, next)));
+            }
+            _ => venn_warning(builder, line_number, "unsupported venn syntax", trimmed),
+        }
+    }
+
+    apply_venn_styles(builder, &meta, &styles);
+    if meta.sets.is_empty() {
+        builder.add_warning("venn-beta declared no sets");
+    }
+    builder.ir_mut().venn_meta = Some(meta);
+}
+
+/// One diagnostic shape for every rejected `venn-beta` line — a single formatting site rather than
+/// one per rule, which matters in the size-budgeted WASM bundle.
+fn venn_warning(builder: &mut IrBuilder, line_number: usize, problem: &str, line: &str) {
+    builder.add_warning(format!("Line {line_number}: {problem}: {line}"));
+}
+
+/// Sort set ids in place, as upstream sorts them to name a region.
+///
+/// An insertion sort over the handful of ids a region names: the generic `[String]::sort` would be a
+/// new monomorphization in the size-budgeted WASM bundle for no measurable benefit at this size.
+fn sort_venn_ids(ids: &mut [String]) {
+    for i in 1..ids.len() {
+        let mut j = i;
+        while j > 0 && ids[j - 1] > ids[j] {
+            ids.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
+
+/// Whether every id names a declared set (upstream throws `unknown set identifier` otherwise).
+fn venn_sets_declared(meta: &fm_core::IrVennMeta, ids: &[String]) -> bool {
+    ids.iter()
+        .all(|id| meta.sets.iter().any(|set| &set.id == id))
+}
+
+/// The value the LAST `style` line targeting exactly `targets` gave `key`, as upstream's
+/// `Object.assign` merge leaves it.
+fn venn_style_value<'a>(styles: &'a [VennStyle], targets: &[String], key: &str) -> Option<&'a str> {
+    styles
+        .iter()
+        .rev()
+        .filter(|(style_targets, _)| style_targets.as_slice() == targets)
+        .find_map(|(_, fields)| {
+            fields
+                .iter()
+                .rev()
+                .find(|(field, _)| field == key)
+                .map(|(_, value)| value.as_str())
+        })
+}
+
+/// `key: value, key: value` after `style <targets>`. A value is every token up to the next comma,
+/// so `rgb(1, 2, 3)` survives whole (the lexer keeps its inner commas).
+fn venn_style_fields(tokens: &[VennToken<'_>], mut i: usize) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    while let Some(VennToken::Word(key)) = tokens.get(i) {
+        if tokens.get(i + 1) != Some(&VennToken::Colon) {
+            break;
+        }
+        let mut value = String::new();
+        let mut j = i + 2;
+        while let Some(token) = tokens.get(j) {
+            let piece = match token {
+                VennToken::Word(text)
+                | VennToken::Other(text)
+                | VennToken::Quoted(text)
+                | VennToken::Number(_, text) => (*text).to_string(),
+                _ => break,
+            };
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(&piece);
+            j += 1;
+        }
+        fields.push((key.to_ascii_lowercase(), value));
+        i = j + 1;
+    }
+    fields
+}
+
+/// Paint every set circle and apply the author's `style` lines.
+///
+/// A set's circle defaults to its palette colour as stroke, the same colour as a 10% fill (upstream
+/// `fill-opacity ?? 0.1`), and a darker shade for its label; `style A fill: …` replaces the colour
+/// (stroke follows fill unless `stroke` is given, as upstream), and `color` the label colour.
+/// `color` on a union's targets recolours that region's label, and on a text entry's id that entry.
+/// A union's `fill` paints the lens upstream, which a node-based renderer cannot shape, so it is
+/// reported rather than silently dropped.
+fn apply_venn_styles(builder: &mut IrBuilder, meta: &fm_core::IrVennMeta, styles: &[VennStyle]) {
+    for (slot, set) in meta.sets.iter().enumerate() {
+        let targets = std::slice::from_ref(&set.id);
+        let custom = |key: &str| venn_style_value(styles, targets, key);
+        let (palette_stroke, palette_text) = VENN_PALETTE[slot % VENN_PALETTE.len()];
+        let fill = custom("fill").unwrap_or(palette_stroke);
+        // Through the shared CSS parser rather than a hand-built map, so author-supplied values get
+        // the same allow-list and sanitising every other `style` statement gets.
+        let style = fm_core::parse_style_string(&format!(
+            "fill:{fill},fill-opacity:{},stroke:{},stroke-width:{},color:{}",
+            custom("fill-opacity").unwrap_or("0.1"),
+            custom("stroke").unwrap_or(fill),
+            custom("stroke-width").unwrap_or("2.5"),
+            custom("color").unwrap_or(palette_text),
+        ));
+        if let Some(node) = builder.node_mut(fm_core::IrNodeId(set.node)) {
+            node.inline_style = Some(Box::new(style));
+        }
+    }
+
+    let paint_text = |builder: &mut IrBuilder, node: usize, color: &str| {
+        let style = fm_core::parse_style_string(&format!("color:{color}"));
+        if !style.is_empty()
+            && let Some(node) = builder.node_mut(fm_core::IrNodeId(node))
+        {
+            node.inline_style = Some(Box::new(style));
+        }
+    };
+    for union in &meta.unions {
+        if let (Some(node), Some(color)) = (
+            union.label_node,
+            venn_style_value(styles, &union.sets, "color"),
+        ) {
+            paint_text(builder, node, color);
+        }
+        if venn_style_value(styles, &union.sets, "fill").is_some() {
+            builder.add_warning(format!(
+                "venn region {} declares a fill; region fills are not drawn, only its label colour",
+                union.sets.join(",")
+            ));
+        }
+    }
+    for text in &meta.texts {
+        if let Some(color) = venn_style_value(styles, std::slice::from_ref(&text.id), "color") {
+            paint_text(builder, text.node, color);
+        }
+    }
+}
+
+/// A cursor over an `eventmodeling` document. The grammar hides ALL whitespace, newlines included,
+/// so statements are read token by token rather than line by line; `%%`, `//` and `/* */` are
+/// comments.
+struct EmLexer<'a> {
+    text: &'a str,
+    pos: usize,
+    line: usize,
+}
+
+impl<'a> EmLexer<'a> {
+    fn advance(&mut self, len: usize) {
+        let end = (self.pos + len).min(self.text.len());
+        self.line += memchr::memchr_iter(b'\n', &self.text.as_bytes()[self.pos..end]).count();
+        self.pos = end;
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.text[self.pos..]
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            let rest = self.rest();
+            let trimmed = rest.trim_start();
+            self.advance(rest.len() - trimmed.len());
+            let skip = if trimmed.starts_with("%%") || trimmed.starts_with("//") {
+                trimmed.find('\n').unwrap_or(trimmed.len())
+            } else if trimmed.starts_with("/*") {
+                trimmed.find("*/").map_or(trimmed.len(), |end| end + 2)
+            } else {
+                return;
+            };
+            self.advance(skip);
+        }
+    }
+
+    /// An identifier, frame number or qualified name: `[A-Za-z0-9_.]+`.
+    fn word(&mut self) -> &'a str {
+        self.skip_trivia();
+        let rest = self.rest();
+        let len = rest
+            .bytes()
+            .position(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'.'))
+            .unwrap_or(rest.len());
+        self.advance(len);
+        &rest[..len]
+    }
+
+    fn eat(&mut self, token: &str) -> bool {
+        self.skip_trivia();
+        if self.rest().starts_with(token) {
+            self.advance(token.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_line(&mut self) {
+        let rest = self.rest();
+        self.advance(rest.find('\n').unwrap_or(rest.len()));
+    }
+
+    /// A data value: `{ … }` on one line, a `{` block closed by a line holding only `}`, or a
+    /// quoted string. Returns the text inside.
+    fn data(&mut self) -> Option<&'a str> {
+        self.skip_trivia();
+        let rest = self.rest();
+        let line_end = rest.find('\n').unwrap_or(rest.len());
+        let line = &rest[..line_end];
+        let (inner, consumed) = match rest.as_bytes().first()? {
+            b'{' if line.trim_end().len() > 1 && line.contains('}') => {
+                let close = line.rfind('}')?;
+                (&line[1..close], close + 1)
+            }
+            b'{' => {
+                // A block: everything up to a line that holds only `}`.
+                let mut offset = line_end;
+                loop {
+                    if offset >= rest.len() {
+                        break (&rest[line_end.min(rest.len())..], rest.len());
+                    }
+                    let next_end = rest[offset + 1..]
+                        .find('\n')
+                        .map_or(rest.len(), |end| offset + 1 + end);
+                    if rest[offset + 1..next_end].trim() == "}" {
+                        break (&rest[line_end..offset], next_end);
+                    }
+                    offset = next_end;
+                }
+            }
+            quote @ (b'"' | b'\'') => {
+                let close = line.rfind(char::from(*quote)).filter(|&close| close > 0)?;
+                (&line[1..close], close + 1)
+            }
+            _ => return None,
+        };
+        self.advance(consumed);
+        Some(inner)
+    }
+}
+
+/// One `eventmodeling` timeframe (`tf`) or reset frame (`rf`), as written.
+struct EmFrame<'a> {
+    name: &'a str,
+    kind: &'a str,
+    reset: bool,
+    identifier: &'a str,
+    sources: Vec<&'a str>,
+    data: Option<&'a str>,
+    data_ref: Option<&'a str>,
+    span: Span,
+}
+
+/// The grammar's `EmModelEntityType`.
+fn is_event_model_type(word: &str) -> bool {
+    matches!(
+        word,
+        "ui" | "cmd" | "command" | "evt" | "event" | "rmo" | "readmodel" | "pcr" | "processor"
+    )
+}
+
+/// The swimlane a frame of `kind` belongs to: upstream's lane key (0 / 100 / 200 bases, a
+/// namespaced lane just after its base), its caption, and the box colours.
+fn event_model_lane(kind: &str) -> (u32, &'static str, &'static str, &'static str) {
+    match kind {
+        "ui" => (0, "UI/Automation", "UI/A: ", "fill:#ffffff,stroke:#dbdada"),
+        "pcr" | "processor" => (0, "UI/Automation", "UI/A: ", "fill:#edb3f6,stroke:#b88cbf"),
+        "rmo" | "readmodel" => (
+            100,
+            "Command/Read Model",
+            "C/RM: ",
+            "fill:#d3f1a2,stroke:#a3b732",
+        ),
+        "cmd" | "command" => (
+            100,
+            "Command/Read Model",
+            "C/RM: ",
+            "fill:#bcd6fe,stroke:#679ac3",
+        ),
+        _ => (200, "Events", "Stream: ", "fill:#ffb778,stroke:#c19a0f"),
+    }
+}
+
+/// Parse an `eventmodeling` document.
+///
+/// Mirrors the pinned 11.15.0 grammar and `eventmodeling` db:
+///
+/// - `tf|timeframe NN type ns.Name (->> NN)* ([[Data]])? (`type`)? {inline data}` and the same with
+///   `rf|resetframe`; types `ui`, `cmd|command`, `evt|event`, `rmo|readmodel`, `pcr|processor`;
+/// - `data Name {` … `}` blocks that a frame's `[[Data]]` shows; `entity`, `note` and `gwt`
+///   statements are read and, as upstream, not drawn;
+/// - each frame is a box in its type's swimlane (UI/Automation, Command/Read Model, Events), or in
+///   a lane of its own namespace (`UI/A: ns`, `C/RM: ns`, `Stream: ns`) when it is written `ns.Name`;
+/// - the flow: from each `->>` source, else from the nearest EARLIER frame in a different lane;
+///   the first frame and reset frames have no implied source.
+///
+/// One deliberate difference: upstream means to reuse a namespace's lane
+/// (`findSwimlaneByNamespace`) but never records the namespace on the lane, so every namespaced
+/// frame opens a new row; here frames of one namespace share their lane.
+#[allow(clippy::too_many_lines)]
+fn parse_event_model(content: &str, builder: &mut IrBuilder) {
+    let mut lexer = EmLexer {
+        text: content,
+        pos: 0,
+        line: 1,
+    };
+    let mut frames: Vec<EmFrame<'_>> = Vec::new();
+    let mut data_entities: Vec<(&str, &str)> = Vec::new();
+    let mut header_seen = false;
+    let span_at = |line: usize| Span::at_line(line, 0);
+
+    loop {
+        lexer.skip_trivia();
+        if lexer.rest().is_empty() {
+            break;
+        }
+        let line = lexer.line;
+        let word = lexer.word();
+        match word {
+            "eventmodeling" if !header_seen => header_seen = true,
+            // Read by the generic title and accessibility passes.
+            "title" | "accTitle" => lexer.skip_line(),
+            "accDescr" => {
+                if lexer.rest().trim_start().starts_with('{') {
+                    let close = lexer.rest().find('}').map_or(lexer.rest().len(), |c| c + 1);
+                    lexer.advance(close);
+                } else {
+                    lexer.skip_line();
+                }
+            }
+            "entity" => {
+                lexer.word();
+            }
+            "tf" | "timeframe" | "rf" | "resetframe" => {
+                let name = lexer.word();
+                let kind = lexer.word();
+                let identifier = lexer.word();
+                if name.is_empty() || !is_event_model_type(kind) || identifier.is_empty() {
+                    builder.add_warning(format!(
+                        "Line {line}: expected `tf NN type Name` (types ui, cmd, evt, rmo, pcr)"
+                    ));
+                    lexer.skip_line();
+                    continue;
+                }
+                let mut frame = EmFrame {
+                    name,
+                    kind,
+                    reset: word.starts_with('r'),
+                    identifier,
+                    sources: Vec::new(),
+                    data: None,
+                    data_ref: None,
+                    span: span_at(line),
+                };
+                while lexer.eat("->>") {
+                    frame.sources.push(lexer.word());
+                }
+                if lexer.eat("[[") {
+                    frame.data_ref = Some(lexer.word());
+                    lexer.eat("]]");
+                }
+                if lexer.eat("`") {
+                    lexer.word();
+                    lexer.eat("`");
+                }
+                frame.data = lexer.data();
+                frames.push(frame);
+            }
+            "data" | "note" => {
+                let name = lexer.word();
+                if lexer.eat("`") {
+                    lexer.word();
+                    lexer.eat("`");
+                }
+                let block = lexer.data();
+                if word == "data" {
+                    data_entities.push((name, block.unwrap_or_default()));
+                }
+            }
+            "gwt" => {
+                lexer.word();
+                // `given (type Entity)+ (when …)? then (type Entity)+`: drawn by no renderer.
+                loop {
+                    let mark = (lexer.pos, lexer.line);
+                    let next = lexer.word();
+                    if matches!(next, "given" | "when" | "then") {
+                        continue;
+                    }
+                    if is_event_model_type(next) {
+                        lexer.word();
+                        continue;
+                    }
+                    (lexer.pos, lexer.line) = mark;
+                    break;
+                }
+            }
+            _ => {
+                builder.add_warning(format!(
+                    "Line {line}: unsupported eventmodeling syntax: {}",
+                    trim_fast(lexer.rest().split('\n').next().unwrap_or(""))
+                        .trim_start_matches(word)
+                ));
+                if word.is_empty() {
+                    lexer.advance(lexer.rest().chars().next().map_or(1, char::len_utf8));
+                }
+                lexer.skip_line();
+            }
+        }
+    }
+
+    // Lanes are keyed as upstream keys them and drawn in key order.
+    let mut lane_keys: Vec<(u32, Option<&str>, usize)> = Vec::new();
+    let mut frame_lanes: Vec<u32> = Vec::with_capacity(frames.len());
+    let mut nodes: Vec<Option<IrNodeId>> = Vec::with_capacity(frames.len());
+    for (index, frame) in frames.iter().enumerate() {
+        let (base, caption, prefix, colours) = event_model_lane(frame.kind);
+        let parts: Vec<&str> = frame.identifier.split('.').collect();
+        let namespace = (parts.len() == 2).then(|| parts[0]);
+        let key = match namespace {
+            None => base,
+            Some(ns) => lane_keys
+                .iter()
+                .find(|(key, lane_ns, _)| *lane_ns == Some(ns) && key / 100 == base / 100)
+                .map_or_else(
+                    || {
+                        lane_keys
+                            .iter()
+                            .map(|(key, _, _)| *key)
+                            .filter(|key| *key > base && *key < base + 100)
+                            .max()
+                            .unwrap_or(base)
+                            + 1
+                    },
+                    |(key, _, _)| *key,
+                ),
+        };
+        let cluster = match lane_keys.iter().find(|(k, _, _)| *k == key) {
+            Some(&(_, _, cluster)) => Some(cluster),
+            None => {
+                let title =
+                    namespace.map_or_else(|| caption.to_string(), |ns| format!("{prefix}{ns}"));
+                let cluster =
+                    builder.ensure_cluster(&format!("em-lane-{key}"), Some(&title), frame.span);
+                if let Some(cluster) = cluster {
+                    builder.push_style_ref(
+                        fm_core::IrStyleTarget::Cluster(cluster),
+                        "fill:#fafafa,stroke:#f0f0f0,stroke-dasharray:none".to_string(),
+                        frame.span,
+                    );
+                    lane_keys.push((key, namespace, cluster));
+                }
+                cluster
+            }
+        };
+        frame_lanes.push(key);
+
+        // A bold name, then the frame's data in a monospace block.
+        let name = if parts.len() == 2 {
+            parts[1]
+        } else {
+            frame.identifier
+        };
+        let data = frame.data.map(trim_fast).or_else(|| {
+            let wanted = frame.data_ref?;
+            let found = data_entities.iter().find(|(name, _)| *name == wanted);
+            if found.is_none() {
+                builder.add_warning(format!(
+                    "eventmodeling frame {} references undeclared data `{wanted}`",
+                    frame.name
+                ));
+            }
+            found.map(|(_, block)| *block)
+        });
+        let mut label = ParsedLabel {
+            text: name.to_string(),
+            segments: vec![IrLabelSegment::Text {
+                text: name.to_string(),
+                bold: true,
+                italic: false,
+                code: false,
+                strike: false,
+            }],
+        };
+        // Dedented by the block's common indent, so nesting inside it survives.
+        let indent = data
+            .into_iter()
+            .flat_map(str::lines)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.len() - line.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        for line in data.into_iter().flat_map(str::lines).map(str::trim_end) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let line = &line[indent.min(line.len() - line.trim_start().len())..];
+            label.text.push('\n');
+            label.text.push_str(line);
+            label.segments.push(IrLabelSegment::LineBreak);
+            label.segments.push(IrLabelSegment::Text {
+                text: line.to_string(),
+                bold: false,
+                italic: false,
+                code: true,
+                strike: false,
+            });
+        }
+        let node = builder.intern_node_label_owned(
+            &format!("frame_{}", index + 1),
+            Some(label),
+            NodeShape::Rect,
+            frame.span,
+        );
+        if let Some(node) = node {
+            if let Some(ir_node) = builder.node_mut(node) {
+                ir_node.inline_style = Some(Box::new(fm_core::parse_style_string(colours)));
+            }
+            if let Some(cluster) = cluster {
+                builder.add_node_to_cluster(cluster, node);
+            }
+        }
+        nodes.push(node);
+    }
+
+    // The flow between frames.
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(target) = nodes[index] else {
+            continue;
+        };
+        if frame.reset || (index == 0 && frame.sources.is_empty()) {
+            continue;
+        }
+        if frame.sources.is_empty() {
+            let source = (0..index)
+                .rev()
+                .find(|&earlier| frame_lanes[earlier] != frame_lanes[index])
+                .and_then(|earlier| nodes[earlier]);
+            if let Some(source) = source {
+                builder.push_edge(source, target, ArrowType::Arrow, None, frame.span);
+            }
+            continue;
+        }
+        for wanted in &frame.sources {
+            match frames
+                .iter()
+                .position(|f| f.name == *wanted)
+                .and_then(|i| nodes[i])
+            {
+                Some(source) => {
+                    builder.push_edge(source, target, ArrowType::Arrow, None, frame.span)
+                }
+                None => builder.add_warning(format!(
+                    "eventmodeling frame {} names an undeclared source frame `{wanted}`",
+                    frame.name
+                )),
+            }
+        }
+    }
+
+    // Insertion sort: a model has a handful of lanes, and a `sort_*` call would add ~1.6K of
+    // quicksort instantiations to the WASM bundle for them.
+    for i in 1..lane_keys.len() {
+        let mut j = i;
+        while j > 0 && lane_keys[j - 1].0 > lane_keys[j].0 {
+            lane_keys.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let lanes: Vec<usize> = lane_keys.iter().map(|(_, _, cluster)| *cluster).collect();
+    let frames = nodes
+        .iter()
+        .zip(&frame_lanes)
+        .filter_map(|(node, key)| {
+            Some((
+                node.as_ref()?.0,
+                lane_keys.iter().position(|(k, _, _)| k == key)?,
+            ))
+        })
+        .collect();
+    builder.ir_mut().event_model_meta = Some(fm_core::IrEventModelMeta { lanes, frames });
+}
+
+/// One `wardley-beta` anchor, component or pipeline component, as written.
+struct WardleyComponent<'a> {
+    name: &'a str,
+    anchor: bool,
+    /// Evolution (x) and visibility (y), in percent.
+    x: f32,
+    y: f32,
+    label: Option<(f32, f32)>,
+    strategy: Option<&'a str>,
+    inertia: bool,
+    /// The pipeline parent's index, for a pipeline component.
+    parent: Option<usize>,
+    span: Span,
+}
+
+/// A link's flow decoration, from its port or `+…` arrow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WardleyFlow {
+    None,
+    Forward,
+    Backward,
+    Both,
+}
+
+struct WardleyLink<'a> {
+    from: &'a str,
+    to: &'a str,
+    dashed: bool,
+    flow: WardleyFlow,
+    label: Option<&'a str>,
+    span: Span,
+}
+
+/// A map coordinate in upstream's `toPercent`: a value up to 1 is a fraction, anything larger a
+/// percentage. Out of range is an error upstream (the whole map fails); here it is clamped and
+/// reported.
+fn wardley_percent(value: f32, builder: &mut IrBuilder, line_number: usize) -> f32 {
+    let percent = if value <= 1.0 { value * 100.0 } else { value };
+    if !(0.0..=100.0).contains(&percent) {
+        builder.add_warning(format!(
+            "Line {line_number}: wardley-beta coordinates are 0-1 or 0-100; clamped {value}"
+        ));
+    }
+    percent.clamp(0.0, 100.0)
+}
+
+/// The numbers inside the first `[…]` of `text`, and the text after the `]`.
+fn wardley_bracket(text: &str) -> Option<(Vec<f32>, &str)> {
+    let open = text.find('[')?;
+    let close = open + text[open..].find(']')?;
+    let numbers = text[open + 1..close]
+        .split(',')
+        .map(|value| trim_fast(value).parse::<f32>().ok())
+        .collect::<Option<Vec<f32>>>()?;
+    Some((numbers, trim_fast(&text[close + 1..])))
+}
+
+/// A name as the grammar spells it: a quoted string, or bare words.
+fn wardley_name(text: &str) -> &str {
+    let text = trim_fast(text);
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'"' | b'\'') && bytes[bytes.len() - 1] == bytes[0] {
+        &text[1..text.len() - 1]
+    } else {
+        text
+    }
+}
+
+/// Split a link body at its operator: `->`, `-->`, `-.->`, `>`, a flow port `+<>` / `+<` / `+>`,
+/// or a labelled flow `+'label'>` (also `<` / `<>`). Quoted names are skipped over.
+fn split_wardley_link(body: &str) -> Option<(&str, &str, WardleyLink<'_>)> {
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'') && (index == 0 || bytes[index - 1] != b'+') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        // Every link token is ASCII, so a match can only start on a character
+        // boundary; slicing at a continuation byte (`Café -> Tea`) panicked.
+        if !body.is_char_boundary(index) {
+            index += 1;
+            continue;
+        }
+        let rest = &body[index..];
+        let mut link = WardleyLink {
+            from: "",
+            to: "",
+            dashed: false,
+            flow: WardleyFlow::None,
+            label: None,
+            span: Span::default(),
+        };
+        let mut len = 0;
+        if let Some(after) = rest.strip_prefix("+'") {
+            let end = after.find('\'')?;
+            link.label = Some(&after[..end]);
+            let tail = &after[end + 1..];
+            let (flow, arrow_len) = wardley_port(tail)?;
+            link.flow = flow;
+            len = 2 + end + 1 + arrow_len;
+        } else if byte == b'+' {
+            let (flow, port_len) = wardley_port(&rest[1..])?;
+            link.flow = flow;
+            len = 1 + port_len;
+        } else if rest.starts_with("-.->") {
+            link.dashed = true;
+            len = 4;
+        } else if rest.starts_with("-->") {
+            len = 3;
+        } else if rest.starts_with("->") {
+            len = 2;
+        } else if byte == b'>' {
+            len = 1;
+        }
+        if len > 0 {
+            // A port may be followed by a plain arrow (`A +> -> B` is grammatical).
+            let mut after = trim_start_fast(&rest[len..]);
+            for arrow in ["-.->", "-->", "->"] {
+                if let Some(tail) = after.strip_prefix(arrow) {
+                    link.dashed |= arrow == "-.->";
+                    after = tail;
+                    break;
+                }
+            }
+            return Some((&body[..index], after, link));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `<>`, `<` or `>` at the start of `text`: the flow it names and its length.
+fn wardley_port(text: &str) -> Option<(WardleyFlow, usize)> {
+    if text.starts_with("<>") {
+        Some((WardleyFlow::Both, 2))
+    } else if text.starts_with('<') {
+        Some((WardleyFlow::Backward, 1))
+    } else if text.starts_with('>') {
+        Some((WardleyFlow::Forward, 1))
+    } else {
+        None
+    }
+}
+
+fn wardley_warning(builder: &mut IrBuilder, line_number: usize, problem: &str, line: &str) {
+    builder.add_warning(format!("Line {line_number}: {problem}: {line}"));
+}
+
+/// Parse a `wardley-beta` map.
+///
+/// Mirrors the pinned 11.15.0 grammar and `wardleyParser`:
+///
+/// - `size [w, h]`; `evolution A -> B@0.4 -> C / D -> …` (stage captions, optional END boundaries,
+///   used only when every stage has one, and a second name joined as `C / D`);
+/// - `anchor Name [visibility, evolution]` and
+///   `component Name [visibility, evolution] label [dx, dy] (build|buy|outsource|market) inertia`;
+/// - links `A -> B`, dashed `A -.-> B`, flows `A +> B`, `A +< B`, `A +<> B`, `A +'label'> B`, and a
+///   trailing `; annotation` as the link's label;
+/// - `evolve Name 0.8`; `pipeline Name { component Member [evolution] … }`;
+/// - `note "text" [v, e]`, `annotations [v, e]`, `annotation 1,[v, e] "text"`,
+///   `accelerator Name [v, e]`, `deaccelerator Name [v, e]`.
+///
+/// Coordinates are visibility first, then evolution, as upstream's `toCoordinates` reads them.
+#[allow(clippy::too_many_lines)]
+fn parse_wardley(content: &str, builder: &mut IrBuilder) {
+    let mut components: Vec<WardleyComponent<'_>> = Vec::new();
+    let mut links: Vec<WardleyLink<'_>> = Vec::new();
+    let mut evolves: Vec<(&str, f32, Span)> = Vec::new();
+    let mut notes: Vec<(&str, f32, f32, Span)> = Vec::new();
+    let mut annotations: Vec<(u32, f32, f32, Option<&str>, Span)> = Vec::new();
+    let mut annotations_box: Option<(f32, f32)> = None;
+    let mut accelerators: Vec<(&str, f32, f32, bool, Span)> = Vec::new();
+    let mut stages: Vec<(String, Option<f32>)> = Vec::new();
+    let mut size = None;
+    let mut pipelines: Vec<(usize, Vec<usize>, Span)> = Vec::new();
+    let mut open_pipeline: Option<usize> = None;
+    let mut header_seen = false;
+    let mut in_acc_descr_block = false;
+
+    for (index, line) in byte_lines(content).enumerate() {
+        let line_number = index + 1;
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+        if in_acc_descr_block {
+            in_acc_descr_block = !trimmed.ends_with('}');
+            continue;
+        }
+        if !header_seen
+            && trimmed
+                .get(..12)
+                .is_some_and(|head| head.eq_ignore_ascii_case("wardley-beta"))
+        {
+            header_seen = true;
+            continue;
+        }
+        header_seen = true;
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            in_acc_descr_block = rest.starts_with('{') && !rest.contains('}');
+            continue;
+        }
+        if trimmed.starts_with("title")
+            && trimmed[5..].chars().next().is_none_or(char::is_whitespace)
+        {
+            // Taken by the generic title pass.
+            continue;
+        }
+        let span = span_for(line_number, line);
+        let (keyword, rest) = trimmed
+            .split_once(char::is_whitespace)
+            .map_or((trimmed, ""), |(keyword, rest)| (keyword, trim_fast(rest)));
+
+        if let Some(parent) = open_pipeline {
+            if trimmed == "}" {
+                open_pipeline = None;
+                continue;
+            }
+            // `component Name [evolution] label [dx, dy]`, at the parent's visibility.
+            let parsed = (keyword == "component")
+                .then(|| rest.find('[').zip(wardley_bracket(rest)))
+                .flatten();
+            let Some((open, (numbers, tail))) = parsed.filter(|(_, (n, _))| n.len() == 1) else {
+                wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `component Name [evolution]`",
+                    trimmed,
+                );
+                continue;
+            };
+            let x = wardley_percent(numbers[0], builder, line_number);
+            let label = tail
+                .strip_prefix("label")
+                .and_then(wardley_bracket)
+                .filter(|(n, _)| n.len() == 2)
+                .map(|(n, _)| (n[0], n[1]));
+            components.push(WardleyComponent {
+                name: wardley_name(&rest[..open]),
+                anchor: false,
+                x,
+                y: components[parent].y,
+                label,
+                strategy: None,
+                inertia: false,
+                parent: Some(parent),
+                span,
+            });
+            if let Some((_, members, _)) = pipelines.last_mut() {
+                members.push(components.len() - 1);
+            }
+            continue;
+        }
+
+        match keyword {
+            "size" => match wardley_bracket(rest) {
+                Some((numbers, _)) if numbers.len() == 2 && numbers.iter().all(|v| *v > 0.0) => {
+                    size = Some((numbers[0], numbers[1]));
+                }
+                _ => wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `size [width, height]`",
+                    trimmed,
+                ),
+            },
+            "evolution" => {
+                stages.clear();
+                for stage in rest.split("->") {
+                    let (stage, second) = stage
+                        .split_once('/')
+                        .map_or((stage, None), |(first, second)| (first, Some(second)));
+                    let (name, boundary) = stage.split_once('@').map_or((stage, None), |(n, b)| {
+                        (n, trim_fast(b).parse::<f32>().ok())
+                    });
+                    let mut caption = wardley_name(name).to_string();
+                    if let Some(second) = second {
+                        caption.push_str(" / ");
+                        caption.push_str(wardley_name(second));
+                    }
+                    stages.push((
+                        caption,
+                        boundary.map(|b| if b > 1.0 { b / 100.0 } else { b }),
+                    ));
+                }
+            }
+            "anchor" | "component" | "note" | "accelerator" | "deaccelerator" => {
+                let Some((open, (numbers, mut tail))) = rest
+                    .find('[')
+                    .zip(wardley_bracket(rest))
+                    .filter(|(_, (n, _))| n.len() == 2)
+                else {
+                    wardley_warning(
+                        builder,
+                        line_number,
+                        "expected `Name [visibility, evolution]`",
+                        trimmed,
+                    );
+                    continue;
+                };
+                let y = wardley_percent(numbers[0], builder, line_number);
+                let x = wardley_percent(numbers[1], builder, line_number);
+                let name = wardley_name(&rest[..open]);
+                match keyword {
+                    "note" => {
+                        notes.push((name, x, y, span));
+                        continue;
+                    }
+                    "accelerator" | "deaccelerator" => {
+                        accelerators.push((name, x, y, keyword == "deaccelerator", span));
+                        continue;
+                    }
+                    _ => {}
+                }
+                let mut component = WardleyComponent {
+                    name,
+                    anchor: keyword == "anchor",
+                    x,
+                    y,
+                    label: None,
+                    strategy: None,
+                    inertia: false,
+                    parent: None,
+                    span,
+                };
+                while !tail.is_empty() {
+                    if let Some((n, after)) = tail
+                        .strip_prefix("label")
+                        .and_then(wardley_bracket)
+                        .filter(|(n, _)| n.len() == 2)
+                    {
+                        component.label = Some((n[0], n[1]));
+                        tail = after;
+                    } else if let Some(after) = tail.strip_prefix("inertia") {
+                        component.inertia = true;
+                        tail = trim_fast(after);
+                    } else if let Some((word, after)) =
+                        tail.strip_prefix('(').and_then(|t| t.split_once(')'))
+                    {
+                        match trim_fast(word) {
+                            "inertia" => component.inertia = true,
+                            strategy @ ("build" | "buy" | "outsource" | "market") => {
+                                component.strategy = Some(strategy);
+                            }
+                            _ => wardley_warning(builder, line_number, "unknown decorator", word),
+                        }
+                        tail = trim_fast(after);
+                    } else {
+                        wardley_warning(builder, line_number, "unrecognised component text", tail);
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+            "pipeline" => {
+                let name = wardley_name(rest.trim_end_matches('{'));
+                let parent = components
+                    .iter()
+                    .position(|c| c.parent.is_none() && c.name == name);
+                match parent {
+                    Some(parent) if rest.ends_with('{') => {
+                        open_pipeline = Some(parent);
+                        pipelines.push((parent, Vec::new(), span));
+                    }
+                    _ => wardley_warning(
+                        builder,
+                        line_number,
+                        "a pipeline needs an already-declared component and `{`",
+                        trimmed,
+                    ),
+                }
+            }
+            "evolve" => {
+                let target = rest
+                    .rsplit_once(char::is_whitespace)
+                    .and_then(|(name, value)| Some((name, value.parse::<f32>().ok()?)));
+                match target {
+                    Some((name, value)) => {
+                        let value = wardley_percent(value, builder, line_number);
+                        evolves.push((wardley_name(name), value, span));
+                    }
+                    None => {
+                        wardley_warning(builder, line_number, "expected `evolve Name 0.8`", trimmed)
+                    }
+                }
+            }
+            "annotations" => match wardley_bracket(rest).filter(|(n, _)| n.len() == 2) {
+                Some((n, _)) => {
+                    let y = wardley_percent(n[0], builder, line_number);
+                    annotations_box = Some((wardley_percent(n[1], builder, line_number), y));
+                }
+                None => wardley_warning(
+                    builder,
+                    line_number,
+                    "expected `annotations [v, e]`",
+                    trimmed,
+                ),
+            },
+            "annotation" => {
+                let parsed = rest.split_once(',').and_then(|(number, tail)| {
+                    let number = trim_fast(number).parse::<u32>().ok()?;
+                    let (n, text) = wardley_bracket(tail).filter(|(n, _)| n.len() == 2)?;
+                    Some((number, n[0], n[1], text))
+                });
+                match parsed {
+                    Some((number, v, e, text)) => {
+                        let y = wardley_percent(v, builder, line_number);
+                        let x = wardley_percent(e, builder, line_number);
+                        let text = (!text.is_empty()).then(|| wardley_name(text));
+                        annotations.push((number, x, y, text, span));
+                    }
+                    None => wardley_warning(
+                        builder,
+                        line_number,
+                        "expected `annotation 1,[v, e] \"text\"`",
+                        trimmed,
+                    ),
+                }
+            }
+            _ => {
+                let (body, label) = trimmed
+                    .split_once(';')
+                    .map_or((trimmed, None), |(body, label)| {
+                        (body, Some(trim_fast(label)))
+                    });
+                match split_wardley_link(body) {
+                    Some((from, to, mut link)) => {
+                        link.from = wardley_name(from);
+                        // A flow port may also close the link (`A -> B +>`).
+                        let to = trim_fast(to);
+                        let (to, port) = ["+<>", "+<", "+>"]
+                            .iter()
+                            .find_map(|port| to.strip_suffix(port).map(|t| (t, port)))
+                            .map_or((to, None), |(t, port)| (t, Some(port)));
+                        link.to = wardley_name(to);
+                        if link.flow == WardleyFlow::None
+                            && let Some(port) = port
+                        {
+                            link.flow = wardley_port(&port[1..]).map_or(WardleyFlow::None, |p| p.0);
+                        }
+                        if link.label.is_none() {
+                            link.label = label.filter(|label| !label.is_empty());
+                        }
+                        link.span = span;
+                        links.push(link);
+                    }
+                    None => {
+                        wardley_warning(builder, line_number, "unsupported wardley syntax", trimmed)
+                    }
+                }
+            }
+        }
+    }
+    if open_pipeline.is_some() {
+        builder.add_warning("wardley-beta pipeline block was never closed with `}`".to_string());
+    }
+
+    build_wardley_ir(
+        builder,
+        WardleyDocument {
+            components,
+            links,
+            evolves,
+            notes,
+            annotations,
+            annotations_box,
+            accelerators,
+            stages,
+            size,
+            pipelines,
+        },
+    );
+}
+
+struct WardleyDocument<'a> {
+    components: Vec<WardleyComponent<'a>>,
+    links: Vec<WardleyLink<'a>>,
+    evolves: Vec<(&'a str, f32, Span)>,
+    notes: Vec<(&'a str, f32, f32, Span)>,
+    annotations: Vec<(u32, f32, f32, Option<&'a str>, Span)>,
+    annotations_box: Option<(f32, f32)>,
+    accelerators: Vec<(&'a str, f32, f32, bool, Span)>,
+    stages: Vec<(String, Option<f32>)>,
+    size: Option<(f32, f32)>,
+    pipelines: Vec<(usize, Vec<usize>, Span)>,
+}
+
+/// Lower a read `wardley-beta` document into nodes, edges, clusters and `ir.wardley_meta`, in
+/// upstream's draw order: frame, stages, pipeline boxes and their evolution links, links, trends,
+/// then per component its ring, dot / square / market mark, inertia bar and label, then notes,
+/// annotations and (de)accelerators.
+#[allow(clippy::too_many_lines)]
+fn build_wardley_ir(builder: &mut IrBuilder, doc: WardleyDocument<'_>) {
+    use fm_core::{IrWardleyMarkKind as Kind, IrWardleyPoint};
+    let mut meta = fm_core::IrWardleyMeta {
+        width: doc.size.map_or(900.0, |s| s.0),
+        height: doc.size.map_or(600.0, |s| s.1),
+        ..fm_core::IrWardleyMeta::default()
+    };
+    let mut ordinal = 0_usize;
+    // Every node gets a fresh generated id; the component's own name is its dot's LABEL-less id.
+    let mut add = |builder: &mut IrBuilder,
+                   meta: &mut fm_core::IrWardleyMeta,
+                   label: Option<&str>,
+                   shape: NodeShape,
+                   style: &str,
+                   place: Option<(usize, Kind, f32, f32)>,
+                   span: Span|
+     -> Option<IrNodeId> {
+        ordinal += 1;
+        let node = builder.intern_node(&format!("wardley_{ordinal}"), label, shape, span)?;
+        if !style.is_empty()
+            && let Some(ir_node) = builder.node_mut(node)
+        {
+            ir_node.inline_style = Some(Box::new(fm_core::parse_style_string(style)));
+        }
+        if let Some((point, kind, dx, dy)) = place {
+            meta.marks.push(fm_core::IrWardleyMark {
+                node: node.0,
+                point,
+                kind,
+                dx,
+                dy,
+            });
+        }
+        Some(node)
+    };
+    let point = |meta: &mut fm_core::IrWardleyMeta, x: f32, y: f32| {
+        meta.points.push(IrWardleyPoint { x, y });
+        meta.points.len() - 1
+    };
+
+    meta.frame_cluster = builder
+        .ensure_cluster("wardley-frame", None, Span::default())
+        .unwrap_or(0);
+    // Solid chart axes and pipeline outlines, as upstream draws them, not dashed subgraph frames.
+    let solid = |builder: &mut IrBuilder, cluster: usize, css: &str| {
+        builder.push_style_ref(
+            fm_core::IrStyleTarget::Cluster(cluster),
+            css.to_string(),
+            Span::default(),
+        );
+    };
+    solid(
+        builder,
+        meta.frame_cluster,
+        "fill:none,stroke:#333333,stroke-dasharray:none",
+    );
+    let default_stages = ["Genesis", "Custom Built", "Product", "Commodity"];
+    let stages: Vec<(String, Option<f32>)> = if doc.stages.is_empty() {
+        default_stages
+            .iter()
+            .map(|s| ((*s).to_string(), None))
+            .collect()
+    } else {
+        doc.stages
+    };
+    // A non-finite `@boundary` (`A@nan`) counts as absent: NaN reached `f32::clamp` as its
+    // lower bound on the next stage, which asserts (and panicked) even in release builds.
+    let all_bounded = stages.iter().all(|(_, b)| b.is_some_and(f32::is_finite));
+    #[allow(clippy::cast_precision_loss)]
+    let stage_width = 1.0 / stages.len() as f32;
+    let mut start = 0.0;
+    for (index, (caption, boundary)) in stages.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let end = if all_bounded {
+            boundary
+                .filter(|b| b.is_finite())
+                .unwrap_or(1.0)
+                .clamp(start, 1.0)
+        } else {
+            (index + 1) as f32 * stage_width
+        };
+        if let Some(node) = add(
+            builder,
+            &mut meta,
+            Some(caption),
+            NodeShape::TextBlock,
+            "",
+            None,
+            Span::default(),
+        ) {
+            meta.stages.push(fm_core::IrWardleyStage {
+                node: node.0,
+                start,
+                end,
+            });
+        }
+        start = end;
+    }
+    for (slot, caption) in ["Evolution", "Visibility"].into_iter().enumerate() {
+        if let Some(node) = add(
+            builder,
+            &mut meta,
+            Some(caption),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            None,
+            Span::default(),
+        ) {
+            meta.axis_nodes[slot] = node.0;
+        }
+    }
+
+    // One point per component; a pipeline parent's is re-centred by the layout.
+    let points: Vec<usize> = doc
+        .components
+        .iter()
+        .map(|c| point(&mut meta, c.x, c.y))
+        .collect();
+    let is_parent = |index: usize| doc.pipelines.iter().any(|(parent, _, _)| *parent == index);
+    // The node every link and trend attaches to, per component.
+    let mut marks: Vec<Option<IrNodeId>> = vec![None; doc.components.len()];
+
+    // Pipeline boxes, before anything drawn inside them.
+    let mut pipeline_clusters = Vec::with_capacity(doc.pipelines.len());
+    for (parent, members, span) in &doc.pipelines {
+        let cluster = builder.ensure_cluster(&format!("wardley-pipeline-{parent}"), None, *span);
+        if let Some(cluster) = cluster {
+            solid(
+                builder,
+                cluster,
+                "fill:none,stroke:#000000,stroke-width:1.5px,stroke-dasharray:none",
+            );
+            meta.pipelines.push(fm_core::IrWardleyPipeline {
+                point: points[*parent],
+                members: members.iter().map(|&m| points[m]).collect(),
+                cluster,
+            });
+        }
+        pipeline_clusters.push(cluster);
+    }
+
+    // Component marks: ring, dot / square / market, inertia, label.
+    for (index, component) in doc.components.iter().enumerate() {
+        let at = points[index];
+        let span = component.span;
+        if component.anchor {
+            let (dx, dy) = component.label.unwrap_or((0.0, -3.0));
+            marks[index] = add(
+                builder,
+                &mut meta,
+                Some(component.name),
+                NodeShape::TextBlock,
+                "font-weight:bold",
+                Some((at, Kind::Caption, dx, dy)),
+                span,
+            );
+            continue;
+        }
+        let parent = is_parent(index);
+        if let Some(strategy) = component.strategy {
+            let fill = match strategy {
+                "build" => "#eeeeee",
+                "buy" => "#cccccc",
+                "outsource" => "#666666",
+                _ => "#ffffff",
+            };
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::Circle,
+                &format!("fill:{fill},stroke:#000000"),
+                Some((at, Kind::Ring, 0.0, 0.0)),
+                span,
+            );
+        }
+        let (shape, kind) = if parent {
+            (NodeShape::Rect, Kind::Square)
+        } else if component.strategy == Some("market") {
+            (NodeShape::Triangle, Kind::Market)
+        } else {
+            (NodeShape::Circle, Kind::Dot)
+        };
+        marks[index] = add(
+            builder,
+            &mut meta,
+            None,
+            shape,
+            "fill:#ffffff,stroke:#000000",
+            Some((at, kind, 0.0, 0.0)),
+            span,
+        );
+        let ring = if component.strategy.is_some() {
+            16.0
+        } else {
+            0.0
+        };
+        if component.inertia {
+            let reach = if parent { 4.8 + 15.0 } else { 6.0 + 15.0 };
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::Rect,
+                "fill:#000000,stroke:#000000",
+                Some((at, Kind::Inertia, reach + ring, 0.0)),
+                span,
+            );
+        }
+        let lift = if component.strategy.is_some() {
+            10.0
+        } else {
+            0.0
+        };
+        let (dx, dy) = component.label.unwrap_or((8.0 + lift, -8.0 - lift));
+        add(
+            builder,
+            &mut meta,
+            Some(component.name),
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Label, dx, dy)),
+            span,
+        );
+    }
+    for (cluster, (_, members, _)) in pipeline_clusters.iter().zip(&doc.pipelines) {
+        for &member in members {
+            if let (Some(cluster), Some(node)) = (cluster, marks[member]) {
+                builder.add_node_to_cluster(*cluster, node);
+            }
+        }
+        // Evolution links between neighbouring members, left to right, dashed.
+        let mut ordered: Vec<usize> = members.clone();
+        for i in 1..ordered.len() {
+            let mut j = i;
+            while j > 0 && doc.components[ordered[j - 1]].x > doc.components[ordered[j]].x {
+                ordered.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        for pair in ordered.windows(2) {
+            if let (Some(a), Some(b)) = (marks[pair[0]], marks[pair[1]]) {
+                builder.push_edge(
+                    a,
+                    b,
+                    ArrowType::DottedLine,
+                    None,
+                    doc.components[pair[0]].span,
+                );
+            }
+        }
+    }
+
+    // Links resolve a name to a component's own name first, then to a pipeline member's.
+    let resolve = |name: &str| {
+        doc.components
+            .iter()
+            .position(|c| c.parent.is_none() && c.name == name)
+            .or_else(|| doc.components.iter().position(|c| c.name == name))
+    };
+    for link in &doc.links {
+        let (Some(from), Some(to)) = (resolve(link.from), resolve(link.to)) else {
+            builder.add_warning(format!(
+                "wardley-beta link {} -> {} names a component that is not declared; not drawn",
+                link.from, link.to
+            ));
+            continue;
+        };
+        // Upstream drops a link from a pipeline member to its own parent.
+        if doc.components[from].parent == Some(to) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (marks[from], marks[to]) else {
+            continue;
+        };
+        let (a, b, arrow) = match (link.flow, link.dashed) {
+            (WardleyFlow::None, false) => (a, b, ArrowType::Line),
+            (WardleyFlow::None, true) => (a, b, ArrowType::DottedLine),
+            (WardleyFlow::Forward, false) => (a, b, ArrowType::Arrow),
+            (WardleyFlow::Forward, true) => (a, b, ArrowType::DottedArrow),
+            (WardleyFlow::Backward, false) => (b, a, ArrowType::Arrow),
+            (WardleyFlow::Backward, true) => (b, a, ArrowType::DottedArrow),
+            (WardleyFlow::Both, false) => (a, b, ArrowType::DoubleArrow),
+            (WardleyFlow::Both, true) => (a, b, ArrowType::DoubleDottedArrow),
+        };
+        builder.push_edge(a, b, arrow, link.label, link.span);
+    }
+
+    // Trends: a dashed red arrow to the evolved position; a later `evolve` of one component wins.
+    for (position, (name, target, span)) in doc.evolves.iter().enumerate() {
+        if doc.evolves[position + 1..]
+            .iter()
+            .any(|(later, _, _)| later == name)
+        {
+            continue;
+        }
+        let Some(owner) = resolve(name).filter(|&c| marks[c].is_some()) else {
+            builder.add_warning(format!(
+                "wardley-beta evolve names an undeclared component: {name}"
+            ));
+            continue;
+        };
+        let at = point(&mut meta, *target, doc.components[owner].y);
+        if let (Some(from), Some(ghost)) = (
+            marks[owner],
+            add(
+                builder,
+                &mut meta,
+                None,
+                NodeShape::TextBlock,
+                "",
+                Some((at, Kind::Target, 0.0, 0.0)),
+                *span,
+            ),
+        ) {
+            builder.push_edge(from, ghost, ArrowType::DottedArrow, None, *span);
+            builder.set_last_edge_inline_style("stroke:#dc3545");
+        }
+    }
+
+    for (text, x, y, span) in &doc.notes {
+        let at = point(&mut meta, *x, *y);
+        add(
+            builder,
+            &mut meta,
+            Some(text),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            Some((at, Kind::Label, 0.0, 0.0)),
+            *span,
+        );
+    }
+    for (number, x, y, _, span) in &doc.annotations {
+        let at = point(&mut meta, *x, *y);
+        add(
+            builder,
+            &mut meta,
+            Some(&number.to_string()),
+            NodeShape::Circle,
+            "fill:#ffffff,stroke:#000000,font-weight:bold",
+            Some((at, Kind::Annotation, 0.0, 0.0)),
+            *span,
+        );
+    }
+    if let Some((x, y)) = doc.annotations_box {
+        let mut listed: Vec<(u32, &str)> = doc
+            .annotations
+            .iter()
+            .filter_map(|(number, _, _, text, _)| Some((*number, (*text)?)))
+            .collect();
+        for i in 1..listed.len() {
+            let mut j = i;
+            while j > 0 && listed[j - 1].0 > listed[j].0 {
+                listed.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        if !listed.is_empty() {
+            let text = listed
+                .iter()
+                .map(|(number, text)| format!("{number}. {text}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let at = point(&mut meta, x, y);
+            add(
+                builder,
+                &mut meta,
+                Some(&text),
+                NodeShape::Rect,
+                "fill:#ffffff,stroke:#000000",
+                Some((at, Kind::AnnotationsBox, 0.0, 0.0)),
+                Span::default(),
+            );
+        }
+    }
+    for (name, x, y, decelerate, span) in &doc.accelerators {
+        let at = point(&mut meta, *x, *y);
+        let tail = add(
+            builder,
+            &mut meta,
+            None,
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Ghost, 0.0, 0.0)),
+            *span,
+        );
+        let head = add(
+            builder,
+            &mut meta,
+            None,
+            NodeShape::TextBlock,
+            "",
+            Some((at, Kind::Ghost, 60.0, 0.0)),
+            *span,
+        );
+        if let (Some(tail), Some(head)) = (tail, head) {
+            let (a, b) = if *decelerate {
+                (head, tail)
+            } else {
+                (tail, head)
+            };
+            builder.push_edge(a, b, ArrowType::ThickArrow, None, *span);
+        }
+        add(
+            builder,
+            &mut meta,
+            Some(name),
+            NodeShape::TextBlock,
+            "font-weight:bold",
+            Some((at, Kind::Caption, 30.0, 26.0)),
+            *span,
+        );
+    }
+
+    builder.ir_mut().wardley_meta = Some(Box::new(meta));
 }
 
 fn parse_radar(content: &str, builder: &mut IrBuilder) {
@@ -9691,6 +11911,12 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
 fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrQuadrantMeta::default();
+    // `classDef name color: …, radius: …`, and each point's `:::name` (by point index). A class can
+    // be declared after the point that uses it, so both resolve once every line is read.
+    let mut class_styles: Vec<(String, fm_core::IrQuadrantPointStyle)> = Vec::new();
+    let mut point_classes: Vec<(usize, String)> = Vec::new();
+    // Each point's node, so a resolved style can reach the backends that paint nodes generically.
+    let mut point_nodes: Vec<Option<IrNodeId>> = Vec::new();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -9699,6 +11925,22 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed == "quadrantChart" {
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("classDef")
+            .filter(|rest| rest.starts_with([' ', '\t']))
+        {
+            let rest = rest.trim_start();
+            let (names, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let style = parse_quadrant_point_style(body);
+            for name in names
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                class_styles.push((name.to_string(), style.clone()));
+            }
             continue;
         }
 
@@ -9763,7 +12005,25 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Data point: "Label: [x, y]"
+        // Data point: "Label: [x, y]", optionally "Label:::class: [x, y] radius: 12, …".
+        // The class suffix is split off FIRST: its `:::` would otherwise be read as the colon that
+        // ends the name.
+        let (trimmed, point_class) = match trimmed.find(":::") {
+            Some(at) => {
+                let after = &trimmed[at + 3..];
+                let class_end = after.find(':').unwrap_or(after.len());
+                let class = after[..class_end].trim();
+                // Re-join name and the rest of the line without the class, so everything below
+                // reads a plain `Label: [x, y] …` line.
+                let rebuilt = format!("{}{}", &trimmed[..at], &after[class_end..]);
+                (
+                    Cow::Owned(rebuilt),
+                    (!class.is_empty()).then(|| class.to_string()),
+                )
+            }
+            None => (Cow::Borrowed(trimmed), None),
+        };
+        let trimmed: &str = &trimmed;
         let Some(point_name) = parse_name_before_colon(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported quadrant syntax: {trimmed}"
@@ -9805,15 +12065,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
                 "",
             ),
         };
-        if !point_style.is_empty() {
-            // NAMED, not swallowed: per-point radius/colour/stroke have nowhere to go —
-            // `IrQuadrantPoint` carries a label and a position and nothing else — so a field here
-            // would be dead IR. What matters is that the point now lands where it was written.
-            builder.add_warning(format!(
-                "Line {line_number}: quadrant point styling `{point_style}` is parsed but not \
-                 applied; the point keeps the theme's appearance"
-            ));
-        }
+        let style = (!point_style.is_empty()).then(|| parse_quadrant_point_style(point_style));
         let (x, y) = if let Some((xs, ys)) = coords.split_once(',') {
             (
                 xs.trim().parse::<f32>().unwrap_or(0.5),
@@ -9825,16 +12077,69 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             (x, 0.5)
         };
 
+        if let Some(class) = point_class {
+            point_classes.push((meta.points.len(), class));
+        }
         meta.points.push(fm_core::IrQuadrantPoint {
             // Entity codes decode here as in every other label position (bd-j06n2); the pinned
             // mermaid-11.15.0 draws `#35;` as `#` in a quadrant point label.
             label: decode_mermaid_entities(point_name),
             x: x.clamp(0.0, 1.0),
             y: y.clamp(0.0, 1.0),
+            style,
         });
 
         let span = span_for(line_number, line);
-        let _ = builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span);
+        point_nodes.push(builder.intern_node(&point_id, Some(point_name), NodeShape::Circle, span));
+    }
+
+    // A class fills in only what the point's own clause left unset, key by key.
+    for (point_index, class) in point_classes {
+        let Some((_, class_style)) = class_styles.iter().rev().find(|(name, _)| *name == class)
+        else {
+            builder.add_warning(format!(
+                "quadrant point `{}` names class `{class}`, which no classDef declares",
+                meta.points
+                    .get(point_index)
+                    .map_or("", |point| point.label.as_str())
+            ));
+            continue;
+        };
+        if let Some(point) = meta.points.get_mut(point_index) {
+            let own = point.style.take().unwrap_or_default();
+            point.style = Some(fm_core::IrQuadrantPointStyle {
+                radius: own.radius.or(class_style.radius),
+                color: own.color.or_else(|| class_style.color.clone()),
+                stroke_color: own
+                    .stroke_color
+                    .or_else(|| class_style.stroke_color.clone()),
+                stroke_width: own.stroke_width.or(class_style.stroke_width),
+            });
+        }
+    }
+    // The canvas and GPU backends paint a quadrant point as its node, so the resolved colours ride
+    // on the node's inline style too — through the shared sanitiser, like every author style.
+    for (point, node) in meta.points.iter().zip(&point_nodes) {
+        let (Some(style), Some(node)) = (point.style.as_ref(), node) else {
+            continue;
+        };
+        let mut css = String::new();
+        if let Some(color) = &style.color {
+            css.push_str("fill:");
+            css.push_str(color);
+            css.push(',');
+        }
+        if let Some(stroke) = &style.stroke_color {
+            css.push_str("stroke:");
+            css.push_str(stroke);
+            css.push(',');
+        }
+        let inline = fm_core::parse_style_string(&css);
+        if !inline.is_empty()
+            && let Some(node) = builder.node_mut(*node)
+        {
+            node.inline_style = Some(Box::new(inline));
+        }
     }
 
     if !meta.points.is_empty()
@@ -9844,6 +12149,40 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     {
         builder.set_quadrant_meta(meta);
     }
+}
+
+/// `radius: 12, color: #f30, stroke-color: #000, stroke-width: 2px` — the four keys upstream's
+/// quadrant grammar accepts, in a point's clause or a `classDef` body. Colours pass through the
+/// shared style sanitiser; an unknown key or an unreadable number is skipped rather than guessed.
+fn parse_quadrant_point_style(text: &str) -> fm_core::IrQuadrantPointStyle {
+    let mut style = fm_core::IrQuadrantPointStyle::default();
+    let number = |value: &str| {
+        let value = value.trim();
+        value
+            .strip_suffix("px")
+            .unwrap_or(value)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    let colour = |value: &str| {
+        let style = fm_core::parse_style_string(&format!("fill:{}", value.trim()));
+        style.properties.get("fill").cloned()
+    };
+    for field in text.split(',') {
+        let Some((key, value)) = field.split_once(':') else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "radius" => style.radius = number(value),
+            "color" => style.color = colour(value),
+            "stroke-color" => style.stroke_color = colour(value),
+            "stroke-width" => style.stroke_width = number(value),
+            _ => {}
+        }
+    }
+    style
 }
 
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
@@ -9859,19 +12198,9 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
 
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("xychart") {
-            // `xychart-beta horizontal` swaps the axes. The whole header line was skipped, so the
-            // orientation was dropped in SILENCE and the reader got a vertical chart with no hint
-            // that the directive had been seen — the chart simply looked wrong (bd-8dk0m).
-            //
-            // NAMED rather than stored: `IrXyChartMeta` has no orientation field and no renderer
-            // reads one, so a flag here would be dead IR of the kind docs/IR_FIELD_SWEEP.md exists
-            // to catch. Drawing it horizontally is a renderer change, not a parser one.
-            if lower.split_whitespace().any(|token| token == "horizontal") {
-                builder.add_warning(
-                    "xychart `horizontal` orientation is parsed but not applied; the chart is \
-                     drawn vertically",
-                );
-            }
+            // `xychart-beta horizontal` swaps the axes (bd-8dk0m). Stored, not just named: layout
+            // and every renderer read `horizontal`, so the flag is live IR.
+            xy_chart_meta.horizontal = lower.split_whitespace().any(|token| token == "horizontal");
             continue;
         }
 
@@ -10515,9 +12844,12 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(declaration) = parse_architecture_declaration(trimmed, "junction") {
+            // A junction is the point where edges meet, not a service: mermaid draws nothing there.
+            // The textless junction dot shows the meeting point without printing the id, which a
+            // labelled circle did.
             let label = declaration.label.as_deref();
             let Some(node_id) =
-                builder.intern_node(&declaration.id, label, NodeShape::Circle, span)
+                builder.intern_node(&declaration.id, label, NodeShape::FilledCircle, span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid architecture junction declaration: {trimmed}"
@@ -10584,6 +12916,9 @@ struct GitGraphState {
     /// Lane index per commit node, keyed by node index. Handed to the IR so layout can turn branch
     /// membership into a position instead of drawing every branch in one column.
     commit_lanes: BTreeMap<usize, usize>,
+    /// `branch dev order: 2` values, by branch name. Applied once parsing ends, because a later
+    /// branch can sort in front of an earlier one.
+    explicit_orders: Vec<(String, f64)>,
 }
 
 impl GitGraphState {
@@ -10594,6 +12929,7 @@ impl GitGraphState {
             commit_counter: 0,
             branch_order: vec!["main".to_string()],
             commit_lanes: BTreeMap::new(),
+            explicit_orders: Vec::new(),
         }
     }
 
@@ -10845,6 +13181,9 @@ fn lower_block_beta_document_item(
                         builder.add_warning(format!(
                             "Line {line_number}: block-beta columns must be >= 1"
                         ));
+                    } else if let Some(&group) = active_subgraphs.last() {
+                        // Inside `block … end` it shapes that group's grid, not the diagram's.
+                        builder.set_block_beta_group_columns(group, *columns);
                     } else {
                         builder.set_block_beta_columns(*columns);
                     }
@@ -11119,12 +13458,45 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
         None => (trimmed, 1),
     };
 
+    if let Some(arrow) = parse_block_beta_arrow(core, config) {
+        return Some(BlockDef { span_cols, ..arrow });
+    }
+
     let node = parse_node_token_with_config(core, config)?;
     Some(BlockDef {
         id: node.id,
         label: node.label.map(|label| label.text),
         shape: node.shape,
         span_cols,
+        is_space: false,
+    })
+}
+
+/// block-beta's block arrow, `id<["label"]>(right)`, with `left`, `up`, `down`, `x` or `y`.
+///
+/// The node-token grammar has no `<[ … ]>` bracket, so this fell through to a plain box labelled
+/// `arrow"]>(right)` — the closing syntax printed as text.
+fn parse_block_beta_arrow(core: &str, config: &ParserConfig) -> Option<BlockDef> {
+    let (id, rest) = core.split_once("<[")?;
+    let (inner, direction) = rest.rsplit_once("]>")?;
+    let direction = direction.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let (_, shape) = [
+        ("right", NodeShape::BlockArrowRight),
+        ("left", NodeShape::BlockArrowLeft),
+        ("up", NodeShape::BlockArrowUp),
+        ("down", NodeShape::BlockArrowDown),
+        ("x", NodeShape::BlockArrowX),
+        ("y", NodeShape::BlockArrowY),
+    ]
+    .into_iter()
+    .find(|(name, _)| direction.eq_ignore_ascii_case(name))?;
+    // The label inside reads exactly as a `[ … ]` box label would, quotes and markup included.
+    let node = parse_node_token_with_config(&format!("{}[{inner}]", id.trim()), config)?;
+    Some(BlockDef {
+        id: node.id,
+        label: node.label.map(|label| label.text),
+        shape,
+        span_cols: 1,
         is_space: false,
     })
 }
@@ -11151,19 +13523,23 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
         if let Some(command) = parse_gitgraph_command(trimmed) {
             match command {
                 Ok(command) => {
-                    // The NAME is now correct; the ORDER VALUE still is not applied, and saying so
-                    // is the point — a silently ignored lane order is the invisible-nothing this
-                    // change is about. Lane placement lives in fm-layout, not here, so honouring it
-                    // is a layout change rather than a parser one (bd-p6sgt).
-                    if matches!(command, GitGraphCommand::Branch(_))
-                        && let Some((_, order)) = split_git_branch_order(trimmed)
-                    {
-                        builder.add_warning(format!(
-                            "Line {line_number}: gitGraph branch order `{order}` is parsed but not \
-                             applied; branches keep declaration order"
-                        ));
-                    }
+                    // `branch dev order: 2` (bd-p6sgt): the name is split off by the command parser;
+                    // the order is recorded here and applied to every lane once parsing ends.
+                    let explicit_order = match &command {
+                        GitGraphCommand::Branch(name) => split_git_branch_order(trimmed)
+                            .map(|(_, order)| (normalize_identifier(name), order.to_string())),
+                        _ => None,
+                    };
                     lower_gitgraph_command(command, line_number, line, &mut state, builder);
+                    if let Some((name, order)) = explicit_order {
+                        match parse_git_branch_order_value(&order) {
+                            Some(value) => state.explicit_orders.push((name, value)),
+                            None => builder.add_warning(format!(
+                                "Line {line_number}: gitGraph branch order `{order}` is not a \
+                                 number; the branch keeps its declaration position"
+                            )),
+                        }
+                    }
                 }
                 Err(message) => builder.add_warning(format!("Line {line_number}: {message}")),
             }
@@ -11183,10 +13559,102 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
         ));
     }
 
+    apply_git_branch_order(&mut state, builder);
     builder.set_git_graph_meta(fm_core::IrGitGraphMeta {
         branches: state.branch_order,
         commit_lanes: state.commit_lanes,
     });
+}
+
+/// `order:`'s value as upstream reads it — `parseInt`, so the leading integer of the text.
+fn parse_git_branch_order_value(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let end = text
+        .char_indices()
+        .find(|&(index, c)| !(c.is_ascii_digit() || (index == 0 && c == '-')))
+        .map_or(text.len(), |(index, _)| index);
+    text[..end].parse::<i64>().ok().map(|value| value as f64)
+}
+
+/// Re-sort branch lanes by their `order:` exactly as the pinned 11.15.0 `getBranchesAsObjArray`
+/// does, then renumber every commit's lane and palette class to match.
+///
+/// Upstream gives `main` order 0, every branch WITHOUT an explicit order the fraction `0.i` (`i`
+/// being its declaration index, so `0.1`, `0.2`, …), and sorts stably by that key. An explicit
+/// integer order therefore moves a branch past every implicitly ordered one, and two explicit
+/// orders sort among themselves. Lane and colour both follow the sorted position, as upstream's
+/// `branchPos` index does.
+fn apply_git_branch_order(state: &mut GitGraphState, builder: &mut IrBuilder) {
+    if state.explicit_orders.is_empty() {
+        return;
+    }
+    let key = |index: usize, name: &str| -> f64 {
+        if let Some((_, value)) = state
+            .explicit_orders
+            .iter()
+            .rev()
+            .find(|(branch, _)| branch == name)
+        {
+            return *value;
+        }
+        if index == 0 {
+            return 0.0;
+        }
+        // `parseFloat("0." + i)`: the declaration index read as a decimal fraction.
+        let mut scale = 1.0;
+        let mut rest = index;
+        while rest > 0 {
+            scale *= 10.0;
+            rest /= 10;
+        }
+        index as f64 / scale
+    };
+    let mut sorted: Vec<usize> = (0..state.branch_order.len()).collect();
+    let keys: Vec<f64> = state
+        .branch_order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| key(index, name))
+        .collect();
+    // Stable insertion sort: a chart has a handful of branches, and this keeps another `sort_by`
+    // instantiation (several KiB of WASM) out of the bundle.
+    for i in 1..sorted.len() {
+        let mut j = i;
+        while j > 0 && keys[sorted[j - 1]] > keys[sorted[j]] {
+            sorted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    if sorted
+        .iter()
+        .enumerate()
+        .all(|(position, &old)| position == old)
+    {
+        return;
+    }
+    let mut new_lane = vec![0_usize; sorted.len()];
+    for (position, &old) in sorted.iter().enumerate() {
+        new_lane[old] = position;
+    }
+    state.branch_order = sorted
+        .iter()
+        .map(|&old| state.branch_order[old].clone())
+        .collect();
+    for (&node_index, lane) in &mut state.commit_lanes {
+        let old = *lane;
+        let Some(&new) = new_lane.get(old) else {
+            continue;
+        };
+        *lane = new;
+        if let Some(node) = builder.node_mut(IrNodeId(node_index)) {
+            let old_class = format!("git-branch-{}", old % 8);
+            for class in &mut node.classes {
+                if *class == old_class {
+                    *class = format!("git-branch-{}", new % 8);
+                }
+            }
+        }
+    }
 }
 
 fn parse_gitgraph_command(line: &str) -> Option<Result<GitGraphCommand, String>> {
@@ -11805,8 +14273,16 @@ fn register_state_declaration(
     let label = state_declaration.title.clone();
     let span = span_for(line_number, source_line);
     let (shape, label) = match state_declaration.stereotype {
-        Some(StatePseudoState::Fork | StatePseudoState::Join) => (NodeShape::HorizontalBar, None),
-        Some(StatePseudoState::Choice) => (NodeShape::Diamond, label),
+        // Pseudostates carry no text: mermaid draws a choice as a bare diamond, and the id it fell
+        // back to (`if_state`) printed inside a full-size one.
+        Some(StatePseudoState::Fork | StatePseudoState::Join | StatePseudoState::Choice) => (
+            if state_declaration.stereotype == Some(StatePseudoState::Choice) {
+                NodeShape::Diamond
+            } else {
+                NodeShape::HorizontalBar
+            },
+            None,
+        ),
         Some(StatePseudoState::History) => (
             NodeShape::Circle,
             if explicit_label {
@@ -12660,6 +15136,12 @@ fn find_operator_from_index<'a>(
 /// Returns the matched byte length and the `ArrowType` naming the (tail marker × stroke) pair.
 /// `None` means "not a link here" and leaves the table's answer standing.
 fn match_mermaid_flow_link(bytes: &[u8], index: usize) -> Option<(usize, ArrowType)> {
+    // `~~~+`, mermaid's INVISIBLE_LINK: no head, no tail, and any run of three or more is one token
+    // (a longer run only asks for more rank distance).
+    let tildes = bytes[index..].iter().take_while(|&&b| b == b'~').count();
+    if tildes > 0 {
+        return (tildes >= 3).then_some((tildes, ArrowType::Invisible));
+    }
     // A LEADING `o`/`x` IS A HEAD ONLY AT A TOKEN BOUNDARY, exactly as for the table scan
     // (bd-zdpwd): mermaid's regex opens `\s*[xo<]?`, so without this `Foo--o Bar` would match a
     // head at the second `o` of `Foo` and split the node. `<` cannot occur inside an identifier.
@@ -13353,7 +15835,7 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         .iter()
         .any(|&b| matches!(b, b'(' | b'[' | b'{' | b'>'))
     {
-        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+        if let Some(parsed) = parse_circle_with_config(core, config, true) {
             return Some(parsed);
         }
         if let Some(parsed) =
@@ -13433,6 +15915,15 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
         {
             return Some(parsed);
         }
+        // Hexagon `{{…}}` before the diamond, which would otherwise take it as a Diamond labelled
+        // `{…}` — the chumsky grammar always had this rule; this path never did. Only when the
+        // token's FIRST brace opens the pair, so a diamond whose quoted label holds `{{` stays one.
+        if memchr::memchr(b'{', core.as_bytes()).is_some_and(|at| core[at..].starts_with("{{"))
+            && let Some(parsed) =
+                parse_wrapped_str_with_config(core, "{{", "}}", NodeShape::Hexagon, config)
+        {
+            return Some(parsed);
+        }
         if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
         {
             return Some(parsed);
@@ -13465,19 +15956,38 @@ fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> 
     })
 }
 
-fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+/// `id((text))` → Circle and, when `triple_is_double`, `id(((text)))` → DoubleCircle.
+///
+/// ⚠️ THIS IS THE TOKEN PATH, NOT THE CHUMSKY GRAMMAR, and it had drifted from it. It read `((x))`
+/// as a DOUBLE circle and `(((x)))` as a double circle labelled `(x)`, so the grammar's bd-vfxu fix
+/// never reached the statements that land here — text-form edges (`a -- x --> b((c))`) and 3+-hop
+/// chains drew a circle as a double circle. Mindmap reuses this for its own `((…))` and has no
+/// triple form, so it passes `false` and keeps reading the inner paren as label text.
+fn parse_circle_with_config(
+    raw: &str,
+    config: &ParserConfig,
+    triple_is_double: bool,
+) -> Option<NodeToken> {
     let start = raw.find("((")?;
-    if !raw.ends_with("))") && !config.auto_close_delimiters {
+    let (open_len, close, shape) = if triple_is_double && raw[start..].starts_with("(((") {
+        (3, ")))", NodeShape::DoubleCircle)
+    } else {
+        (2, "))", NodeShape::Circle)
+    };
+    if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
 
     let id_raw = raw[..start].trim();
-    let label_end = if raw.ends_with("))") {
-        raw.len().saturating_sub(2)
+    let label_end = if raw.ends_with(close) {
+        raw.len().saturating_sub(close.len())
     } else {
         raw.len()
     };
-    let label_raw = raw[start + 2..label_end].trim();
+    if start + open_len > label_end {
+        return None;
+    }
+    let label_raw = raw[start + open_len..label_end].trim();
     let mut id = normalize_identifier(id_raw);
     if id.is_empty() {
         id = normalize_identifier(label_raw);
@@ -13493,7 +16003,7 @@ fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<N
         id,
         label,
         icon,
-        shape: NodeShape::DoubleCircle,
+        shape,
         classes: Vec::new(),
     })
 }
@@ -13841,9 +16351,11 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     // `one<br/>two` verbatim and the conversion below is never reached — the guard would have made
     // the fix inert in the common case while every slow-path test passed. `<` in a label is rare
     // enough that the fast path still fires for essentially every real label.
+    // `\n` joins for labels written over several source lines, whose lines are trimmed below — a
+    // caller that already stripped the quotes (a quoted subgraph title) arrives here without them.
     if !raw
         .bytes()
-        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#' | b'<'))
+        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#' | b'<' | b'\n'))
     {
         // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
         // When the caller already trimmed (`pretrimmed`), `trim_fast(raw) == raw`, so skip it entirely
@@ -13866,7 +16378,8 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
         .strip_prefix('`')
         .and_then(|value| value.strip_suffix('`'))
     {
-        let normalized = replace_br_with_newlines(markdown_body.trim());
+        let markdown_body = trim_label_source_lines(markdown_body.trim(), true);
+        let normalized = replace_br_with_newlines(&markdown_body);
         let decoded = decode_mermaid_entities(&normalized);
         let segments = parse_markdown_label_segments(&decoded);
         let text = flatten_label_segments(&segments);
@@ -13885,13 +16398,35 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
     //
     // Measured in Chromium 151 against the pinned mermaid 11.15.0 bundle: `<br/>` was drawn as
     // literal text in 17 of 18 label sites, and the reference joins it in 9 of them.
-    let with_line_breaks = replace_br_with_newlines(without_quotes.trim());
+    let source_lines = trim_label_source_lines(without_quotes.trim(), false);
+    let with_line_breaks = replace_br_with_newlines(&source_lines);
     let decoded = decode_mermaid_entities(&with_line_breaks);
     if decoded.is_empty() {
         None
     } else {
         Some(ParsedLabel::plain(decoded))
     }
+}
+
+/// A label written over several source lines (see [`flowchart_logical_lines`]): each line is drawn
+/// as a line of the label with its indentation trimmed, as upstream's `nonMarkdownToLines` trims and
+/// `markdownToLines` dedents. A markdown string also folds blank lines (`\n{2,}` → `\n`).
+fn trim_label_source_lines(text: &str, fold_blank_lines: bool) -> Cow<'_, str> {
+    if !text.contains('\n') {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let lines = text
+        .split('\n')
+        .map(trim_fast)
+        .filter(|line| !(fold_blank_lines && line.is_empty()));
+    for (index, line) in lines.enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    Cow::Owned(out)
 }
 
 fn parse_markdown_label_segments(text: &str) -> Vec<IrLabelSegment> {
@@ -17464,7 +19999,7 @@ mod tests {
     use fm_core::{
         ArrowType, C4RelationshipDirection, DiagnosticCategory, DiagnosticSeverity, DiagramType,
         GanttDate, GanttExclude, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
-        IrXySeriesKind, MermaidParseMode, NodeShape,
+        IrSubgraphId, IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
     use super::{
@@ -18126,6 +20661,117 @@ mod tests {
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|value| value.text.as_str());
         assert_eq!(label, Some("Research & Dev"));
+    }
+
+    /// Labels written over several source lines (mermaid's string lexer runs across newlines): each
+    /// line becomes a line of the label, indentation trimmed, and NO node is minted from a
+    /// continuation line. Markdown strings fold blank lines, as upstream's `preprocessMarkdown` does.
+    #[test]
+    fn flowchart_labels_may_span_source_lines() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[\"`**Line 1**\n  Line 2\n\n  Line 3`\"] -- \"edge\n    label\" --> B(\"plain\n   quoted\")\n  B --> C\n",
+        );
+        let label_of = |id: &str| {
+            let node = parsed.ir.nodes.iter().find(|node| node.id == id)?;
+            node.label
+                .map(|label| parsed.ir.labels[label.0].text.clone())
+        };
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["A", "B", "C"], "a continuation line became a node");
+        assert_eq!(label_of("A").as_deref(), Some("Line 1\nLine 2\nLine 3"));
+        assert_eq!(label_of("B").as_deref(), Some("plain\nquoted"));
+        let edge_label = parsed.ir.edges[0]
+            .label
+            .map(|label| parsed.ir.labels[label.0].text.clone());
+        assert_eq!(edge_label.as_deref(), Some("edge\nlabel"));
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        // The bold run survives the join.
+        let markup = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "A")
+            .and_then(|node| node.label)
+            .and_then(|label| parsed.ir.label_markup.get(&label))
+            .expect("markdown runs");
+        assert!(markup.iter().any(|segment| matches!(
+            segment,
+            IrLabelSegment::Text { text, bold: true, .. } if text == "Line 1"
+        )));
+    }
+
+    /// CONTROL: a quote that never closes is NOT joined — the following lines parse as before — and
+    /// quotes on comment lines do not open a string.
+    #[test]
+    fn an_unclosed_flowchart_quote_does_not_swallow_the_document() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  %% a \"stray quote\n  A --> B\n  B --> C[\"oops]\n  C --> D\n",
+        );
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert!(ids.starts_with(&["A", "B", "C"]), "{ids:?}");
+        assert!(ids.contains(&"D"), "{ids:?}");
+    }
+
+    /// The token path (text-form edge labels, 3+-hop chains) reads circle, double circle and hexagon
+    /// exactly as the grammar does.
+    #[test]
+    fn token_path_shapes_match_the_grammar() {
+        for (source, expected) in [
+            (
+                "flowchart LR\n  a -- x --> b((c))",
+                (NodeShape::Circle, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b(((c)))",
+                (NodeShape::DoubleCircle, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b{{c}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a -. x .-> b{{\"`**c**`\"}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a --> z --> y --> b{{c}}",
+                (NodeShape::Hexagon, "c"),
+            ),
+            (
+                "flowchart LR\n  a -- x --> b{\"{{c}}\"}",
+                (NodeShape::Diamond, "{{c}}"),
+            ),
+        ] {
+            let parsed = parse_mermaid(source);
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| node.id == "b")
+                .unwrap_or_else(|| panic!("no node b for {source}"));
+            let label = node
+                .label
+                .map(|label| parsed.ir.labels[label.0].text.as_str());
+            assert_eq!(
+                (node.shape, label),
+                (expected.0, Some(expected.1)),
+                "{source}"
+            );
+        }
+        // Mindmap keeps its own reading: no triple form there.
+        let mindmap = parse_mermaid("mindmap\n  root((r))\n");
+        assert_eq!(mindmap.ir.nodes[0].shape, NodeShape::Circle);
     }
 
     #[test]
@@ -19127,6 +21773,58 @@ mod tests {
         assert_eq!(parsed.ir.edges.len(), 2);
     }
 
+    /// `columns` inside a group shapes only that group: it used to overwrite the diagram's own
+    /// `columns`, so a nested `columns 2` made a three-column diagram two columns wide.
+    #[test]
+    fn block_beta_nested_columns_belong_to_their_group() {
+        let parsed = parse_mermaid(
+            "block-beta\n  columns 3\n  a:3\n  block:inner:2\n    columns 2\n    h i\n  end\n  g\n",
+        );
+        assert_eq!(parsed.ir.meta.block_beta_columns, Some(3));
+        let inner = parsed
+            .ir
+            .graph
+            .subgraphs
+            .iter()
+            .position(|subgraph| subgraph.key == "inner")
+            .expect("CONTROL: the group exists");
+        assert_eq!(parsed.ir.meta.block_beta_group_columns, [(inner, 2)]);
+    }
+
+    /// `id<["label"]>(dir)` is a block arrow with the label inside, not a box whose label ends in
+    /// the closing syntax.
+    #[test]
+    fn block_beta_block_arrows_parse_their_label_and_direction() {
+        let parsed = parse_mermaid(
+            "block-beta\n  r<[\"go\"]>(right) l<[\"back\"]>(left) u<[\"up\"]>(up)\n  d<[\"down\"]>(down) x<[\"both\"]>(x) y<[\"vert\"]>(y)\n",
+        );
+        let shapes: Vec<(&str, NodeShape, Option<&str>)> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id.as_str(),
+                    node.shape,
+                    node.label
+                        .and_then(|id| parsed.ir.labels.get(id.0))
+                        .map(|label| label.text.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            [
+                ("r", NodeShape::BlockArrowRight, Some("go")),
+                ("l", NodeShape::BlockArrowLeft, Some("back")),
+                ("u", NodeShape::BlockArrowUp, Some("up")),
+                ("d", NodeShape::BlockArrowDown, Some("down")),
+                ("x", NodeShape::BlockArrowX, Some("both")),
+                ("y", NodeShape::BlockArrowY, Some("vert")),
+            ]
+        );
+    }
+
     #[test]
     fn block_beta_parses_basic_blocks_without_flowchart_fallback_warning() {
         let parsed = parse_mermaid("block-beta\ncolumns 2\nalpha[Alpha]\nbeta[Beta]");
@@ -19505,6 +22203,40 @@ mod tests {
         let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
         assert!(node_a.classes.contains(&"urgent".to_string()));
         assert!(node_a.classes.contains(&"large".to_string()));
+    }
+
+    #[test]
+    fn mindmap_preserves_inline_classes_on_every_shape() {
+        for (token, expected_shape) in [
+            ("A", NodeShape::Rect),
+            ("A[Node A]", NodeShape::Rect),
+            ("A(Node A)", NodeShape::Rounded),
+            ("A((Node A))", NodeShape::Circle),
+            ("A{{Node A}}", NodeShape::Hexagon),
+            ("A)Node A(", NodeShape::Cloud),
+            ("A))Node A((", NodeShape::Asymmetric),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "mindmap\n  root((Root))\n    {token}:::urgent large\n\
+                 classDef urgent fill:#ffcc00,stroke:#b45309\n"
+            ));
+            assert_eq!(parsed.ir.nodes.len(), 2, "{token}");
+            let node = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+            assert_eq!(node.shape, expected_shape, "{token}");
+            assert!(
+                node.classes.iter().any(|class| class == "urgent"),
+                "{token}"
+            );
+            assert!(node.classes.iter().any(|class| class == "large"), "{token}");
+            assert!(node.classes.iter().any(|class| class == "mindmap-branch-1"));
+            assert_eq!(
+                node.classes
+                    .iter()
+                    .any(|class| class == "mindmap-no-border"),
+                token == "A",
+                "inline classes must not change the default-shape discriminator"
+            );
+        }
     }
 
     #[test]
@@ -20764,7 +23496,11 @@ fan_in:B --> T:db",
             .iter()
             .find(|node| node.id == "fan_in")
             .expect("junction node");
-        assert_eq!(junction.shape, NodeShape::Circle);
+        assert_eq!(junction.shape, NodeShape::FilledCircle);
+        assert!(
+            parsed.ir.is_textless_ornament_node(junction),
+            "a junction is a meeting point, so its id is not printed"
+        );
 
         let platform_cluster = &parsed.ir.clusters[0];
         let title = platform_cluster
@@ -24446,6 +27182,134 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    /// `~~~` was not an operator at all: `A ~~~ B` became ONE node labelled "A ~~~ B" and the
+    /// placement the author asked for was lost. Any run of three or more tildes is one invisible
+    /// link, in chains, `&` groups and with a label; two tildes are not a link.
+    #[test]
+    fn flowchart_tilde_runs_are_invisible_links() {
+        let edges = |input: &str| -> Vec<(String, String, ArrowType)> {
+            let ir = parse_mermaid(input).ir;
+            ir.edges
+                .iter()
+                .map(|edge| {
+                    let id = |endpoint| match endpoint {
+                        IrEndpoint::Node(id) => ir.nodes[id.0].id.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (id(edge.from), id(edge.to), edge.arrow)
+                })
+                .collect()
+        };
+        let edge = |from: &str, to: &str, arrow| (from.to_string(), to.to_string(), arrow);
+        assert_eq!(
+            edges("flowchart LR\n  A ~~~ B\n"),
+            [edge("A", "B", ArrowType::Invisible)]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A~~~~~B\n"),
+            [edge("A", "B", ArrowType::Invisible)]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A --> B ~~~ C\n"),
+            [
+                edge("A", "B", ArrowType::Arrow),
+                edge("B", "C", ArrowType::Invisible)
+            ]
+        );
+        assert_eq!(
+            edges("flowchart LR\n  A & B ~~~ C\n"),
+            [
+                edge("A", "C", ArrowType::Invisible),
+                edge("B", "C", ArrowType::Invisible)
+            ]
+        );
+        let labelled = parse_mermaid("flowchart LR\n  A ~~~|why| B\n").ir;
+        assert_eq!(labelled.edges.len(), 1);
+        assert_eq!(labelled.nodes.len(), 2, "the label is not a node");
+        // Two tildes are not a link, and tildes inside a label stay text.
+        assert!(edges("flowchart LR\n  A ~~ B\n").is_empty());
+        assert_eq!(
+            edges("flowchart LR\n  A[x ~~~ y] --> B\n"),
+            [edge("A", "B", ArrowType::Arrow)]
+        );
+    }
+
+    /// A node written inside two subgraphs that do not nest stays in the one that closed first,
+    /// as in mermaid; in both, the two boxes were built around it and overlapped.
+    #[test]
+    fn a_flowchart_node_belongs_to_one_subgraph() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  subgraph Frontend\n    UI --> GW\n  end\n  subgraph Backend\n    \
+             GW --> Auth\n    subgraph Inner\n      GW --> Deep\n    end\n  end\n  subgraph Solo\n    \
+             Deep\n  end\n",
+        );
+        let ir = &parsed.ir;
+        let members = |key: &str| -> Vec<&str> {
+            let subgraph = ir.graph.subgraphs.iter().find(|s| s.key == key).unwrap();
+            subgraph
+                .members
+                .iter()
+                .map(|id| ir.nodes[id.0].id.as_str())
+                .collect()
+        };
+        assert_eq!(members("Frontend"), ["UI", "GW"]);
+        assert_eq!(members("Backend"), ["Auth", "Deep"], "GW stays in Frontend");
+        assert_eq!(members("Inner"), ["Deep"]);
+        assert!(
+            members("Solo").is_empty(),
+            "Deep stays in Inner, which closed first"
+        );
+        // The cluster records and each node's own lists agree with the subgraphs.
+        let gw = ir.nodes.iter().position(|n| n.id == "GW").unwrap();
+        assert_eq!(ir.graph.nodes[gw].subgraphs.len(), 1);
+        assert_eq!(ir.graph.nodes[gw].clusters.len(), 1);
+        for cluster in &ir.clusters {
+            let subgraph = ir
+                .graph
+                .subgraphs
+                .iter()
+                .find(|s| s.cluster == Some(cluster.id))
+                .unwrap();
+            assert_eq!(cluster.members, subgraph.members);
+        }
+    }
+
+    #[test]
+    fn flowchart_edges_remember_the_subgraphs_they_name() {
+        let named = |input: &str| -> Vec<(Option<String>, Option<String>)> {
+            let ir = parse_mermaid(input).ir;
+            let key = |id: Option<IrSubgraphId>| id.map(|id| ir.graph.subgraphs[id.0].key.clone());
+            ir.edges
+                .iter()
+                .map(|edge| {
+                    let (from, to) = edge.named_subgraphs();
+                    (key(from), key(to))
+                })
+                .collect()
+        };
+        let some = |key: &str| Some(key.to_string());
+        let input = "flowchart LR\n  c1 --> a2\n  subgraph one\n    a1 --> a2\n  end\n  \
+                     subgraph two\n    b1 --> b2\n  end\n  one --> two\n  three --> two\n  \
+                     subgraph three\n    c1 --> c2\n  end\n";
+        assert_eq!(
+            named(input),
+            [
+                (None, None),
+                (None, None),
+                (None, None),
+                (some("one"), some("two")),
+                (some("three"), some("two")),
+                (None, None),
+            ],
+            "only the ends written as a subgraph id name one, including a subgraph declared later"
+        );
+        // A chain names a subgraph only on the link whose end it is.
+        assert_eq!(
+            named("flowchart TB\n  subgraph s\n    x\n  end\n  a --> s --> b\n"),
+            [(None, some("s")), (some("s"), None)]
+        );
+    }
+
     #[test]
     fn flowchart_thick_arrow_with_label() {
         let input = "flowchart LR\n  A ==>|label| B";
@@ -25374,9 +28238,74 @@ Rel_Back(db, app, "Responds")"#,
             (point.x - 0.3).abs() < 1e-6 && (point.y - 0.6).abs() < 1e-6,
             "the styling clause moved the point: {point:?}"
         );
+        let style = point.style.as_ref().expect("the styling clause is applied");
+        assert_eq!(style.radius, Some(10.0));
+        assert_eq!(style.color.as_deref(), Some("#ff0000"));
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("point styling")),
-            "the unapplied styling was dropped in silence: {:?}",
+            parsed.warnings.is_empty(),
+            "applied styling is not a warning: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// `classDef` + `:::class` on a quadrant point: the class fills only the keys the point's own
+    /// clause left unset, the class may be declared after its first use, and the resolved fill and
+    /// stroke reach the point's node for the backends that paint nodes generically.
+    #[test]
+    fn quadrant_point_classes_merge_under_the_points_own_style() {
+        let parsed = parse_mermaid(
+            "quadrantChart\n  Campaign A:::hot: [0.3, 0.6]\n  Campaign B:::hot: [0.45, 0.23] radius: 12\n  Campaign C: [0.7, 0.8]\n  classDef hot color: #109060, radius : 9, stroke-color: #000000, stroke-width: 3px\n",
+        );
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+        let labels: Vec<&str> = meta.points.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Campaign A", "Campaign B", "Campaign C"]);
+
+        let a = meta.points[0].style.as_ref().expect("class style applied");
+        assert_eq!(a.radius, Some(9.0));
+        assert_eq!(a.color.as_deref(), Some("#109060"));
+        assert_eq!(a.stroke_color.as_deref(), Some("#000000"));
+        assert_eq!(a.stroke_width, Some(3.0));
+        let b = meta.points[1].style.as_ref().expect("own + class style");
+        assert_eq!(b.radius, Some(12.0), "the point's own radius wins");
+        assert_eq!(b.color.as_deref(), Some("#109060"));
+        assert!(
+            meta.points[2].style.is_none(),
+            "an unstyled point stays unstyled"
+        );
+        assert!((meta.points[1].x - 0.45).abs() < 1e-6);
+
+        let fills: Vec<Option<&str>> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| {
+                node.inline_style
+                    .as_ref()
+                    .and_then(|style| style.properties.get("fill"))
+                    .map(String::as_str)
+            })
+            .collect();
+        assert_eq!(fills, [Some("#109060"), Some("#109060"), None]);
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("hot") || w.contains("unsupported")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    /// A point naming a class nobody declares is reported, and the point is still drawn.
+    #[test]
+    fn quadrant_point_with_an_undeclared_class_is_reported() {
+        let parsed = parse_mermaid("quadrantChart\n  A:::ghost: [0.3, 0.6]\n");
+        let meta = parsed.ir.quadrant_meta.as_ref().expect("quadrant meta");
+        assert_eq!(meta.points.len(), 1);
+        assert!(meta.points[0].style.is_none());
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("ghost")),
+            "{:?}",
             parsed.warnings
         );
     }
@@ -25412,14 +28341,23 @@ Rel_Back(db, app, "Responds")"#,
         }
     }
 
-    /// `xychart-beta horizontal` swaps the axes and we draw vertically — say so (bd-8dk0m).
+    /// `xychart-beta horizontal` swaps the axes, and the orientation reaches the IR (bd-8dk0m).
     #[test]
-    fn xychart_horizontal_orientation_is_reported_as_unapplied() {
+    fn xychart_horizontal_orientation_is_stored() {
         let parsed = parse_mermaid("xychart-beta horizontal\n  x-axis [a, b]\n  bar [1, 2]\n");
 
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("horizontal")),
-            "the orientation was dropped in silence: {:?}",
+            parsed
+                .ir
+                .xy_chart_meta
+                .as_ref()
+                .is_some_and(|meta| meta.horizontal),
+            "the orientation was dropped: {:?}",
+            parsed.ir.xy_chart_meta
+        );
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("horizontal")),
+            "an applied orientation must not be reported as unapplied: {:?}",
             parsed.warnings
         );
         // NON-VACUITY: the chart itself must still parse, or the warning is all there is.
@@ -25433,10 +28371,17 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// CONTROL: an ordinary vertical chart raises no orientation warning.
+    /// CONTROL: an ordinary vertical chart stays vertical and raises no orientation warning.
     #[test]
     fn xychart_without_an_orientation_is_silent() {
         let parsed = parse_mermaid("xychart-beta\n  x-axis [a, b]\n  bar [1, 2]\n");
+        assert!(
+            parsed
+                .ir
+                .xy_chart_meta
+                .as_ref()
+                .is_some_and(|meta| !meta.horizontal)
+        );
 
         assert!(
             !parsed.warnings.iter().any(|w| w.contains("horizontal")),
@@ -25445,43 +28390,599 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
+    /// Parent of each non-root ishikawa node, read off its cause → effect edge, by label.
+    fn ishikawa_parents(source: &str) -> Vec<(String, String)> {
+        let parsed = parse_mermaid(source);
+        let label = |index: usize| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[index])
+                .to_string()
+        };
+        parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(child), IrEndpoint::Node(parent)) = (edge.from, edge.to)
+                else {
+                    panic!("ishikawa edges join two nodes");
+                };
+                (label(child.0), label(parent.0))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ishikawa_builds_the_cause_tree_from_indentation() {
+        let source = "ishikawa\n  Late launch\n    People\n      Understaffed\n    Process\n      Slow approvals\n        Too many sign-offs\n    Tools\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Ishikawa);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 7);
+        assert_eq!(parsed.ir.nodes[0].shape, NodeShape::HalfRoundedRect);
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|c| c == "ishikawa-head")
+        );
+        assert_eq!(
+            ishikawa_parents(source),
+            [
+                ("People", "Late launch"),
+                ("Understaffed", "People"),
+                ("Process", "Late launch"),
+                ("Slow approvals", "Process"),
+                ("Too many sign-offs", "Slow approvals"),
+                ("Tools", "Late launch"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        // First-ring causes are boxed; everything below them is text on a bone.
+        let shape_of = |text: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| parsed.ir.node_display_text(node) == text)
+                .map(|node| node.shape)
+        };
+        assert_eq!(shape_of("People"), Some(NodeShape::Rect));
+        assert_eq!(shape_of("Understaffed"), Some(NodeShape::TextBlock));
+        assert!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .all(|edge| edge.arrow == ArrowType::Arrow)
+        );
+    }
+
+    #[test]
+    fn ishikawa_takes_its_base_level_from_the_first_cause_not_the_effect() {
+        // The effect is indented DEEPER than its causes; upstream still nests by the causes'
+        // relative indentation, and an over-dedented line clamps to level 1 instead of escaping.
+        let source = "ishikawa\n        Effect\n  A\n    A1\n  B\nC\n";
+        assert_eq!(
+            ishikawa_parents(source),
+            [
+                ("A", "Effect"),
+                ("A1", "A"),
+                ("B", "Effect"),
+                ("C", "Effect"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+    }
+
+    #[test]
+    fn ishikawa_header_variants_and_inline_effect() {
+        for header in ["ishikawa", "ishikawa-beta", "ISHIKAWA", "Ishikawa-Beta"] {
+            let parsed = parse_mermaid(&format!("{header}\n  Effect\n    Cause\n"));
+            assert_eq!(parsed.ir.diagram_type, DiagramType::Ishikawa, "{header}");
+            assert_eq!(parsed.ir.nodes.len(), 2, "{header}");
+        }
+        // Text after the header on the same line is the effect itself.
+        let parsed = parse_mermaid("ishikawa Effect on header\n    Cause\n");
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "Effect on header"
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn ishikawa_skips_comments_and_accessibility_and_honours_br() {
+        let source =
+            "ishikawa\n%% a comment\n  accTitle: Why we slipped\n  Effect<br>line two\n    Cause\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.nodes.len(), 2, "{:?}", parsed.ir.nodes);
+        assert_eq!(
+            parsed.ir.node_display_text(&parsed.ir.nodes[0]),
+            "Effect\nline two"
+        );
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Why we slipped"));
+    }
+
+    #[test]
+    fn ishikawa_duplicate_labels_stay_distinct_nodes() {
+        let parsed = parse_mermaid("ishikawa\n  Effect\n    Same\n    Same\n");
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_ishikawa_warns_rather_than_inventing_an_effect() {
+        let parsed = parse_mermaid("ishikawa\n");
+        assert!(parsed.ir.nodes.is_empty());
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("ishikawa")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    /// (child, parent) label pairs of a tree view, read off its parent → child edges.
+    fn tree_view_pairs(source: &str) -> Vec<(String, String)> {
+        let parsed = parse_mermaid(source);
+        let label = |id: fm_core::IrNodeId| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[id.0])
+                .to_string()
+        };
+        parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(parent), IrEndpoint::Node(child)) = (edge.from, edge.to)
+                else {
+                    panic!("tree edges join two nodes");
+                };
+                (label(child), label(parent))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tree_view_nests_quoted_names_under_an_implicit_root() {
+        let source = "treeView-beta\n    \"src\"\n        \"main.rs\"\n        'lib.rs'\n    \"Cargo.toml\"\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::TreeView);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.node_display_text(&parsed.ir.nodes[0]), "/");
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .all(|node| node.shape == NodeShape::TextBlock)
+        );
+        assert_eq!(
+            tree_view_pairs(source),
+            [
+                ("src", "/"),
+                ("main.rs", "src"),
+                ("lib.rs", "src"),
+                ("Cargo.toml", "/"),
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        assert!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .all(|edge| edge.arrow == ArrowType::Line)
+        );
+    }
+
+    #[test]
+    fn tree_view_pops_to_the_nearest_strictly_shallower_line() {
+        // Upstream pops while `level <= top.level`: a sibling at the SAME indent is a sibling, and a
+        // line shallower than every open ancestor attaches to the root.
+        let source = "treeView-beta\n  \"a\"\n      \"deep\"\n    \"mid\"\n\"top\"\n";
+        assert_eq!(
+            tree_view_pairs(source),
+            [("a", "/"), ("deep", "a"), ("mid", "a"), ("top", "/")]
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+    }
+
+    #[test]
+    fn tree_view_skips_title_accessibility_and_comments() {
+        let source = "treeView-beta\ntitle Repo layout\naccTitle: Files\naccDescr {\n  \"not a node\"\n}\n%% note\n  \"src\"\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.nodes.len(), 2, "{:?}", parsed.ir.nodes);
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Files"));
+    }
+
+    #[test]
+    fn tree_view_accepts_unquoted_names_with_a_warning_and_draws_an_empty_root() {
+        let parsed = parse_mermaid("treeView-beta\n  bare\n");
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("quoted")),
+            "{:?}",
+            parsed.warnings
+        );
+        let empty = parse_mermaid("treeView-beta\n");
+        assert_eq!(empty.ir.nodes.len(), 1);
+        assert!(
+            !empty.warnings.iter().any(|w| w.contains("No parseable")),
+            "{:?}",
+            empty.warnings
+        );
+    }
+
+    fn wardley_marks(parsed: &crate::ParseResult, kind: fm_core::IrWardleyMarkKind) -> Vec<String> {
+        let meta = parsed.ir.wardley_meta.as_deref().expect("wardley meta");
+        meta.marks
+            .iter()
+            .filter(|mark| mark.kind == kind)
+            .map(|mark| {
+                let node = &parsed.ir.nodes[mark.node];
+                node.label
+                    .map(|label| parsed.ir.labels[label.0].text.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The statements of the pinned grammar each land as the right marks, coordinates are read
+    /// visibility-first, and no well-formed line is reported.
+    #[test]
+    fn wardley_parses_components_links_and_decorations() {
+        use fm_core::IrWardleyMarkKind as Kind;
+        let parsed = parse_mermaid(
+            "wardley-beta\ntitle Tea Shop\nsize [1100, 800]\nevolution Genesis -> Custom@0.5 -> Product / Rental -> Commodity\nanchor Business [0.95, 0.63]\ncomponent Cup of Tea [0.79, 0.61] label [19, -4]\ncomponent Kettle [0.43, 35] (build) inertia\ncomponent Stall [0.3, 0.9] (market)\nBusiness -> Cup of Tea\nCup of Tea -.-> Kettle; limited by\nKettle +<> Stall\nStall +'cash'< Business\nevolve Kettle 0.62\nnote \"A note\" [0.3, 0.5]\naccelerator Push [0.2, 0.5]\n",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Wardley);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Tea Shop"));
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!((meta.width, meta.height), (1100.0, 800.0));
+        let stages: Vec<String> = meta
+            .stages
+            .iter()
+            .map(|stage| {
+                let node = &parsed.ir.nodes[stage.node];
+                parsed.ir.labels[node.label.unwrap().0].text.clone()
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            ["Genesis", "Custom", "Product / Rental", "Commodity"]
+        );
+        assert_eq!(wardley_marks(&parsed, Kind::Caption), ["Business", "Push"]);
+        assert_eq!(
+            wardley_marks(&parsed, Kind::Label),
+            ["Cup of Tea", "Kettle", "Stall", "A note"]
+        );
+        assert_eq!(wardley_marks(&parsed, Kind::Ring).len(), 2);
+        assert_eq!(wardley_marks(&parsed, Kind::Market).len(), 1);
+        assert_eq!(wardley_marks(&parsed, Kind::Inertia).len(), 1);
+        // `[0.43, 35]`: visibility 43%, evolution 35% (a value above 1 is already a percentage).
+        let kettle_dot = meta
+            .marks
+            .iter()
+            .filter(|mark| mark.kind == Kind::Dot)
+            .nth(1)
+            .expect("kettle dot");
+        let point = meta.points[kettle_dot.point];
+        assert!(
+            (point.x - 35.0).abs() < 1e-4 && (point.y - 43.0).abs() < 1e-4,
+            "{point:?}"
+        );
+
+        let arrows: Vec<ArrowType> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        assert_eq!(
+            arrows,
+            [
+                ArrowType::Line,
+                ArrowType::DottedLine,
+                ArrowType::DoubleArrow,
+                ArrowType::Arrow,
+                ArrowType::DottedArrow,
+                ArrowType::ThickArrow,
+            ]
+        );
+        let label = |index: usize| {
+            parsed.ir.edges[index]
+                .label
+                .map(|label| parsed.ir.labels[label.0].text.as_str())
+        };
+        assert_eq!(label(1), Some("limited by"));
+        assert_eq!(label(3), Some("cash"));
+        // A backward flow points at the link's SOURCE: the edge runs Business -> Stall.
+        let fm_core::IrEndpoint::Node(target) = parsed.ir.edges[3].to else {
+            panic!("a node endpoint");
+        };
+        assert!(
+            parsed.ir.nodes[target.0].label.is_none(),
+            "the arrow lands on the stall's mark"
+        );
+        // The trend is red.
+        let trend = parsed.ir.edges[4]
+            .inline_style
+            .as_ref()
+            .expect("trend colour");
+        assert_eq!(
+            trend.properties.get("stroke").map(String::as_str),
+            Some("#dc3545")
+        );
+    }
+
+    /// A pipeline's members take the parent's visibility, resolve by their own names in links,
+    /// are chained left to right, and a member's link to its own parent is dropped as upstream
+    /// drops it.
+    #[test]
+    fn wardley_pipelines_resolve_members_and_chain_them() {
+        use fm_core::IrWardleyMarkKind as Kind;
+        let parsed = parse_mermaid(
+            "wardley-beta\ncomponent Kettle [0.45, 0.57]\ncomponent Power [0.1, 0.7]\npipeline Kettle {\n  component Electric [0.75] label [5, 5]\n  component Campfire [0.35]\n}\nElectric -> Power\nCampfire -> Kettle\n",
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!(wardley_marks(&parsed, Kind::Square).len(), 1);
+        let pipeline = &meta.pipelines[0];
+        let ys: Vec<f32> = pipeline.members.iter().map(|&p| meta.points[p].y).collect();
+        assert_eq!(ys, [45.0, 45.0]);
+        let arrows: Vec<ArrowType> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        // The chain (Campfire -> Electric, sorted by evolution), then Electric -> Power; the
+        // member-to-parent link is not drawn.
+        assert_eq!(arrows, [ArrowType::DottedLine, ArrowType::Line]);
+        assert_eq!(parsed.ir.clusters.len(), 2, "frame and pipeline box");
+    }
+
+    /// Frames land in their type lanes (namespaced ones in their own lane, shared by the namespace),
+    /// lanes come out in upstream's key order, and the flow follows `->>` or the nearest earlier
+    /// frame in another lane — never into a reset frame or out of nowhere into the first frame.
+    #[test]
+    fn eventmodeling_lanes_and_flow() {
+        let parsed = parse_mermaid(
+            "eventmodeling\n%% a comment\ntf 01 ui Cart\ntf 02 cmd AddItem { itemId: 42 }\ntf 03 evt ItemAdded [[Item]]\ntf 04 evt Shop.Stocked\ntf 05 evt Shop.Sold\nrf 06 rmo Reset\ntf 07 pcr Ship ->> 03 ->> 04\ndata Item {\n  itemId: 42\n}\nentity Customer\nnote 02 {\n  ignored\n}\ngwt 02 given evt ItemAdded when cmd AddItem then evt ItemAdded\n",
+        );
+        assert_eq!(parsed.ir.diagram_type, DiagramType::EventModeling);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.event_model_meta.as_ref().expect("meta");
+        let titles: Vec<String> = meta
+            .lanes
+            .iter()
+            .map(|&cluster| {
+                let title = parsed.ir.clusters[cluster].title.expect("lane caption");
+                parsed.ir.labels[title.0].text.clone()
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "UI/Automation",
+                "Command/Read Model",
+                "Events",
+                "Stream: Shop"
+            ]
+        );
+        let lanes: Vec<usize> = meta.frames.iter().map(|(_, lane)| *lane).collect();
+        assert_eq!(lanes, [0, 1, 2, 3, 3, 1, 0]);
+
+        // Labels: the bare name, then the data as code lines.
+        let label = |frame: usize| {
+            let node = &parsed.ir.nodes[meta.frames[frame].0];
+            parsed.ir.labels[node.label.expect("label").0].text.clone()
+        };
+        assert_eq!(label(1), "AddItem\nitemId: 42");
+        assert_eq!(label(2), "ItemAdded\nitemId: 42");
+        assert_eq!(label(3), "Stocked");
+
+        // 01 -> 02 -> 03 (implied), 03 -> 04 (implied, different lane), 04 -> 05 has none (same
+        // lane: nearest earlier in ANOTHER lane is 03), the reset frame none, and 07 from 03 and 04.
+        let edges: Vec<(usize, usize)> = parsed
+            .ir
+            .edges
+            .iter()
+            .map(|edge| match (edge.from, edge.to) {
+                (fm_core::IrEndpoint::Node(a), fm_core::IrEndpoint::Node(b)) => {
+                    let frame = |node: fm_core::IrNodeId| {
+                        meta.frames.iter().position(|(n, _)| *n == node.0).unwrap() + 1
+                    };
+                    (frame(a), frame(b))
+                }
+                _ => panic!("node endpoints"),
+            })
+            .collect();
+        assert_eq!(edges, [(1, 2), (2, 3), (3, 4), (3, 5), (3, 7), (4, 7)]);
+    }
+
+    /// An unknown type, an undeclared source frame and an undeclared data reference are reported,
+    /// and the frames that can be drawn still are.
+    #[test]
+    fn eventmodeling_reports_what_it_cannot_draw() {
+        let parsed = parse_mermaid(
+            "eventmodeling\ntf 01 widget X\ntf 02 evt A ->> 09\ntf 03 evt B [[Nope]]\nbogus line\n",
+        );
+        let joined = parsed.warnings.join(" | ");
+        assert!(joined.contains("expected `tf NN type Name`"), "{joined}");
+        assert!(joined.contains("undeclared source frame `09`"), "{joined}");
+        assert!(joined.contains("undeclared data `Nope`"), "{joined}");
+        assert!(
+            joined.contains("unsupported eventmodeling syntax"),
+            "{joined}"
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+    }
+
+    /// Mistakes are reported and the rest of the map still draws: an out-of-range coordinate is
+    /// clamped, a link to an undeclared component and a pipeline of one are skipped with a reason.
+    #[test]
+    fn wardley_reports_what_it_cannot_draw() {
+        let parsed = parse_mermaid(
+            "wardley-beta\ncomponent A [1.5, 120]\nA -> Ghost\npipeline Nobody {\n}\nwhat is this\n",
+        );
+        let joined = parsed.warnings.join(" | ");
+        assert!(joined.contains("clamped"), "{joined}");
+        assert!(joined.contains("not declared"), "{joined}");
+        assert!(joined.contains("pipeline"), "{joined}");
+        assert!(joined.contains("unsupported wardley syntax"), "{joined}");
+        let meta = parsed.ir.wardley_meta.as_deref().expect("meta");
+        assert_eq!(meta.points[0].x, 100.0);
+    }
+
+    #[test]
+    fn venn_parses_sets_unions_sizes_and_labels() {
+        let source = "venn-beta\n  title Team overlap\n  set A\n  set B[\"Backend\"]:20\n  set \"C\":5\n  union B,A[\"APIs\"]\n  union A,B,C:0.5\n";
+        let parsed = parse_mermaid(source);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Venn);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.meta.title.as_deref(), Some("Team overlap"));
+        let meta = parsed.ir.venn_meta.as_ref().expect("venn meta");
+        let sets: Vec<(&str, f64)> = meta.sets.iter().map(|s| (s.id.as_str(), s.size)).collect();
+        assert_eq!(sets, [("A", 10.0), ("B", 20.0), ("C", 5.0)]);
+        let label = |node: usize| {
+            parsed
+                .ir
+                .node_display_text(&parsed.ir.nodes[node])
+                .to_string()
+        };
+        assert_eq!(label(meta.sets[1].node), "Backend");
+        assert_eq!(parsed.ir.nodes[meta.sets[0].node].shape, NodeShape::Circle);
+        // Union ids are sorted, the 2-way default is overridden by nothing here, the 3-way size is
+        // explicit, and only the labelled union owns a label node.
+        assert_eq!(meta.unions[0].sets, ["A", "B"]);
+        assert!((meta.unions[0].size - 2.5).abs() < 1e-9);
+        assert_eq!(label(meta.unions[0].label_node.unwrap()), "APIs");
+        assert_eq!(meta.unions[1].sets, ["A", "B", "C"]);
+        assert!((meta.unions[1].size - 0.5).abs() < 1e-9);
+        assert!(meta.unions[1].label_node.is_none());
+        assert!(parsed.ir.edges.is_empty());
+    }
+
+    #[test]
+    fn venn_text_attaches_to_its_region_explicitly_or_by_indentation() {
+        let source = "venn-beta\n  set A\n  set B\nunion A,B\n    text shared[\"Both\"]\n    text other\ntext A solo\ntext B, A pair[\"Pair\"]\n";
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        let texts: Vec<(Vec<&str>, &str, String)> = meta
+            .texts
+            .iter()
+            .map(|t| {
+                (
+                    t.sets.iter().map(String::as_str).collect(),
+                    t.id.as_str(),
+                    parsed
+                        .ir
+                        .node_display_text(&parsed.ir.nodes[t.node])
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (vec!["A", "B"], "shared", "Both".to_string()),
+                (vec!["A", "B"], "other", "other".to_string()),
+                (vec!["A"], "solo", "solo".to_string()),
+                (vec!["A", "B"], "pair", "Pair".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn venn_rejects_unions_of_undeclared_sets_and_single_set_unions() {
+        let parsed = parse_mermaid("venn-beta\n  set A\n  union A,Z\n  union A\n");
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        assert!(meta.unions.is_empty());
+        assert!(parsed.warnings.iter().any(|w| w.contains("undeclared set")));
+        assert!(parsed.warnings.iter().any(|w| w.contains("at least two")));
+    }
+
+    #[test]
+    fn venn_styles_paint_sets_regions_and_text_and_default_to_the_palette() {
+        // `text` at column 0: indented under the union it would join that region by indent mode.
+        let source = "venn-beta\n  set A\n  set B\n  union A,B[\"AB\"]\ntext A t1\n  style A fill: #ff0000, color: #00ff00\n  style B,A color: #123456\n  style t1 color: #abcdef\n";
+        let parsed = parse_mermaid(source);
+        let meta = parsed.ir.venn_meta.as_ref().unwrap();
+        let style = |node: usize, key: &str| {
+            parsed.ir.nodes[node]
+                .inline_style
+                .as_ref()
+                .and_then(|style| style.properties.get(key).cloned())
+        };
+        let a = meta.sets[0].node;
+        assert_eq!(style(a, "fill").as_deref(), Some("#ff0000"));
+        assert_eq!(
+            style(a, "stroke").as_deref(),
+            Some("#ff0000"),
+            "stroke follows fill"
+        );
+        assert_eq!(style(a, "color").as_deref(), Some("#00ff00"));
+        assert_eq!(style(a, "fill-opacity").as_deref(), Some("0.1"));
+        // An unstyled set still gets a translucent palette fill, never an opaque theme fill.
+        let b = meta.sets[1].node;
+        assert!(style(b, "fill").is_some());
+        assert_eq!(style(b, "fill-opacity").as_deref(), Some("0.1"));
+        assert_eq!(
+            style(meta.unions[0].label_node.unwrap(), "color").as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            style(meta.texts[0].node, "color").as_deref(),
+            Some("#abcdef")
+        );
+        // The generic `style` pass must not have read `style B,A …` as a node directive.
+        assert!(
+            parsed.ir.style_refs.is_empty(),
+            "{:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    #[test]
+    fn requirement_styling_statements_are_applied_not_reported_unsupported() {
+        let parsed = parse_mermaid(
+            "requirementDiagram\n  requirement r {\n  id: 1\n  }\n  classDef hot fill:#f96\n  class r hot\n  style r fill:#ffa\n",
+        );
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("unsupported")),
+            "{:?}",
+            parsed.warnings
+        );
+        assert!(
+            parsed.ir.nodes[0]
+                .classes
+                .iter()
+                .any(|class| class == "hot")
+        );
+        assert!(
+            !parsed.ir.style_refs.is_empty(),
+            "the style statement was not recorded"
+        );
+    }
+
+    /// A header mermaid REJECTS but one suffix from a family that renders says so, instead of
+    /// blaming the author with "No parseable nodes or edges were found" (bd-8z4fk).
     ///
-    /// `treemap` renders in the incumbent. "No parseable nodes or edges were found" is true here but
-    /// misleading — it invites the author to hunt for a syntax error that does not exist.
+    /// Every upstream type is implemented now (treemap, radar, ishikawa, treeView, venn, wardley and
+    /// eventmodeling each left this test as it landed), so what remains is the bare spelling of a
+    /// `-beta`-only family, answered with the header that works.
     #[test]
     fn an_unimplemented_diagram_type_is_named_rather_than_blamed() {
-        // ⚠️ THE MESSAGE NAMES THE CANONICAL TYPE, NOT THE HEADER AS WRITTEN, which is why these are
-        // PAIRS. `unsupported_upstream_keyword` splits the header on whitespace or `-` and matches
-        // the first token, so `treemap-beta` reports `treemap`. My first version asserted the
-        // message contained the header verbatim and failed on exactly that — the implementation is
-        // right and the expectation was mine.
-        //
-        // `ishikawa` is deliberately ABSENT: it is a real mermaid 11.15.0 type we do not implement,
-        // but the surviving matcher in lib.rs does not list it yet and that file belongs to another
-        // session. Adding the case here before the entry exists would be a test asserting a feature
-        // nobody wrote. Tracked on bd-8z4fk.
-        // `treemap`/`treemap-beta` WERE HERE and are not any more: bd-9ghyo implemented the family,
-        // so naming it unimplemented is now the wrong answer. `an_implemented_type_is_never_named_
-        // as_unimplemented` in lib.rs asserts the opposite for it.
-        // `radar-beta` WAS HERE and is not any more: bd-sk4dv implemented the family. The BARE
-        // `radar` spelling is still unimplemented and still names `radar-beta` back, which is
-        // now a spelling that actually renders — asserted in lib.rs.
-        for (header, canonical) in [("venn-beta", "venn"), ("wardley-beta", "wardley")] {
-            let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
+        let parsed = parse_mermaid("wardley\n  component A [0.5, 0.5]\n");
 
-            // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
-            // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
-            // test survives that implementation moving, and fails if it is deleted.
-            assert!(
-                parsed
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains(canonical) && w.contains("does not implement")),
-                "`{header}` was not named as unimplemented: {:?}",
-                parsed.warnings
-            );
-        }
+        // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
+        // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
+        // test survives that implementation moving, and fails if it is deleted.
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("wardley-beta") && w.contains("rejected upstream")),
+            "the bare `wardley` header was not answered with `wardley-beta`: {:?}",
+            parsed.warnings
+        );
     }
 
     /// CONTROL: an unrecognisable document is NOT claimed as an unimplemented upstream type.
@@ -25539,15 +29040,60 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// The order VALUE is not applied, and says so rather than vanishing.
+    /// The order VALUE sorts the lanes the way upstream's `getBranchesAsObjArray` does: `main` is 0,
+    /// an unordered branch is `0.i`, an explicit order is its integer, and the sort is stable.
     #[test]
-    fn gitgraph_branch_order_value_is_reported_as_unapplied() {
-        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev order: 2\n  commit\n");
-
+    fn gitgraph_branch_order_value_sorts_lanes_and_colours() {
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch late order: 1\n  commit\n  branch first\n  commit\n  branch zero order: 0\n  commit\n",
+        );
         assert!(
-            parsed.warnings.iter().any(|w| w.contains("branch order")),
-            "an unapplied lane order was dropped in silence: {:?}",
+            !parsed.warnings.iter().any(|w| w.contains("branch order")),
+            "{:?}",
             parsed.warnings
+        );
+        let meta = parsed.ir.git_graph_meta.as_ref().expect("git meta");
+        // main 0 and zero 0 tie (stable: main first); first is 0.2 (third declared); late is 1.
+        assert_eq!(meta.branches, ["main", "zero", "first", "late"]);
+        let lane_of = |label: &str| {
+            let index = parsed
+                .ir
+                .nodes
+                .iter()
+                .position(|node| parsed.ir.node_display_text(node) == label || node.id == label)
+                .unwrap_or_else(|| panic!("no commit {label}"));
+            (index, meta.lane_of(index))
+        };
+        // Commits are numbered in creation order: 1 on main, 2 on late, 3 on first, 4 on zero.
+        for (commit, lane) in [
+            ("commit_1", 0),
+            ("commit_2", 3),
+            ("commit_3", 2),
+            ("commit_4", 1),
+        ] {
+            let (index, actual) = lane_of(commit);
+            assert_eq!(actual, lane, "{commit}");
+            let class = format!("git-branch-{lane}");
+            assert!(
+                parsed.ir.nodes[index].classes.contains(&class),
+                "{commit} keeps a stale colour: {:?}",
+                parsed.ir.nodes[index].classes
+            );
+        }
+    }
+
+    /// A non-numeric order is reported and leaves declaration order alone.
+    #[test]
+    fn gitgraph_branch_order_that_is_not_a_number_is_reported() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev order: soon\n  commit\n");
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("not a number")),
+            "{:?}",
+            parsed.warnings
+        );
+        assert_eq!(
+            parsed.ir.git_graph_meta.as_ref().unwrap().branches,
+            ["main", "dev"]
         );
     }
 
@@ -26120,12 +29666,18 @@ Rel_Back(db, app, "Responds")"#,
             "the orphan note is still carried; layout is where an unresolvable target is dropped"
         );
 
-        // The standalone form has no target. It stays dropped rather than being attached to an
-        // arbitrary class — and, as before, must not intern a node called `note`.
+        // The standalone form has no target. It is carried with an empty one rather than being
+        // attached to an arbitrary class — and, as before, must not intern a node called `note`.
         let standalone = parse_mermaid("classDiagram\n    class Duck\n    note \"loose text\"");
-        assert!(
-            standalone.ir.state_notes.is_empty(),
-            "the untargeted note form is not implemented and must not be guessed at"
+        assert_eq!(
+            standalone
+                .ir
+                .state_notes
+                .iter()
+                .map(|note| (note.target.as_str(), note.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("", "loose text")],
+            "the untargeted note annotates the diagram, not a class"
         );
         assert_eq!(
             standalone
@@ -26137,6 +29689,30 @@ Rel_Back(db, app, "Responds")"#,
             vec!["Duck"],
             "a standalone note must not intern a node"
         );
+    }
+
+    /// mermaid's own example, `note for Duck "can fly\ncan swim"`, draws one line per `\n`; the
+    /// escape was carried through as text and printed literally.
+    #[test]
+    fn class_note_line_breaks_break_the_line() {
+        let parsed = parse_mermaid(
+            "classDiagram\n    class Duck\n    note for Duck \"can fly\\ncan swim<br>can dive\"\n    \
+             note \"From Duck<br/>till Zebra\"",
+        );
+        let texts: Vec<&str> = parsed
+            .ir
+            .state_notes
+            .iter()
+            .map(|note| note.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["can fly\ncan swim\ncan dive", "From Duck\ntill Zebra"]
+        );
+        // `note` with no quoted text is not a note, and still declares nothing.
+        let bare = parse_mermaid("classDiagram\n    class Duck\n    note for\n    note x\n");
+        assert!(bare.ir.state_notes.is_empty());
+        assert_eq!(bare.ir.nodes.len(), 1);
     }
 
     // ── Class diagram cardinality and namespace tests ─────────────────

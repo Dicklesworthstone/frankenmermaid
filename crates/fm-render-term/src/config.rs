@@ -40,6 +40,11 @@ pub struct TermRenderConfig {
     pub max_label_chars: usize,
     /// Maximum label lines before truncation.
     pub max_label_lines: usize,
+    /// Whether textual labels, titles, legends, and annotations are rendered.
+    ///
+    /// This is distinct from label length limits: zero limits remain clamped for ordinary callers,
+    /// while degradation can explicitly request a true skeleton-only surface.
+    pub show_labels: bool,
     /// Show selection highlighting.
     pub show_selection: bool,
     /// Currently selected node index (into `ir.nodes`) for interactive highlighting.
@@ -56,6 +61,12 @@ pub struct TermRenderConfig {
     pub padding: usize,
     /// Overlay a minimap onto the rendered terminal output.
     pub show_minimap: bool,
+    /// Overlay deterministic layout-quality metrics on the diagram.
+    ///
+    /// This is deliberately plain text with no ANSI escapes so terminal output remains safe to
+    /// pipe to files. The panel reports crossings, rendered polyline bends, and a 0..=1000
+    /// horizontal symmetry score. It occupies existing cells rather than growing the viewport.
+    pub debug_overlay: bool,
     /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
     ///
     /// SUPPLIED, NEVER READ FROM THE CLOCK, exactly as `SvgRenderConfig::gantt_today` and
@@ -64,9 +75,6 @@ pub struct TermRenderConfig {
     /// every terminal snapshot depend on the day it ran. The default is `None`, so nothing about an
     /// existing render changes; the CLI injects the real date.
     pub gantt_today: Option<String>,
-    /// Whether to append a diagnostic debug overlay banner (`[debug: nodes=... edges=...]`)
-    /// showing layout statistics (`bd-0l1x2`).
-    pub debug_overlay: bool,
 }
 
 impl Default for TermRenderConfig {
@@ -80,6 +88,7 @@ impl Default for TermRenderConfig {
             max_height: 40,
             max_label_chars: 24,
             max_label_lines: 2,
+            show_labels: true,
             show_selection: false,
             selected_node: None,
             highlighted_nodes: Vec::new(),
@@ -88,8 +97,8 @@ impl Default for TermRenderConfig {
             diagonal_edges: true,
             padding: 1,
             show_minimap: false,
-            gantt_today: None,
             debug_overlay: false,
+            gantt_today: None,
         }
     }
 }
@@ -159,8 +168,7 @@ impl TermRenderConfig {
             self.show_clusters = false;
         }
         if plan.hide_labels {
-            self.max_label_chars = 0;
-            self.max_label_lines = 0;
+            self.show_labels = false;
         }
         match plan.target_fidelity {
             fm_core::MermaidFidelity::Compact => {
@@ -174,6 +182,7 @@ impl TermRenderConfig {
                 self.render_mode = MermaidRenderMode::CellOnly;
                 self.show_clusters = false;
                 self.diagonal_edges = false;
+                self.show_labels = false;
             }
             _ => {}
         }
@@ -439,12 +448,15 @@ pub struct ResolvedConfig {
     pub rows: usize,
     pub max_label_chars: usize,
     pub max_label_lines: usize,
+    pub show_labels: bool,
     pub show_selection: bool,
     pub selected_node: Option<usize>,
     pub link_mode: MermaidLinkMode,
     pub show_clusters: bool,
     pub diagonal_edges: bool,
     pub padding: usize,
+    /// Whether to overlay layout-quality metrics inside the resolved viewport.
+    pub debug_overlay: bool,
     /// [`TermRenderConfig::gantt_today`] resolved to an epoch day number, or `None` when no date
     /// was supplied or the one supplied is not a calendar date.
     ///
@@ -457,8 +469,6 @@ pub struct ResolvedConfig {
     /// Nothing about it depends on the resolved tier: a today marker is one line drawn on the
     /// canvas layer, so there is no size at which dropping it buys room for anything else.
     pub gantt_today_day: Option<i32>,
-    /// Whether to append the diagnostic debug overlay line (`bd-0l1x2`).
-    pub debug_overlay: bool,
 }
 
 impl ResolvedConfig {
@@ -498,6 +508,7 @@ impl ResolvedConfig {
             rows: available_rows,
             max_label_chars,
             max_label_lines,
+            show_labels: config.show_labels && !matches!(fidelity, MermaidFidelity::Outline),
             show_selection: config.show_selection || config.selected_node.is_some(),
             selected_node: config.selected_node,
             link_mode: config.link_mode,
@@ -506,11 +517,11 @@ impl ResolvedConfig {
                 && !matches!(fidelity, MermaidFidelity::Outline),
             diagonal_edges: config.diagonal_edges,
             padding: config.padding,
+            debug_overlay: config.debug_overlay,
             gantt_today_day: config
                 .gantt_today
                 .as_deref()
                 .and_then(fm_layout::parse_iso_day_number),
-            debug_overlay: config.debug_overlay,
         }
     }
 
@@ -552,7 +563,8 @@ mod tests {
         assert_eq!(config.tier, MermaidTier::Compact);
         assert_eq!(config.render_mode, MermaidRenderMode::CellOnly);
         assert!(!config.show_clusters);
-        assert_eq!(config.max_label_chars, 0);
+        assert!(!config.show_labels);
+        assert_eq!(config.max_label_chars, 48);
     }
 
     #[test]
@@ -576,6 +588,7 @@ mod tests {
         assert_eq!(config.tier, MermaidTier::Compact);
         assert!(!config.show_clusters);
         assert!(!config.diagonal_edges);
+        assert!(!config.show_labels);
     }
 
     #[test]
@@ -599,6 +612,19 @@ mod tests {
     }
 
     #[test]
+    fn resolved_zero_label_limits_stay_safe_without_becoming_a_hide_signal() {
+        let config = TermRenderConfig {
+            max_label_chars: 0,
+            max_label_lines: 0,
+            ..TermRenderConfig::default()
+        };
+        let resolved = ResolvedConfig::resolve(&config, 80, 24);
+        assert!(resolved.show_labels);
+        assert_eq!(resolved.max_label_chars, 1);
+        assert_eq!(resolved.max_label_lines, 1);
+    }
+
+    #[test]
     fn braille_has_2x4_multiplier() {
         let config = ResolvedConfig {
             render_mode: MermaidRenderMode::Braille,
@@ -609,13 +635,14 @@ mod tests {
             rows: 24,
             max_label_chars: 24,
             max_label_lines: 2,
+            show_labels: true,
             show_selection: false,
             selected_node: None,
             link_mode: MermaidLinkMode::Inline,
             show_clusters: true,
             diagonal_edges: true,
-            debug_overlay: false,
             padding: 1,
+            debug_overlay: false,
             gantt_today_day: None,
         };
         assert_eq!(config.subcell_multiplier(), (2, 4));

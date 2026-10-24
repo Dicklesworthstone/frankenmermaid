@@ -33,6 +33,8 @@ mod gpu_plan;
 /// as the WebGPU path does.
 pub mod interaction;
 mod renderer;
+/// Stable multi-node picking, marquee selection, and selection-ring rendering.
+pub mod selection;
 mod shapes;
 mod viewport;
 
@@ -53,6 +55,10 @@ pub use interaction::{
     CanvasSession, HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test,
 };
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
+pub use selection::{
+    NodeSelectionSet, SelectionBox, SelectionContainment, SelectionMode,
+    draw_multi_selection_overlay, render_to_canvas_with_multi_selection,
+};
 pub use viewport::{Viewport, ViewportTransform};
 
 use fm_core::MermaidDiagramIr;
@@ -186,6 +192,16 @@ pub fn draw_selection_overlay<C: Canvas2dContext>(
     let Some(bounds) = selection.selected_bounds(ir, layout) else {
         return 0;
     };
+    draw_selection_bounds(context, viewport, bounds, style)
+}
+
+// Single- and multi-selection share the same pixel-space ring and drawing-state contract.
+pub(crate) fn draw_selection_bounds<C: Canvas2dContext>(
+    context: &mut C,
+    viewport: &Viewport,
+    bounds: fm_layout::LayoutRect,
+    style: &CanvasSelectionStyle,
+) -> usize {
     if !viewport.zoom.is_finite()
         || viewport.zoom <= 0.0
         || !viewport.offset_x.is_finite()
@@ -443,7 +459,17 @@ mod tests {
                 DrawOperation::Scale(x, y) => {
                     transform = transform.multiply(&ViewportTransform::scale(*x, *y));
                 }
-                DrawOperation::Rotate(_) => panic!("unexpected rotation in flowchart fixture"),
+                DrawOperation::Rotate(angle) => {
+                    let (sin, cos) = angle.sin_cos();
+                    transform = transform.multiply(&ViewportTransform {
+                        a: cos,
+                        b: sin,
+                        c: -sin,
+                        d: cos,
+                        e: 0.0,
+                        f: 0.0,
+                    });
+                }
                 DrawOperation::FillText(text, x, y) if text == label => {
                     return transform.apply(*x, *y);
                 }
@@ -468,6 +494,63 @@ mod tests {
             let mut selection = NodeSelection::default();
             assert!(selection.select_at_canvas(&ir, &layout, &result.viewport, x, y));
             assert_eq!(selection.selected_node_id(), Some("A"));
+        }
+    }
+
+    #[test]
+    fn expanded_edge_label_frame_preserves_hit_testing_and_fit() {
+        let label = "A long relationship label that extends beyond both endpoint nodes";
+        let ir = fm_parser::parse(&format!("flowchart LR\nA[Alpha] -->|{label}| B[Beta]\n")).ir;
+        let mut layout = layout_diagram(&ir);
+        for node in &mut layout.nodes {
+            node.bounds = fm_layout::LayoutRect {
+                x: if ir.nodes[node.node_index].id == "A" {
+                    -80.0
+                } else {
+                    0.0
+                },
+                y: -20.0,
+                width: 40.0,
+                height: 30.0,
+            };
+        }
+        layout.edges[0].points = [
+            fm_layout::LayoutPoint { x: -40.0, y: -5.0 },
+            fm_layout::LayoutPoint { x: 0.0, y: -5.0 },
+        ]
+        .into_iter()
+        .collect();
+        layout.bounds = fm_layout::LayoutRect {
+            x: -100.0,
+            y: -50.0,
+            width: 160.0,
+            height: 80.0,
+        };
+        for auto_fit in [false, true] {
+            let config = CanvasRenderConfig {
+                auto_fit,
+                padding: 10.0,
+                ..Default::default()
+            };
+            let mut ctx = MockCanvas2dContext::new(800.0, 300.0);
+            let result = render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            for (name, id) in [("Alpha", "A"), ("Beta", "B")] {
+                let (x, y) = drawn_label_position(&ctx, name);
+                let mut selection = NodeSelection::default();
+                assert!(selection.select_at_canvas(&ir, &layout, &result.viewport, x, y));
+                assert_eq!(selection.selected_node_id(), Some(id));
+            }
+            if auto_fit {
+                let text_width = label.len() as f64 * config.font_size * 0.85 * 0.57;
+                assert!(text_width > f64::from(layout.bounds.width));
+                let (x, y) = drawn_label_position(&ctx, label);
+                let half_width = (text_width + 8.0) * result.viewport.zoom / 2.0;
+                let half_height = (config.font_size * 1.2 + 4.0) * result.viewport.zoom / 2.0;
+                assert!(x - half_width >= config.padding - 0.001);
+                assert!(x + half_width <= ctx.width() - config.padding + 0.001);
+                assert!(y - half_height >= config.padding - 0.001);
+                assert!(y + half_height <= ctx.height() - config.padding + 0.001);
+            }
         }
     }
 

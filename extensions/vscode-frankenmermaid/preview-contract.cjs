@@ -20,10 +20,123 @@ function isPreviewDocument(document) {
   return isMermaidDocument(document) || isMarkdownDocument(document);
 }
 
-// A linear scanner for top-level fenced blocks, not a Mermaid parser. Track ALL fences so a
-// Mermaid example inside a longer documentation/code fence is never treated as a live diagram.
-// Follow CommonMark's fence character/length, info-string, indentation, and unclosed-EOF rules.
-// Blockquote/list-container fences are deliberately outside this scanner's contract.
+// Markdown indentation uses four-column tab stops; VS Code ranges use UTF-16 offsets.
+// A partially consumed tab leaves virtual spaces in the engine input, never guessed bytes.
+function markdownIndent(line, cursor, count) {
+  const next = { ...cursor };
+  let consumed = 0;
+  while (consumed < count) {
+    let width = next.virtual;
+    if (!width) {
+      if (line[next.offset] === " ") width = 1;
+      else if (line[next.offset] === "\t") width = 4 - next.column % 4;
+      else break;
+      next.offset += 1;
+    }
+    const used = Math.min(count - consumed, width);
+    next.column += used;
+    consumed += used;
+    next.virtual = width - used;
+  }
+  return { cursor: next, consumed };
+}
+
+function markdownTail(line, cursor) {
+  return " ".repeat(cursor.virtual) + line.slice(cursor.offset);
+}
+
+function markdownQuote(line, cursor) {
+  const leading = markdownIndent(line, cursor, 3);
+  const next = leading.cursor;
+  if (next.virtual || line[next.offset] !== ">") return null;
+  next.offset += 1; next.column += 1;
+  const space = markdownIndent(line, next, 1);
+  return { cursor: space.cursor, prefix: " ".repeat(leading.consumed) + ">" + " ".repeat(space.consumed) };
+}
+
+function markdownList(line, cursor, paragraph) {
+  const leading = markdownIndent(line, cursor, 3);
+  const next = leading.cursor;
+  if (next.virtual) return null;
+  const tail = line.slice(next.offset);
+  // A thematic break takes precedence over a list marker, including inside containers.
+  if (/^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/u.test(tail)) return null;
+  const match = /^([-+*]|[0-9]{1,9}[.)])(?=[ \t]|$)/u.exec(tail);
+  if (!match) return null;
+  const marker = match[1];
+  next.offset += marker.length; next.column += marker.length;
+  const empty = /^[ \t]*$/u.test(line.slice(next.offset));
+  if (paragraph && (empty || (marker.length > 1 && Number(marker.slice(0, -1)) !== 1))) return null;
+  const padding = markdownIndent(line, next, 5);
+  const width = empty || padding.consumed > 4 ? 1 : padding.consumed;
+  return { cursor: markdownIndent(line, next, width).cursor,
+    width: leading.consumed + marker.length + width };
+}
+
+const MARKDOWN_HTML_BLOCK_TAGS = new Set((
+  "address article aside base basefont blockquote body caption center col colgroup dd details " +
+  "dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 " +
+  "head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option " +
+  "p param search section summary table tbody td tfoot th thead title tr track ul"
+).split(" "));
+
+// CommonMark's complete-tag block condition, scanned without nested regex quantifiers over
+// arbitrarily long attribute values. This recognizes a literal block; it never executes HTML.
+function completeMarkdownTag(text) {
+  const tag = /^<\/?[A-Za-z][A-Za-z0-9-]*/u.exec(text);
+  if (!tag) return false;
+  const closing = text[1] === "/";
+  let index = tag[0].length;
+  while (index < text.length) {
+    const start = index;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] === ">") return /^[ \t]*$/u.test(text.slice(index + 1));
+    if (!closing && text.startsWith("/>", index)) return /^[ \t]*$/u.test(text.slice(index + 2));
+    if (closing || index === start) return false;
+    const attribute = /^[A-Za-z_:][A-Za-z0-9_.:-]*/u.exec(text.slice(index));
+    if (!attribute) return false;
+    index += attribute[0].length;
+    const afterName = index;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] !== "=") { index = afterName; continue; }
+    index += 1;
+    while (text[index] === " " || text[index] === "\t") index += 1;
+    if (text[index] === '"' || text[index] === "'") {
+      const end = text.indexOf(text[index], index + 1);
+      if (end < 0) return false;
+      index = end + 1;
+    } else {
+      const value = /^[^\s"'=<>`]+/u.exec(text.slice(index));
+      if (!value) return false;
+      index += value[0].length;
+    }
+  }
+  return false;
+}
+
+// CommonMark 0.31.2 section 4.6 is the contract here. In particular, declarations allow
+// lowercase ASCII letters and type 7 excludes opening pre/script/style/textarea tags.
+// markdown-it-py 4.2.0 differs on those cases; do not silently replace the written rules.
+function markdownHtmlEnd(line, paragraph) {
+  const match = /^ {0,3}(<.*)$/u.exec(line);
+  if (!match) return null;
+  const text = match[1];
+  if (/^<(?:pre|script|style|textarea)(?:[ \t>]|$)/iu.test(text)) return /<\/(?:pre|script|style|textarea)>/iu;
+  if (text.startsWith("<!--")) return /-->/u;
+  if (text.startsWith("<?")) return /\?>/u;
+  if (/^<![A-Za-z]/u.test(text)) return />/u;
+  if (text.startsWith("<![CDATA[")) return /\]\]>/u;
+  const tag = /^<\/?([A-Za-z][A-Za-z0-9-]*)(?:[ \t>]|\/>|$)/u.exec(text);
+  if ((tag && MARKDOWN_HTML_BLOCK_TAGS.has(tag[1].toLowerCase()))
+    || (!paragraph && !/^<(?:pre|script|style|textarea)(?:[ \t/>]|$)/iu.test(text)
+      && completeMarkdownTag(text))) return /^[ \t]*$/u;
+  return null;
+}
+
+// Track the container stack as well as ALL fences. A documentation example inside a longer
+// non-Mermaid fence is literal, even if it contains quotes/list markers. Fenced code is not a
+// lazy paragraph continuation: leaving its container ends it and reprocesses that same line.
+// This is Markdown block extraction only; Mermaid parsing remains in the native engine.
 function extractMermaidBlocks(document) {
   const text = document.getText();
   if (Buffer.byteLength(text, "utf8") > MAX_PREVIEW_BYTES) {
@@ -36,38 +149,90 @@ function extractMermaidBlocks(document) {
   }
   if (!isMarkdownDocument(document)) return [];
   const blocks = [];
+  const containers = [];
+  let paragraph = false;
   let fence;
+  let htmlEnd = null;
   function finish() {
     if (fence.mermaid) {
       if (blocks.length >= MAX_PREVIEW_DIAGRAMS) {
         throw new Error(`Preview supports at most ${MAX_PREVIEW_DIAGRAMS} diagrams per document.`);
       }
       blocks.push({ id: blocks.length, source: fence.body.join("\n"),
-        startLine: fence.startLine, lineMap: fence.lineMap, fenceIndent: fence.indent });
+        startLine: fence.startLine, lineMap: fence.lineMap, fenceIndent: fence.indent,
+        continuationPrefix: fence.prefix });
     }
     fence = undefined;
   }
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (!fence) {
-      const open = /^( {0,3})(`{3,}|~{3,})(.*)$/u.exec(line);
-      if (!open || (open[2][0] === "`" && open[3].includes("`"))) continue;
+    let cursor = { offset: 0, column: 0, virtual: 0 }, prefix = "", matched = 0;
+    for (const container of containers) {
+      if (container.kind === "quote") {
+        const quote = markdownQuote(line, cursor);
+        if (!quote) break;
+        cursor = quote.cursor; prefix += quote.prefix;
+      } else {
+        const indent = markdownIndent(line, cursor, container.width);
+        if (indent.consumed < container.width && !/^[ \t]*$/u.test(markdownTail(line, cursor))) break;
+        cursor = indent.cursor; prefix += " ".repeat(container.width);
+      }
+      matched += 1;
+    }
+    if (htmlEnd && matched === containers.length) {
+      if (htmlEnd.test(markdownTail(line, cursor))) htmlEnd = null;
+      paragraph = false;
+      continue;
+    }
+    if (htmlEnd) { htmlEnd = null; paragraph = false; }
+    if (fence && matched === containers.length) {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(markdownTail(line, cursor));
+      if (close && close[1][0] === fence.marker && close[1].length >= fence.length) finish();
+      else if (fence.mermaid) {
+        cursor = markdownIndent(line, cursor, fence.indent).cursor;
+        const content = markdownTail(line, cursor);
+        fence.body.push(content);
+        fence.lineMap.push({ line: index, indent: cursor.offset, text: content,
+          ...(cursor.virtual ? { virtualIndent: cursor.virtual } : {}) });
+      }
+      paragraph = false;
+      continue;
+    }
+    if (fence) { finish(); paragraph = false; }
+    const tail = markdownTail(line, cursor);
+    // Retain a list/quote across a lazy ordinary paragraph continuation. A new block cannot
+    // be lazy: in particular a root-level fence must not inherit the preceding quote prefix.
+    const interrupts = /^ {0,3}(?:`{3,}|~{3,}|>|#{1,6}(?:\s|$)|[-*_][ \t]*[-*_])/u.test(tail)
+      || markdownList(line, cursor, true) || markdownHtmlEnd(tail, true);
+    if (matched < containers.length && paragraph && tail.trim() && !interrupts) continue;
+    if (matched < containers.length) paragraph = false;
+    containers.length = matched;
+    while (true) {
+      const quote = markdownQuote(line, cursor);
+      const list = quote ? null : markdownList(line, cursor, paragraph);
+      if (!quote && !list) break;
+      if (containers.length >= 128) throw new Error("Markdown container nesting exceeds the 128-level limit.");
+      containers.push(quote ? { kind: "quote" } : { kind: "list", width: list.width });
+      cursor = (quote || list).cursor;
+      prefix += quote ? quote.prefix : " ".repeat(list.width);
+      paragraph = false;
+    }
+    const content = markdownTail(line, cursor);
+    const end = markdownHtmlEnd(content, paragraph);
+    if (end) {
+      htmlEnd = end.test(content) ? null : end;
+      paragraph = false;
+      continue;
+    }
+    const open = /^( {0,3})(`{3,}|~{3,})(.*)$/u.exec(content);
+    if (open && !(open[2][0] === "`" && open[3].includes("`"))) {
       fence = { marker: open[2][0], length: open[2].length, indent: open[1].length,
-        mermaid: /^mermaid(?:[ \t]|$)/iu.test(open[3].trim()),
+        prefix: prefix + open[1], mermaid: /^mermaid(?:[ \t]|$)/iu.test(open[3].trim()),
         startLine: index + 1, body: [], lineMap: [] };
-      continue;
-    }
-    const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(line);
-    if (close && close[1][0] === fence.marker && close[1].length >= fence.length) {
-      finish();
-      continue;
-    }
-    if (fence.mermaid) {
-      let indent = 0;
-      while (indent < fence.indent && line[indent] === " ") indent += 1;
-      const content = line.slice(indent);
-      fence.body.push(content);
-      fence.lineMap.push({ line: index, indent, text: content });
+      paragraph = false;
+    } else {
+      paragraph = Boolean(content.trim()) && (paragraph || !/^(?: {4}|\t)/u.test(content))
+        && !/^ {0,3}(?:#{1,6}(?:\s|$)|(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$)/u.test(content);
     }
   }
   if (fence) finish();
@@ -111,7 +276,7 @@ function lineStarts(source) {
   return starts;
 }
 
-function documentPosition(block, starts, offset) {
+function documentPosition(block, starts, offset, physicalLineStart = false) {
   let low = 0;
   let high = starts.length;
   while (low + 1 < high) {
@@ -122,9 +287,13 @@ function documentPosition(block, starts, offset) {
   const mapped = block.lineMap[low];
   if (!mapped) return undefined;
   const character = offset - starts[low];
+  // Whole-line structural patches own the physical prefix as well. This is never enabled
+  // for ordinary source bindings, where a virtual half-tab has no exact byte boundary.
+  if (physicalLineStart && character === 0) return { line: mapped.line, character: 0 };
   // A CRLF is one document line break, never two selectable characters beyond the line end.
-  if (character > mapped.text.length) return undefined;
-  return { line: mapped.line, character: mapped.indent + character };
+  const virtual = mapped.virtualIndent || 0;
+  if (character > mapped.text.length || character < virtual) return undefined;
+  return { line: mapped.line, character: mapped.indent + character - virtual };
 }
 
 function blockRange(block) {
@@ -132,7 +301,7 @@ function blockRange(block) {
   const last = block.lineMap.at(-1);
   return {
     start: { line: first?.line ?? Math.max(0, block.startLine - 1), character: first?.indent ?? 0 },
-    end: { line: last?.line ?? Math.max(0, block.startLine - 1), character: last ? last.indent + last.text.length : 0 },
+    end: { line: last?.line ?? Math.max(0, block.startLine - 1), character: last ? last.indent + last.text.length - (last.virtualIndent || 0) : 0 },
   };
 }
 
@@ -178,7 +347,7 @@ function diagnosticRange(block, span) {
   const startLine = block.lineMap[first - 1];
   const endLine = block.lineMap[end - 1];
   return { start: { line: startLine.line, character: startLine.indent },
-    end: { line: endLine.line, character: endLine.indent + endLine.text.length } };
+    end: { line: endLine.line, character: endLine.indent + endLine.text.length - (endLine.virtualIndent || 0) } };
 }
 
 function checkedDiagnostics(block, diagnostics) {
@@ -236,7 +405,7 @@ function planSourceEdit(document, snapshot, reports, message) {
   const eol = document.eol === 2 ? "\r\n" : document.eol === 1 ? "\n"
     : before.match(/\r\n|\n|\r/u)?.[0] || "\n";
   const markdown = !isMermaidDocument(document);
-  const separator = eol + (markdown ? " ".repeat(block.fenceIndent) : "");
+  const separator = eol + (markdown ? block.continuationPrefix : "");
   const newText = replacement.split(/\r\n|\n|\r/u).join(separator);
   const starts = lineStarts(before);
   const from = starts[binding.range.start.line] + binding.range.start.character;
@@ -306,8 +475,9 @@ function planStructuralEdit(document, snapshot, reports, message) {
 
   const markdown = !isMermaidDocument(document);
   const sourceStarts = lineStarts(source), starts = lineStarts(before);
-  const range = { start: documentPosition(block, sourceStarts, start),
-    end: documentPosition(block, sourceStarts, end) };
+  const physicalLineStart = fullLine || (operation === "insert-after" && nextNewline >= 0);
+  const range = { start: documentPosition(block, sourceStarts, start, physicalLineStart),
+    end: documentPosition(block, sourceStarts, end, physicalLineStart) };
   if (!range.start || !range.end) throw new Error("Structural edit does not resolve to document positions.");
   const last = block.lineMap.at(-1);
   // A closed Markdown fence contributes a native line terminator that is not part of the
@@ -329,7 +499,7 @@ function planStructuralEdit(document, snapshot, reports, message) {
   }
   const eol = document.eol === 2 ? "\r\n" : document.eol === 1 ? "\n"
     : before.match(/\r\n|\n|\r/u)?.[0] || "\n";
-  const prefix = markdown ? " ".repeat(block.fenceIndent) : "";
+  const prefix = markdown ? block.continuationPrefix : "";
   const parts = nativeText.split(/\r\n|\n|\r/u);
   const newText = parts.map((part, index) =>
     (index > 0 || firstLineIndent) && (index < parts.length - 1 || part !== "")

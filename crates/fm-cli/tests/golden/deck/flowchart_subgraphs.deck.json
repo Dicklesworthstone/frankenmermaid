@@ -6,7 +6,7 @@
   "viewBox": {
     "x": 0.0,
     "y": 0.0,
-    "width": 1404.0,
+    "width": 1508.0,
     "height": 354.5
   },
   "options": {
@@ -56,7 +56,7 @@
       "id": "core",
       "title": "The core",
       "bounds": {
-        "x": 485.05,
+        "x": 537.05,
         "y": 92.0,
         "width": 653.95,
         "height": 170.5
@@ -130,7 +130,7 @@
       "bounds": {
         "x": 92.0,
         "y": 92.0,
-        "width": 1220.0,
+        "width": 1324.0,
         "height": 170.5
       },
       "fitMargin": 150.0,
@@ -217,25 +217,25 @@
   },
   "nodeGeometry": {
     "fm-node-core1-2": {
-      "x": 537.05,
+      "x": 589.05,
       "y": 144.0,
       "width": 100.0,
       "height": 66.5
     },
     "fm-node-core2-3": {
-      "x": 757.05,
+      "x": 809.05,
       "y": 144.0,
       "width": 100.0,
       "height": 66.5
     },
     "fm-node-core3-4": {
-      "x": 977.05,
+      "x": 1029.05,
       "y": 144.0,
       "width": 109.95,
       "height": 66.5
     },
     "fm-node-done-5": {
-      "x": 1207.0,
+      "x": 1311.0,
       "y": 144.0,
       "width": 105.0,
       "height": 66.5

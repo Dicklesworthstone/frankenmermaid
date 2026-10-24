@@ -5135,8 +5135,8 @@ fn readme_and_docs_capability_truth_matches_codebase_invariants() {
         .expect("workspace root");
     let pkg_version = env!("CARGO_PKG_VERSION");
 
-    assert_eq!(fm_core::documented_diagram_types().len(), 27);
-    assert_eq!(fm_layout::concrete_layout_algorithms().len(), 18);
+    assert_eq!(fm_core::documented_diagram_types().len(), 32);
+    assert_eq!(fm_layout::concrete_layout_algorithms().len(), 23);
 
     let readme = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
     assert!(
@@ -5159,8 +5159,8 @@ fn readme_and_docs_capability_truth_matches_codebase_invariants() {
         .expect("read docs/planning/FEATURE_PARITY.md");
     assert!(
         parity.contains("23 node shapes")
-            && parity.contains("18 algorithms + Auto")
-            && parity.contains("18 dedicated layout algorithms plus Auto"),
-        "docs/planning/FEATURE_PARITY.md must stay synchronized with 23 node shapes and 18 layout algorithms"
+            && parity.contains("23 algorithms + Auto")
+            && parity.contains("23 dedicated layout algorithms plus Auto"),
+        "docs/planning/FEATURE_PARITY.md must stay synchronized with 23 node shapes and 23 layout algorithms"
     );
 }

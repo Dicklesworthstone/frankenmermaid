@@ -65,6 +65,11 @@ Current status in this file is grounded in:
 | treemap | Yes | Yes | `treemap` | Yes | Full | N/A | Squarified treemap; new family with no FrankenTUI reference counterpart (bd-dw450 certified terminal/canvas/WebGPU draw) |
 | radar-beta | Yes | Yes | `radar` | Yes | Full | N/A | Polar layout with cardinal-spline wedges; new family with no FrankenTUI reference counterpart (bd-sk4dv) |
 | info | Yes | Yes | `auto` | Yes | Full | N/A | Title banner; routes through the general graph selector |
+| ishikawa | Yes | Yes | `ishikawa` | Yes | Full | N/A | Fishbone cause-and-effect: effect head, alternating cause bones, nested sub-causes; new family with no FrankenTUI reference counterpart |
+| treeView-beta | Yes | Yes | `treeview` | Yes | Full | N/A | Indented file-explorer tree under an implicit `/` root with trunk-and-elbow connectors; new family with no FrankenTUI reference counterpart |
+| venn-beta | Yes | Yes | `venn` | Yes | Full | N/A | Area-proportional set circles placed from pairwise overlaps, region labels at the point of largest margin, text grids, set styles; new family with no FrankenTUI reference counterpart |
+| wardley-beta | Yes | Yes | `wardley` | Yes | Full | N/A | Evolution × visibility map with stage dividers, anchors, components, sourcing rings, inertia, links with flows, trends, pipelines, notes, annotations and (de)accelerators; new family with no FrankenTUI reference counterpart |
+| eventmodeling | Yes | Yes | `eventmodeling` | Yes | Full | N/A | Timeframes in type swimlanes (namespaced lanes included), staircase placement, explicit and implied flow arrows, inline and referenced data rendered under bold names; new family with no FrankenTUI reference counterpart |
 <!-- END GENERATED: feature-parity-families -->
 
 ### Layout Algorithms
@@ -91,6 +96,11 @@ Current status in this file is grounded in:
 | `architecture` | Architecture-beta | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
+| `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
+| `treeview` | TreeView-beta | One pre-order row per entry, indented by depth, with trunk-and-elbow connectors |
+| `venn` | Venn-beta | Area-proportional circles from pairwise lens-area targets, greedy placement plus stress refinement, region labels at the largest-margin point |
+| `wardley` | Wardley-beta | Author-placed evolution × visibility projection with stage dividers, re-centred pipeline parents and radius-shortened links |
+| `eventmodeling` | EventModeling | Source-order timeframes in stacked type swimlanes, staircase placement across lane changes, two-thirds/one-third flow arrows |
 <!-- END GENERATED: feature-parity-layouts -->
 
 ### Cross-Cutting Features
@@ -101,7 +111,7 @@ Current status in this file is grounded in:
 | Layout constraints (SameRank, MinLength) | Complete | Applied after rank assignment in Sugiyama |
 | accTitle/accDescr directives | Complete | Parsed and propagated to SVG title/desc |
 | Subgraph direction override | Complete | `direction LR` inside subgraph blocks |
-| classDef default | Complete | Default node class applied as base cascade layer before explicit classDef and style overrides |
+| classDef default | Complete | Base node styles precede named classes and direct styles; SVG, Canvas2D, and GPU node plans share the cascade; edges and subgraph containers remain independently styled |
 | linkStyle default | Complete | Default style for all unindexed edges |
 | Click/callback directives with tooltips | Complete | `click nodeId "url" "tooltip"` plus callback hooks; fixture-backed FrankenTUI conformance coverage exists |
 | ER cardinality labels | Complete | Notation parsed and rendered as endpoint labels |
@@ -114,10 +124,10 @@ Current status in this file is grounded in:
 | Surface | Current status | Notes |
 |---|---|---|
 | Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers |
-| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
-| SVG renderer | Complete | 23 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
-| Terminal renderer | Complete | 4 sub-cell modes, `Outline`/`Compact`/`Normal`/`Rich` fidelity selection, `SelectionState` + directional navigation, `MermaidLinkMode::Footnote`, diff engine, minimap, glyphs, ASCII normalization |
-| Canvas/WASM | Complete | Canvas2D with mock context, `CanvasSession` interactive pan/zoom/hit-testing/marquee/keyboard navigation, viewport transforms |
+| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 23 algorithms + Auto |
+| SVG renderer | Partial | 23 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
+| Terminal renderer | Partial | 4 sub-cell modes, `Outline`/`Compact`/`Normal`/`Rich` fidelity selection, `SelectionState` and directional navigation, `MermaidLinkMode::Footnote`, diff engine, minimap, glyphs, ASCII normalization, and an opt-in viewport-bounded debug panel (crossings, bends, symmetry, node/edge/rank/cycle counts) |
+| Canvas/WASM | Partial | Canvas2D `CanvasSession` with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, dedicated vertical/horizontal XY axes and bar/line/area series, and proportional Sankey ribbons with node throughput labels; Canvas/GPU Sankey plans share SVG quantity rules; compiled package qualification and GPU XY support remain separate |
 | Diff engine | Complete | Structural node/edge diffing with change classification |
 | Minimap | Complete | Density-aware scaling with viewport indicator |
 
@@ -125,7 +135,7 @@ Current status in this file is grounded in:
 
 ### Parser-Level
 
-- The fixture-backed FrankenTUI conformance slice in
+- The first fixture-backed FrankenTUI conformance slice now exists in
   [`crates/fm-cli/tests/frankentui_conformance_test.rs`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_test.rs)
   and
   [`crates/fm-cli/tests/frankentui_conformance_cases.json`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_cases.json)
@@ -145,16 +155,22 @@ Current status in this file is grounded in:
 
 ### Rendering-Level
 
-- Terminal fidelity-tier selection (`select_fidelity` across `Outline` /
-  `Compact` / `Normal` / `Rich`) and `Outline` skeleton rendering are now
-  implemented in `fm-render-term` (`bd-qsgs1`)
-- Debug overlay panel (`MermaidConfig::debug_overlay` / `--debug-overlay`) is now
-  mapped across SVG (`fm-debug-overlay`), Terminal (`[debug: ...]`), and Canvas2D
-  (`draw_debug_overlay_world` / `draw_debug_overlay_hud`) surfaces (`bd-0l1x2`)
-- Interactive selection state (`SelectionState`, `build_adjacency`,
-  `navigate_direction`, `MermaidLinkMode::Footnote`, and `CanvasSession`) is now
-  mapped across `fm-render-term`, `fm-cli interactive`, `fm-render-canvas`, and
-  `fm-wasm` (`bd-g7sx9`, `bd-qsgs1`)
+- Terminal fidelity-tier selection still needs an evidence-backed parity audit against
+  FrankenTUI's exact `Outline` / `Compact` / `Normal` / `Rich` thresholds and presentation rules.
+  Frankenmermaid now gives `Outline` distinct skeleton semantics: it uses the compact cell renderer
+  but suppresses textual labels/titles/legends/annotations explicitly while retaining structural
+  geometry. `Compact` / `Normal` / `Rich` and auto sizing remain separate resolved tiers.
+  `select_fidelity`, `SelectionState`, directional navigation, and `MermaidLinkMode::Footnote`
+  are implemented on the terminal surface.
+- The debug overlay is mapped across SVG (`fm-debug-overlay`), terminal output as an opt-in
+  viewport-bounded plain-text panel (crossing count, rendered polyline bend count, horizontal
+  symmetry, and node/edge/rank/cycle counts), and Canvas2D (`draw_debug_overlay_world` /
+  `draw_debug_overlay_hud`). Exact reference-panel presentation semantics remain to be audited.
+- Interactive selection state is mapped into Canvas/WASM through `CanvasSession`: retained
+  author-ID highlight, directional navigation, modifier selection, and transactional box/lasso
+  gestures share the renderer's actual viewport. Terminal `SelectionState` and footnote link mode
+  stay on the text surface. Remaining work is package rebuild/browser qualification and any
+  future mapping onto non-canvas surfaces.
 
 ### Areas Where frankenmermaid Is Ahead of FrankenTUI
 
@@ -162,7 +178,7 @@ Current status in this file is grounded in:
 - Lifecycle events (create/destroy)
 - Fragment alternatives with labeled sections
 - Fragment nesting (children tracking)
-- 18 dedicated layout algorithms plus Auto (vs ~6 in FrankenTUI)
+- 23 dedicated layout algorithms plus Auto (vs ~6 in FrankenTUI)
 - SVG gradients, shadows, glow effects
 - Canvas2D rendering backend
 - WASM/JavaScript API

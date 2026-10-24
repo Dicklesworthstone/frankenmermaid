@@ -50,6 +50,17 @@ fn canonical_bounds(bounds: LayoutRect) -> LayoutRect {
     }
 }
 
+/// The square occupied by a circle drawn inside possibly non-square layout bounds.
+pub(crate) fn circle_bounds(bounds: LayoutRect) -> LayoutRect {
+    let diameter = bounds.width.min(bounds.height).max(0.0);
+    LayoutRect {
+        x: bounds.x + (bounds.width - diameter) / 2.0,
+        y: bounds.y + (bounds.height - diameter) / 2.0,
+        width: diameter,
+        height: diameter,
+    }
+}
+
 #[must_use]
 pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
     // Every shape dispatches from here, so one canonicalization covers all of them. Putting it in
@@ -63,7 +74,7 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         NodeShape::Diamond => diamond_path(bounds),
         NodeShape::Hexagon => hexagon_path(bounds),
         NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
-            polygon_ellipse_path(bounds, 24)
+            polygon_ellipse_path(circle_bounds(bounds), 24)
         }
         NodeShape::Cylinder => cylinder_path(bounds),
         NodeShape::Trapezoid => trapezoid_path(bounds),
@@ -110,7 +121,7 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
             // but for simple path representation we return the outer box.
             rounded_rect_path(bounds, 0.0)
         }
-        NodeShape::CrossedCircle => polygon_ellipse_path(bounds, 24),
+        NodeShape::CrossedCircle => polygon_ellipse_path(circle_bounds(bounds), 24),
         // Rules are interior decoration, but a notch changes the actual outer boundary.
         NodeShape::NotchedRect => notched_rect_path(bounds),
         NodeShape::LinedRect | NodeShape::DividedRect => rounded_rect_path(bounds, 0.0),
@@ -143,6 +154,32 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The stack fills its box corner to corner between the back and front copies, so the box is
         // the right boundary; an edge stopping on it lands on one of the three outlines.
         NodeShape::StackedDocument | NodeShape::StackedRect => rounded_rect_path(bounds, 0.0),
+        // The arrow's own outline: its heads leave most of the box corners empty.
+        NodeShape::BlockArrowRight
+        | NodeShape::BlockArrowLeft
+        | NodeShape::BlockArrowUp
+        | NodeShape::BlockArrowDown
+        | NodeShape::BlockArrowX
+        | NodeShape::BlockArrowY => {
+            let outline = fm_core::block_arrow_outline(
+                shape,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+            )
+            .unwrap_or_default();
+            let mut path = Vec::with_capacity(outline.len() + 1);
+            for (x, y) in outline {
+                path.push(if path.is_empty() {
+                    PathCmd::MoveTo { x, y }
+                } else {
+                    PathCmd::LineTo { x, y }
+                });
+            }
+            path.push(PathCmd::Close);
+            path
+        }
     }
 }
 
@@ -1076,6 +1113,39 @@ mod tests {
             3
         );
         assert!(path.iter().any(|cmd| matches!(cmd, PathCmd::Close)));
+    }
+
+    #[test]
+    fn circular_paths_follow_the_drawn_circle_in_non_square_bounds() {
+        for (width, height) in [(180.0, 60.0), (60.0, 180.0)] {
+            let bounds = LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width,
+                height,
+            };
+            let center = bounds.center();
+            for shape in [
+                NodeShape::Circle,
+                NodeShape::FilledCircle,
+                NodeShape::DoubleCircle,
+                NodeShape::CrossedCircle,
+            ] {
+                let path = node_path(bounds, shape);
+                let mut vertices = 0;
+                for command in path {
+                    if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = command {
+                        let distance = (x - center.x).hypot(y - center.y);
+                        assert!(
+                            (distance - 30.0).abs() < 0.001,
+                            "{shape:?}: radius {distance}"
+                        );
+                        vertices += 1;
+                    }
+                }
+                assert_eq!(vertices, 24);
+            }
+        }
     }
 
     #[test]

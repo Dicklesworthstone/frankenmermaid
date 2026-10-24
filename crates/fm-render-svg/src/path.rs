@@ -298,113 +298,60 @@ fn write_point(output: &mut String, prefix: char, x: f32, y: f32) {
     let _ = FmtNum(y).write_into(output);
 }
 
-/// Build a smooth cubic-Bézier path `d` string directly, with no intermediate
-/// `Vec<PathCommand>` — Catmull-Rom→cubic conversion (tension 1/4), the same shape a
-/// `PathBuilder` of `move_to`/`line_to`/`curve_to` would produce. Byte-identical to the
-/// builder output (commands joined by single spaces). This is the per-edge hot path on
-/// curve-heavy graphs, where the builder's per-segment enum push + dispatch is pure
-/// overhead on top of the byte writing.
+/// Build a smooth path `d` string directly, with no intermediate `Vec<PathCommand>`.
+/// Orthogonal routes receive small rounded elbows; other routes use bounded
+/// Catmull-Rom→cubic conversion (tension 1/4). Commands are joined by single spaces.
 pub(crate) fn build_smooth_path_by<F>(n: usize, point_at: F) -> String
 where
     F: FnMut(usize) -> (f32, f32),
 {
-    // Right-size the `d` buffer. n<=2 is `M` (or `M ... L ...`), ~24-48 bytes — keep the tight
-    // `n*24` so short edges never over-allocate. n>=3 emits an `M` plus (n-1) cubic segments
-    // (`C cp1x cp1y,cp2x cp2y,x y`, six `write_fixed2` coords ~8 chars + separators ≈ 56 bytes each),
-    // which the old `n*24` under-sized — forcing 1-2 reallocate-and-copy (memmove) per multi-point
-    // edge. Size the cubic case for one allocation. Capacity-only, output byte-identical.
+    // n<=2 needs only M or M+L. Longer paths can emit six-coordinate cubic segments or a
+    // line plus a quadratic elbow per corner; allow room for either without reallocation.
     let mut d = String::with_capacity(if n < 3 { n * 24 } else { 24 + (n - 1) * 56 });
     build_smooth_path_by_into(&mut d, n, point_at);
     d
 }
 
-/// Append the smooth cubic-Bézier path `d` data directly into `out` — byte-identical to
+/// Append smooth path `d` data directly into `out` — byte-identical to
 /// [`build_smooth_path_by`] but writing into a caller-provided buffer so a whole edge fragment can be
 /// assembled without allocating the per-edge `d` String first. Pinned by
 /// `build_smooth_path_into_matches_build_smooth_path`.
-pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, mut point_at: F)
+pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, point_at: F)
 where
     F: FnMut(usize) -> (f32, f32),
 {
-    if n == 0 {
-        return;
-    }
-    let first = point_at(0);
-    write_point(out, 'M', first.0, first.1);
-    if n == 1 {
-        return;
-    }
-    if n == 2 {
-        let second = point_at(1);
-        out.push(' ');
-        write_point(out, 'L', second.0, second.1);
-        return;
-    }
-
-    // Near-collinear collapse (GH#7): orthogonal routes whose source and target almost line up
-    // produce a polyline with a tiny mid-route jog (a few px). Catmull-Rom smoothing of that jog
-    // rendered as a visible S-wiggle in an otherwise straight edge. If every interior waypoint
-    // sits within `STRAIGHT_EPS` of the start→end chord, the honest shape is a straight line.
-    const STRAIGHT_EPS: f32 = 2.0;
-    let last = point_at(n - 1);
-    let chord = (last.0 - first.0, last.1 - first.1);
-    let chord_len = (chord.0 * chord.0 + chord.1 * chord.1).sqrt();
-    if chord_len > f32::EPSILON {
-        let mut straight = true;
-        for i in 1..(n - 1) {
-            let p = point_at(i);
-            let dev = ((p.0 - first.0) * chord.1 - (p.1 - first.1) * chord.0).abs() / chord_len;
-            // Reject points that deviate laterally OR lie outside the chord span (backtracking).
-            let along = ((p.0 - first.0) * chord.0 + (p.1 - first.1) * chord.1) / chord_len;
-            if dev > STRAIGHT_EPS || along < -STRAIGHT_EPS || along > chord_len + STRAIGHT_EPS {
-                straight = false;
-                break;
-            }
-        }
-        if straight {
+    let mut first = true;
+    let _ = fm_layout::edge_paths::emit_smoothed_path(n, point_at, |command| {
+        if first {
+            first = false;
+        } else {
             out.push(' ');
-            write_point(out, 'L', last.0, last.1);
-            return;
         }
-    }
-
-    let t: f32 = 0.25;
-    for i in 0..(n - 1) {
-        let p_prev = if i == 0 { point_at(0) } else { point_at(i - 1) };
-        let p_cur = point_at(i);
-        let p_next = point_at(i + 1);
-        let p_next2 = if i + 2 < n {
-            point_at(i + 2)
-        } else {
-            point_at(n - 1)
-        };
-
-        // Catmull-Rom tangents, then clamp each control point into the current segment's
-        // bounding box (GH#7). Unclamped neighbor-chord tangents overshoot at right-angle
-        // waypoints — an edge leaving a node straight down and then turning left first bulged
-        // ~25px to the RIGHT, so sibling branches from one port crossed each other in a
-        // pretzel. The cubic convex-hull property means clamped control points keep every
-        // segment inside the channel the router actually chose, so smoothed edges can no
-        // longer swing wide or cross where their polylines do not.
-        let (seg_lo_x, seg_hi_x) = if p_cur.0 <= p_next.0 {
-            (p_cur.0, p_next.0)
-        } else {
-            (p_next.0, p_cur.0)
-        };
-        let (seg_lo_y, seg_hi_y) = if p_cur.1 <= p_next.1 {
-            (p_cur.1, p_next.1)
-        } else {
-            (p_next.1, p_cur.1)
-        };
-
-        let cp1x = (p_cur.0 + (p_next.0 - p_prev.0) * t).clamp(seg_lo_x, seg_hi_x);
-        let cp1y = (p_cur.1 + (p_next.1 - p_prev.1) * t).clamp(seg_lo_y, seg_hi_y);
-        let cp2x = (p_next.0 - (p_next2.0 - p_cur.0) * t).clamp(seg_lo_x, seg_hi_x);
-        let cp2y = (p_next.1 - (p_next2.1 - p_cur.1) * t).clamp(seg_lo_y, seg_hi_y);
-
-        out.push(' ');
-        write_cubic(out, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
-    }
+        match command {
+            fm_layout::PathCmd::MoveTo { x, y } => write_point(out, 'M', x, y),
+            fm_layout::PathCmd::LineTo { x, y } => write_point(out, 'L', x, y),
+            fm_layout::PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                write_cubic(out, 'C', (c1x, c1y), (c2x, c2y), (x, y));
+            }
+            fm_layout::PathCmd::QuadTo { cx, cy, x, y } => {
+                PathCommand::QuadraticTo {
+                    x1: cx,
+                    y1: cy,
+                    x,
+                    y,
+                }
+                .render(out);
+            }
+            fm_layout::PathCmd::Close => out.push('Z'),
+        }
+    });
 }
 
 /// Fluent builder for SVG path `d` attribute strings.
@@ -656,6 +603,7 @@ mod tests {
             &[],
             &[(0.0, 0.0)],
             &[(0.0, 0.0), (10.0, 10.0)],
+            &[(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)],
             &[(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 30.0)],
             &[
                 (-5.25, 0.0),
@@ -720,6 +668,160 @@ mod tests {
             path,
             "M10 20 C15 30,15 50,30 60 C45 60,55 60,70 60 C85 50,85 30,90 20"
         );
+    }
+
+    #[test]
+    fn orthogonal_elbows_preserve_endpoint_positions_and_tangents() {
+        let points = [(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)];
+        let path = build_smooth_path_by(points.len(), |index| points[index]);
+        // The terminal lines retain the horizontal port/arrow directions. Each quadratic's
+        // control point shares the incoming axis with its start and the outgoing axis with
+        // its end, so there is no kink where the straight leg meets the elbow.
+        assert_eq!(path, "M0 0 L34 0 Q40 0,40 6 L40 74 Q40 80,46 80 L120 80");
+    }
+
+    #[test]
+    fn short_orthogonal_segments_share_trim_without_reversing() {
+        let points = [
+            (0.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 2.0),
+            (80.0, 2.0),
+            (80.0, 40.0),
+        ];
+        let path = build_smooth_path_by(points.len(), |index| points[index]);
+        assert_eq!(
+            path,
+            "M0 0 L39 0 Q40 0,40 1 Q40 2,41 2 L74 2 Q80 2,80 8 L80 40"
+        );
+        for pair in sample_rounded_path(&path).windows(2) {
+            assert!(pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1);
+        }
+
+        let short_ports = [(0.0, 0.0), (4.0, 0.0), (4.0, 12.0), (8.0, 12.0)];
+        assert_eq!(
+            build_smooth_path_by(short_ports.len(), |index| short_ports[index]),
+            "M0 0 L2 0 Q4 0,4 2 L4 10 Q4 12,6 12 L8 12"
+        );
+    }
+
+    #[test]
+    fn orthogonal_rounding_ignores_duplicate_and_collinear_waypoints() {
+        let points = [
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (39.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 0.0),
+            (40.0, 1.0),
+            (40.0, 79.0),
+            (40.0, 80.0),
+            (41.0, 80.0),
+            (120.0, 80.0),
+            (120.0, 80.0),
+        ];
+        assert_eq!(
+            build_smooth_path_by(points.len(), |index| points[index]),
+            "M0 0 L34 0 Q40 0,40 6 L40 74 Q40 80,46 80 L120 80"
+        );
+        assert_eq!(build_smooth_path_by(4, |_| (5.0, 9.0)), "M5 9");
+    }
+
+    #[test]
+    fn orthogonal_rounding_preserves_near_straight_collapse_and_reversals() {
+        let nearly_straight = [(0.0, 0.0), (40.0, 0.0), (40.0, 1.0), (120.0, 1.0)];
+        assert_eq!(
+            build_smooth_path_by(nearly_straight.len(), |index| nearly_straight[index]),
+            "M0 0 L120 1"
+        );
+        let reversal = [(0.0, 0.0), (40.0, 0.0), (0.0, 0.0), (0.0, 40.0)];
+        assert_eq!(
+            build_smooth_path_by(reversal.len(), |index| reversal[index]),
+            "M0 0 L40 0 L6 0 Q0 0,0 6 L0 40"
+        );
+    }
+
+    #[test]
+    fn acute_nonorthogonal_routes_keep_the_bounded_cubic_curve() {
+        let points = [(0.0, 0.0), (40.0, 40.0), (4.0, 80.0)];
+        assert_eq!(
+            build_smooth_path_by(points.len(), |index| points[index]),
+            "M0 0 C10 10,39 20,40 40 C40 60,13 70,4 80"
+        );
+    }
+
+    #[test]
+    fn rounded_elbows_stay_in_the_router_clearance_corridor() {
+        // Obstacles occupy the inside of both turns, exactly 8px from the routed legs.
+        // Sample the emitted geometry, including mirrored turns, rather than just inspecting
+        // the control points: a smooth path must neither hit either obstacle nor overshoot
+        // the endpoint bounds anywhere between them.
+        let route = [(0.0, 0.0), (40.0, 0.0), (40.0, 80.0), (120.0, 80.0)];
+        for (sx, sy) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+            let path = build_smooth_path_by(route.len(), |index| {
+                (route[index].0 * sx, route[index].1 * sy)
+            });
+            assert!(
+                path.contains('Q'),
+                "route must actually have rounded elbows"
+            );
+            for (x, y) in sample_rounded_path(&path) {
+                let (x, y) = (x * sx, y * sy);
+                assert!((0.0..=120.0).contains(&x) && (0.0..=80.0).contains(&y));
+                for (left, top, right, bottom) in [(8.0, 8.0, 32.0, 72.0), (48.0, 8.0, 112.0, 72.0)]
+                {
+                    assert!(x < left || x > right || y < top || y > bottom);
+                }
+                let distance = route
+                    .windows(2)
+                    .map(|pair| {
+                        let (dx, dy) = (pair[1].0 - pair[0].0, pair[1].1 - pair[0].1);
+                        let t = (((x - pair[0].0) * dx + (y - pair[0].1) * dy)
+                            / (dx * dx + dy * dy))
+                            .clamp(0.0, 1.0);
+                        (x - pair[0].0 - t * dx).hypot(y - pair[0].1 - t * dy)
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    distance <= 1.501,
+                    "curve escaped the local channel: {distance}"
+                );
+            }
+        }
+    }
+
+    /// Evaluate the emitted SVG line/quadratic commands independently of the path builder.
+    fn sample_rounded_path(path: &str) -> Vec<(f32, f32)> {
+        let commands = path.chars().filter(|ch| matches!(ch, 'M' | 'L' | 'Q'));
+        let arguments = path.split(['M', 'L', 'Q']).skip(1);
+        let mut current = (0.0, 0.0);
+        let mut samples = Vec::new();
+        for (command, arguments) in commands.zip(arguments) {
+            let values: Vec<f32> = arguments
+                .split(|ch: char| ch.is_whitespace() || ch == ',')
+                .filter(|value| !value.is_empty())
+                .map(|value| value.parse().expect("finite path coordinate"))
+                .collect();
+            let end = (values[values.len() - 2], values[values.len() - 1]);
+            if command == 'M' {
+                samples.push(end);
+            } else {
+                for step in 1..=32 {
+                    let t = step as f32 / 32.0;
+                    let u = 1.0 - t;
+                    samples.push(if command == 'Q' {
+                        (
+                            u * u * current.0 + 2.0 * u * t * values[0] + t * t * end.0,
+                            u * u * current.1 + 2.0 * u * t * values[1] + t * t * end.1,
+                        )
+                    } else {
+                        (u * current.0 + t * end.0, u * current.1 + t * end.1)
+                    });
+                }
+            }
+            current = end;
+        }
+        samples
     }
 
     #[test]

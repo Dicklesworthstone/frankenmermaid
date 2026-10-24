@@ -45,14 +45,20 @@ pub fn describe_diagram_with_layout(
     };
 
     let diagnostics = ir.diagnostic_counts();
+    // A `~~~` link only positions nodes; the picture shows no connection, so neither does this.
+    let edge_count = ir
+        .edges
+        .iter()
+        .filter(|edge| edge.arrow != ArrowType::Invisible)
+        .count();
     let _ = write!(
         desc,
         "{} with {} node{} and {} edge{}",
         leading_type_phrase(type_desc),
         ir.nodes.len(),
         plural_suffix(ir.nodes.len()),
-        ir.edges.len(),
-        plural_suffix(ir.edges.len())
+        edge_count,
+        plural_suffix(edge_count)
     );
 
     if !ir.clusters.is_empty() {
@@ -111,6 +117,11 @@ pub fn describe_diagram_with_layout(
     }
 
     if let Some(layout) = layout {
+        // Each `~~~` link is routed as exactly one path, none of which is drawn.
+        let drawn_edges = layout
+            .edges
+            .len()
+            .saturating_sub(ir.edges.len() - edge_count);
         let _ = write!(
             desc,
             ". Layout spans {:.0} by {:.0} units with {} rendered node {} and {} routed edge path{}",
@@ -122,8 +133,8 @@ pub fn describe_diagram_with_layout(
             } else {
                 "boxes"
             },
-            layout.edges.len(),
-            plural_suffix(layout.edges.len())
+            drawn_edges,
+            plural_suffix(drawn_edges)
         );
         if layout.stats.crossing_count > 0 {
             let _ = write!(
@@ -169,6 +180,9 @@ fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
     ir.edges
         .iter()
         .filter_map(|edge| {
+            if edge.arrow == ArrowType::Invisible {
+                return None;
+            }
             let from = ir
                 .resolve_endpoint_node(edge.from)
                 .and_then(|id| ir.nodes.get(id.0))?;
@@ -244,6 +258,12 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::TaggedDocument => "tagged document",
         fm_core::NodeShape::BowTieRect => "stored data block",
         fm_core::NodeShape::Hourglass => "hourglass",
+        fm_core::NodeShape::BlockArrowRight => "arrow pointing right",
+        fm_core::NodeShape::BlockArrowLeft => "arrow pointing left",
+        fm_core::NodeShape::BlockArrowUp => "arrow pointing up",
+        fm_core::NodeShape::BlockArrowDown => "arrow pointing down",
+        fm_core::NodeShape::BlockArrowX => "double-headed horizontal arrow",
+        fm_core::NodeShape::BlockArrowY => "double-headed vertical arrow",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",
@@ -455,6 +475,11 @@ pub(crate) fn describe_edge_labels(
 }
 
 /// Generate accessibility CSS with media query support.
+///
+/// Semantic shapes carry local paint variables, so high contrast must reset those as well as
+/// the root palette. Keep the text rule at normal priority so author classDef and inline colors
+/// retain precedence over the default presentation attributes. Edge widths can encode flow
+/// quantities, so contrast adjustments preserve their resolved widths.
 #[must_use]
 pub fn accessibility_css() -> &'static str {
     r"
@@ -467,8 +492,12 @@ pub fn accessibility_css() -> &'static str {
     --fm-node-stroke: #000000 !important;
     --fm-edge-color: #000000 !important;
   }
+  .fm-node-semantic {
+    --fm-node-fill: #ffffff !important;
+    --fm-node-stroke: #000000 !important;
+  }
+  .fm-node-semantic text { fill: #000000; }
   .fm-node { stroke-width: 2px !important; }
-  .fm-edge { stroke-width: 2px !important; }
 }
 
 /* Reduced motion support */

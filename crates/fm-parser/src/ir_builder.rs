@@ -204,6 +204,14 @@ pub struct IrBuilder {
     /// subgraphs declared LATER in the document than the edge naming them (bd-dw2a9). Empty for
     /// every other diagram type, so their paths pay one hash miss.
     flow_forward_subgraph_members: FxHashMap<String, String>,
+    /// Flowchart only: the endpoints of the statement being lowered that NAMED a subgraph, as
+    /// (member node it resolved to, subgraph public key). `push_edge` reads them to record which
+    /// ends of an edge were written to a subgraph; cleared at each statement.
+    pending_subgraph_endpoints: Vec<(IrNodeId, String)>,
+    /// (edge index, is the source end, subgraph public key) for every edge end that named a
+    /// subgraph. Resolved to subgraph ids once lowering ends, because a forward reference names
+    /// a subgraph that does not exist yet when the edge is pushed.
+    subgraph_edge_ends: Vec<(usize, bool, String)>,
     /// Subgraph PUBLIC key -> index into `ir.graph.subgraphs`.
     ///
     /// ⚠️ NOT `subgraph_index_by_key`, WHICH IS KEYED DIFFERENTLY. That map holds
@@ -229,6 +237,8 @@ pub struct IrBuilder {
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
     fragment_stack: Vec<OpenFragment>,
+    /// How many edges the sequence timeline already records as `Message` steps.
+    sequence_timeline_edges: usize,
     /// Node id of the currently open class block, resolved once when the block opens so each member add
     /// skips a `NodeIdIndex` hash+lookup+id-compare (the class name is invariant across a block's members).
     current_class_node_id: Option<IrNodeId>,
@@ -417,6 +427,9 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
     target.xy_chart_meta.clone_from(&source.xy_chart_meta);
     target.treemap_meta.clone_from(&source.treemap_meta);
     target.radar_meta.clone_from(&source.radar_meta);
+    target.venn_meta.clone_from(&source.venn_meta);
+    target.wardley_meta.clone_from(&source.wardley_meta);
+    target.event_model_meta.clone_from(&source.event_model_meta);
     target.pie_meta.clone_from(&source.pie_meta);
     target.quadrant_meta.clone_from(&source.quadrant_meta);
     target.packet_meta.clone_from(&source.packet_meta);
@@ -517,6 +530,11 @@ impl IrBuilder {
         self.ir.xy_chart_meta.clone_from(&source.ir.xy_chart_meta);
         self.ir.treemap_meta.clone_from(&source.ir.treemap_meta);
         self.ir.radar_meta.clone_from(&source.ir.radar_meta);
+        self.ir.venn_meta.clone_from(&source.ir.venn_meta);
+        self.ir.wardley_meta.clone_from(&source.ir.wardley_meta);
+        self.ir
+            .event_model_meta
+            .clone_from(&source.ir.event_model_meta);
         self.ir.pie_meta.clone_from(&source.ir.pie_meta);
         self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
         self.ir.packet_meta.clone_from(&source.ir.packet_meta);
@@ -546,6 +564,8 @@ impl IrBuilder {
             cluster_index_by_key,
             subgraph_index_by_key,
             flow_forward_subgraph_members,
+            pending_subgraph_endpoints,
+            subgraph_edge_ends,
             subgraph_index_by_public_key,
             cluster_member_set,
             subgraph_member_set,
@@ -555,11 +575,15 @@ impl IrBuilder {
             activation_stacks,
             current_participant_group,
             fragment_stack,
+            sequence_timeline_edges,
             current_class_node_id,
             state_stack,
             parser_config,
             reusable_prefix_guard: _,
         } = source;
+        self.pending_subgraph_endpoints
+            .clone_from(pending_subgraph_endpoints);
+        self.subgraph_edge_ends.clone_from(subgraph_edge_ends);
         self.node_id_index
             .buckets
             .clone_from(&node_id_index.buckets);
@@ -579,6 +603,7 @@ impl IrBuilder {
         self.current_participant_group
             .clone_from(current_participant_group);
         self.fragment_stack.clone_from(fragment_stack);
+        self.sequence_timeline_edges = *sequence_timeline_edges;
         self.current_class_node_id = *current_class_node_id;
         self.state_stack.clone_from(state_stack);
         self.parser_config = *parser_config;
@@ -593,6 +618,8 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            pending_subgraph_endpoints: Vec::new(),
+            subgraph_edge_ends: Vec::new(),
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -602,6 +629,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
+            sequence_timeline_edges: 0,
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
@@ -642,6 +670,8 @@ impl IrBuilder {
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
+            pending_subgraph_endpoints: Vec::new(),
+            subgraph_edge_ends: Vec::new(),
             subgraph_index_by_public_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
@@ -651,6 +681,7 @@ impl IrBuilder {
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
+            sequence_timeline_edges: 0,
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
@@ -699,6 +730,16 @@ impl IrBuilder {
 
     pub(crate) fn set_block_beta_columns(&mut self, columns: usize) {
         self.ir.meta.block_beta_columns = Some(columns.max(1));
+    }
+
+    /// `columns N` inside the block-beta group whose subgraph index is `subgraph`.
+    pub(crate) fn set_block_beta_group_columns(&mut self, subgraph: usize, columns: usize) {
+        let columns = columns.max(1);
+        let entries = &mut self.ir.meta.block_beta_group_columns;
+        match entries.iter_mut().find(|(group, _)| *group == subgraph) {
+            Some(entry) => entry.1 = columns,
+            None => entries.push((subgraph, columns)),
+        }
     }
 
     pub(crate) fn set_gantt_meta(&mut self, gantt_meta: IrGanttMeta) {
@@ -945,6 +986,40 @@ impl IrBuilder {
             .hide_footbox = true;
     }
 
+    /// Append a step to the sequence timeline, first recording every message added since the last
+    /// step, so messages need no hook of their own.
+    fn push_sequence_step(&mut self, step: fm_core::IrSequenceStep) {
+        let edges = self.ir.edges.len();
+        let recorded = self.sequence_timeline_edges;
+        let timeline = &mut self
+            .ir
+            .sequence_meta
+            .get_or_insert_with(IrSequenceMeta::default)
+            .timeline;
+        timeline.extend((recorded..edges).map(|_| fm_core::IrSequenceStep::Message));
+        timeline.push(step);
+        self.sequence_timeline_edges = edges;
+    }
+
+    /// Close the sequence timeline at the end of a parse: record the trailing messages, or drop a
+    /// timeline that holds nothing but messages (the per-message rows need no order).
+    pub(crate) fn finish_sequence_timeline(&mut self) {
+        let edges = self.ir.edges.len();
+        let recorded = self.sequence_timeline_edges;
+        if let Some(meta) = self.ir.sequence_meta.as_mut() {
+            meta.timeline
+                .extend((recorded..edges).map(|_| fm_core::IrSequenceStep::Message));
+            if meta
+                .timeline
+                .iter()
+                .all(|step| *step == fm_core::IrSequenceStep::Message)
+            {
+                meta.timeline.clear();
+            }
+        }
+        self.sequence_timeline_edges = edges;
+    }
+
     pub(crate) fn add_sequence_note(
         &mut self,
         position: NotePosition,
@@ -971,6 +1046,7 @@ impl IrBuilder {
                 text,
                 after_edge: self.ir.edges.len().saturating_sub(1),
             });
+        self.push_sequence_step(fm_core::IrSequenceStep::Note);
     }
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
@@ -1074,7 +1150,10 @@ impl IrBuilder {
         let Some(node_id) = self.node_id_index.get(normalized.as_ref(), &self.ir.nodes) else {
             return;
         };
-        let at_edge = self.ir.edges.len().saturating_sub(1);
+        // ⚠️ THE NEXT MESSAGE, like `create`. mermaid's docs write `destroy Carl` immediately BEFORE
+        // `Alice-xCarl: We are too many`, the message that ends Carl; reading the previous one put
+        // the cross on whatever Carl last said and cut his lifeline a message early.
+        let at_edge = self.ir.edges.len();
         self.ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default)
@@ -1294,6 +1373,7 @@ impl IrBuilder {
         color: Option<String>,
     ) {
         let start_edge = self.ir.edges.len();
+        self.push_sequence_step(fm_core::IrSequenceStep::Open);
         self.fragment_stack
             .push((kind, label, start_edge, Vec::new(), Vec::new()));
         if let Some((stored_kind, stored_label, _, _, _)) = self.fragment_stack.last_mut()
@@ -1305,6 +1385,9 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_fragment_alternative(&mut self, label: String) {
+        if !self.fragment_stack.is_empty() {
+            self.push_sequence_step(fm_core::IrSequenceStep::Else);
+        }
         if let Some((_, _, _, alternatives, _)) = self.fragment_stack.last_mut() {
             let start_edge = self.ir.edges.len();
             // Close the previous section's end_edge
@@ -1326,6 +1409,7 @@ impl IrBuilder {
         else {
             return false;
         };
+        self.push_sequence_step(fm_core::IrSequenceStep::Close);
 
         let end_edge = self.ir.edges.len().saturating_sub(1);
 
@@ -2131,11 +2215,115 @@ impl IrBuilder {
     /// every `IrNodeId` in edges, cluster and subgraph members and both id maps. Nothing is removed
     /// here because nothing wrong is ever created.
     pub(crate) fn resolve_subgraph_endpoint(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
-        if let Some(member) = self.subgraph_endpoint_member(id) {
-            return Some(member);
+        let member = if let Some(member) = self.subgraph_endpoint_member(id) {
+            member
+        } else {
+            let target = self.flow_forward_subgraph_members.get(id.trim())?.clone();
+            self.intern_node_auto_normalized(&target, None, NodeShape::Rect, span, false)?
+        };
+        self.pending_subgraph_endpoints
+            .push((member, id.trim().to_string()));
+        Some(member)
+    }
+
+    /// Start a new flowchart statement: endpoints noted by the previous one no longer apply.
+    pub(crate) fn begin_flow_statement(&mut self) {
+        self.pending_subgraph_endpoints.clear();
+    }
+
+    /// An edge whose push was skipped (one endpoint did not intern) must not leave the subgraph
+    /// endpoint it did resolve for the next edge to pick up: in `G & c --> a & X["x]` the skipped
+    /// `G --> X` would otherwise attach `c --> a` to G.
+    pub(crate) fn discard_pending_subgraph_endpoints(&mut self) {
+        self.pending_subgraph_endpoints.clear();
+    }
+
+    /// Keep each flowchart node in ONE subgraph, as mermaid does.
+    ///
+    /// A node written inside two subgraphs that do not nest (`API_GW` in `Frontend`, then again in
+    /// `Backend`) joined both, so the two boxes were built around it and overlapped. mermaid adds a
+    /// subgraph at its `end` and drops from it every node an earlier one already holds, so the node
+    /// stays in the subgraph that closed first. For subgraphs that do not nest that is also the one
+    /// that opened first, the lower index. The node leaves the other branch: its innermost
+    /// subgraph and every ancestor of it that is not also an ancestor of the one kept.
+    pub(crate) fn finish_unique_subgraph_membership(&mut self) {
+        if self.ir.graph.subgraphs.len() < 2 {
+            return;
         }
-        let target = self.flow_forward_subgraph_members.get(id.trim())?.clone();
-        self.intern_node_auto_normalized(&target, None, NodeShape::Rect, span, false)
+        for node in 0..self.ir.graph.nodes.len() {
+            let held = self.ir.graph.nodes[node].subgraphs.clone();
+            if held.len() < 2 {
+                continue;
+            }
+            let subgraphs = &self.ir.graph.subgraphs;
+            // The innermost subgraphs holding the node: none of their children holds it too.
+            let Some(keep) = held
+                .iter()
+                .copied()
+                .filter(|s| !subgraphs[s.0].children.iter().any(|c| held.contains(c)))
+                .min_by_key(|s| s.0)
+            else {
+                continue;
+            };
+            let mut chain = Vec::new();
+            let mut cursor = Some(keep);
+            while let Some(subgraph) = cursor {
+                chain.push(subgraph);
+                cursor = subgraphs[subgraph.0].parent;
+            }
+            if held.iter().all(|s| chain.contains(s)) {
+                continue;
+            }
+            let node_id = IrNodeId(node);
+            self.mark_reusable_prefix_node_dirty(node_id);
+            // Every list holds an entry at most once, so removing the first match removes it.
+            fn drop_entry<T: PartialEq>(list: &mut Vec<T>, entry: &T) {
+                if let Some(at) = list.iter().position(|held| held == entry) {
+                    list.remove(at);
+                }
+            }
+            for subgraph in &held {
+                if chain.contains(subgraph) {
+                    continue;
+                }
+                self.mark_reusable_prefix_subgraph_dirty(subgraph.0);
+                drop_entry(&mut self.ir.graph.nodes[node].subgraphs, subgraph);
+                let entry = &mut self.ir.graph.subgraphs[subgraph.0];
+                drop_entry(&mut entry.members, &node_id);
+                let Some(cluster) = entry.cluster else {
+                    continue;
+                };
+                self.mark_reusable_prefix_cluster_dirty(cluster.0);
+                drop_entry(&mut self.ir.graph.nodes[node].clusters, &cluster);
+                if let Some(entry) = self.ir.clusters.get_mut(cluster.0) {
+                    drop_entry(&mut entry.members, &node_id);
+                }
+                if let Some(entry) = self.ir.graph.clusters.get_mut(cluster.0) {
+                    drop_entry(&mut entry.members, &node_id);
+                }
+            }
+        }
+    }
+
+    /// Turn the recorded subgraph-named edge ends into `from_subgraph` / `to_subgraph`, now that
+    /// every subgraph exists.
+    pub(crate) fn finish_subgraph_edge_ends(&mut self) {
+        for (edge, is_source, key) in &self.subgraph_edge_ends {
+            let (Some(&index), Some(edge)) = (
+                self.subgraph_index_by_public_key.get(key),
+                self.ir.edges.get_mut(*edge),
+            ) else {
+                continue;
+            };
+            let extras = edge.extras_mut();
+            let end = if *is_source {
+                &mut extras.from_subgraph
+            } else {
+                &mut extras.to_subgraph
+            };
+            *end = Some(IrSubgraphId(index));
+        }
+        self.subgraph_edge_ends.clear();
     }
 
     pub(crate) fn intern_edge_endpoint_pretrimmed(
@@ -2598,6 +2786,20 @@ impl IrBuilder {
         let label_id = parsed_label
             .as_ref()
             .map(|value| self.intern_label(value, span));
+        let edge_index = self.ir.edges.len();
+        for (member, key) in &self.pending_subgraph_endpoints {
+            for (end, is_source) in [(from, true), (to, false)] {
+                if end == *member {
+                    self.subgraph_edge_ends
+                        .push((edge_index, is_source, key.clone()));
+                }
+            }
+        }
+        // Each edge resolves its two endpoints right before this push, so what is pending belongs
+        // to THIS edge alone. Keeping it for the rest of the statement made every later edge
+        // re-match it: `G&G&…&G --> G&G&…&G` (90 x 90 edges) left ~2E^2 entries (OOM in wasm),
+        // and in `G --> b --> a` the edge `b --> a` was attached to G's border.
+        self.pending_subgraph_endpoints.clear();
         self.ir.edges.push(IrEdge {
             from: IrEndpoint::Node(from),
             to: IrEndpoint::Node(to),
