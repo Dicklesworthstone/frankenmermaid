@@ -10483,7 +10483,7 @@ const TIMELINE_SECTION_CLASSES: [&str; 8] = [
 
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
     let mut previous_period: Option<IrNodeId> = None;
-    let mut current_period: Option<IrNodeId> = None;
+    let mut current_period: Option<(IrNodeId, Option<usize>, Option<usize>)> = None;
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
@@ -10539,10 +10539,12 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         if let Some(section_name) = trimmed.strip_prefix("section ") {
             let section_name = section_name.trim();
             let span = span_for(line_number, line);
-            current_section = builder.ensure_cluster(section_name, Some(section_name), span);
+            // A section declaration opens a new run of periods, even when its caption repeats.
+            let section_key = format!("timeline-section-{line_number}");
+            current_section = builder.ensure_cluster(&section_key, Some(section_name), span);
             current_section_subgraph = current_section.and_then(|section_idx| {
                 builder.ensure_subgraph(
-                    section_name,
+                    &section_key,
                     section_name,
                     Some(section_name),
                     span,
@@ -10558,15 +10560,15 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         // Check if this is a continuation event (starts with :)
         if let Some(continuation) = trimmed.strip_prefix(':') {
             // This is a continuation event for the current period
-            if let Some(period_id) = current_period {
+            if let Some((period_id, period_section, period_subgraph)) = current_period {
                 let events_text = continuation.trim();
                 parse_timeline_events(
                     events_text,
                     period_id,
                     line_number,
                     line,
-                    current_section,
-                    current_section_subgraph,
+                    period_section,
+                    period_subgraph,
                     builder,
                 );
             } else {
@@ -10577,96 +10579,47 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // This should be a time period line: {period} : {event1} : {event2} ...
-        if let Some(colon_pos) = trimmed.find(':') {
-            let period_text = trimmed[..colon_pos].trim();
-            let events_text = trimmed[colon_pos + 1..].trim();
+        // Captions are content, not identifiers. Each source occurrence is a distinct period;
+        // reusing a caption must not merge it with a previous period or an event of the same name.
+        let (period_text, events_text) = trimmed
+            .split_once(':')
+            .map_or((trimmed, ""), |(period, events)| {
+                (period.trim(), events.trim())
+            });
+        let period_id = format!("timeline-period-{line_number}");
+        let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+        current_period = period_node.map(|id| (id, current_section, current_section_subgraph));
+        let Some(period_node_id) = period_node else {
+            continue;
+        };
 
-            if period_text.is_empty() {
-                builder.add_warning(format!("Line {line_number}: empty time period: {trimmed}"));
-                continue;
-            }
+        builder.add_class_to_node_id(period_node_id, "timeline-period");
+        if let Some(section_idx) = current_section {
+            builder.add_class_to_node_id(
+                period_node_id,
+                TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
+            );
+            builder.add_node_to_cluster(section_idx, period_node_id);
+        }
+        if let Some(subgraph_idx) = current_section_subgraph {
+            builder.add_node_to_subgraph(subgraph_idx, period_node_id);
+        }
 
-            // Create time period node
-            let period_id = normalize_identifier(period_text);
-            if period_id.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: could not derive identifier for time period: {period_text}"
-                ));
-                continue;
-            }
+        if let Some(prev_id) = previous_period {
+            builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
+        }
+        previous_period = Some(period_node_id);
 
-            let period_node =
-                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
-
-            if let Some(period_node_id) = period_node {
-                builder.add_class_to_node_id(period_node_id, "timeline-period");
-                // Section color class for background band differentiation.
-                if let Some(section_idx) = current_section {
-                    builder.add_class_to_node_id(
-                        period_node_id,
-                        TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
-                    );
-                }
-
-                // Add to current section if any
-                if let Some(section_idx) = current_section {
-                    builder.add_node_to_cluster(section_idx, period_node_id);
-                }
-                if let Some(subgraph_idx) = current_section_subgraph {
-                    builder.add_node_to_subgraph(subgraph_idx, period_node_id);
-                }
-
-                // Link to previous period (timeline sequence)
-                if let Some(prev_id) = previous_period {
-                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
-                }
-
-                previous_period = Some(period_node_id);
-                current_period = Some(period_node_id);
-
-                // Parse events for this period
-                if !events_text.is_empty() {
-                    parse_timeline_events(
-                        events_text,
-                        period_node_id,
-                        line_number,
-                        line,
-                        current_section,
-                        current_section_subgraph,
-                        builder,
-                    );
-                }
-            }
-        } else {
-            // Line without colon - treat as a time period with no events
-            let period_text = trimmed;
-            let period_id = normalize_identifier(period_text);
-            if period_id.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: unsupported timeline syntax: {trimmed}"
-                ));
-                continue;
-            }
-
-            let period_node =
-                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
-
-            if let Some(period_node_id) = period_node {
-                if let Some(section_idx) = current_section {
-                    builder.add_node_to_cluster(section_idx, period_node_id);
-                }
-                if let Some(subgraph_idx) = current_section_subgraph {
-                    builder.add_node_to_subgraph(subgraph_idx, period_node_id);
-                }
-
-                if let Some(prev_id) = previous_period {
-                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
-                }
-
-                previous_period = Some(period_node_id);
-                current_period = Some(period_node_id);
-            }
+        if !events_text.is_empty() {
+            parse_timeline_events(
+                events_text,
+                period_node_id,
+                line_number,
+                line,
+                current_section,
+                current_section_subgraph,
+                builder,
+            );
         }
     }
 }
@@ -10684,16 +10637,15 @@ fn parse_timeline_events(
     let span = span_for(line_number, source_line);
 
     // Events can be separated by colons
-    for event_text in events_text.split(':') {
+    for (event_index, event_text) in events_text.split(':').enumerate() {
         let event_text_trimmed = event_text.trim();
         if event_text_trimmed.is_empty() {
             continue;
         }
 
-        let event_id = normalize_identifier(event_text);
-        if event_id.is_empty() {
-            continue;
-        }
+        // Include the occurrence within the line so repeated inline and continuation events
+        // remain separate, including captions whose normalized spellings would collide.
+        let event_id = format!("timeline-event-{line_number}-{event_index}");
 
         // Create event node and link to period. Entity codes decode here as in every other label
         // position (bd-j06n2); the pinned mermaid-11.15.0 draws `#35;` as `#` in a timeline event.
@@ -12266,8 +12218,17 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             .as_deref()
             .filter(|name| !name.is_empty())
             .unwrap_or(series_kind);
-        let base_id = normalize_compound_identifier(base_name);
-        let use_fresh_nodes = seen_base_ids.insert(base_id.clone());
+        // Every statement is a separate series, even when it has the same name or kind.
+        // Reusing point IDs aliases its geometry to an earlier series and loses one series
+        // when renderers index layout boxes by node ID. Keep descriptive first-use IDs,
+        // then reserve collision-safe bases without changing the author's visible labels.
+        let normalized_base = normalize_compound_identifier(base_name);
+        let mut base_id = normalized_base.clone();
+        let mut discriminator = xy_chart_meta.series.len() + 1;
+        while !seen_base_ids.insert(base_id.clone()) {
+            base_id = format!("{normalized_base}__{discriminator}");
+            discriminator += 1;
+        }
         let mut previous_node = None;
         let mut series_nodes = Vec::with_capacity(values.len());
 
@@ -12287,12 +12248,9 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
                 "bar" => NodeShape::Rect,
                 _ => NodeShape::Circle,
             };
-            let node = if use_fresh_nodes {
+            let Some(node) =
                 builder.intern_fresh_node_owned_label(node_id, node_label, shape, span)
-            } else {
-                builder.intern_node(&node_id, Some(&node_label), shape, span)
-            };
-            let Some(node) = node else {
+            else {
                 continue;
             };
             series_nodes.push(node);
@@ -22348,15 +22306,169 @@ mod tests {
     #[test]
     fn timeline_events_have_rounded_shape() {
         let parsed = parse_mermaid("timeline\n    2004 : Facebook");
-        let event = parsed.ir.nodes.iter().find(|n| n.id == "Facebook").unwrap();
+        let event = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| parsed.ir.node_display_text(node) == "Facebook")
+            .unwrap();
         assert_eq!(event.shape, NodeShape::Rounded);
     }
 
     #[test]
     fn timeline_periods_have_rect_shape() {
         let parsed = parse_mermaid("timeline\n    2004 : Facebook");
-        let period = parsed.ir.nodes.iter().find(|n| n.id == "2004").unwrap();
+        let period = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| parsed.ir.node_display_text(node) == "2004")
+            .unwrap();
         assert_eq!(period.shape, NodeShape::Rect);
+    }
+
+    #[test]
+    fn timeline_repeated_captions_keep_distinct_occurrences_and_sections() {
+        let source = concat!(
+            "timeline\n",
+            "  section Release\n",
+            "    Q1 : Review : Review\n",
+            "       : Q1\n",
+            "  section Release\n",
+            "    Q1 : Review\n",
+            "       : Review\n",
+            "    Q1\n",
+            "       : Q1\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let labels: Vec<_> = ir
+            .nodes
+            .iter()
+            .map(|node| ir.node_display_text(node).trim())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Q1", "Review", "Review", "Q1", "Q1", "Review", "Review", "Q1", "Q1"
+            ]
+        );
+        let ids: std::collections::BTreeSet<_> = ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(
+            ids.len(),
+            labels.len(),
+            "every occurrence needs its own identity"
+        );
+        for (index, node) in ir.nodes.iter().enumerate() {
+            let is_period = [0, 4, 7].contains(&index);
+            assert_eq!(
+                node.shape,
+                if is_period {
+                    NodeShape::Rect
+                } else {
+                    NodeShape::Rounded
+                }
+            );
+            assert!(node.classes.iter().any(|class| class
+                == if is_period {
+                    "timeline-period"
+                } else {
+                    "timeline-event"
+                }));
+        }
+        let edges: Vec<_> = ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to) else {
+                    panic!("timeline entries are node endpoints");
+                };
+                (from.0, to.0, edge.arrow)
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                (0, 1, ArrowType::Line),
+                (0, 2, ArrowType::Line),
+                (0, 3, ArrowType::Line),
+                (0, 4, ArrowType::Arrow),
+                (4, 5, ArrowType::Line),
+                (4, 6, ArrowType::Line),
+                (4, 7, ArrowType::Arrow),
+                (7, 8, ArrowType::Line),
+            ]
+        );
+        assert_eq!(ir.clusters.len(), 2);
+        assert_eq!(ir.graph.subgraphs_by_key("Release").len(), 2);
+        let section_members: Vec<Vec<_>> = ir
+            .clusters
+            .iter()
+            .map(|section| section.members.iter().map(|id| id.0).collect())
+            .collect();
+        assert_eq!(section_members, [vec![0, 1, 2, 3], vec![4, 5, 6, 7, 8]]);
+        assert_eq!(
+            parsed.ir,
+            parse_mermaid(source).ir,
+            "source identities must be deterministic"
+        );
+    }
+
+    #[test]
+    fn timeline_caption_normalization_cannot_merge_periods_or_events() {
+        let parsed = parse_mermaid("timeline\n  Q 1 : A B : A_B\n  Q_1 : Q 1 : Q_1\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let labels: Vec<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| parsed.ir.node_display_text(node).trim())
+            .collect();
+        assert_eq!(labels, ["Q 1", "A B", "A_B", "Q_1", "Q 1", "Q_1"]);
+        assert_eq!(parsed.ir.edges.len(), 5);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::Rect)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn timeline_continuations_keep_the_owning_period_section() {
+        let parsed = parse_mermaid(concat!(
+            "timeline\n",
+            "  section Earlier\n",
+            "    Old\n",
+            "  section Later\n",
+            "       : Still old\n",
+            "    New : New event\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        let section_members: Vec<Vec<_>> = parsed
+            .ir
+            .clusters
+            .iter()
+            .map(|section| section.members.iter().map(|id| id.0).collect())
+            .collect();
+        assert_eq!(section_members, [vec![0, 1], vec![2, 3]]);
+        assert!(
+            parsed.ir.nodes[1]
+                .classes
+                .iter()
+                .any(|class| class == "timeline-section-0")
+        );
+        assert!(
+            parsed.ir.nodes[3]
+                .classes
+                .iter()
+                .any(|class| class == "timeline-section-1")
+        );
     }
 
     #[test]
@@ -27558,6 +27670,155 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(xy_meta.x_axis.categories, vec!["A", "B", "C"]);
         assert_eq!(xy_meta.series[0].kind, IrXySeriesKind::Line);
         assert_eq!(xy_meta.series[0].values, vec![5.0, 15.0, 25.0]);
+    }
+
+    #[test]
+    fn xychart_repeated_anonymous_bars_keep_every_value_and_point_identity() {
+        let parsed = parse_mermaid(
+            "xychart-beta\nx-axis [Jan, Feb, Mar]\ny-axis -100 --> 100\n\
+             bar [-80,20,0]\nbar [-40,80,40]",
+        );
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(meta.series.len(), 2);
+        assert_eq!(meta.series[0].values, [-80.0, 20.0, 0.0]);
+        assert_eq!(meta.series[1].values, [-40.0, 80.0, 40.0]);
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        assert!(parsed.ir.edges.is_empty());
+        for series in &meta.series {
+            assert!(series.name.is_none());
+            assert_eq!(series.nodes.len(), 3);
+        }
+        assert!(
+            meta.series[0]
+                .nodes
+                .iter()
+                .all(|node| !meta.series[1].nodes.contains(node))
+        );
+        let label = |series: usize, point: usize| {
+            let node = &parsed.ir.nodes[meta.series[series].nodes[point].0];
+            parsed.ir.labels[node.label.expect("point label").0]
+                .text
+                .as_str()
+        };
+        assert_eq!(label(0, 0), "bar Jan: -80");
+        assert_eq!(label(0, 1), "bar Feb: 20");
+        assert_eq!(label(0, 2), "bar Mar: 0");
+        assert_eq!(label(1, 0), "bar Jan: -40");
+        assert_eq!(label(1, 1), "bar Feb: 80");
+        assert_eq!(label(1, 2), "bar Mar: 40");
+        assert_eq!(parsed.ir.nodes[meta.series[0].nodes[0].0].id, "bar_1");
+    }
+
+    #[test]
+    fn xychart_colliding_line_and_area_names_keep_edges_in_their_own_series() {
+        for kind in ["line", "area"] {
+            for (first_name, second_name) in
+                [("Revenue", "Revenue"), ("\"Net sales\"", "Net_sales")]
+            {
+                let input = format!(
+                    "xychart-beta\nx-axis [Jan, Feb, Mar]\n\
+                     {kind} {first_name} [1,2,3]\n{kind} {second_name} [4,5,6]"
+                );
+                let parsed = parse_mermaid(&input);
+                let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+                assert_eq!(meta.series.len(), 2);
+                assert_eq!(parsed.ir.nodes.len(), 6, "{input}");
+                assert_eq!(parsed.ir.edges.len(), 4, "{input}");
+                assert!(
+                    meta.series[0]
+                        .nodes
+                        .iter()
+                        .all(|node| !meta.series[1].nodes.contains(node))
+                );
+                assert_eq!(
+                    meta.series[0].name.as_deref(),
+                    Some(first_name.trim_matches('"'))
+                );
+                assert_eq!(meta.series[1].name.as_deref(), Some(second_name));
+                for series in &meta.series {
+                    assert_eq!(series.nodes.len(), 3);
+                    for pair in series.nodes.windows(2) {
+                        assert_eq!(
+                            parsed
+                                .ir
+                                .edges
+                                .iter()
+                                .filter(|edge| {
+                                    edge.from == IrEndpoint::Node(pair[0])
+                                        && edge.to == IrEndpoint::Node(pair[1])
+                                })
+                                .count(),
+                            1,
+                            "each line/area segment must belong to exactly one series: {input}"
+                        );
+                    }
+                    let label = parsed.ir.nodes[series.nodes[0].0].label.unwrap();
+                    assert!(
+                        parsed.ir.labels[label.0]
+                            .text
+                            .starts_with(series.name.as_deref().unwrap())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xychart_generated_series_bases_do_not_collide_with_authored_suffix_names() {
+        let input = "xychart-beta\nx-axis [Jan, Feb, Mar]\n\
+                     bar bar__3 [1,2,3]\nbar [4,5,6]\nbar [7,8,9]\nbar bar__4 [10,11,12]";
+        let parsed = parse_mermaid(input);
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(meta.series.len(), 4);
+        assert_eq!(parsed.ir.nodes.len(), 12);
+        let point_ids: std::collections::BTreeSet<_> = meta
+            .series
+            .iter()
+            .flat_map(|series| series.nodes.iter().map(|node| node.0))
+            .collect();
+        assert_eq!(
+            point_ids.len(),
+            12,
+            "series must not share point references"
+        );
+        let node_ids: std::collections::BTreeSet<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            node_ids.len(),
+            12,
+            "generated suffixes must reserve their own bases"
+        );
+        assert_eq!(parsed.ir.nodes[meta.series[0].nodes[0].0].id, "bar__3_1");
+        assert_eq!(parsed.ir.nodes[meta.series[1].nodes[0].0].id, "bar_1");
+        for (series, expected) in meta.series.iter().zip([
+            "bar__3 Jan: 1",
+            "bar Jan: 4",
+            "bar Jan: 7",
+            "bar__4 Jan: 10",
+        ]) {
+            let label = parsed.ir.nodes[series.nodes[0].0].label.unwrap();
+            assert_eq!(parsed.ir.labels[label.0].text, expected);
+        }
+        let repeated = parse_mermaid(input);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<Vec<_>>(),
+            repeated
+                .ir
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<Vec<_>>(),
+            "series identity allocation must be deterministic"
+        );
     }
 
     #[test]

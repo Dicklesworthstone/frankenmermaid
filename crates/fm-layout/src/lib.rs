@@ -8372,13 +8372,10 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     if period_indexes.is_empty() {
         period_indexes = (0..node_count).collect();
     }
-    period_indexes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
 
-    // `period_set` / `events_by_period` are read by membership/key only (never iterated for output
-    // order — the layout order comes from `period_indexes` below), so `FxHash*` replaces the
-    // `BTreeSet`/`BTreeMap`'s O(log N) inserts/lookups + per-node B-tree allocations (the `BTreeMap<usize,
-    // …>::insert` was ~9% of timeline layout) with O(1) hashing. `values_mut()` only sorts each Vec
-    // independently, so iteration order there is irrelevant. Byte-identical output.
+    // A timeline's chronology is its declaration order, not a lexical ordering of captions or
+    // generated IDs. Nodes retain period order and edges retain each period's event order.
+    // These maps are only queried by key; their iteration order never reaches the picture.
     let period_set: FxHashSet<usize> = period_indexes.iter().copied().collect();
     let mut events_by_period: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     for edge in &ir.edges {
@@ -8392,11 +8389,6 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             events_by_period.entry(source).or_default().push(target);
         }
     }
-    for targets in events_by_period.values_mut() {
-        targets.sort_by(|left, right| compare_node_indices(ir, *left, *right));
-        targets.dedup();
-    }
-
     let period_gap_x = spacing.rank_spacing + 104.0;
     let event_gap_y = spacing.node_spacing + 22.0;
     // Membership set (`.insert` returns the same newly-inserted bool, `.contains` the same result); never
@@ -8425,10 +8417,9 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let period_count = period_indexes.len().max(1);
     let mut spill = 0_usize;
-    let mut leftovers: Vec<usize> = (0..node_count)
+    let leftovers: Vec<usize> = (0..node_count)
         .filter(|node_index| !assigned.contains(node_index))
         .collect();
-    leftovers.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     for node_index in leftovers {
         let col = spill % period_count;
         let row = spill / period_count;
@@ -27251,6 +27242,152 @@ mod tests {
         assert!(launch.y > kickoff.y);
         assert!(retro.y > period_2025.y);
         assert_eq!(layout.extensions.axis_ticks.len(), 2);
+    }
+
+    #[test]
+    fn timeline_layout_preserves_every_authored_occurrence_and_its_column() {
+        let source = concat!(
+            "timeline\n",
+            "  section Release\n",
+            "    Mar : Zeta : Alpha\n",
+            "        : Zeta\n",
+            "    Jan : Mar\n",
+            "        : Review\n",
+            "  section Release\n",
+            "    Feb : Review\n",
+            "        : Done\n",
+            "    Mar\n",
+            "        : Mar\n",
+        );
+        let parsed = parse(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let layout = layout_diagram(ir);
+        assert_eq!(
+            layout.nodes.len(),
+            12,
+            "four periods and all eight events must survive"
+        );
+        assert_eq!(
+            layout.edges.len(),
+            11,
+            "every period transition and event attachment survives"
+        );
+        let placed: BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        assert_eq!(placed.len(), ir.nodes.len());
+        let periods: Vec<_> = ir
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.classes.iter().any(|class| class == "timeline-period"))
+            .map(|(index, _)| index)
+            .collect();
+        let labels: Vec<_> = periods
+            .iter()
+            .map(|&index| ir.node_display_text(&ir.nodes[index]))
+            .collect();
+        assert_eq!(labels, ["Mar", "Jan", "Feb", "Mar"]);
+        let expected_events: [&[&str]; 4] = [
+            &["Zeta", "Alpha", "Zeta"],
+            &["Mar", "Review"],
+            &["Review", "Done"],
+            &["Mar"],
+        ];
+        for (order, (&period, expected)) in periods.iter().zip(expected_events).enumerate() {
+            let center = placed[&period].bounds.center();
+            if order > 0 {
+                let previous = placed[&periods[order - 1]].bounds.center();
+                assert!(
+                    center.x > previous.x,
+                    "periods must follow the source, including the repeated Mar"
+                );
+                assert!((center.y - previous.y).abs() < 0.001);
+            }
+            let events: Vec<_> = ir
+                .edges
+                .iter()
+                .filter_map(|edge| {
+                    let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to)
+                    else {
+                        return None;
+                    };
+                    (from.0 == period && edge.arrow == ArrowType::Line).then_some(to.0)
+                })
+                .collect();
+            let actual: Vec<_> = events
+                .iter()
+                .map(|&index| ir.node_display_text(&ir.nodes[index]).trim())
+                .collect();
+            assert_eq!(actual, expected);
+            let mut previous_y = center.y;
+            for event in events {
+                let event_center = placed[&event].bounds.center();
+                assert!(
+                    (event_center.x - center.x).abs() < 0.001,
+                    "an event moved to another period"
+                );
+                assert!(
+                    event_center.y > previous_y,
+                    "events must follow their authored order"
+                );
+                previous_y = event_center.y;
+            }
+            let tick = &layout.extensions.axis_ticks[order];
+            assert_eq!(tick.label, labels[order]);
+            assert!((tick.position - center.x).abs() < 0.001);
+        }
+        assert_eq!(layout.extensions.axis_ticks.len(), 4);
+        assert_eq!(layout.clusters.len(), 2);
+        assert_eq!(
+            layout
+                .extensions
+                .bands
+                .iter()
+                .map(|band| band.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Release", "Release"]
+        );
+        assert_eq!(
+            layout,
+            layout_diagram(ir),
+            "timeline placement must be deterministic"
+        );
+    }
+
+    #[test]
+    fn timeline_layout_keeps_more_than_ten_inline_events_in_source_order() {
+        let parsed = parse("timeline\n  Q2 : Z : Y : X : W : V : U : T : S : R : Q : P : O\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let layout = layout_diagram(&parsed.ir);
+        let mut events: Vec<_> = layout
+            .nodes
+            .iter()
+            .filter(|placed| parsed.ir.nodes[placed.node_index].shape == NodeShape::Rounded)
+            .collect();
+        assert_eq!(events.len(), 12);
+        events.sort_by(|left, right| left.bounds.y.total_cmp(&right.bounds.y));
+        let labels: Vec<_> = events
+            .iter()
+            .map(|placed| {
+                parsed
+                    .ir
+                    .node_display_text(&parsed.ir.nodes[placed.node_index])
+                    .trim()
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["Z", "Y", "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O"]
+        );
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].bounds.center().y < pair[1].bounds.center().y)
+        );
     }
 
     /// A tick that merely EXISTS is not an axis. If the tick labelled with a task's start date does
