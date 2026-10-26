@@ -456,6 +456,7 @@ mod tests {
         assert!(total_changes > 0);
     }
 
+    #[test]
     fn outline_degradation_is_a_real_textless_skeleton() {
         let ir = sample_ir();
         let mut config = TermRenderConfig::rich();

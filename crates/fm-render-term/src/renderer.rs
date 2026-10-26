@@ -2948,6 +2948,66 @@ impl TermRenderer {
         // of label rectangles so the later relationship does not overwrite an earlier one (for
         // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
         let mut edge_label_rects = Vec::new();
+        // Protect the actual node and annotation boxes, not just text already stamped into them.
+        // A label in a blank node interior reads as content of that node. Composite-state boxes
+        // are containers: only their border is protected, so internal transitions can be named.
+        for node_box in &layout.nodes {
+            let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let y = y + overlay_caption_pushes
+                .get(&node_box.node_index)
+                .copied()
+                .unwrap_or(0);
+            if fm_layout::is_composite_state_node(ir, node_box) {
+                edge_label_rects.extend([
+                    (x, y, x + w, y + 1),
+                    (x, y + h, x + w + 1, y + h + 1),
+                    (x, y, x + 1, y + h + 1),
+                    (x + w, y, x + w + 1, y + h + 1),
+                ]);
+            } else if !ir
+                .nodes
+                .get(node_box.node_index)
+                .is_some_and(is_block_beta_space_node)
+            {
+                edge_label_rects.push((x, y, x + w + 1, y + h + 1));
+            }
+        }
+        for bounds in layout
+            .extensions
+            .state_notes
+            .iter()
+            .map(|note| &note.bounds)
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| &note.bounds),
+            )
+            .chain(
+                layout
+                    .extensions
+                    .sequence_mirror_headers
+                    .iter()
+                    .map(|node| &node.bounds),
+            )
+        {
+            let (x, y, w, h) = self.bounds_to_cells(bounds, scale_x, scale_y);
+            edge_label_rects.push((x, y, x + w + 1, y + h + 1));
+        }
+        // Keep all prior overlay text, including text wider than its node's scaled box. The
+        // sub-cell raster only emits block/braille glyphs; everything else is authored content
+        // or an annotation border that must survive the next label.
+        for (y, row) in lines.iter().enumerate() {
+            for (x, ch) in row.iter().enumerate() {
+                if !matches!(*ch, ' ' | '\u{2580}'..='\u{259f}' | '\u{2800}'..='\u{28ff}') {
+                    edge_label_rects.push((x, y, x + 1, y + 1));
+                }
+            }
+        }
+        if generic_terminal_diagram_title(ir).is_some() {
+            edge_label_rects.push((0, 0, cell_width, 1));
+        }
         for edge_path in &layout.edges {
             if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
@@ -3005,10 +3065,19 @@ impl TermRenderer {
                     lines.len(),
                 );
 
+                // Clear one whole backing plate, including a one-cell horizontal gutter. This
+                // keeps short continuation rows from being threaded through connector glyphs.
+                for row in lines.iter_mut().skip(start_y).take(label_lines.len()) {
+                    let left = label_x.saturating_sub(1);
+                    let right = (label_x + label_width + 1).min(cell_width).min(row.len());
+                    if left < right {
+                        row[left..right].fill(' ');
+                    }
+                }
                 for (i, line) in label_lines.iter().enumerate() {
                     // Iterate chars directly (see the node-label loops above): `chars().count()` for the
                     // centering width, `chars().enumerate()` for placement — no per-line Vec allocation.
-                    let line_x = mid_x.saturating_sub(line.chars().count() / 2);
+                    let line_x = label_x + label_width.saturating_sub(line.chars().count()) / 2;
                     let label_y = start_y + i;
 
                     if label_y < lines.len() {
@@ -3021,9 +3090,9 @@ impl TermRenderer {
                     }
                 }
                 edge_label_rects.push((
-                    label_x,
+                    label_x.saturating_sub(1),
                     start_y,
-                    label_x.saturating_add(label_width).min(cell_width),
+                    label_x.saturating_add(label_width + 1).min(cell_width),
                     start_y.saturating_add(label_lines.len()).min(lines.len()),
                 ));
             }
@@ -3108,6 +3177,12 @@ impl TermRenderer {
                             for (offset, ch) in text.chars().enumerate() {
                                 lines[cy][cx + offset] = ch;
                             }
+                            edge_label_rects.push((
+                                cx.saturating_sub(1),
+                                cy,
+                                (cx + width + 1).min(cell_width),
+                                cy + 1,
+                            ));
                             // Placed; a second copy at another offset would be worse than none.
                             break;
                         }
@@ -4289,10 +4364,9 @@ fn append_term_debug_overlay(output: &mut String, layout: &DiagramLayout) -> (us
     (1, width)
 }
 
-/// Place an edge label near its path midpoint without overwriting another edge label.
-///
-/// The candidate order is stable: midpoint first, then alternating rows above and below it. When
-/// no free row exists, preserve the historical midpoint placement rather than dropping the label.
+/// Place the complete label and a horizontal gutter near its route, within the cell frame.
+/// The distance ordering is deterministic, preferring a vertical slide when distances tie.
+/// Search both axes: fixing the column can make a clear half of the viewport unreachable.
 fn place_edge_label(
     occupied: &[(usize, usize, usize, usize)],
     midpoint_x: usize,
@@ -4302,32 +4376,36 @@ fn place_edge_label(
     cell_width: usize,
     cell_height: usize,
 ) -> (usize, usize) {
-    let label_x = midpoint_x.saturating_sub(label_width / 2);
-    let label_right = label_x.saturating_add(label_width).min(cell_width);
-
-    for offset in 0..cell_height {
-        let candidate_y = match offset {
-            0 => preferred_y,
-            offset if offset % 2 == 1 => match preferred_y.checked_sub(offset.div_ceil(2)) {
-                Some(y) => y,
-                None => continue,
-            },
-            offset => preferred_y.saturating_add(offset / 2),
-        };
-        let candidate_bottom = candidate_y.saturating_add(label_height);
-        if candidate_bottom > cell_height {
-            continue;
-        }
-
-        let overlaps = occupied.iter().any(|&(left, top, right, bottom)| {
-            label_x < right && left < label_right && candidate_y < bottom && top < candidate_bottom
-        });
-        if !overlaps {
-            return (label_x, candidate_y);
+    let max_x = cell_width.saturating_sub(label_width);
+    let max_y = cell_height.saturating_sub(label_height);
+    let preferred_x = midpoint_x.saturating_sub(label_width / 2).min(max_x);
+    let preferred_y = preferred_y.min(max_y);
+    let mut closest = (preferred_x, preferred_y);
+    let mut best = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+    for y in 0..=max_y {
+        for x in 0..=max_x {
+            let left = x.saturating_sub(1);
+            let right = x.saturating_add(label_width + 1).min(cell_width);
+            let bottom = y.saturating_add(label_height).min(cell_height);
+            // In an exhausted viewport minimize the damaged area, while a free placement always
+            // beats every overlapping candidate. Do not silently drop the transition text.
+            let overlap = occupied
+                .iter()
+                .map(|&(ox, oy, oright, obottom)| {
+                    right.min(oright).saturating_sub(left.max(ox))
+                        * bottom.min(obottom).saturating_sub(y.max(oy))
+                })
+                .sum::<usize>();
+            let dx = x.abs_diff(preferred_x);
+            let dy = y.abs_diff(preferred_y);
+            let score = (overlap, dx + dy, dx, y);
+            if score < best {
+                best = score;
+                closest = (x, y);
+            }
         }
     }
-
-    (label_x, preferred_y)
+    closest
 }
 
 fn terminal_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
@@ -5267,6 +5345,160 @@ mod tests {
         assert_eq!(renderer.truncate_label("界面 42"), "界面 42");
     }
 
+    #[test]
+    fn edge_labels_search_the_whole_frame_and_leave_a_text_gutter() {
+        assert_eq!(
+            place_edge_label(&[(0, 0, 10, 8)], 5, 0, 4, 1, 10, 12),
+            (3, 8),
+            "free rows beyond half of the viewport must be considered"
+        );
+        assert_eq!(
+            place_edge_label(&[(3, 0, 7, 12)], 5, 4, 4, 1, 14, 12),
+            (8, 4),
+            "a full-height obstruction requires a horizontal slide"
+        );
+        assert_eq!(
+            place_edge_label(&[], 79, 23, 22, 2, 80, 24),
+            (58, 22),
+            "the whole measured plate must remain inside the frame"
+        );
+        let (x, y) = place_edge_label(&[(0, 0, 4, 1)], 4, 0, 4, 1, 12, 1);
+        assert_eq!((x, y), (5, 0));
+        assert!(x > 4, "adjacent labels need a separating blank cell");
+    }
+
+    #[test]
+    fn cyclic_state_labels_remain_separate_and_complete_in_terminal_cells() {
+        // GitHub #16/#17: duplicate transition text and shared return corridors used to fuse
+        // labels, and a long transition's second row was painted through other routes.
+        let ir = fm_parser::parse(concat!(
+            "stateDiagram-v2\n",
+            "[*] --> Idle\n",
+            "Idle --> Starting: Space down / tap\n",
+            "Starting --> Idle: closed\n",
+            "Starting --> Recording: opened\n",
+            "Starting --> Releasing: Space up, focus lost\n",
+            "Recording --> Idle: closed\n",
+            "Recording --> Stopping: Space up, focus lost / tap\n",
+            "Releasing --> Idle: closed\n",
+            "Releasing --> Stopping: opened / tap\n",
+            "Stopping --> Settling: closed\n",
+            "Settling --> Idle: quiet 1 s\n",
+            "Settling --> Stopping: opened / tap\n",
+        ))
+        .ir;
+        assert_eq!(ir.edges.len(), 12);
+        let cases = [
+            (TermRenderConfig::default(), 80, 24),
+            (
+                TermRenderConfig {
+                    render_mode: MermaidRenderMode::HalfBlock,
+                    ..TermRenderConfig::rich()
+                },
+                110,
+                40,
+            ),
+            (
+                TermRenderConfig {
+                    glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+                    ..TermRenderConfig::rich()
+                },
+                110,
+                40,
+            ),
+        ];
+        for (config, cols, rows) in cases {
+            let result = render_diagram_with_config(&ir, &config, cols, rows);
+            assert!(result.width <= cols && result.height <= rows);
+            assert_eq!(
+                result.output,
+                render_diagram_with_config(&ir, &config, cols, rows).output,
+                "placement must be deterministic"
+            );
+            for name in [
+                "Idle",
+                "Starting",
+                "Recording",
+                "Releasing",
+                "Stopping",
+                "Settling",
+            ] {
+                assert!(
+                    result.output.contains(name),
+                    "lost state {name}:\n{}",
+                    result.output
+                );
+            }
+            assert_eq!(
+                result.output.matches("closed").count(),
+                4,
+                "{}",
+                result.output
+            );
+            assert_eq!(
+                result.output.matches("opened / tap").count(),
+                2,
+                "{}",
+                result.output
+            );
+            for text in ["Space down / tap", "Space up, focus lost", "quiet 1 s"] {
+                assert!(
+                    result.output.contains(text),
+                    "lost transition {text}:\n{}",
+                    result.output
+                );
+            }
+            let grid: Vec<Vec<char>> = result
+                .output
+                .lines()
+                .map(|row| row.chars().collect())
+                .collect();
+            for text in ["closed", "opened / tap", "Space down / tap", "quiet 1 s"] {
+                let chars: Vec<char> = text.chars().collect();
+                for row in &grid {
+                    for (x, segment) in row.windows(chars.len()).enumerate() {
+                        if segment == chars.as_slice() {
+                            assert!(
+                                x == 0 || row[x - 1] == ' ',
+                                "no left gutter for {text}:\n{}",
+                                result.output
+                            );
+                            assert!(
+                                x + chars.len() == row.len() || row[x + chars.len()] == ' ',
+                                "no right gutter for {text}:\n{}",
+                                result.output
+                            );
+                        }
+                    }
+                }
+            }
+            if config.tier == MermaidTier::Auto {
+                let first: Vec<char> = "Space up, focus lost /".chars().collect();
+                let (y, x) = grid
+                    .iter()
+                    .enumerate()
+                    .find_map(|(y, row)| {
+                        row.windows(first.len())
+                            .position(|part| part == first.as_slice())
+                            .map(|x| (y, x))
+                    })
+                    .expect("normal fidelity keeps the complete first row");
+                let continuation = &grid[y + 1][x..x + first.len()];
+                assert_eq!(
+                    continuation.iter().collect::<String>().trim(),
+                    "tap",
+                    "the continuation's plate must contain no connector glyphs"
+                );
+            } else {
+                assert!(
+                    result.output.contains("Space up, focus lost / tap"),
+                    "rich fidelity lost the complete transition:\n{}",
+                    result.output
+                );
+            }
+        }
+    }
+
     #[inline]
     fn owned_compact_label_width_reference(line: &str) -> usize {
         let chars: Vec<char> = line.chars().collect();
@@ -6190,14 +6422,29 @@ mod tests {
             outline_res.output
         );
 
-        let resolved = ResolvedConfig::resolve(
-            &TermRenderConfig::outline().with_selection(&selection),
-            80,
-            24,
-        );
-        let skeleton =
-            TermRenderer::new(resolved).render_outline_mode(&ir, &layout, 80, 24, 1.0, 1.0);
+        // The low-level marker renderer takes fitted cell scales, not layout-pixel scales.
+        // Its IDs obey the same label visibility setting as the public renderer.
+        let render_skeleton = |config: &TermRenderConfig| {
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(config, 80, 24));
+            let (cols, rows, scale_x, scale_y) =
+                renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+            renderer.render_outline_mode(&ir, &layout, cols, rows, scale_x, scale_y)
+        };
+        let skeleton = render_skeleton(&TermRenderConfig::compact().with_selection(&selection));
         assert!(skeleton.output.contains("▶[Alpha]"), "{}", skeleton.output);
         assert!(skeleton.output.contains("[Beta]"), "{}", skeleton.output);
+
+        let textless = render_skeleton(&outline_cfg);
+        assert!(textless.output.contains("▶[]"), "{}", textless.output);
+        assert_eq!(
+            textless.output.matches("[]").count(),
+            2,
+            "{}",
+            textless.output
+        );
+        assert!(!textless.output.contains("Alpha"));
+        assert!(!textless.output.contains("Beta"));
+        assert!(textless.width <= outline_cfg.max_width);
+        assert!(textless.height <= outline_cfg.max_height);
     }
 }
