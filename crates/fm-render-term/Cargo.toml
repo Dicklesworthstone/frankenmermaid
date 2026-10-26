@@ -14,6 +14,7 @@ homepage.workspace = true
 fm-core.workspace = true
 fm-layout.workspace = true
 serde.workspace = true
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 fm-parser.workspace = true

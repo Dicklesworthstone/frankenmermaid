@@ -5,6 +5,7 @@ use fm_core::{
     NodeShape,
 };
 use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
+use unicode_width::UnicodeWidthStr;
 
 use crate::canvas::Canvas;
 use crate::config::{ResolvedConfig, TermRenderConfig};
@@ -37,6 +38,10 @@ pub struct TermRenderResult {
     /// cannot see, so a caller can warn instead of presenting a clean, plausible, incomplete
     /// diagram. Zero whenever the diagram fits.
     pub occluded_node_count: usize,
+    /// Requested graph-edge captions that could not fit without hiding protected content.
+    /// A paired route callout counts as one visible caption. Intentionally hidden labels do not
+    /// contribute to this count.
+    pub occluded_edge_label_count: usize,
     /// Layout-quality metrics shown by the optional debug overlay.
     ///
     /// `None` is the default so existing callers and byte snapshots do not pay for diagnostics.
@@ -538,6 +543,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            occluded_edge_label_count: 0,
             debug_metrics,
         }
     }
@@ -805,7 +811,14 @@ impl TermRenderer {
         if self.config.show_labels {
             self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
         }
-        let mut output = buffer.to_output_string();
+        let mut grid: Vec<Vec<char>> = buffer
+            .cells
+            .chunks(cell_width)
+            .map(<[char]>::to_vec)
+            .collect();
+        let (edge_labels, occluded_edge_label_count) =
+            self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[]);
+        let mut output = serialize_cell_labels(&grid, &edge_labels, true);
         let debug_metrics = self
             .config
             .debug_overlay
@@ -836,6 +849,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            occluded_edge_label_count,
             debug_metrics,
         }
     }
@@ -1217,7 +1231,7 @@ impl TermRenderer {
         // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
         // and overlay labels.
         let base_grid = canvas.render_char_grid();
-        let mut output = self.overlay_labels(
+        let (mut output, occluded_edge_label_count) = self.overlay_labels(
             base_grid,
             ir,
             layout,
@@ -1256,6 +1270,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            occluded_edge_label_count,
             debug_metrics,
         }
     }
@@ -2210,7 +2225,7 @@ impl TermRenderer {
         cell_height: usize,
         scale_x: f32,
         scale_y: f32,
-    ) -> String {
+    ) -> (String, usize) {
         // `lines` arrives as the canvas's char grid (`Canvas::render_char_grid`) — one row per cell
         // row — instead of a rendered `String` this fn used to re-parse with `lines().chars().collect()`.
         // Skips a full encode+decode of the whole raster.
@@ -2964,7 +2979,15 @@ impl TermRenderer {
                 .and_then(|map| map.get(&node_box.node_index));
 
             let label_lines: Vec<&str> = label.lines().collect();
-            let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
+            let start_y = if fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type) {
+                // A 2.8-cell-high box has an interior row. Flooring its height before centering
+                // puts the text on its top border instead of that actual geometric center.
+                self.point_to_cells(&node_box.bounds.center(), scale_x, scale_y)
+                    .1
+                    .saturating_sub(label_lines.len() / 2)
+            } else {
+                y + (h.saturating_sub(label_lines.len())) / 2
+            };
 
             for (i, line) in label_lines.iter().enumerate() {
                 // Iterate the label line's chars directly for both the centering width and the placement —
@@ -3108,7 +3131,8 @@ impl TermRenderer {
             if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
             }
-            if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
+            if !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+                && let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
             {
                 let base_label = self.truncate_label(&label.text);
@@ -3428,22 +3452,367 @@ impl TermRenderer {
             }
         }
 
-        // Single-pass serialization: push every cell char into one pre-sized `String`, with a `'\n'`
-        // between rows. The previous `map(collect::<String>).collect::<Vec>().join("\n")` built one
-        // `String` per row (cell_height allocations) and then RE-COPIED every byte in `join`. Byte-
-        // identical: same chars in row-major order, `'\n'` between rows, no trailing newline. Reserve for
-        // the worst case (every cell a 3-byte U+2800.. braille/box glyph) so no push ever reallocates.
-        let total_chars: usize = lines.iter().map(Vec::len).sum();
-        let mut out = String::with_capacity(total_chars * 3 + lines.len());
-        for (row_index, row) in lines.into_iter().enumerate() {
-            if row_index > 0 {
-                out.push('\n');
+        let (labels, occluded) = self.overlay_graph_edge_labels(
+            &mut lines,
+            ir,
+            layout,
+            scale_x,
+            scale_y,
+            &edge_label_rects,
+        );
+        (serialize_cell_labels(&lines, &labels, false), occluded)
+    }
+
+    /// Use shared geometric placement with terminal-sized measurements, then validate the
+    /// quantized painted cells. A pixel-space clearance smaller than one column is insufficient
+    /// here: it can merge captions or erase a neighbouring connector after rasterization.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_graph_edge_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+        protected: &[(usize, usize, usize, usize)],
+    ) -> (Vec<CellLabel>, usize) {
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        if !self.config.show_labels
+            || !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+        {
+            return (Vec::new(), 0);
+        }
+        if width < 3 || height == 0 {
+            let occluded = layout
+                .edges
+                .iter()
+                .filter(|path| {
+                    !path.bundled
+                        && path.points.len() >= 2
+                        && !is_invisible_edge(ir, path)
+                        && ir
+                            .edges
+                            .get(path.edge_index)
+                            .and_then(|edge| edge.label)
+                            .and_then(|id| ir.labels.get(id.0))
+                            .is_some_and(|label| {
+                                label
+                                    .text
+                                    .chars()
+                                    .any(|ch| !ch.is_control() && !ch.is_whitespace())
+                            })
+                })
+                .count();
+            return (Vec::new(), occluded);
+        }
+        let mut labels = Vec::new();
+        let mut occluded = 0;
+        let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, 0.0);
+        let mut node_cells = vec![false; width * height];
+        let mut protect = |left: usize, top: usize, right: usize, bottom: usize| {
+            for row in top.min(height)..bottom.min(height) {
+                node_cells[row * width + left.min(width)..row * width + right.min(width)]
+                    .fill(true);
             }
-            for ch in row {
-                out.push(ch);
+        };
+        for node in &layout.nodes {
+            if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
+            let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+            protect(x, y, x.saturating_add(w + 1), y.saturating_add(h + 1));
+        }
+        for note in &layout.extensions.state_notes {
+            let (x, y, w, h) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+            protect(x, y, x.saturating_add(w + 1), y.saturating_add(h + 1));
+        }
+        for &(left, top, right, bottom) in protected {
+            protect(left, top, right, bottom);
+        }
+
+        for path in &layout.edges {
+            if path.bundled || path.points.len() < 2 || is_invisible_edge(ir, path) {
+                continue;
+            }
+            let Some(label) = ir
+                .edges
+                .get(path.edge_index)
+                .and_then(|edge| edge.label)
+                .and_then(|id| ir.labels.get(id.0))
+            else {
+                continue;
+            };
+            // Preserve the configured total text budget, while fitting line lengths to the
+            // available columns. The default 24-character soft wrap must not cut a 25-column
+            // caption (or identifier) that fits intact in this terminal.
+            let text = edge_caption_text(
+                &label.text,
+                self.config
+                    .max_label_chars
+                    .max(1)
+                    .saturating_mul(self.config.max_label_lines.max(1)),
+            );
+            if text.trim().is_empty() {
+                continue;
+            }
+            let route: Vec<_> = path
+                .points
+                .iter()
+                .map(|point| {
+                    (
+                        point.x * scale_x + self.config.padding as f32,
+                        point.y * scale_y + self.config.padding as f32,
+                    )
+                })
+                .collect();
+            let own_route = self
+                .edge_label_route_grid(ir, layout, path, false, width, height, scale_x, scale_y);
+            let foreign_routes =
+                self.edge_label_route_grid(ir, layout, path, true, width, height, scale_x, scale_y);
+            let mut blocked_nodes = node_cells.clone();
+            for node in layout
+                .nodes
+                .iter()
+                .filter(|node| fm_layout::is_composite_state_node(ir, node))
+            {
+                let contains_endpoint = ir.clusters.iter().any(|cluster| {
+                    cluster
+                        .title
+                        .and_then(|id| ir.labels.get(id.0))
+                        .is_some_and(|title| title.text == node.node_id)
+                        && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                            [edge.from, edge.to].iter().any(|endpoint| {
+                                ir.resolve_endpoint_node(*endpoint)
+                                    .is_some_and(|id| cluster.members.contains(&id))
+                            })
+                        })
+                });
+                if !contains_endpoint {
+                    let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+                    for row in y..y.saturating_add(h + 1).min(height) {
+                        for col in x..x.saturating_add(w + 1).min(width) {
+                            blocked_nodes[row * width + col] = true;
+                        }
+                    }
+                }
+            }
+            let occupied: Vec<bool> = grid
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    let own_route = &own_route;
+                    let foreign_routes = &foreign_routes;
+                    let blocked_nodes = &blocked_nodes;
+                    cells.iter().enumerate().map(move |(col, &cell)| {
+                        blocked_nodes[row * width + col]
+                            || !blank_terminal_cell(foreign_routes[row][col])
+                            || (!blank_terminal_cell(cell) && cell != own_route[row][col])
+                    })
+                })
+                .collect();
+
+            let mut caption = CellLabel::new(
+                path.edge_index,
+                false,
+                wrap_cell_label(&text, width - 2, self.config.max_label_lines.max(1)),
+            );
+            let preferred = placer.place(
+                path,
+                (caption.width + 2) as f32 / scale_x,
+                caption.lines.len() as f32 / scale_y,
+            );
+            let preferred = (
+                preferred.x * scale_x + self.config.padding as f32,
+                preferred.y * scale_y + self.config.padding as f32,
+            );
+            if let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                preferred,
+                &route,
+                caption.width,
+                caption.lines.len(),
+                width,
+                height,
+                Some(2.0),
+            ) {
+                caption.x = x;
+                caption.y = y;
+                placer.update_last_placement(Some(caption.layout_bounds(
+                    scale_x,
+                    scale_y,
+                    self.config.padding,
+                )));
+                clear_cell_label(grid, &caption);
+                labels.push(caption);
+                continue;
+            }
+
+            // A finite grid can have enough area for the words but no sufficiently wide slot
+            // beside their route. Pair that caption with a stable, compact route badge. Both
+            // use the same fit checks, and neither is painted unless the complete pair fits.
+            let badge_text = format!("[{}]", path.edge_index + 1);
+            caption = CellLabel::new(
+                path.edge_index,
+                false,
+                wrap_cell_label(
+                    &format!("{badge_text} {text}"),
+                    width - 2,
+                    self.config.max_label_lines.max(1),
+                ),
+            );
+            placer.update_last_placement(None);
+            let preferred = placer.place(
+                path,
+                (caption.width + 2) as f32 / scale_x,
+                caption.lines.len() as f32 / scale_y,
+            );
+            let preferred = (
+                preferred.x * scale_x + self.config.padding as f32,
+                preferred.y * scale_y + self.config.padding as f32,
+            );
+            let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                preferred,
+                &route,
+                caption.width,
+                caption.lines.len(),
+                width,
+                height,
+                None,
+            ) else {
+                placer.update_last_placement(None);
+                occluded += 1;
+                continue;
+            };
+            caption.x = x;
+            caption.y = y;
+            labels.push(caption);
+            let mut badge = CellLabel::new(path.edge_index, true, vec![badge_text]);
+            let anchor = fm_layout::edge_label_position(path);
+            let anchor = (
+                anchor.x * scale_x + self.config.padding as f32,
+                anchor.y * scale_y + self.config.padding as f32,
+            );
+            let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                anchor,
+                &route,
+                badge.width,
+                1,
+                width,
+                height,
+                Some(2.0),
+            ) else {
+                labels.pop();
+                placer.update_last_placement(None);
+                occluded += 1;
+                continue;
+            };
+            badge.x = x;
+            badge.y = y;
+            let caption = labels.last().expect("paired caption was reserved");
+            debug_assert!(
+                caption.edge_index == badge.edge_index && !caption.is_callout && badge.is_callout
+            );
+            placer.update_last_placement(Some(caption.layout_bounds(
+                scale_x,
+                scale_y,
+                self.config.padding,
+            )));
+            clear_cell_label(grid, caption);
+            placer.place(path, (badge.width + 2) as f32 / scale_x, 1.0 / scale_y);
+            placer.update_last_placement(Some(badge.layout_bounds(
+                scale_x,
+                scale_y,
+                self.config.padding,
+            )));
+            clear_cell_label(grid, &badge);
+            labels.push(badge);
+        }
+        (labels, occluded)
+    }
+
+    /// Rasterize the connectors using the same cell/subcell geometry as the drawing pass.
+    /// Collinear shared portions are usable by either edge; distinct crossings stay protected.
+    #[allow(clippy::too_many_arguments)]
+    fn edge_label_route_grid(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        own: &LayoutEdgePath,
+        foreign: bool,
+        width: usize,
+        height: usize,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Vec<Vec<char>> {
+        let cell_mode = self.config.tier == MermaidTier::Compact
+            || self.config.render_mode == MermaidRenderMode::CellOnly;
+        let (mult_x, mult_y) = self.config.subcell_multiplier();
+        let mut canvas = Canvas::new(width, height, self.config.render_mode);
+        let mut cells = CellBuffer::new(width, height);
+        for path in &layout.edges {
+            if is_invisible_edge(ir, path) || (path.edge_index == own.edge_index) == foreign {
+                continue;
+            }
+            let mut segments = Vec::new();
+            for pair in path.points.windows(2) {
+                if foreign {
+                    fm_layout::edge_labels::append_foreign_route_obstacles(
+                        own,
+                        pair[0],
+                        pair[1],
+                        &mut segments,
+                    );
+                } else {
+                    segments.push(fm_layout::edge_labels::EdgeLabelObstacle::Segment(
+                        pair[0], pair[1],
+                    ));
+                }
+            }
+            for obstacle in segments {
+                let fm_layout::edge_labels::EdgeLabelObstacle::Segment(from, to) = obstacle else {
+                    continue;
+                };
+                if cell_mode {
+                    let (x0, y0) = self.point_to_cells(&from, scale_x, scale_y);
+                    let (x1, y1) = self.point_to_cells(&to, scale_x, scale_y);
+                    let arrow = ir
+                        .edges
+                        .get(path.edge_index)
+                        .map_or(ArrowType::Arrow, |edge| edge.arrow);
+                    self.draw_line_cell(
+                        &mut cells,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        &self.edge_glyphs,
+                        path.reversed,
+                        arrow,
+                    );
+                } else {
+                    let x0 = (from.x * scale_x * mult_x as f32) as isize
+                        + (self.config.padding * mult_x) as isize;
+                    let y0 = (from.y * scale_y * mult_y as f32) as isize
+                        + (self.config.padding * mult_y) as isize;
+                    let x1 = (to.x * scale_x * mult_x as f32) as isize
+                        + (self.config.padding * mult_x) as isize;
+                    let y1 = (to.y * scale_y * mult_y as f32) as isize
+                        + (self.config.padding * mult_y) as isize;
+                    canvas.draw_line(x0, y0, x1, y1);
+                }
             }
         }
-        out
+        if cell_mode {
+            cells.cells.chunks(width).map(<[char]>::to_vec).collect()
+        } else {
+            canvas.render_char_grid()
+        }
     }
 
     fn render_generic_diagram_title(
@@ -4461,6 +4830,247 @@ fn append_term_debug_overlay(output: &mut String, layout: &DiagramLayout) -> (us
     (1, width)
 }
 
+#[derive(Debug)]
+struct CellLabel {
+    edge_index: usize,
+    is_callout: bool,
+    x: usize,
+    y: usize,
+    width: usize,
+    lines: Vec<String>,
+}
+
+impl CellLabel {
+    fn new(edge_index: usize, is_callout: bool, lines: Vec<String>) -> Self {
+        let width = lines.iter().map(|line| line.width()).max().unwrap_or(0);
+        Self {
+            edge_index,
+            is_callout,
+            x: 0,
+            y: 0,
+            width,
+            lines,
+        }
+    }
+
+    fn layout_bounds(&self, scale_x: f32, scale_y: f32, padding: usize) -> fm_layout::LayoutRect {
+        fm_layout::LayoutRect {
+            x: (self.x as f32 - 1.0 - padding as f32) / scale_x,
+            y: (self.y as f32 - padding as f32) / scale_y,
+            width: (self.width + 2) as f32 / scale_x,
+            height: self.lines.len() as f32 / scale_y,
+        }
+    }
+}
+
+fn blank_terminal_cell(cell: char) -> bool {
+    cell == ' ' || cell == '\u{2800}'
+}
+
+fn clear_cell_label(grid: &mut [Vec<char>], label: &CellLabel) {
+    for row in &mut grid[label.y..label.y + label.lines.len()] {
+        row[label.x - 1..label.x + label.width + 1].fill(' ');
+    }
+}
+
+/// Fit the measured shared proposal to actual character cells. The prefix sum checks the full
+/// painted backing rectangle, including separating blanks, without ever damaging occupied cells.
+#[allow(clippy::too_many_arguments)]
+fn fit_edge_label_cells(
+    occupied: &[bool],
+    labels: &[CellLabel],
+    preferred: (f32, f32),
+    route: &[(f32, f32)],
+    label_width: usize,
+    label_height: usize,
+    cell_width: usize,
+    cell_height: usize,
+    max_route_gap: Option<f32>,
+) -> Option<(usize, usize)> {
+    if label_width + 2 > cell_width || label_height > cell_height || label_height == 0 {
+        return None;
+    }
+    let mut occupied = occupied.to_vec();
+    for label in labels {
+        for row in label.y..label.y + label.lines.len() {
+            for col in label.x..label.x + label.width {
+                occupied[row * cell_width + col] = true;
+            }
+        }
+    }
+    let stride = cell_width + 1;
+    let mut prefix = vec![0_usize; stride * (cell_height + 1)];
+    for row in 0..cell_height {
+        let mut count = 0;
+        for col in 0..cell_width {
+            count += usize::from(occupied[row * cell_width + col]);
+            prefix[(row + 1) * stride + col + 1] = prefix[row * stride + col + 1] + count;
+        }
+    }
+    let mut best = None;
+    let mut best_score = f32::INFINITY;
+    for row in 0..=cell_height - label_height {
+        for col in 1..=cell_width - label_width - 1 {
+            let (left, right, bottom) = (col - 1, col + label_width + 1, row + label_height);
+            let count = prefix[bottom * stride + right] + prefix[row * stride + left]
+                - prefix[row * stride + right]
+                - prefix[bottom * stride + left];
+            if count != 0 {
+                continue;
+            }
+            let gap = cell_label_route_gap(route, col, row, label_width, label_height);
+            if max_route_gap.is_some_and(|limit| gap > limit) {
+                continue;
+            }
+            let center = (
+                col as f32 + label_width as f32 / 2.0,
+                row as f32 + label_height as f32 / 2.0,
+            );
+            let score =
+                (center.0 - preferred.0).abs() + (center.1 - preferred.1).abs() * 2.0 + gap * 4.0;
+            if score < best_score {
+                best = Some((col, row));
+                best_score = score;
+            }
+        }
+    }
+    best
+}
+
+/// Distance from the actual caption rectangle to its own polyline, with terminal rows weighted
+/// twice as high as columns. Measuring from the text's center wrongly detaches long side labels.
+fn cell_label_route_gap(
+    route: &[(f32, f32)],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> f32 {
+    let (left, right) = (x as f32, (x + width) as f32);
+    let (top, bottom) = (y as f32 * 2.0, (y + height) as f32 * 2.0);
+    let mut best = f32::INFINITY;
+    for pair in route.windows(2) {
+        let a = (pair[0].0, pair[0].1 * 2.0);
+        let b = (pair[1].0, pair[1].1 * 2.0);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let (mut enter, mut leave) = (0.0_f32, 1.0_f32);
+        let mut intersects = true;
+        for (origin, delta, lo, hi) in [(a.0, dx, left, right), (a.1, dy, top, bottom)] {
+            if delta.abs() <= f32::EPSILON {
+                intersects &= origin >= lo && origin <= hi;
+            } else {
+                let (p, q) = ((lo - origin) / delta, (hi - origin) / delta);
+                enter = enter.max(p.min(q));
+                leave = leave.min(p.max(q));
+            }
+        }
+        if intersects && enter <= leave {
+            return 0.0;
+        }
+        for point in [a, b] {
+            let gx = (left - point.0).max(0.0).max(point.0 - right);
+            let gy = (top - point.1).max(0.0).max(point.1 - bottom);
+            best = best.min(gx * gx + gy * gy);
+        }
+        let length = dx * dx + dy * dy;
+        for corner in [(left, top), (left, bottom), (right, top), (right, bottom)] {
+            let t = if length > f32::EPSILON {
+                (((corner.0 - a.0) * dx + (corner.1 - a.1) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let gx = corner.0 - (a.0 + dx * t);
+            let gy = corner.1 - (a.1 + dy * t);
+            best = best.min(gx * gx + gy * gy);
+        }
+    }
+    best.sqrt()
+}
+
+fn edge_caption_text(text: &str, budget: usize) -> String {
+    let mut chars = text.chars().map(|ch| match ch {
+        '\n' => '\n',
+        other if other.is_control() => ' ',
+        other => other,
+    });
+    let mut result: String = chars.by_ref().take(budget).collect();
+    if chars.next().is_some() {
+        result.pop();
+        result.push('…');
+    }
+    result
+}
+
+fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        let mut line = String::new();
+        for word in source_line.split_whitespace() {
+            let needed = line.width() + usize::from(!line.is_empty()) + word.width();
+            if !line.is_empty() && needed > width {
+                lines.push(line);
+                line = String::new();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            if word.width() <= width {
+                line.push_str(word);
+            } else {
+                for ch in word.chars() {
+                    line.push(ch);
+                    if line.width() >= width {
+                        line.pop();
+                        break;
+                    }
+                }
+                line.push('…');
+            }
+        }
+        lines.push(line);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            while last.width() >= width {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines
+}
+
+/// Emit complete caption strings while skipping their measured columns. A Unicode scalar is
+/// not a terminal cell: CJK glyphs occupy two columns and combining marks occupy none.
+fn serialize_cell_labels(grid: &[Vec<char>], labels: &[CellLabel], trim: bool) -> String {
+    let mut output = String::new();
+    for (row_index, row) in grid.iter().enumerate() {
+        if row_index > 0 {
+            output.push('\n');
+        }
+        let mut runs: Vec<_> = labels
+            .iter()
+            .filter_map(|label| {
+                let offset = row_index.checked_sub(label.y)?;
+                let text = label.lines.get(offset)?;
+                Some((label.x + (label.width - text.width()) / 2, text))
+            })
+            .collect();
+        runs.sort_by_key(|(col, _)| *col);
+        let mut line = String::new();
+        let mut cursor = 0;
+        for (col, text) in runs {
+            line.extend(row[cursor..col].iter());
+            line.push_str(text);
+            cursor = col + text.width();
+        }
+        line.extend(row[cursor..].iter());
+        output.push_str(if trim { line.trim_end() } else { &line });
+    }
+    output
+}
+
 /// Place the complete label and a horizontal gutter near its route, within the cell frame.
 /// The distance ordering is deterministic, preferring a vertical slide when distances tie.
 /// Search both axes: fixing the column can make a clear half of the viewport unreachable.
@@ -5022,6 +5632,7 @@ impl TermRenderer {
                 width,
                 height,
             ),
+            occluded_edge_label_count: 0,
             debug_metrics,
         }
     }
@@ -6065,31 +6676,229 @@ mod tests {
                     }
                 }
             }
-            if config.tier == MermaidTier::Auto {
-                let first: Vec<char> = "Space up, focus lost /".chars().collect();
-                let (y, x) = grid
-                    .iter()
-                    .enumerate()
-                    .find_map(|(y, row)| {
-                        row.windows(first.len())
-                            .position(|part| part == first.as_slice())
-                            .map(|x| (y, x))
-                    })
-                    .expect("normal fidelity keeps the complete first row");
-                let continuation = &grid[y + 1][x..x + first.len()];
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+            assert_eq!(
+                result.output.matches("Space up, focus lost / tap").count(),
+                1,
+                "a complete 25-column caption fits on one row at these widths:\n{}",
+                result.output,
+            );
+            assert!(result.output.lines().all(|line| line.width() <= cols));
+        }
+    }
+
+    #[test]
+    fn terminal_label_blocks_are_bounded_and_separated_after_quantization() {
+        let ir = cyclic_state_ir();
+        let layout = layout_diagram(&ir);
+        for cols in [40, 60, 80, 110] {
+            for mode in [
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::HalfBlock,
+                MermaidRenderMode::CellOnly,
+            ] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    ..Default::default()
+                };
+                let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, cols, 24));
+                let (width, height, sx, sy) =
+                    renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+                let mut grid = vec![vec![' '; width]; height];
+                let (labels, occluded) =
+                    renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, sx, sy, &[]);
                 assert_eq!(
-                    continuation.iter().collect::<String>().trim(),
-                    "tap",
-                    "the continuation's plate must contain no connector glyphs"
+                    labels.iter().filter(|label| !label.is_callout).count() + occluded,
+                    11
                 );
-            } else {
+                for (index, label) in labels.iter().enumerate() {
+                    assert!(label.x + label.width < width && label.y + label.lines.len() <= height);
+                    for other in &labels[..index] {
+                        let horizontal =
+                            label.x <= other.x + other.width && other.x <= label.x + label.width;
+                        let vertical = label.y < other.y + other.lines.len()
+                            && other.y < label.y + label.lines.len();
+                        assert!(
+                            !(horizontal && vertical),
+                            "labels merge at {cols} columns in {mode:?}"
+                        );
+                    }
+                    if label.is_callout {
+                        let caption = labels
+                            .iter()
+                            .find(|caption| {
+                                !caption.is_callout && caption.edge_index == label.edge_index
+                            })
+                            .expect("every badge has a visible caption");
+                        assert!(caption.lines[0].starts_with(&label.lines[0]));
+                        let path = layout
+                            .edges
+                            .iter()
+                            .find(|path| path.edge_index == label.edge_index)
+                            .unwrap();
+                        let route = renderer.edge_label_route_grid(
+                            &ir, &layout, path, false, width, height, sx, sy,
+                        );
+                        let adjacent = route
+                            .iter()
+                            .take((label.y + 2).min(height))
+                            .skip(label.y.saturating_sub(1))
+                            .any(|row| {
+                                row.iter()
+                                    .take((label.x + label.width + 2).min(width))
+                                    .skip(label.x.saturating_sub(2))
+                                    .any(|&cell| !blank_terminal_cell(cell))
+                            });
+                        assert!(
+                            adjacent,
+                            "badge must touch or sit beside its own rasterized route"
+                        );
+                    }
+                }
+                let result = renderer.render_layout(&ir, &layout);
                 assert!(
-                    result.output.contains("Space up, focus lost / tap"),
-                    "rich fidelity lost the complete transition:\n{}",
+                    result.output.lines().all(|line| line.width() <= cols),
+                    "{}",
                     result.output
                 );
+                assert_eq!(result.output, renderer.render_layout(&ir, &layout).output);
             }
         }
+    }
+
+    #[test]
+    fn detached_caption_has_a_matching_local_callout_and_never_an_orphan() {
+        let text = "the complete transition caption remains readable";
+        let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B")).ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes[0].bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 3.0,
+            width: 20.0,
+            height: 4.0,
+        };
+        layout.nodes[1].bounds = fm_layout::LayoutRect {
+            x: 40.0,
+            y: 3.0,
+            width: 20.0,
+            height: 4.0,
+        };
+        layout.edges[0].points = [
+            fm_layout::LayoutPoint { x: 20.0, y: 5.0 },
+            fm_layout::LayoutPoint { x: 40.0, y: 5.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = TermRenderConfig {
+            tier: MermaidTier::Normal,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 12));
+        let mut grid = vec![vec![' '; 60]; 12];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 0);
+        let caption = labels
+            .iter()
+            .find(|label| !label.is_callout)
+            .expect("complete caption");
+        let badge = labels
+            .iter()
+            .find(|label| label.is_callout)
+            .expect("local route badge");
+        assert_eq!(labels.len(), 2);
+        assert_eq!(caption.lines, [format!("[1] {text}")]);
+        assert_eq!(badge.lines, ["[1]"]);
+        assert!(badge.x >= 21 && badge.x + badge.width < 40);
+        assert!(
+            (4..=6).contains(&badge.y),
+            "badge must stay beside the horizontal route"
+        );
+        let output = serialize_cell_labels(&grid, &labels, false);
+        assert_eq!(output.matches("[1]").count(), 2);
+        assert_eq!(output.matches(text).count(), 1);
+
+        let mut impossible = vec![vec![' '; 6]; 1];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut impossible, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 1);
+        assert!(
+            labels.is_empty(),
+            "a badge without its caption would misidentify the route"
+        );
+        let mut too_narrow = vec![vec![' '; 2]; 1];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut too_narrow, &ir, &layout, 1.0, 1.0, &[]);
+        assert!(labels.is_empty());
+        assert_eq!(
+            occluded, 1,
+            "an impossible grid must report the missing caption"
+        );
+    }
+
+    #[test]
+    fn cell_only_uses_shared_placement_and_keeps_both_cycle_captions() {
+        let ir = fm_parser::parse("flowchart LR\nA -->|sent| B\nB -->|acknowledged| A").ir;
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            ..Default::default()
+        };
+        let result = render_diagram_with_config(&ir, &config, 80, 24);
+        assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+        for text in ["sent", "acknowledged"] {
+            assert_eq!(result.output.matches(text).count(), 1, "{}", result.output);
+        }
+    }
+
+    #[test]
+    fn unicode_edge_labels_use_display_columns_and_keep_fitting_long_words() {
+        let text = "界面 e\u{301} ready";
+        let mut label = CellLabel::new(0, false, vec![text.to_owned()]);
+        label.x = 2;
+        assert_eq!(label.width, 12);
+        let output = serialize_cell_labels(&[vec![' '; 30]], &[label], false);
+        assert_eq!(output.width(), 30);
+        assert!(output.contains(text));
+        let long = "aLongTransitionIdentifier";
+        assert!(long.width() > 24);
+        assert_eq!(wrap_cell_label(&edge_caption_text(long, 48), 78, 2), [long]);
+        let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B\nB -->|{long}| A")).ir;
+        let rendered = render_diagram(&ir);
+        assert_eq!(rendered.occluded_edge_label_count, 0, "{}", rendered.output);
+        assert!(rendered.output.contains(text), "{}", rendered.output);
+        assert!(rendered.output.contains(long), "{}", rendered.output);
+        assert!(rendered.output.lines().all(|line| line.width() <= 80));
+        let wrapped = wrap_cell_label("界面 文本 界面 文本", 8, 2);
+        assert!(wrapped.iter().all(|line| line.width() <= 8));
+    }
+
+    #[test]
+    fn graph_node_name_uses_the_interior_row_at_fractional_cell_height() {
+        let ir = fm_parser::parse("flowchart TB\nA[Alpha]").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes[0].bounds = fm_layout::LayoutRect {
+            x: 10.0,
+            y: 0.0,
+            width: 100.0,
+            height: 28.0,
+        };
+        layout.bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 220.0,
+        };
+        let result = render_diagram_with_layout_and_config(
+            &ir,
+            &layout,
+            &TermRenderConfig::default(),
+            80,
+            24,
+        );
+        let rows: Vec<_> = result.output.lines().collect();
+        assert!(rows[2].contains("Alpha"), "{}", result.output);
+        assert!(!rows[1].contains("Alpha"), "name erased the top border");
+        assert!(!rows[3].contains("Alpha"), "name erased the bottom border");
     }
 
     #[inline]
