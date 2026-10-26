@@ -13,6 +13,9 @@ homepage.workspace = true
 [features]
 default = []
 bench-internals = []
+# The default LP/MIP backend is pure Rust. Native applications may opt into HiGHS,
+# which builds a C++ solver and requires a native toolchain.
+highs = ["good_lp/highs"]
 fnx-integration = [
     "dep:fnx-runtime",
     "dep:fnx-classes",
@@ -38,7 +41,7 @@ web-time.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nalgebra.workspace = true
-good_lp = { workspace = true, features = ["highs"] }
+good_lp = { workspace = true, features = ["microlp"] }
 fnx-runtime = { workspace = true, optional = true }
 fnx-classes = { workspace = true, optional = true }
 fnx-algorithms = { workspace = true, optional = true }

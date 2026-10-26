@@ -40,6 +40,8 @@ default = []
 watch = ["dep:notify"]
 serve = ["dep:tiny_http"]
 png = ["dep:resvg", "dep:usvg"]
+# Optional native C++ solver; the default layout solver is pure Rust.
+highs = ["fm-layout/highs"]
 # Canvas measurement for `support-matrix` (bd-5k51.1). Optional so the shipped binary keeps
 # the fm-render-canvas link out of the default build (bd-53p4); the gauntlet enables it.
 support-matrix = ["dep:fm-render-canvas"]

@@ -64,10 +64,12 @@ use fm_core::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
+#[cfg(all(feature = "highs", not(target_arch = "wasm32")))]
+use good_lp::solvers::highs::highs as layout_solver;
+#[cfg(all(not(feature = "highs"), not(target_arch = "wasm32")))]
+use good_lp::solvers::microlp::microlp as layout_solver;
 #[cfg(not(target_arch = "wasm32"))]
-use good_lp::{
-    Expression, Solution, SolutionStatus, SolverModel, constraint, default_solver, variable,
-};
+use good_lp::{Expression, Solution, SolutionStatus, SolverModel, constraint, variable};
 use smallvec::{SmallVec, smallvec};
 use tracing::{debug, info, trace, warn};
 
@@ -15857,7 +15859,8 @@ const LP_RELAXATION_LAYER_NODE_LIMIT: usize = 50;
 ///
 /// The heuristic rank bands anchor each weak component, preserving its deliberate disconnected
 /// component packing. Within each component the LP minimizes total layer index subject to one
-/// layer per oriented edge, yielding the canonical longest-path layering when HiGHS proves optimal.
+/// layer per oriented edge, yielding the canonical longest-path layering when the solver proves
+/// optimal. The default backend is pure Rust; the `highs` feature selects the native solver.
 /// Any non-optimal, non-integral, or failed result is rejected by returning `None`.
 #[cfg(not(target_arch = "wasm32"))]
 fn lp_relaxation_layer_assignment(
@@ -15879,7 +15882,7 @@ fn lp_relaxation_layer_assignment(
     let objective = rank_vars
         .iter()
         .fold(Expression::from(0.0), |sum, rank| sum + *rank);
-    let mut model = variables.minimise(objective).using(default_solver);
+    let mut model = variables.minimise(objective).using(layout_solver);
 
     for edge in &edges {
         if edge.source != edge.target {
@@ -17919,7 +17922,7 @@ fn apply_constraint_solver(
 /// per declared constraint. Simplex on a problem this shape converges in O(rows), so 64x the row
 /// count is headroom no correct solve uses. The clamp keeps the value inside `i32` for HiGHS
 /// without ever making the bound depend on anything but the input.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "highs", not(target_arch = "wasm32")))]
 const fn constraint_lp_iteration_limit(node_count: usize, constraint_count: usize) -> i32 {
     const HEADROOM: usize = 64;
     const CEILING: usize = 2_000_000;
@@ -17961,6 +17964,12 @@ fn solve_constraint_coordinates(
     spacing: LayoutSpacing,
     wall_clock_valve_ms: u64,
 ) -> Result<usize, String> {
+    if wall_clock_valve_ms == 0 {
+        return Err(String::from(
+            "constraint solver has no time budget; keeping heuristic coordinates",
+        ));
+    }
+
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let id_to_index: BTreeMap<&str, usize> = nodes
         .iter()
@@ -18018,21 +18027,18 @@ fn solve_constraint_coordinates(
         expr
     });
 
-    let mut model = variables
-        .minimise(objective)
-        .using(default_solver)
-        // bd-4q4d. The OPERATIVE bound is counted, so the solver stops at the same place on every
-        // machine; the clock below is only a liveness backstop. Naming the HiGHS option means
-        // naming the backend, which this crate already pins (`good_lp` with only the `highs`
-        // feature, so `default_solver` IS `highs`).
-        .set_option(
-            "simplex_iteration_limit",
-            constraint_lp_iteration_limit(nodes.len(), ir.constraints.len()),
-        )
-        // A valve of 0 means "spend no clock here" and is honoured as such. It used to be clamped
-        // up to 1 ms, which made "no optimization" unrequestable and left no way to exercise the
-        // fail-closed path without racing the solver (bd-9xwk).
-        .with_time_limit((wall_clock_valve_ms as f64) / 1000.0);
+    // Select our backend explicitly: another workspace dependency enabling a good_lp backend
+    // must not change layout behavior through Cargo feature unification of `default_solver`.
+    let model = variables.minimise(objective).using(layout_solver);
+    // HiGHS exposes a counted simplex stop in addition to the shared wall-clock liveness valve.
+    // microlp does not expose this option through good_lp. Both backends must prove optimality
+    // before any coordinates are committed; an interrupted solve preserves the heuristic layout.
+    #[cfg(feature = "highs")]
+    let model = model.set_option(
+        "simplex_iteration_limit",
+        constraint_lp_iteration_limit(nodes.len(), ir.constraints.len()),
+    );
+    let mut model = model.with_time_limit((wall_clock_valve_ms as f64) / 1000.0);
 
     for (index, node) in nodes.iter().enumerate() {
         let base_x = f64::from(node.bounds.x);
@@ -23998,6 +24004,8 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "highs")]
+    use super::constraint_lp_iteration_limit;
     use super::{
         CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ConstraintSolverMode, CycleStrategy,
         DependencyGraph, DiagramLayout, DirtySet, EdgeRouting, GraphMetrics,
@@ -24008,13 +24016,12 @@ mod tests {
         SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
         build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
         build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
-        compute_node_size, constraint_lp_iteration_limit, constraint_solution_is_usable,
-        dispatch_layout_algorithm, er_compartment_dimensions, estimate_layout_cost,
-        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
-        force_barnes_hut_repulsion, force_direct_repulsion, incremental_overlap_alignment,
-        is_directed_path, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
-        layout_diagram_incremental_traced_with_config_and_guardrails,
+        compute_node_size, constraint_solution_is_usable, dispatch_layout_algorithm,
+        er_compartment_dimensions, estimate_layout_cost, evaluate_layout_guardrails,
+        find_obstacle_nudge_x, find_obstacle_nudge_y, force_barnes_hut_repulsion,
+        force_direct_repulsion, incremental_overlap_alignment, is_directed_path, layout,
+        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_mindmap_traced, layout_diagram_radial, layout_diagram_sankey,
         layout_diagram_sequence, layout_diagram_sequence_traced, layout_diagram_timeline,
         layout_diagram_traced, layout_diagram_traced_with_algorithm,
@@ -26722,7 +26729,8 @@ mod tests {
             });
         }
 
-        let layout = crate::layout_diagram_kanban_traced(&ir).layout;
+        let layout =
+            crate::layout_diagram_kanban_traced(&ir, &fm_core::FontMetrics::default()).layout;
         let labels: Vec<&str> = layout
             .extensions
             .bands
@@ -26760,7 +26768,8 @@ mod tests {
         });
         ir.graph.nodes.push(IrGraphNode::default());
 
-        let layout = crate::layout_diagram_kanban_traced(&ir).layout;
+        let layout =
+            crate::layout_diagram_kanban_traced(&ir, &fm_core::FontMetrics::default()).layout;
         for band in &layout.extensions.bands {
             assert!(
                 !band.label.is_empty(),
@@ -35184,6 +35193,7 @@ mod tests {
     /// host load even when each branch is itself deterministic. A simplex iteration is the same unit
     /// of work everywhere.
     #[test]
+    #[cfg(feature = "highs")]
     fn constraint_lp_iteration_bound_is_a_pure_function_of_problem_size() {
         // Deterministic: the same problem shape always gets the same bound, on any machine.
         assert_eq!(
@@ -35700,6 +35710,119 @@ mod tests {
         let first = node_bounds(&layout, "N0");
         let second = node_bounds(&layout, "N1");
         assert!((first.y - second.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn constraint_solver_combines_signed_pins_order_and_integer_separation() {
+        // A pure-Rust backend must retain the complete authored-constraint path, including
+        // unrestricted negative coordinates and binary non-overlap choices. Exercise the same
+        // model in both rank orientations rather than accepting a heuristic fallback as success.
+        for direction in [GraphDirection::TB, GraphDirection::LR] {
+            let mut ir = labeled_graph_ir(4, &[(0, 2), (1, 2), (2, 3)]);
+            ir.direction = direction;
+            ir.constraints = vec![
+                IrConstraint::Pin {
+                    node_id: "N0".to_string(),
+                    x: -120.0,
+                    y: -80.0,
+                    span: Span::default(),
+                },
+                IrConstraint::SameRank {
+                    node_ids: vec!["N0".to_string(), "N1".to_string()],
+                    span: Span::default(),
+                },
+                IrConstraint::OrderInRank {
+                    node_ids: vec!["N1".to_string(), "N0".to_string()],
+                    span: Span::default(),
+                },
+                IrConstraint::MinLength {
+                    from_id: "N0".to_string(),
+                    to_id: "N2".to_string(),
+                    min_len: 2,
+                    span: Span::default(),
+                },
+                IrConstraint::NonOverlap {
+                    node_ids: vec!["N0".to_string(), "N3".to_string()],
+                    gap: 12.0,
+                    span: Span::default(),
+                },
+            ];
+            let initial: Vec<_> = (0..4)
+                .map(|index| LayoutNodeBox {
+                    node_index: index,
+                    node_id: format!("N{index}"),
+                    rank: index.saturating_sub(1),
+                    order: usize::from(index == 1),
+                    span: Span::default(),
+                    bounds: LayoutRect {
+                        x: -120.0,
+                        y: -80.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                })
+                .collect();
+            let spacing = LayoutSpacing {
+                node_spacing: 20.0,
+                rank_spacing: 40.0,
+                ..LayoutSpacing::default()
+            };
+            let mut stopped = initial.clone();
+            assert!(solve_constraint_coordinates(&ir, &mut stopped, spacing, 0).is_err());
+            assert_eq!(
+                stopped, initial,
+                "zero budget partially applied constraints"
+            );
+
+            let mut first_solution = None;
+            for _ in 0..3 {
+                let mut nodes = initial.clone();
+                assert_eq!(
+                    solve_constraint_coordinates(
+                        &ir,
+                        &mut nodes,
+                        spacing,
+                        CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+                    ),
+                    Ok(5),
+                    "{direction:?}: solver fell back instead of enforcing constraints"
+                );
+                assert!((nodes[0].bounds.x + 120.0).abs() < 0.01);
+                assert!((nodes[0].bounds.y + 80.0).abs() < 0.01);
+                let (same_rank_delta, order_gap, length_gap, min_order, min_length) =
+                    if direction == GraphDirection::LR {
+                        (
+                            nodes[0].bounds.x - nodes[1].bounds.x,
+                            nodes[0].bounds.y - nodes[1].bounds.y,
+                            nodes[2].bounds.x - nodes[0].bounds.x,
+                            60.0,
+                            240.0,
+                        )
+                    } else {
+                        (
+                            nodes[0].bounds.y - nodes[1].bounds.y,
+                            nodes[0].bounds.x - nodes[1].bounds.x,
+                            nodes[2].bounds.y - nodes[0].bounds.y,
+                            100.0,
+                            160.0,
+                        )
+                    };
+                assert!(same_rank_delta.abs() < 0.01);
+                assert!(order_gap >= min_order - 0.01);
+                assert!(length_gap >= min_length - 0.01);
+                let separation_x = (nodes[0].bounds.x - nodes[3].bounds.x).abs() - 80.0;
+                let separation_y = (nodes[0].bounds.y - nodes[3].bounds.y).abs() - 40.0;
+                assert!(separation_x >= 11.99 || separation_y >= 11.99);
+                if let Some(expected) = &first_solution {
+                    assert_eq!(
+                        &nodes, expected,
+                        "{direction:?}: solver was nondeterministic"
+                    );
+                } else {
+                    first_solution = Some(nodes);
+                }
+            }
+        }
     }
 
     #[test]
