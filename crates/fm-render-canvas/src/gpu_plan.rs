@@ -4612,45 +4612,61 @@ mod tests {
             ..Default::default()
         }));
 
-        let plan = super::GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
-        let run_at = |source: super::GpuTextSource| {
-            plan.text_runs
-                .iter()
-                .find(|run| run.source == source)
-                .copied()
-                .unwrap_or_else(|| panic!("no run for {source:?}"))
-        };
+        // The fixture runs (50,35) -> (70,35) -> (90,30). Canvas insets each cardinality
+        // by 1.2 times the configured font size along its own endpoint tangent and draws it
+        // at 85% size. These independent coordinates use unit tangents (1,0) and
+        // (-20,5)/sqrt(425), not cardinality_anchor or the evolving default font size.
+        for (font_size, label_font_px, source_x, target) in [
+            (14.0, 11.9, 66.8, (73.702, 34.075)),
+            (20.0, 17.0, 74.0, (66.717, 35.821)),
+        ] {
+            let config = crate::CanvasRenderConfig {
+                font_size,
+                font_family: "sans-serif".into(),
+                edge_stroke_width: 1.25,
+                ..Default::default()
+            };
+            let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &test_layout(), &config);
+            let run_at = |source: super::GpuTextSource| {
+                plan.text_runs
+                    .iter()
+                    .find(|run| run.source == source)
+                    .copied()
+                    .unwrap_or_else(|| panic!("no run for {source:?}"))
+            };
 
-        let source_run = run_at(super::GpuTextSource::EdgeSourceCardinality);
-        let target_run = run_at(super::GpuTextSource::EdgeTargetCardinality);
-        assert_eq!(source_run.quad_count, 1, "\"1\" is one glyph");
-        assert_eq!(target_run.quad_count, 4, "\"many\" is four glyphs");
-        assert_eq!(source_run.node_index, 7);
-        assert_eq!(target_run.node_index, 7);
+            let source_run = run_at(super::GpuTextSource::EdgeSourceCardinality);
+            let target_run = run_at(super::GpuTextSource::EdgeTargetCardinality);
+            assert_eq!(source_run.quad_count, 1, "\"1\" is one glyph");
+            assert_eq!(target_run.quad_count, 4, "\"many\" is four glyphs");
+            assert_eq!(source_run.node_index, 7);
+            assert_eq!(target_run.node_index, 7);
 
-        // Independently computed, NOT read back from cardinality_anchor, or this would assert the
-        // implementation against itself. The fixture edge runs (50,35) -> (70,35) -> (90,30), and
-        // the inset is DEFAULT_FONT_SIZE_PX * 1.2 = 16.8 along each end's own first segment.
-        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`. "many"
-        // has letters of four different widths, so the two stopped agreeing when text became
-        // proportional (bd-2u0.2).
-        let centre_of = |run: super::GpuTextRun, text: &str| {
-            let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-            (
-                run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX * 0.85),
-                quads[0].center[1],
-            )
-        };
-        let (sx, sy) = centre_of(source_run, "1");
-        assert!(
-            (sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01,
-            "source at ({sx}, {sy})"
-        );
-        let (tx, ty) = centre_of(target_run, "many");
-        assert!(
-            (tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01,
-            "target at ({tx}, {ty})"
-        );
+            // Measure the advance-span midpoint, not the mean of proportional glyph centres.
+            let centre_of = |run: super::GpuTextRun, text: &str| {
+                let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+                for quad in quads {
+                    assert!(
+                        (quad.half_extent[1] * 2.0 - label_font_px).abs() < 0.01,
+                        "cardinality font did not follow the configured {font_size}px size"
+                    );
+                }
+                (
+                    run_span_midpoint(quads, text, label_font_px),
+                    quads[0].center[1],
+                )
+            };
+            let (sx, sy) = centre_of(source_run, "1");
+            assert!(
+                (sx - source_x).abs() < 0.01 && (sy - 35.0).abs() < 0.01,
+                "{font_size}px source at ({sx}, {sy})"
+            );
+            let (tx, ty) = centre_of(target_run, "many");
+            assert!(
+                (tx - target.0).abs() < 0.01 && (ty - target.1).abs() < 0.01,
+                "{font_size}px target at ({tx}, {ty})"
+            );
+        }
     }
 
     /// A degenerate first segment must not push the text to NaN (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
@@ -5893,20 +5909,39 @@ mod tests {
                 ),
                 "fm-gantt-section-bg",
                 fm_layout::LayoutBandKind::Section,
+                true,
             ),
             (
                 include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/journey_user.mmd"),
                 "fm-band-lane",
                 fm_layout::LayoutBandKind::Lane,
+                false,
             ),
             (
                 include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
                 "fm-band-column",
                 fm_layout::LayoutBandKind::Column,
+                false,
+            ),
+            (
+                include_str!(
+                    "../../fm-cli/tests/fixtures/frankentui_conformance/gitgraph_basic.mmd"
+                ),
+                "fm-band-lane",
+                fm_layout::LayoutBandKind::Lane,
+                true,
+            ),
+            (
+                include_str!(
+                    "../../fm-cli/tests/fixtures/frankentui_conformance/sequence_basic.mmd"
+                ),
+                "fm-band-lane",
+                fm_layout::LayoutBandKind::Lane,
+                false,
             ),
         ];
 
-        for (source, svg_class, kind) in cases {
+        for (source, svg_class, kind, band_has_caption) in cases {
             let ir = fm_parser::parse(source).ir;
             let layout = fm_layout::layout_diagram(&ir);
             let bands: Vec<_> = layout
@@ -5920,6 +5955,12 @@ mod tests {
                 !bands.is_empty(),
                 "CONTROL FAILED: fixture for {kind:?} produced no matching layout band"
             );
+            if band_has_caption {
+                assert!(
+                    bands.iter().any(|(_, band)| !band.label.is_empty()),
+                    "CONTROL FAILED: captioned-band fixture has no declared caption"
+                );
+            }
 
             let svg = fm_render_svg::render_svg_with_layout(
                 &ir,
@@ -5974,18 +6015,57 @@ mod tests {
             }
 
             for (band_index, band) in bands {
-                let expects_label = !band.label.is_empty()
-                    && (kind == fm_layout::LayoutBandKind::Section
-                        || (kind == fm_layout::LayoutBandKind::Lane
-                            && ir.diagram_type != fm_core::DiagramType::Sequence));
                 let has_label = plan.text_runs.iter().any(|run| {
                     run.source == super::GpuTextSource::Band
                         && run.node_index == u32::try_from(band_index).unwrap_or(u32::MAX)
                 });
                 assert_eq!(
-                    has_label, expects_label,
-                    "band label selection drifted for {kind:?}"
+                    has_label,
+                    band_has_caption && !band.label.is_empty(),
+                    "band label selection drifted for {:?} {kind:?}",
+                    ir.diagram_type
                 );
+            }
+
+            if ir.diagram_type == fm_core::DiagramType::Journey {
+                // Journey task lanes repeat their section name in metadata, but the section
+                // heading must be drawn exactly once. Check all three surfaces retain it;
+                // merely suppressing every lane label would not prove the caption survived.
+                let mut context = crate::MockCanvas2dContext::new(1200.0, 900.0);
+                crate::Canvas2dRenderer::new(crate::CanvasRenderConfig::default()).render(
+                    &layout,
+                    &ir,
+                    &mut context,
+                );
+                for (cluster_index, caption) in ["Go to work", "At work"].into_iter().enumerate() {
+                    assert_eq!(
+                        plan.text_runs
+                            .iter()
+                            .filter(|run| run.source == super::GpuTextSource::Cluster
+                                && run.node_index
+                                    == u32::try_from(cluster_index).unwrap_or(u32::MAX))
+                            .count(),
+                        1,
+                        "GPU must retain one section heading for {caption}"
+                    );
+                    assert_eq!(
+                        context
+                            .operations()
+                            .iter()
+                            .filter(|operation| {
+                                matches!(operation, crate::DrawOperation::FillText(text, ..)
+                                if text == caption)
+                            })
+                            .count(),
+                        1,
+                        "Canvas must retain one section heading for {caption}"
+                    );
+                    assert_eq!(
+                        svg.matches(&format!(">{caption}</text>")).count(),
+                        1,
+                        "SVG must retain one section heading for {caption}"
+                    );
+                }
             }
         }
     }

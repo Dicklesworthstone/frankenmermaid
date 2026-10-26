@@ -1975,7 +1975,10 @@ fn terminal_xychart_axes_titles_and_numeric_categories_survive_all_fidelity_mode
             }
             for number in ["-100", "0", "100"] {
                 assert!(
-                    result.output.split_whitespace().any(|word| word == number),
+                    result
+                        .output
+                        .split(|ch: char| !ch.is_ascii_digit() && ch != '-' && ch != '.')
+                        .any(|word| word == number),
                     "missing value tick {number}:\n{}",
                     result.output
                 );

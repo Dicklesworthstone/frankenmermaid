@@ -2297,11 +2297,10 @@ impl Canvas2dRenderer {
                 // began 6 left of its reserved margin and 8.8 below it, pushing the last line toward
                 // an overflow the box was never sized to hold.
                 //
-                // Line SPACING was already right, by coincidence of two different formulas: the SVG
-                // uses `font_size * 0.8 * line_height(1.5)` and this uses `font_size * 1.2`, both
-                // 16.8 at the default 14. Left alone rather than "unified" -- they agree, and the
-                // two configs are not shared.
-                let line_height = self.config.font_size * 1.2;
+                // Layout reserves each row at the note font size and the configured line height.
+                // Keep that spacing when the caller chooses a non-default line-height multiplier.
+                let line_height =
+                    self.config.font_size * 0.8 * f64::from(self.config.resolved_line_height());
                 for (row, line) in note.text.lines().enumerate() {
                     let line_y = y + STATE_NOTE_PAD_Y + line_height * row as f64;
                     // The layout sized the box to fit, so this guard is unreachable for a note the
@@ -6358,7 +6357,8 @@ mod tests {
     #[test]
     fn canvas_scene_draws_sequence_geometry_and_notes_in_layout_coordinates() {
         let ir = fm_parser::parse(
-            "sequenceDiagram\n\
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+             sequenceDiagram\n\
              box rgb(230,240,250) Workers\n\
              participant Alice\n\
              participant Bob\n\
@@ -6381,6 +6381,11 @@ mod tests {
         assert_eq!(layout.extensions.sequence_notes.len(), 2);
         assert_eq!(layout.extensions.activation_bars.len(), 1);
         assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        assert_eq!(
+            layout.extensions.sequence_mirror_headers.len(),
+            ir.nodes.len(),
+            "the fixture must reserve one footer header per participant"
+        );
         let scene = build_render_scene(&ir, &layout);
         let config = CanvasRenderConfig {
             auto_fit: false,
@@ -6432,6 +6437,42 @@ mod tests {
             activation.x + activation.width,
             activation.y + activation.height,
         ));
+        let expected_corners = [
+            (activation.x, activation.y),
+            (activation.x + activation.width, activation.y),
+            (
+                activation.x + activation.width,
+                activation.y + activation.height,
+            ),
+            (activation.x, activation.y + activation.height),
+        ]
+        .map(|(x, y)| {
+            (
+                f64::from(x - layout.bounds.x),
+                f64::from(y - layout.bounds.y),
+            )
+        });
+        assert!(
+            operations.windows(5).any(|window| {
+                let corners = match window {
+                    [
+                        DrawOperation::MoveTo(x0, y0),
+                        DrawOperation::LineTo(x1, y1),
+                        DrawOperation::LineTo(x2, y2),
+                        DrawOperation::LineTo(x3, y3),
+                        DrawOperation::ClosePath,
+                    ] => [(*x0, *y0), (*x1, *y1), (*x2, *y2), (*x3, *y3)],
+                    _ => return false,
+                };
+                corners
+                    .iter()
+                    .zip(expected_corners)
+                    .all(|(&(x, y), (expected_x, expected_y))| {
+                        (x - expected_x).abs() < 0.001 && (y - expected_y).abs() < 0.001
+                    })
+            }),
+            "the activation must trace all four square corners and close its left edge"
+        );
         let alternative = layout
             .extensions
             .sequence_fragments
@@ -6504,6 +6545,38 @@ mod tests {
         assert_eq!(result.nodes_drawn, ir.nodes.len());
         assert_eq!(result.edges_drawn, ir.edges.len());
         assert_eq!(result.clusters_drawn, 1);
+    }
+
+    #[test]
+    fn canvas_scene_keeps_single_headers_when_sequence_mirroring_is_disabled() {
+        for directive in [
+            "",
+            "%%{init: {\"sequence\": {\"mirrorActors\": false}}}%%\n",
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "{directive}sequenceDiagram\nparticipant Alice\nparticipant Bob\nAlice->>Bob: hello\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            assert!(layout.extensions.sequence_mirror_headers.is_empty());
+            let scene = build_render_scene(&ir, &layout);
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            let result =
+                crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+            for participant in ["Alice", "Bob"] {
+                assert_eq!(
+                    ctx.operations()
+                        .iter()
+                        .filter(|operation| {
+                            matches!(operation, DrawOperation::FillText(text, _, _) if text == participant)
+                        })
+                        .count(),
+                    1,
+                    "{participant} must have one header with directive {directive:?}"
+                );
+            }
+            assert_eq!(result.nodes_drawn, ir.nodes.len());
+        }
     }
 
     #[test]
@@ -7469,10 +7542,31 @@ mod tests {
     /// the relationship rather than a snapshot of today's layout.
     #[test]
     fn a_state_note_draws_its_text_at_the_reserved_padding() {
+        assert_state_note_text_fits_reserved_rows(&CanvasRenderConfig::default());
+    }
+
+    #[test]
+    fn state_note_spacing_tracks_configured_line_height() {
+        for (font_size, line_height) in [(24.0, 2.0), (18.0, 1.25), (18.0, f64::NAN)] {
+            assert_state_note_text_fits_reserved_rows(&CanvasRenderConfig {
+                font_size,
+                line_height,
+                ..Default::default()
+            });
+        }
+    }
+
+    fn assert_state_note_text_fits_reserved_rows(config: &CanvasRenderConfig) {
         let src = "stateDiagram-v2\n  A --| B\n  note right of A\n    alpha line\n                       beta line\n  end note\n"
             .replace("--|", "-->");
         let ir = fm_parser::parse(&src).ir;
-        let layout = fm_layout::layout_diagram(&ir);
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
 
         let note = layout
             .extensions
@@ -7487,12 +7581,7 @@ mod tests {
         );
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
-        let _ = crate::render_to_canvas_with_layout(
-            &ir,
-            &layout,
-            &mut ctx,
-            &CanvasRenderConfig::default(),
-        );
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, config);
 
         let mut lines: Vec<(f64, f64)> = Vec::new();
         for op in ctx.operations() {
@@ -7502,10 +7591,10 @@ mod tests {
                 lines.push((*x, *y));
             }
         }
-        assert!(
-            lines.len() >= 2,
-            "expected every note line to be drawn, got {}",
-            lines.len()
+        assert_eq!(
+            lines.len(),
+            note.text.lines().count(),
+            "every note line must be drawn"
         );
 
         // THE AUTO-FIT OFFSET COMES FROM THE BOX, NOT FROM AN INSET UNDER TEST. Deriving it from
@@ -7545,9 +7634,11 @@ mod tests {
              box at {box_y}, text at {first_y}, expected {}",
             box_y + STATE_NOTE_PAD_Y
         );
+        let expected_line_height = (f64::from(note.bounds.height) - 2.0 * STATE_NOTE_PAD_Y)
+            / note.text.lines().count() as f64;
         assert!(
-            (second_y - first_y - 16.8).abs() < 0.01,
-            "line spacing must stay at the SVG's 16.8 (font_size * 0.8 * 1.5): got {}",
+            (second_y - first_y - expected_line_height).abs() < 0.01,
+            "line spacing must use the {expected_line_height}px rows reserved by layout: got {}",
             second_y - first_y
         );
     }

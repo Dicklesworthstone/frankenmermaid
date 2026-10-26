@@ -3630,7 +3630,27 @@ fn append_sequence_scene_layers(
             continue;
         }
         activations.children.push(sequence_scene_path(
-            node_path(bar.bounds, fm_core::NodeShape::Rect),
+            // Keep the full rectangular extent from layout, matching the direct SVG and
+            // Canvas activation bars.
+            vec![
+                PathCmd::MoveTo {
+                    x: bar.bounds.x,
+                    y: bar.bounds.y,
+                },
+                PathCmd::LineTo {
+                    x: bar.bounds.x + bar.bounds.width,
+                    y: bar.bounds.y,
+                },
+                PathCmd::LineTo {
+                    x: bar.bounds.x + bar.bounds.width,
+                    y: bar.bounds.y + bar.bounds.height,
+                },
+                PathCmd::LineTo {
+                    x: bar.bounds.x,
+                    y: bar.bounds.y + bar.bounds.height,
+                },
+                PathCmd::Close,
+            ],
             Some(FillStyle::Solid {
                 color: String::from("#ffffff"),
                 opacity: 1.0,
