@@ -1682,3 +1682,400 @@ fn a_quadrant_chart_without_names_gains_none() {
     // and it must still draw its own content
     assert!(out.contains("Reach"), "the chart lost its title:\n{out}");
 }
+
+fn xychart_terminal_configs() -> Vec<TermRenderConfig> {
+    use fm_core::{MermaidGlyphMode, MermaidRenderMode};
+    vec![
+        TermRenderConfig::compact(),
+        TermRenderConfig::default(),
+        TermRenderConfig {
+            render_mode: MermaidRenderMode::HalfBlock,
+            ..TermRenderConfig::rich()
+        },
+        TermRenderConfig {
+            render_mode: MermaidRenderMode::Block,
+            ..TermRenderConfig::rich()
+        },
+        TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            glyph_mode: MermaidGlyphMode::Ascii,
+            ..TermRenderConfig::rich()
+        },
+    ]
+}
+
+/// Decode the public terminal output, so these checks measure visible marks rather than an
+/// internal draw-call count or a second invocation of the renderer's geometry helper.
+fn xychart_output_pixels(result: &fm_render_term::TermRenderResult) -> Vec<Vec<bool>> {
+    use fm_core::MermaidRenderMode;
+    let (mx, my) = fm_render_term::canvas::subcell_multiplier(result.render_mode);
+    let mut pixels = vec![vec![false; result.width * mx]; result.height * my];
+    for (row, line) in result.output.lines().enumerate() {
+        for (column, ch) in line.chars().enumerate() {
+            if row >= result.height || column >= result.width {
+                continue;
+            }
+            let mask = match result.render_mode {
+                MermaidRenderMode::Braille => (ch as u32).saturating_sub(0x2800),
+                MermaidRenderMode::Block => match ch {
+                    '▘' => 1,
+                    '▝' => 2,
+                    '▀' => 3,
+                    '▖' => 4,
+                    '▌' => 5,
+                    '▞' => 6,
+                    '▛' => 7,
+                    '▗' => 8,
+                    '▚' => 9,
+                    '▐' => 10,
+                    '▜' => 11,
+                    '▄' => 12,
+                    '▙' => 13,
+                    '▟' => 14,
+                    '█' => 15,
+                    _ => 0,
+                },
+                MermaidRenderMode::HalfBlock => match ch {
+                    '▀' => 1,
+                    '▄' => 2,
+                    '█' => 3,
+                    _ => 0,
+                },
+                MermaidRenderMode::CellOnly | MermaidRenderMode::Auto => {
+                    u32::from(ch != ' ' && ch != '\u{2800}')
+                }
+            };
+            for dy in 0..my {
+                for dx in 0..mx {
+                    let bit = if result.render_mode == MermaidRenderMode::Braille {
+                        [[0, 3], [1, 4], [2, 5], [6, 7]][dy][dx]
+                    } else {
+                        dy * mx + dx
+                    };
+                    pixels[row * my + dy][column * mx + dx] = mask & (1 << bit) != 0;
+                }
+            }
+        }
+    }
+    pixels
+}
+
+fn xychart_pixel(
+    result: &fm_render_term::TermRenderResult,
+    layout: &fm_layout::DiagramLayout,
+    padding: usize,
+    x: f32,
+    y: f32,
+) -> (usize, usize) {
+    let (mx, my) = fm_render_term::canvas::subcell_multiplier(result.render_mode);
+    let sx = result.width.saturating_sub(padding * 2) as f32 / layout.bounds.width;
+    let sy = result.height.saturating_sub(padding * 2) as f32 / layout.bounds.height;
+    (
+        (x * sx * mx as f32) as usize + padding * mx,
+        (y * sy * my as f32) as usize + padding * my,
+    )
+}
+
+#[test]
+fn terminal_xychart_bars_preserve_shared_magnitudes_signed_baselines_and_declared_domains() {
+    // Domains that include zero, exclude zero in either direction, and are inferred across
+    // multiple series. In the old compact renderer every vertical series had its own maximum.
+    let cases = [
+        (
+            "y-axis -100 --> 100\nbar [-80, 20, 0]\nbar [-40, 80, 40]\n",
+            -100.0,
+            100.0,
+        ),
+        ("bar [20, 40, 0]\nbar [80, 60, 40]\n", 0.0, 80.0),
+        (
+            "y-axis 100 --> 200\nbar [120, 160, 100]\nbar [180, 140, 160]\n",
+            100.0,
+            200.0,
+        ),
+        (
+            "y-axis -200 --> -100\nbar [-120, -160, -100]\nbar [-180, -140, -160]\n",
+            -200.0,
+            -100.0,
+        ),
+    ];
+    for horizontal in [false, true] {
+        for (body, min, max) in cases {
+            let source = format!(
+                "xychart-beta{}\nx-axis [Jan, Feb, Mar]\n{body}",
+                if horizontal { " horizontal" } else { "" }
+            );
+            let parsed = fm_parser::parse(&source);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            let meta = parsed.ir.xy_chart_meta.as_ref().unwrap();
+            assert_eq!(meta.series.len(), 2);
+            assert!(meta.series.iter().all(|series| series.values.len() == 3));
+            let layout = fm_layout::layout_diagram(&parsed.ir);
+            let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+            let baseline = 0.0_f32.clamp(min, max);
+            for mut config in xychart_terminal_configs() {
+                config.show_labels = false;
+                let result = fm_render_term::render_term_with_layout_and_config(
+                    &parsed.ir, &layout, &config, 80, 24,
+                );
+                let pixels = xychart_output_pixels(&result);
+                assert!(result.width <= 80 && result.height <= 24);
+                for series in &meta.series {
+                    for (&id, &value) in series.nodes.iter().zip(&series.values) {
+                        let node = layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_index == id.0)
+                            .unwrap();
+                        let center = node.bounds.center();
+                        // Independent numeric oracle: value location in the declared/global range.
+                        let fraction = (value - min) / (max - min);
+                        let (x, y) = if horizontal {
+                            (plot.x + fraction * plot.width, center.y)
+                        } else {
+                            (center.x, plot.y + (1.0 - fraction) * plot.height)
+                        };
+                        let (px, py) = xychart_pixel(&result, &layout, config.padding, x, y);
+                        let cap_present = if horizontal {
+                            (px.saturating_sub(1)..=(px + 1).min(pixels[py].len() - 1))
+                                .any(|x| pixels[py][x])
+                        } else {
+                            (py.saturating_sub(1)..=(py + 1).min(pixels.len() - 1))
+                                .any(|y| pixels[y][px])
+                        };
+                        assert!(
+                            cap_present,
+                            "missing value {value} on {min}..{max}, horizontal={horizontal}, {:?}:\n{}",
+                            result.render_mode, result.output
+                        );
+                        // A shorter bar must stop at its own value, not the series maximum.
+                        // Sample further toward the same range endpoint, away from its cap.
+                        let direction = (value - baseline).signum();
+                        let probe_value = value + direction * (max - min) * 0.2;
+                        if value == baseline || probe_value <= min || probe_value >= max {
+                            continue;
+                        }
+                        let fraction = (probe_value - min) / (max - min);
+                        let (x, y) = if horizontal {
+                            (plot.x + fraction * plot.width, center.y)
+                        } else {
+                            (center.x, plot.y + (1.0 - fraction) * plot.height)
+                        };
+                        let (px, py) = xychart_pixel(&result, &layout, config.padding, x, y);
+                        assert!(
+                            !pixels[py][px],
+                            "bar {value} extends to {probe_value}; horizontal={horizontal}, {:?}:\n{}",
+                            result.render_mode, result.output
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_xychart_line_and_area_series_remain_distinct_in_both_orientations() {
+    for horizontal in [false, true] {
+        let source = |kind| {
+            format!(
+                "xychart-beta{}\nx-axis [A, B, C, D]\ny-axis -100 --> 100\n{kind} [80, -80, 80, -80]\n",
+                if horizontal { " horizontal" } else { "" }
+            )
+        };
+        let line_ir = fm_parser::parse(&source("line")).ir;
+        let area_ir = fm_parser::parse(&source("area")).ir;
+        let bar_ir = fm_parser::parse(&source("bar")).ir;
+        assert_eq!(
+            area_ir.xy_chart_meta.as_ref().unwrap().series[0].kind,
+            fm_core::IrXySeriesKind::Area
+        );
+        let layout = fm_layout::layout_diagram(&area_ir);
+        let plot =
+            fm_layout::xychart_plot_bounds(area_ir.xy_chart_meta.as_ref().unwrap(), layout.bounds);
+        for mut config in xychart_terminal_configs() {
+            config.show_labels = false;
+            let line = render_term_with_config(&line_ir, &config, 80, 24);
+            let area = render_term_with_config(&area_ir, &config, 80, 24);
+            let bar = render_term_with_config(&bar_ir, &config, 80, 24);
+            assert_ne!(line.output, bar.output, "line became bars");
+            assert_ne!(line.output, area.output, "area lost its fill");
+            assert_eq!((line.width, line.height), (area.width, area.height));
+            let line_pixels = xychart_output_pixels(&line);
+            let area_pixels = xychart_output_pixels(&area);
+            let (zero_x, zero_y) = xychart_pixel(
+                &area,
+                &layout,
+                config.padding,
+                plot.x + plot.width / 2.0,
+                plot.y + plot.height / 2.0,
+            );
+            let (mut positive, mut negative) = (0, 0);
+            for (y, row) in area_pixels.iter().enumerate() {
+                for (x, &filled) in row.iter().enumerate() {
+                    if !filled || line_pixels[y][x] {
+                        continue;
+                    }
+                    if if horizontal {
+                        x > zero_x + 1
+                    } else {
+                        y + 1 < zero_y
+                    } {
+                        positive += 1;
+                    }
+                    if if horizontal {
+                        x + 1 < zero_x
+                    } else {
+                        y > zero_y + 1
+                    } {
+                        negative += 1;
+                    }
+                }
+            }
+            assert!(
+                positive >= 3 && negative >= 3,
+                "both signed area lobes need visible interiors: {positive}/{negative}, {:?}\n{}",
+                area.render_mode,
+                area.output
+            );
+            // The area does not extend to ±100: the outer 10% of the value range stays empty
+            // between category centers. This rejects painting the whole plot as an 'area'.
+            for fraction in [0.05, 0.95] {
+                let (x, y) = if horizontal {
+                    (plot.x + fraction * plot.width, plot.y + plot.height * 0.25)
+                } else {
+                    (plot.x + plot.width * 0.25, plot.y + fraction * plot.height)
+                };
+                let (px, py) = xychart_pixel(&area, &layout, config.padding, x, y);
+                assert!(
+                    !area_pixels[py][px],
+                    "area escaped the series extent:\n{}",
+                    area.output
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_xychart_axes_titles_and_numeric_categories_survive_all_fidelity_modes() {
+    for horizontal in [false, true] {
+        let source = format!(
+            "xychart-beta{}\ntitle Balance\nx-axis \"Quarter\" [Jan, Feb, Mar]\ny-axis \"Net\" -100 --> 100\nbar [-40, 80, 20]\nline [60, -60, 0]\n",
+            if horizontal { " horizontal" } else { "" }
+        );
+        let ir = fm_parser::parse(&source).ir;
+        for config in xychart_terminal_configs() {
+            let result = render_term_with_config(&ir, &config, 80, 24);
+            for label in ["Balance", "Quarter", "Net", "Jan", "Feb", "Mar"] {
+                assert!(
+                    result.output.contains(label),
+                    "lost {label}:\n{}",
+                    result.output
+                );
+            }
+            for number in ["-100", "0", "100"] {
+                assert!(
+                    result.output.split_whitespace().any(|word| word == number),
+                    "missing value tick {number}:\n{}",
+                    result.output
+                );
+            }
+            if config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                assert!(
+                    result.output.is_ascii(),
+                    "ASCII chart emitted Unicode:\n{}",
+                    result.output
+                );
+            }
+            assert_eq!(
+                result.output,
+                render_term_with_config(&ir, &config, 80, 24).output
+            );
+        }
+    }
+    let ir = fm_parser::parse(
+        "xychart-beta\nx-axis \"Year\" 2020 --> 2022\ny-axis \"Count\" 0 --> 100\nline [20, 80, 40]\n"
+    ).ir;
+    let result = render_term_with_config(&ir, &TermRenderConfig::default(), 80, 24);
+    for label in ["Year", "Count", "2020", "2021", "2022"] {
+        assert!(
+            result.output.contains(label),
+            "missing numeric category {label}:\n{}",
+            result.output
+        );
+    }
+}
+
+#[test]
+fn terminal_xychart_outline_keeps_data_and_small_canvases_stay_bounded() {
+    let ir = fm_parser::parse(
+        "xychart-beta\ntitle Balance\nx-axis [Jan, Feb, Mar]\ny-axis -100 --> 100\narea [80, -80, 40]\n"
+    ).ir;
+    let outline = TermRenderConfig {
+        fidelity_override: Some(fm_core::MermaidFidelity::Outline),
+        max_width: 80,
+        max_height: 24,
+        ..TermRenderConfig::compact()
+    };
+    let result = render_term_with_config(&ir, &outline, 80, 24);
+    assert!(
+        !result.output.chars().any(char::is_alphanumeric),
+        "outline leaked text"
+    );
+    let mut textless = TermRenderConfig::compact();
+    textless.show_labels = false;
+    assert_eq!(
+        result.output,
+        render_term_with_config(&ir, &textless, 80, 24).output
+    );
+    assert!(
+        xychart_output_pixels(&result)
+            .iter()
+            .flatten()
+            .filter(|&&on| on)
+            .count()
+            > 30
+    );
+    for (cols, rows) in [(8, 4), (20, 8), (80, 24)] {
+        for config in xychart_terminal_configs() {
+            let result = render_term_with_config(&ir, &config, cols, rows);
+            assert!(result.width <= cols && result.height <= rows);
+            assert!(result.output.lines().count() <= rows);
+            assert!(
+                result
+                    .output
+                    .lines()
+                    .all(|line| line.chars().count() <= cols)
+            );
+        }
+    }
+    let empty = fm_parser::parse("xychart-beta\ntitle Empty\ny-axis 0 --> 10\n").ir;
+    let result = render_term_with_config(&empty, &TermRenderConfig::default(), 80, 24);
+    assert!(result.output.contains("Empty"));
+    assert!(
+        result
+            .output
+            .chars()
+            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+    );
+}
+
+#[test]
+fn terminal_xychart_ascii_truncation_and_control_characters_stay_plain_text() {
+    let mut ir = fm_parser::parse(
+        "xychart-beta\ntitle ABCDEFGHIJKLMNOPQRSTUVWXYZ\nx-axis [Jan, Feb]\nbar [20, 80]\n",
+    )
+    .ir;
+    ir.xy_chart_meta.as_mut().unwrap().y_axis.label = Some("Safe\u{1b}[31mText".into());
+    let config = TermRenderConfig {
+        glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+        render_mode: fm_core::MermaidRenderMode::CellOnly,
+        max_label_chars: 12,
+        ..TermRenderConfig::rich()
+    };
+    let result = render_term_with_config(&ir, &config, 80, 24);
+    assert!(result.output.is_ascii(), "{}", result.output);
+    assert!(!result.output.contains('\u{1b}'));
+    assert!(result.output.contains("ABCDEFGHIJK~"), "{}", result.output);
+    assert!(result.output.contains("Safe"), "{}", result.output);
+}

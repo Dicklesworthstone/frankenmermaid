@@ -408,6 +408,19 @@ impl TermRenderer {
         let (cell_width, cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
+        // Chart marks are data, not graph nodes. Every fidelity uses the same laid-out bars,
+        // points and value scale; only the raster resolution and text budget may change.
+        if ir.diagram_type == fm_core::DiagramType::XyChart
+            && let Some(meta) = &ir.xy_chart_meta
+        {
+            return self.render_xychart(
+                ir,
+                meta,
+                layout,
+                (cell_width, cell_height, scale_x, scale_y),
+            );
+        }
+
         // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
         // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The legacy
         // id-marker skeleton is retained only for direct unit-test coverage.
@@ -621,14 +634,6 @@ impl TermRenderer {
                 &mut buffer,
                 ir,
                 layout,
-                cell_width,
-                cell_height,
-                self.config.show_labels,
-            );
-        } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
-            render_xychart_cell(
-                &mut buffer,
-                ir,
                 cell_width,
                 cell_height,
                 self.config.show_labels,
@@ -4810,167 +4815,443 @@ fn render_gantt_cell(
     }
 }
 
-/// Render an XY chart with ASCII axes, category labels, and data bars.
-fn render_xychart_cell(
-    buffer: &mut CellBuffer,
-    ir: &MermaidDiagramIr,
-    cell_width: usize,
-    cell_height: usize,
-    show_labels: bool,
-) {
-    let Some(xy_meta) = &ir.xy_chart_meta else {
-        return;
-    };
+impl TermRenderer {
+    /// Project XY marks onto a terminal raster without changing their common numeric scale.
+    fn render_xychart(
+        &self,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrXyChartMeta,
+        layout: &DiagramLayout,
+        dimensions: (usize, usize, f32, f32),
+    ) -> TermRenderResult {
+        let (width, height, scale_x, scale_y) = dimensions;
+        let width = width.min(self.config.cols);
+        let height = height.min(self.config.rows);
+        let mode = if self.config.tier == MermaidTier::Compact {
+            MermaidRenderMode::CellOnly
+        } else {
+            self.config.render_mode
+        };
+        let (mult_x, mult_y) = crate::canvas::subcell_multiplier(mode);
+        let mut canvas = Canvas::new(width, height, mode);
+        let project = |x: f32, y: f32| {
+            (
+                (x * scale_x * mult_x as f32) as isize + (self.config.padding * mult_x) as isize,
+                (y * scale_y * mult_y as f32) as isize + (self.config.padding * mult_y) as isize,
+            )
+        };
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let baseline = min.min(0.0).max(max.min(0.0));
+        let baseline_x = fm_layout::xychart_value_to_x(baseline, min, max, plot);
+        let baseline_y = fm_layout::xychart_value_to_y(baseline, min, max, plot);
+        let (left, top) = project(plot.x, plot.y);
+        let (right, bottom) = project(plot.x + plot.width, plot.y + plot.height);
+        let (zero_x, zero_y) = project(baseline_x, baseline_y);
+        let value_axis = if meta.horizontal {
+            ((left, top), (right, top))
+        } else {
+            ((left, bottom), (right, bottom))
+        };
+        let zero_axis = if meta.horizontal {
+            ((zero_x, top), (zero_x, bottom))
+        } else {
+            ((left, zero_y), (right, zero_y))
+        };
+        let axes = [((left, top), (left, bottom)), value_axis, zero_axis];
+        for &((x0, y0), (x1, y1)) in &axes {
+            canvas.draw_line(x0, y0, x1, y1);
+        }
+        for value in fm_layout::xychart_y_ticks(min, max) {
+            if meta.horizontal {
+                let (x, _) = project(fm_layout::xychart_value_to_x(value, min, max, plot), plot.y);
+                canvas.draw_line(x, top - 1, x, top);
+            } else {
+                let (_, y) = project(plot.x, fm_layout::xychart_value_to_y(value, min, max, plot));
+                canvas.draw_line(left - 1, y, left, y);
+            }
+        }
 
-    let label_margin = if show_labels { 8_usize } else { 0 };
-    let chart_left = label_margin + 1;
-    let chart_right = cell_width.saturating_sub(2);
-    let chart_top = 2_usize;
-    let chart_bottom = cell_height.saturating_sub(3);
-    let chart_w = chart_right.saturating_sub(chart_left);
-    let chart_h = chart_bottom.saturating_sub(chart_top);
+        let by_index: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        let points = |series: &fm_core::IrXySeries| {
+            series
+                .nodes
+                .iter()
+                .filter_map(|id| by_index.get(&id.0))
+                .map(|node| {
+                    let center = node.bounds.center();
+                    project(center.x, center.y)
+                })
+                .collect::<Vec<_>>()
+        };
 
-    if chart_w < 4 || chart_h < 4 {
-        return;
-    }
+        // Hatching separates an area from its line boundary without introducing ANSI color.
+        // Filling along the category axis also preserves both lobes at a zero crossing.
+        for series in &meta.series {
+            if series.kind == fm_core::IrXySeriesKind::Area {
+                fill_xychart_area(
+                    &mut canvas,
+                    &points(series),
+                    if meta.horizontal { zero_x } else { zero_y },
+                    meta.horizontal,
+                );
+            }
+        }
+        // Outlined bars leave overlapping line series readable on a monochrome surface.
+        // Use the layout's exact grouped slots and value endpoints, including negative bars.
+        for series in &meta.series {
+            if series.kind != fm_core::IrXySeriesKind::Bar {
+                continue;
+            }
+            for id in &series.nodes {
+                let Some(node) = by_index.get(&id.0) else {
+                    continue;
+                };
+                let bounds = node.bounds;
+                let (x0, y0) = project(bounds.x, bounds.y);
+                let (x1, y1) = project(bounds.x + bounds.width, bounds.y + bounds.height);
+                let (x0, x1) = (x0.clamp(left, right), x1.clamp(left, right));
+                let (y0, y1) = (y0.clamp(top, bottom), y1.clamp(top, bottom));
+                canvas.draw_line(x0, y0, x1, y0);
+                canvas.draw_line(x0, y1, x1, y1);
+                canvas.draw_line(x0, y0, x0, y1);
+                canvas.draw_line(x1, y0, x1, y1);
+            }
+        }
+        for series in &meta.series {
+            if series.kind == fm_core::IrXySeriesKind::Bar {
+                continue;
+            }
+            let points = points(series);
+            for pair in points.windows(2) {
+                canvas.draw_line(pair[0].0, pair[0].1, pair[1].0, pair[1].1);
+            }
+            for (x, y) in points {
+                canvas.fill_circle(
+                    x,
+                    y,
+                    if mode == MermaidRenderMode::CellOnly {
+                        0
+                    } else {
+                        1
+                    },
+                );
+            }
+        }
 
-    // Title
-    if show_labels && let Some(title) = &xy_meta.title {
-        let tx = cell_width.saturating_sub(title.len()) / 2;
-        buffer.set_string(tx, 0, title);
-    }
+        let mut buffer = CellBuffer {
+            cells: canvas
+                .render_char_grid()
+                .into_iter()
+                .flatten()
+                .map(|ch| {
+                    if ch == '\u{2800}' {
+                        ' '
+                    } else if mode == MermaidRenderMode::CellOnly && ch == '█' {
+                        self.box_glyphs.block_full
+                    } else {
+                        ch
+                    }
+                })
+                .collect(),
+            width,
+            height,
+        };
+        if mode == MermaidRenderMode::CellOnly {
+            for &((x0, y0), (x1, y1)) in &axes {
+                self.draw_line_cell(
+                    &mut buffer,
+                    x0.max(0) as usize,
+                    y0.max(0) as usize,
+                    x1.max(0) as usize,
+                    y1.max(0) as usize,
+                    &self.edge_glyphs,
+                    false,
+                    ArrowType::Line,
+                );
+            }
+            for series in &meta.series {
+                if series.kind != fm_core::IrXySeriesKind::Bar {
+                    for (x, y) in points(series) {
+                        buffer.set(x.max(0) as usize, y.max(0) as usize, self.box_glyphs.circle);
+                    }
+                }
+            }
+        }
+        if self.config.show_labels {
+            self.overlay_xychart_labels(&mut buffer, ir, meta, layout, (scale_x, scale_y));
+        }
+        if let Some(node) = self.config.selected_node.and_then(|id| by_index.get(&id))
+            && self.config.show_selection
+        {
+            let center = node.bounds.center();
+            let (x, y) = project(center.x, center.y);
+            buffer.set(
+                x.max(0) as usize / mult_x,
+                y.max(0) as usize / mult_y,
+                self.box_glyphs.diamond,
+            );
+        }
 
-    if xy_meta.horizontal {
-        render_xychart_horizontal_cell(
-            buffer,
-            xy_meta,
-            cell_width,
-            chart_top,
-            chart_bottom,
-            show_labels,
-        );
-        return;
-    }
-
-    // Y axis (vertical line).
-    for row in chart_top..=chart_bottom {
-        buffer.set(chart_left, row, '\u{2502}'); // │
-    }
-
-    // X axis (horizontal line).
-    for col in chart_left..=chart_right {
-        buffer.set(col, chart_bottom, '\u{2500}'); // ─
-    }
-    buffer.set(chart_left, chart_bottom, '\u{2514}'); // └ corner
-
-    // Category labels along x axis.
-    let categories = &xy_meta.x_axis.categories;
-    if show_labels && !categories.is_empty() {
-        let cat_spacing = chart_w / categories.len().max(1);
-        for (i, cat) in categories.iter().enumerate() {
-            let x = chart_left + 1 + i * cat_spacing;
-            let label: String = cat.chars().take(cat_spacing.saturating_sub(1)).collect();
-            buffer.set_string(x, chart_bottom + 1, &label);
+        let mut output = buffer.to_output_string();
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, width, height, metrics);
+        }
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        TermRenderResult {
+            output,
+            width: width.max(links_width),
+            height: height + links_rows,
+            tier: self.config.tier,
+            render_mode: mode,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                width,
+                height,
+            ),
+            debug_metrics,
         }
     }
 
-    // Render data series as vertical bar characters.
-    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
-    for (series_idx, series) in xy_meta.series.iter().enumerate() {
-        let bar_ch = bar_chars[series_idx % bar_chars.len()];
-        let max_val = series
-            .values
+    fn overlay_xychart_labels(
+        &self,
+        buffer: &mut CellBuffer,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrXyChartMeta,
+        layout: &DiagramLayout,
+        (scale_x, scale_y): (f32, f32),
+    ) {
+        use fm_layout::TextAlign;
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let to_cell = |x: f32, y: f32| {
+            (
+                (x * scale_x) as usize + self.config.padding,
+                (y * scale_y) as usize + self.config.padding,
+            )
+        };
+        let (left, top) = to_cell(plot.x, plot.y);
+        let (right, bottom) = to_cell(plot.x + plot.width, plot.y + plot.height);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let ticks = fm_layout::xychart_y_ticks(min, max);
+        let mut occupied = Vec::<(usize, usize)>::new();
+        // Retain zero and the extreme ticks first when terminal resolution merges nearby ticks.
+        for &value in ticks
             .iter()
-            .copied()
-            .fold(0.0_f32, f32::max)
-            .max(f32::EPSILON);
-        let val_count = series.values.len().max(1);
-        let bar_spacing = chart_w / val_count;
-
-        for (i, &val) in series.values.iter().enumerate() {
-            let bar_height = ((val / max_val) * chart_h as f32) as usize;
-            let x = chart_left + 1 + i * bar_spacing;
-            for h in 0..bar_height.min(chart_h) {
-                let y = chart_bottom.saturating_sub(1 + h);
-                if y >= chart_top && x < chart_right {
-                    buffer.set(x, y, bar_ch);
+            .filter(|&&value| value == 0.0)
+            .chain(ticks.first())
+            .chain(ticks.last())
+            .chain(ticks.iter())
+        {
+            let label = fm_layout::format_xychart_tick_value(value);
+            let length = label.chars().count();
+            if meta.horizontal {
+                let (column, _) =
+                    to_cell(fm_layout::xychart_value_to_x(value, min, max, plot), plot.y);
+                if top == 0 || length > buffer.width {
+                    continue;
                 }
+                let column = column
+                    .saturating_sub(length / 2)
+                    .min(buffer.width.saturating_sub(length));
+                let end = column + length;
+                if occupied
+                    .iter()
+                    .any(|&(start, stop)| column <= stop + 1 && end + 1 >= start)
+                {
+                    continue;
+                }
+                buffer.set_string(column, top - 1, &label);
+                occupied.push((column, end));
+            } else {
+                let (_, row) =
+                    to_cell(plot.x, fm_layout::xychart_value_to_y(value, min, max, plot));
+                if row >= buffer.height
+                    || length + 1 > left
+                    || occupied.iter().any(|&(other, _)| row.abs_diff(other) < 2)
+                {
+                    continue;
+                }
+                buffer.set_string(left - length - 1, row, &label);
+                occupied.push((row, row));
             }
+        }
+
+        let categories = fm_layout::xychart_categories(meta);
+        let count = categories.len().max(1) as f32;
+        let band = if meta.horizontal {
+            plot.height
+        } else {
+            plot.width
+        } / count;
+        let mut previous_row = None;
+        for (index, category) in categories.iter().enumerate() {
+            let position = (index as f32 + 0.5) * band;
+            if meta.horizontal {
+                let (_, row) = to_cell(plot.x, plot.y + position);
+                if previous_row == Some(row) {
+                    continue;
+                }
+                self.write_xychart_text(
+                    buffer,
+                    category,
+                    row,
+                    (0, left.saturating_sub(1)),
+                    TextAlign::End,
+                );
+                previous_row = Some(row);
+            } else {
+                let (start, _) = to_cell(plot.x + index as f32 * band, plot.y);
+                let (end, _) = to_cell(plot.x + (index + 1) as f32 * band, plot.y);
+                self.write_xychart_text(
+                    buffer,
+                    category,
+                    bottom + 1,
+                    (start, end.saturating_sub(1)),
+                    TextAlign::Middle,
+                );
+            }
+        }
+        if let Some(label) = &meta.y_axis.label {
+            self.write_xychart_text(
+                buffer,
+                label,
+                top.saturating_sub(if meta.horizontal { 3 } else { 2 }),
+                if meta.horizontal {
+                    (left, right)
+                } else {
+                    (0, right)
+                },
+                if meta.horizontal {
+                    TextAlign::Middle
+                } else {
+                    TextAlign::Start
+                },
+            );
+        }
+        if let Some(label) = &meta.x_axis.label {
+            self.write_xychart_text(
+                buffer,
+                label,
+                if meta.horizontal {
+                    top.saturating_sub(3)
+                } else {
+                    bottom + 3
+                },
+                if meta.horizontal {
+                    (0, left.saturating_sub(1))
+                } else {
+                    (left, right)
+                },
+                if meta.horizontal {
+                    TextAlign::End
+                } else {
+                    TextAlign::Middle
+                },
+            );
+        }
+        if let Some(title) = ir.declared_title_if_drawn() {
+            self.write_xychart_text(buffer, title, 0, (0, buffer.width), TextAlign::Middle);
+        }
+    }
+
+    fn write_xychart_text(
+        &self,
+        buffer: &mut CellBuffer,
+        text: &str,
+        row: usize,
+        (left, right): (usize, usize),
+        align: fm_layout::TextAlign,
+    ) {
+        let right = right.min(buffer.width);
+        let budget = right.saturating_sub(left);
+        if budget == 0 || row >= buffer.height {
+            return;
+        }
+        let text = self
+            .truncate_label(text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ellipsis = if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+            '~'
+        } else {
+            '…'
+        };
+        let mut chars: Vec<_> = text
+            .chars()
+            .map(|ch| if ch == '…' { ellipsis } else { ch })
+            .collect();
+        if chars.len() > budget {
+            chars.truncate(budget);
+            chars[budget - 1] = ellipsis;
+        }
+        let column = match align {
+            fm_layout::TextAlign::Start => left,
+            fm_layout::TextAlign::Middle => left + budget.saturating_sub(chars.len()) / 2,
+            fm_layout::TextAlign::End => right.saturating_sub(chars.len()),
+        };
+        for (offset, ch) in chars.into_iter().enumerate() {
+            buffer.set(column + offset, row, ch);
         }
     }
 }
 
-/// A HORIZONTAL xychart in cells: one row band per category, its label left of the axis and each
-/// series' bar growing rightward from it, as `xychart-beta horizontal` draws upstream.
-fn render_xychart_horizontal_cell(
-    buffer: &mut CellBuffer,
-    xy_meta: &fm_core::IrXyChartMeta,
-    cell_width: usize,
-    chart_top: usize,
-    chart_bottom: usize,
-    show_labels: bool,
+/// Hatch each strip between an area series and its zero baseline. Working along the category
+/// axis avoids self-intersecting fill polygons when successive values cross zero.
+fn fill_xychart_area(
+    canvas: &mut Canvas,
+    points: &[(isize, isize)],
+    baseline: isize,
+    horizontal: bool,
 ) {
-    let categories = &xy_meta.x_axis.categories;
-    let rows = xy_meta
-        .series
-        .iter()
-        .map(|series| series.values.len())
-        .max()
-        .unwrap_or(0)
-        .max(categories.len())
-        .max(1);
-    let label_width = if show_labels {
-        categories
-            .iter()
-            .map(|category| category.chars().count())
-            .max()
-            .unwrap_or(0)
-            .clamp(1, cell_width / 3)
+    let (width, height) = canvas.pixel_dimensions();
+    let (category_extent, value_extent) = if horizontal {
+        (height, width)
     } else {
-        0
+        (width, height)
     };
-    let axis_x = label_width + 1;
-    let chart_right = cell_width.saturating_sub(2);
-    let chart_w = chart_right.saturating_sub(axis_x + 1);
-    if chart_w < 2 {
+    if category_extent == 0 || value_extent == 0 {
         return;
     }
-    for row in chart_top..=chart_bottom {
-        buffer.set(axis_x, row, '\u{2502}'); // │
-    }
-
-    let max_val = xy_meta
-        .series
-        .iter()
-        .flat_map(|series| series.values.iter().copied())
-        .fold(0.0_f32, f32::max)
-        .max(f32::EPSILON);
-    let series_count = xy_meta.series.len().max(1);
-    let band = (chart_bottom.saturating_sub(chart_top) + 1) / rows;
-    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
-    for index in 0..rows {
-        let band_top = chart_top + index * band.max(1);
-        if band_top > chart_bottom {
-            break;
-        }
-        if show_labels && let Some(category) = categories.get(index) {
-            let label: String = category.chars().take(label_width).collect();
-            let x = axis_x.saturating_sub(label.chars().count() + 1);
-            buffer.set_string(x, band_top, &label);
-        }
-        for (series_idx, series) in xy_meta.series.iter().enumerate() {
-            let Some(&value) = series.values.get(index) else {
-                continue;
+    for pair in points.windows(2) {
+        let (a, b) = if horizontal {
+            ((pair[0].1, pair[0].0), (pair[1].1, pair[1].0))
+        } else {
+            (pair[0], pair[1])
+        };
+        let start = a.0.min(b.0).max(0);
+        let end = a.0.max(b.0).min(category_extent as isize - 1);
+        for category in start..=end {
+            let ratio = if a.0 == b.0 {
+                0.5
+            } else {
+                (category - a.0) as f64 / (b.0 - a.0) as f64
             };
-            let row = band_top + series_idx.min(band.saturating_sub(1).max(series_count - 1));
-            if row > chart_bottom {
-                continue;
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let length = ((value.max(0.0) / max_val) * chart_w as f32) as usize;
-            let bar_ch = bar_chars[series_idx % bar_chars.len()];
-            for col in 0..length.min(chart_w) {
-                buffer.set(axis_x + 1 + col, row, bar_ch);
+            let value = ((b.1 - a.1) as f64).mul_add(ratio, a.1 as f64).round() as isize;
+            let low = value.min(baseline).max(0);
+            let high = value.max(baseline).min(value_extent as isize - 1);
+            for value in low..=high {
+                if (category + value) % 4 == 0 {
+                    let (x, y) = if horizontal {
+                        (value, category)
+                    } else {
+                        (category, value)
+                    };
+                    canvas.set_pixel(x as usize, y as usize);
+                }
             }
         }
     }
