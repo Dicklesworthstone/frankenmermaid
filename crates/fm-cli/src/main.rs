@@ -30,8 +30,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod minimize;
 mod support_matrix;
 
-#[cfg(feature = "png")]
-use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -159,6 +157,10 @@ enum Command {
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,
 
+        /// Emit a static SVG for image converters and document tools without browser CSS.
+        #[arg(long)]
+        portable: bool,
+
         /// Theme name (default, dark, forest, neutral)
         #[arg(short, long)]
         theme: Option<String>,
@@ -248,6 +250,10 @@ enum Command {
         /// Output format. PNG is rejected: rasterization is not batch-safe here.
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,
+
+        /// Emit static SVGs for image converters and document tools without browser CSS.
+        #[arg(long)]
+        portable: bool,
 
         /// Theme name (default, dark, forest, neutral)
         #[arg(short, long)]
@@ -1012,6 +1018,7 @@ struct FrankenmermaidRenderConfig {
 #[serde(default, deny_unknown_fields)]
 struct FrankenmermaidSvgConfig {
     theme: Option<String>,
+    portable: Option<bool>,
     rounded_corners: Option<f32>,
     padding: Option<f32>,
     shadows: Option<bool>,
@@ -3391,6 +3398,7 @@ fn run() -> Result<()> {
             parse_mode,
             layout_algorithm,
             format,
+            portable,
             theme,
             font_size,
             output,
@@ -3409,7 +3417,14 @@ fn run() -> Result<()> {
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
             let layout_config = build_layout_config(&loaded_config.file, font_size)?;
-            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            if portable {
+                anyhow::ensure!(
+                    format == OutputFormat::Svg,
+                    "--portable requires --format svg"
+                );
+                svg_base_config.make_portable();
+            }
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
@@ -3465,6 +3480,7 @@ fn run() -> Result<()> {
             parse_mode,
             layout_algorithm,
             format,
+            portable,
             theme,
             font_size,
             json,
@@ -3492,7 +3508,14 @@ fn run() -> Result<()> {
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
             let layout_config = build_layout_config(&loaded_config.file, font_size)?;
-            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            if portable {
+                anyhow::ensure!(
+                    format == OutputFormat::Svg,
+                    "--portable requires --format svg"
+                );
+                svg_base_config.make_portable();
+            }
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
@@ -4230,6 +4253,9 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
         .or(config_file.render.debug_overlay)
     {
         config.debug_overlay = debug_overlay;
+    }
+    if config_file.svg.portable.unwrap_or(false) {
+        config.make_portable();
     }
 
     Ok(config)
@@ -8042,9 +8068,11 @@ fn render_format(
                 let mut svg_config =
                     build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
                 svg_config.apply_degradation(&degradation);
-                make_svg_render_config_raster_safe(&mut svg_config);
+                svg_config.make_portable();
                 let svg = render_svg_with_layout(ir, render_layout, &svg_config);
-                let svg = resolve_svg_custom_properties_for_rasterization(&svg);
+                // Portable rendering resolves generated paints at their source. Rewriting
+                // the finished SVG would also alter authored labels, titles, and links
+                // that happen to contain CSS expressions such as `var(--fm-color, red)`.
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height), None))
             }
@@ -8143,20 +8171,6 @@ fn build_svg_render_config(
         svg_config.font_size = size;
     }
     svg_config
-}
-
-#[cfg(feature = "png")]
-fn make_svg_render_config_raster_safe(config: &mut SvgRenderConfig) {
-    // usvg/resvg only supports a browser-free subset of the CSS emitted for
-    // interactive SVG output. Prefer a static attribute-driven SVG for PNG so
-    // rasterization remains deterministic across theme presets.
-    config.responsive = false;
-    config.embed_theme_css = false;
-    config.animations_enabled = false;
-    config.print_optimized = false;
-    config.shadows = false;
-    config.glow_enabled = false;
-    config.a11y.accessibility_css = false;
 }
 
 fn normalize_positive_font_size(font_size: Option<f32>) -> Option<f32> {
@@ -8258,106 +8272,127 @@ fn svg_root_tag(svg: &str) -> &str {
 }
 
 #[cfg(feature = "png")]
-fn resolve_svg_custom_properties_for_rasterization(svg: &str) -> String {
-    let mut custom_properties = BTreeMap::new();
-    if let Some(style_start) = svg.find("<style>") {
-        let style_content_start = style_start + "<style>".len();
-        if let Some(style_end_rel) = svg[style_content_start..].find("</style>") {
-            let style_content_end = style_content_start + style_end_rel;
-            let style_content = &svg[style_content_start..style_content_end];
-            custom_properties = extract_svg_custom_properties(style_content);
-        }
-    }
-    if custom_properties.is_empty() && !svg.contains("var(--fm-") {
-        return svg.to_string();
-    }
-
-    let mut resolved = svg.to_string();
-    for _ in 0..8 {
-        let next = substitute_svg_var_calls(&resolved, &custom_properties);
-        if next == resolved {
-            break;
-        }
-        resolved = next;
-    }
-    resolved
-}
-
-#[cfg(feature = "png")]
-fn extract_svg_custom_properties(style_content: &str) -> BTreeMap<String, String> {
-    let mut properties = BTreeMap::new();
-    for line in style_content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("--fm-") {
-            continue;
-        }
-        let Some((name, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_end_matches(';').trim();
-        if !value.is_empty() {
-            properties.insert(name.trim().to_string(), value.to_string());
-        }
-    }
-    properties
-}
-
-#[cfg(feature = "png")]
-fn substitute_svg_var_calls(input: &str, custom_properties: &BTreeMap<String, String>) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-
-    while let Some(rel_start) = input[cursor..].find("var(--fm-") {
-        let start = cursor + rel_start;
-        output.push_str(&input[cursor..start]);
-
-        let content_start = start + "var(".len();
-        let mut depth = 1_usize;
-        let mut end = None;
-        for (offset, ch) in input[content_start..].char_indices() {
-            match ch {
-                '(' => depth = depth.saturating_add(1),
-                ')' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        end = Some(content_start + offset);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(end) = end else {
-            output.push_str(&input[start..]);
-            return output;
-        };
-        let body = &input[content_start..end];
-        let (property_name, fallback) = match body.split_once(',') {
-            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
-            None => (body.trim(), None),
-        };
-
-        if let Some(value) = custom_properties.get(property_name) {
-            output.push_str(value);
-        } else if let Some(fallback) = fallback.filter(|value| !value.is_empty()) {
-            output.push_str(fallback);
-        } else {
-            output.push_str(&input[start..=end]);
-        }
-
-        cursor = end + 1;
-    }
-
-    output.push_str(&input[cursor..]);
-    output
-}
-
-#[cfg(feature = "png")]
 fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<(Vec<u8>, u32, u32)> {
+    // usvg starts with an empty font database and silently drops text it cannot resolve.
+    // Load installed fonts once, shared across exports, before it converts text to paths.
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        ensure_png_generic_font_families(&mut fonts);
+        Arc::new(fonts)
+    });
+    svg_to_png_with_fonts(svg, width, height, Arc::clone(fonts))
+}
+
+#[cfg(feature = "png")]
+fn ensure_png_generic_font_families(fonts: &mut usvg::fontdb::Database) {
+    use usvg::fontdb::{Family, Query};
+
+    // A database can contain fonts while its generic aliases still point to absent
+    // platform defaults (Arial, Times New Roman, Courier New). This happens on
+    // minimal Linux installs without fontconfig. usvg then drops otherwise valid
+    // text, including its final serif fallback for an unavailable named family.
+    for (generic, preferred) in [
+        (
+            Family::SansSerif,
+            &[
+                "DejaVu Sans",
+                "Noto Sans",
+                "Liberation Sans",
+                "Arial",
+                "Helvetica",
+            ][..],
+        ),
+        (
+            Family::Serif,
+            &[
+                "DejaVu Serif",
+                "Noto Serif",
+                "Liberation Serif",
+                "Times New Roman",
+            ][..],
+        ),
+        (
+            Family::Monospace,
+            &[
+                "DejaVu Sans Mono",
+                "Noto Sans Mono",
+                "Liberation Mono",
+                "Courier New",
+                "Menlo",
+            ][..],
+        ),
+        (Family::Cursive, &[][..]),
+        (Family::Fantasy, &[][..]),
+    ] {
+        if fonts
+            .query(&Query {
+                families: &[generic],
+                ..Query::default()
+            })
+            .is_some()
+        {
+            continue;
+        }
+        let replacement = preferred
+            .iter()
+            .find(|name| {
+                fonts
+                    .query(&Query {
+                        families: &[Family::Name(name)],
+                        ..Query::default()
+                    })
+                    .is_some()
+            })
+            .map(|name| (*name).to_owned())
+            .or_else(|| {
+                fonts
+                    .faces()
+                    .filter(|face| face.monospaced == (generic == Family::Monospace))
+                    .filter_map(|face| face.families.first().map(|(name, _)| name))
+                    .min()
+                    .cloned()
+            })
+            .or_else(|| {
+                fonts
+                    .faces()
+                    .filter_map(|face| face.families.first().map(|(name, _)| name))
+                    .min()
+                    .cloned()
+            });
+        let Some(replacement) = replacement else {
+            continue;
+        };
+        match generic {
+            Family::SansSerif => fonts.set_sans_serif_family(replacement),
+            Family::Serif => fonts.set_serif_family(replacement),
+            Family::Monospace => fonts.set_monospace_family(replacement),
+            Family::Cursive => fonts.set_cursive_family(replacement),
+            Family::Fantasy => fonts.set_fantasy_family(replacement),
+            Family::Name(_) => unreachable!("only generic families are configured"),
+        }
+    }
+}
+
+#[cfg(feature = "png")]
+fn svg_to_png_with_fonts(
+    svg: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    fonts: Arc<usvg::fontdb::Database>,
+) -> Result<(Vec<u8>, u32, u32)> {
     use resvg::tiny_skia;
     use usvg::{Options, Transform, Tree};
 
-    let opt = Options::default();
+    anyhow::ensure!(
+        !fonts.is_empty() || !svg.contains("<text"),
+        "PNG text rendering requires installed fonts; install a font family such as DejaVu Sans"
+    );
+    let opt = Options {
+        fontdb: fonts,
+        ..Options::default()
+    };
     let tree = Tree::from_str(svg, &opt).context("Failed to parse SVG")?;
 
     let size = tree.size();
@@ -8409,7 +8444,12 @@ fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<(Vec
 
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
-    use super::{resolve_svg_custom_properties_for_rasterization, svg_to_png};
+    use super::{
+        OutputFormat, RenderSurfaceOptions, SvgRenderConfig, TermRenderConfig,
+        build_svg_render_config, ensure_png_generic_font_families, render_format,
+        render_svg_with_layout, svg_to_png, svg_to_png_with_fonts,
+    };
+    use std::sync::Arc;
 
     const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect x="0" y="0" width="100" height="50" fill="#f00"/></svg>"##;
     const ZERO_SVG: &str =
@@ -8447,49 +8487,220 @@ mod png_tests {
     }
 
     #[test]
-    fn png_rasterization_resolves_svg_custom_properties() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>:root {
-  --fm-node-fill: #123456;
-  --fm-node-stroke: #abcdef;
-}
-.fm-box { fill: var(--fm-node-fill, #ffffff); stroke: var(--fm-node-stroke, #000000); }</style><rect class="fm-box" fill="var(--fm-node-fill, #ffffff)" stroke="var(--fm-node-stroke, #000000)" x="0" y="0" width="40" height="20"/></svg>"##;
-
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#123456"));
-        assert!(resolved.contains("#abcdef"));
-        assert!(!resolved.contains("var(--fm-node-fill"));
-        assert!(!resolved.contains("var(--fm-node-stroke"));
+    fn png_rasterization_paints_text_instead_of_dropping_it() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="100">
+<rect width="240" height="100" fill="#ffffff"/>
+<text x="12" y="34" font-family="sans-serif" font-size="24" fill="#000000">Alpha</text>
+<text x="12" y="76" font-family="sans-serif" font-size="20" font-weight="bold" fill="#000000">transfer to Beta</text>
+</svg>"##;
+        let (bytes, width, height) =
+            svg_to_png(svg, None, None).expect("rasterize text with system fonts");
+        assert_eq!((width, height), (240, 100));
+        let image = resvg::tiny_skia::Pixmap::decode_png(&bytes).expect("decode PNG");
+        for (top, bottom) in [(8, 38), (50, 80)] {
+            let ink = (top..bottom)
+                .flat_map(|y| (8..230).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = image.pixel(x, y).expect("inside image");
+                    pixel.red() < 100 && pixel.green() < 100 && pixel.blue() < 100
+                })
+                .count();
+            assert!(
+                ink > 100,
+                "text row {top}..{bottom} is missing: only {ink} dark pixels"
+            );
+        }
     }
 
     #[test]
-    fn png_rasterization_resolves_chained_svg_custom_properties() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>:root {
-  --fm-cluster-stroke: #654321;
-  --fm-edge-muted: var(--fm-cluster-stroke);
-}
-</style><path stroke="var(--fm-edge-muted, #000000)" d="M0 0 L40 20"/></svg>"##;
-
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#654321"));
-        assert!(!resolved.contains("var(--fm-edge-muted"));
+    fn png_fontless_text_fails_explicitly_but_shapes_still_render() {
+        let fonts = Arc::new(usvg::fontdb::Database::new());
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text x="5" y="25">Alpha</text></svg>"#;
+        let error = svg_to_png_with_fonts(svg, None, None, Arc::clone(&fonts)).unwrap_err();
+        assert!(error.to_string().contains("requires installed fonts"));
+        let (_, width, height) = svg_to_png_with_fonts(SIMPLE_SVG, None, None, fonts)
+            .expect("shape-only SVG needs no fonts");
+        assert_eq!((width, height), (100, 50));
     }
 
     #[test]
-    fn png_rasterization_applies_var_fallback_without_style_block() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect fill="var(--fm-missing, #123456)" x="0" y="0" width="40" height="20"/></svg>"##;
+    fn png_text_renders_with_font_files_but_no_fontconfig_aliases() {
+        use usvg::fontdb::{Database, Family, Query};
 
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#123456"));
-        assert!(!resolved.contains("var(--fm-missing"));
+        let mut system_fonts = Database::new();
+        system_fonts.load_system_fonts();
+        let face_id = system_fonts
+            .query(&Query {
+                families: &[
+                    Family::Name("DejaVu Sans"),
+                    Family::Name("Liberation Sans"),
+                    Family::Name("Noto Sans"),
+                    Family::Name("Arial"),
+                    Family::SansSerif,
+                    Family::Serif,
+                    Family::Monospace,
+                ],
+                ..Query::default()
+            })
+            .or_else(|| {
+                system_fonts
+                    .faces()
+                    .find(|face| !face.monospaced && !face.families.is_empty())
+                    .map(|face| face.id)
+            })
+            .or_else(|| system_fonts.faces().next().map(|face| face.id))
+            .expect("PNG tests require at least one installed font");
+        let data = system_fonts
+            .with_face_data(face_id, |bytes, _| bytes.to_vec())
+            .expect("read an installed font");
+
+        // Load only font data into a fresh database: none of the machine's
+        // fontconfig aliases carry across into this regression fixture.
+        let mut fonts = Database::new();
+        fonts.load_font_data(data);
+        let preserved = fonts.faces().next().unwrap().families[0].0.clone();
+        fonts.set_sans_serif_family(preserved.clone());
+        fonts.set_serif_family("fm-absent-serif");
+        fonts.set_monospace_family("fm-absent-monospace");
+        fonts.set_cursive_family("fm-absent-cursive");
+        fonts.set_fantasy_family("fm-absent-fantasy");
+        assert!(
+            fonts
+                .query(&Query {
+                    families: &[Family::Serif],
+                    ..Query::default()
+                })
+                .is_none(),
+            "fixture must expose the missing generic alias"
+        );
+
+        ensure_png_generic_font_families(&mut fonts);
+        assert_eq!(fonts.family_name(&Family::SansSerif), preserved);
+        for generic in [
+            Family::SansSerif,
+            Family::Serif,
+            Family::Monospace,
+            Family::Cursive,
+            Family::Fantasy,
+        ] {
+            assert!(
+                fonts
+                    .query(&Query {
+                        families: &[generic],
+                        ..Query::default()
+                    })
+                    .is_some(),
+                "{generic:?} must resolve to an available face"
+            );
+        }
+
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180">
+<rect width="240" height="180" fill="#ffffff"/>
+<g font-size="20" fill="#000000">
+<text x="12" y="26" font-family="sans-serif">Alpha</text>
+<text x="12" y="56" font-family="serif">Alpha</text>
+<text x="12" y="86" font-family="monospace">Alpha</text>
+<text x="12" y="116" font-family="cursive">Alpha</text>
+<text x="12" y="146" font-family="fantasy">Alpha</text>
+<text x="12" y="176" font-family="fm-absent-named-family">Alpha</text>
+</g></svg>"##;
+        let (bytes, _, _) = svg_to_png_with_fonts(svg, None, None, Arc::new(fonts))
+            .expect("rasterize using repaired generic aliases");
+        let image = resvg::tiny_skia::Pixmap::decode_png(&bytes).expect("decode PNG");
+        for row in 0..6 {
+            let ink = (row * 30..(row + 1) * 30)
+                .flat_map(|y| (8..230).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = image.pixel(x, y).unwrap();
+                    pixel.red() < 100 && pixel.green() < 100 && pixel.blue() < 100
+                })
+                .count();
+            assert!(
+                ink > 40,
+                "font-family row {row} lost its text: {ink} dark pixels"
+            );
+        }
     }
 
     #[test]
-    fn png_rasterization_applies_var_fallback_with_parentheses() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect fill="var(--fm-missing, rgb(18, 52, 86))" x="0" y="0" width="40" height="20"/></svg>"##;
+    fn png_export_preserves_authored_css_fallback_text_and_title() {
+        const LABEL: &str = "var(--fm-text-color, red)";
+        const TITLE: &str = "var(--fm-title, rgb(18, 52, 86))";
+        let mut ir = fm_parser::parse(&format!("flowchart LR\nA[\"{LABEL}\"] --> B[Ready]\n")).ir;
+        ir.meta.title = Some(TITLE.to_owned());
+        ir.meta.title_from_front_matter = true;
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("textColor".into(), "#f1e2d3".into());
+        let layout = fm_layout::layout_diagram(&ir);
 
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("rgb(18, 52, 86)"));
-        assert!(!resolved.contains("var(--fm-missing"));
+        for backend in [
+            fm_render_svg::SvgBackend::LegacyLayout,
+            fm_render_svg::SvgBackend::Scene,
+        ] {
+            // Start with the browser profile so this also exercises PNG's automatic
+            // portable conversion, including literal resolution of generated paints.
+            let base_config = SvgRenderConfig {
+                backend,
+                preserve_labels: true,
+                ..SvgRenderConfig::default()
+            };
+            let mut portable_config =
+                build_svg_render_config(&base_config, "dark", Some(18.0), false);
+            portable_config.make_portable();
+            let svg = render_svg_with_layout(&ir, &layout, &portable_config);
+            assert!(svg.contains(LABEL), "{backend:?}: missing authored label");
+            assert!(svg.contains(TITLE), "{backend:?}: missing authored title");
+            assert!(svg.contains("fill=\"#f1e2d3\""));
+            assert!(
+                !svg.replace(LABEL, "").replace(TITLE, "").contains("var("),
+                "{backend:?}: generated paints must be resolved before rasterization"
+            );
+
+            let (expected_bytes, expected_width, expected_height) =
+                svg_to_png(&svg, None, None).expect("rasterize untouched portable SVG");
+            let expected = resvg::tiny_skia::Pixmap::decode_png(&expected_bytes).unwrap();
+            let (actual_bytes, width, height, _) = render_format(
+                &ir,
+                &layout,
+                OutputFormat::Png,
+                RenderSurfaceOptions {
+                    theme: "dark",
+                    font_size: Some(18.0),
+                    svg_base_config: base_config,
+                    term_base_config: TermRenderConfig::rich(),
+                    show_back_edges: true,
+                    show_minimap: false,
+                    embed_source_spans: false,
+                    dimensions: (None, None),
+                    degradation: fm_core::MermaidDegradationPlan::default(),
+                },
+                false,
+            )
+            .expect("render PNG through the CLI export path");
+            assert_eq!(
+                (width, height),
+                (Some(expected_width), Some(expected_height))
+            );
+            let actual = resvg::tiny_skia::Pixmap::decode_png(&actual_bytes).unwrap();
+            assert!(
+                actual.data() == expected.data(),
+                "{backend:?}: PNG export changed the authored text"
+            );
+
+            // Each string must affect visible pixels, not just accessibility metadata.
+            // These controls reproduce the old whole-document fallback substitution.
+            for (literal, fallback) in [(LABEL, "red"), (TITLE, "rgb(18, 52, 86)")] {
+                let changed_svg = svg.replace(literal, fallback);
+                let (changed_bytes, _, _) = svg_to_png(&changed_svg, None, None).unwrap();
+                let changed = resvg::tiny_skia::Pixmap::decode_png(&changed_bytes).unwrap();
+                assert!(
+                    changed.data() != expected.data(),
+                    "{backend:?}: {literal} must be visible in the regression fixture"
+                );
+            }
+        }
     }
 }
 

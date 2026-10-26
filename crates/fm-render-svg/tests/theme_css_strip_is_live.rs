@@ -20,7 +20,61 @@
 //! a diagram that uses NONE of these features and assert the selectors are absent from the output.
 //! A constant that stops matching then fails loudly here.
 
-use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
+use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset, render_svg_with_config};
+
+#[test]
+fn portable_svg_resolves_band_axis_and_scene_title_colors() {
+    let sources = [
+        "gitGraph\ncommit\nbranch development\ncommit\n",
+        "timeline\ntitle History\n2026 : Started\n2027 : Released\n",
+        "gantt\ntitle Delivery\ndateFormat YYYY-MM-DD\nsection Build\nImplementation : 2026-01-01, 3d\n",
+    ];
+    for source in sources {
+        let mut ir = fm_parser::parse(source).ir;
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("textColor".into(), "#f1e2d3".into());
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("lineColor".into(), "#a1b2c3".into());
+        let mut config = SvgRenderConfig {
+            theme: ThemePreset::Dark,
+            ..SvgRenderConfig::default()
+        };
+        config.make_portable();
+        let svg = render_svg_with_config(&ir, &config);
+        assert!(
+            !svg.contains("var("),
+            "{} has unresolved theme variables",
+            ir.diagram_type.as_str()
+        );
+        assert!(
+            svg.contains("fill=\"#f1e2d3\""),
+            "authored text color was lost"
+        );
+        if ir.diagram_type == fm_core::DiagramType::Gantt {
+            assert!(
+                svg.contains("stroke=\"#a1b2c3\" stroke-width=\"1\""),
+                "tick strokes must use the resolved palette"
+            );
+        }
+        config.backend = SvgBackend::Scene;
+        let scene_svg = render_svg_with_config(&ir, &config);
+        assert!(
+            !scene_svg.contains("var("),
+            "portable scene has unresolved theme variables"
+        );
+    }
+
+    // Resolve paints at their source, without rewriting authored text that resembles CSS.
+    let ir = fm_parser::parse("flowchart LR\nA[\"var(--fm-text-color)\"]\n").ir;
+    let mut config = SvgRenderConfig::default();
+    config.make_portable();
+    let svg = render_svg_with_config(&ir, &config);
+    assert!(svg.contains(">var(--fm-text-color)</"));
+}
 
 /// A plain flowchart: no subgraphs, no note/cloud/cylinder/star/pentagon shape, no dotted or thick
 /// edge. Every gated block is dead weight in its output.

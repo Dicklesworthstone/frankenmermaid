@@ -409,8 +409,8 @@ impl TermRenderer {
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
         // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
-        // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The id-marker
-        // skeleton in `render_outline_mode` remains available for direct callers.
+        // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The legacy
+        // id-marker skeleton is retained only for direct unit-test coverage.
 
         // Use cell-based rendering for Compact tier or CellOnly mode.
         if matches!(self.config.tier, MermaidTier::Compact)
@@ -450,6 +450,7 @@ impl TermRenderer {
     }
 
     /// Render skeleton outline (Outline fidelity mode) for tight viewports or dense graphs.
+    #[cfg(test)]
     fn render_outline_mode(
         &self,
         ir: &MermaidDiagramIr,
@@ -4348,6 +4349,7 @@ fn append_footnote_links(
     (entries.len() + 1, width)
 }
 
+#[cfg(test)]
 fn append_term_debug_overlay(output: &mut String, layout: &DiagramLayout) -> (usize, usize) {
     let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
     let banner = format!(

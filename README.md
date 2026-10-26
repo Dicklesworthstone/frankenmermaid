@@ -282,11 +282,17 @@ default = []
 watch                    = ["dep:notify"]        # File watching for `fm-cli watch`
 serve                    = ["dep:tiny_http"]     # Local preview server for `fm-cli serve`
 png                      = ["dep:resvg", "dep:usvg"]  # PNG rasterization
+highs                    = ["fm-layout/highs"]   # Optional native C++ LP/MIP solver
 fnx-integration          = ["fm-layout/fnx-integration"]               # Phase-1 FNX advisory
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]    # Phase-2 directed FNX
 ```
 
 Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerly git-pinned `franken-kernel` is now consumed from crates.io (currently pinned to `0.3.1`); only the FNX feature still requires a git-pinned dependency on `franken_networkx`.
+
+`fm-layout` and `fm-render-svg` use the pure-Rust microlp solver by default. Authored
+pins, rank/order constraints, minimum edge lengths, and non-overlap constraints remain
+available without a C++ toolchain. Enable `highs` on either library or on
+`frankenmermaid-cli` to use the native HiGHS backend explicitly.
 
 ### Crates.io status
 
@@ -374,6 +380,9 @@ Parse, lay out, and render a diagram.
 # SVG output to a file
 fm-cli render input.mmd --format svg --output diagram.svg
 
+# Static SVG for librsvg, image converters, and document embedding
+fm-cli render input.mmd --format svg --portable --output diagram.svg
+
 # PNG rasterization (requires --features png)
 fm-cli render input.mmd --format png --output diagram.png
 
@@ -398,6 +407,18 @@ fm-cli render input.mmd --format svg \
 ```
 
 Render-time flags include `--parse-mode {strict|compat|recover}`, `--layout-algorithm {auto|sugiyama|force|tree|radial|timeline|gantt|sankey|kanban|grid}` (the 10 most useful general-purpose algorithms; the 6 chart-style layouts — `sequence`, `xychart`, `pie`, `quadrant`, `gitgraph`, `packet` — are auto-dispatched per diagram type and can also be selected by name in `frankenmermaid.toml`), and FNX controls (`--fnx-mode {auto|enabled|disabled}`, `--fnx-projection {undirected|directed}`, `--fnx-fallback {graceful|strict}`).
+
+Default SVG output uses browser CSS for themes and interactive effects. `--portable`
+emits explicit dimensions and colors, retaining text, links, and accessibility metadata
+while disabling browser-dependent CSS and effects. It also works with `render-batch`;
+set `portable = true` under `[svg]` in the TOML config to make it the default. Library
+callers can apply the same profile with `SvgRenderConfig::make_portable()`.
+
+PNG export uses this static profile and loads installed system fonts before rasterizing
+labels. Install a family such as DejaVu Sans in minimal containers. A text-bearing export
+with no installed fonts reports an error. Use the same font installation when comparing
+PNG snapshots across machines; SVG font selection and PNG glyph shapes depend on the
+available fonts.
 
 ### `fm-cli parse`
 
@@ -2327,6 +2348,7 @@ Yes. The parser is explicitly designed to recover and produce best-effort output
 | Use case | Format |
 |---|---|
 | Documentation / web embedding | `svg` |
+| Image converters / document embedding | `svg --portable` |
 | Static image sharing | `png` (requires `--features png`) |
 | CI logs / terminal preview | `term` or `ascii` |
 | Large interactive browser views | Canvas2D via the WASM `Diagram` class |

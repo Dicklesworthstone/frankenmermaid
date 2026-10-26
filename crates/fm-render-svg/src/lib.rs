@@ -222,6 +222,22 @@ pub struct SvgRenderConfig {
 }
 
 impl SvgRenderConfig {
+    /// Use explicit presentation attributes and dimensions for static SVG consumers.
+    ///
+    /// Image converters such as resvg and librsvg do not implement every browser CSS
+    /// feature. This disables theme custom properties, responsive sizing, animations,
+    /// and effects that require browser styling while retaining labels, links, source
+    /// metadata, and accessible titles/descriptions. PNG export uses the same profile.
+    pub fn make_portable(&mut self) {
+        self.responsive = false;
+        self.embed_theme_css = false;
+        self.animations_enabled = false;
+        self.print_optimized = false;
+        self.shadows = false;
+        self.glow_enabled = false;
+        self.a11y.accessibility_css = false;
+    }
+
     /// Apply a degradation plan to this config, disabling visual effects as directed.
     pub fn apply_degradation(&mut self, plan: &fm_core::MermaidDegradationPlan) {
         if plan.reduce_decoration {
@@ -2056,6 +2072,7 @@ fn render_scene_document_with_ir(
     ir: Option<&MermaidDiagramIr>,
 ) -> String {
     let padding = config.padding;
+    let theme = resolve_theme(ir, config);
     let planned_journey_title = scene.root.children.iter().any(|item| {
         matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("journey-title"))
     });
@@ -2087,6 +2104,8 @@ fn render_scene_document_with_ir(
 
     if config.responsive {
         doc = doc.responsive();
+    } else {
+        doc = doc.width(&width.to_string()).height(&height.to_string());
     }
 
     let (group_count, path_count, text_count) = count_scene_items(&scene.root);
@@ -2116,7 +2135,11 @@ fn render_scene_document_with_ir(
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
-                .fill("var(--fm-text-color, #1f2937)")
+                .fill(if config.embed_theme_css {
+                    "var(--fm-text-color, #1f2937)"
+                } else {
+                    &theme.colors.text
+                })
                 .class("fm-diagram-title")
                 .build(),
         );
@@ -2142,7 +2165,6 @@ fn render_scene_document_with_ir(
     let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
 
-    let theme = resolve_theme(ir, config);
     let classdef_css = ir.map_or(String::new(), collect_classdef_css);
 
     let mut css = String::new();
@@ -4506,6 +4528,8 @@ fn render_layout_to_svg(
 
     if config.responsive {
         doc = doc.responsive();
+    } else {
+        doc = doc.width(&width.to_string()).height(&height.to_string());
     }
 
     if config.accessible {
@@ -4907,9 +4931,23 @@ fn render_layout_to_svg(
             if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {
                 let mut unlabelled = band.clone();
                 unlabelled.label.clear();
-                write_layout_band_into(&mut bands_svg, &unlabelled, offset_x, offset_y, config);
+                write_layout_band_into(
+                    &mut bands_svg,
+                    &unlabelled,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
             } else {
-                write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+                write_layout_band_into(
+                    &mut bands_svg,
+                    band,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
             }
         }
         doc = doc.child(Element::raw_svg(bands_svg));
@@ -4963,6 +5001,7 @@ fn render_layout_to_svg(
                 tick.position + offset_x,
                 tick_y,
                 config,
+                &theme.colors,
             );
         }
         doc = doc.child(Element::raw_svg(ticks_svg));
@@ -6509,8 +6548,14 @@ fn write_layout_band_into(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let text_color = if config.embed_theme_css {
+        "var(--fm-text-color, #4a5568)"
+    } else {
+        &colors.text
+    };
     let (fill, stroke, class_name) = match band.kind {
         LayoutBandKind::Section => (
             "rgba(191,219,254,0.18)",
@@ -6565,7 +6610,7 @@ fn write_layout_band_into(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
-                .fill("var(--fm-text-color, #4a5568)")
+                .fill(text_color)
                 .class("fm-band-label")
                 .build()
                 .write_to_string(out);
@@ -6585,7 +6630,9 @@ fn write_layout_band_into(
                 out,
                 clamp_font_size(config.font_size * 0.82, config.min_font_size),
             );
-            out.push_str("\" fill=\"var(--fm-text-color, #4a5568)\" class=\"fm-band-label\">");
+            out.push_str("\" fill=\"");
+            let _ = write_escaped_attr(out, text_color);
+            out.push_str("\" class=\"fm-band-label\">");
             let _ = write_escaped_text(out, &band.label);
             out.push_str("</text>");
         }
@@ -6601,6 +6648,7 @@ fn render_layout_band(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) -> Element {
     let (fill, stroke, class_name) = match band.kind {
         LayoutBandKind::Section => (
@@ -6641,7 +6689,11 @@ fn render_layout_band(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
-                .fill("var(--fm-text-color, #4a5568)")
+                .fill(if config.embed_theme_css {
+                    "var(--fm-text-color, #4a5568)"
+                } else {
+                    &colors.text
+                })
                 .class("fm-band-label")
                 .build(),
         );
@@ -6662,8 +6714,19 @@ fn write_layout_axis_tick_into(
     x: f32,
     y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let edge_color = if config.embed_theme_css {
+        "var(--fm-edge-color, #94a3b8)"
+    } else {
+        &colors.edge
+    };
+    let text_color = if config.embed_theme_css {
+        "var(--fm-text-color, #64748b)"
+    } else {
+        &colors.text
+    };
     out.push_str("<g class=\"fm-axis-tick\"><line x1=\"");
     let _ = write_number_into(out, x);
     out.push_str("\" y1=\"");
@@ -6672,7 +6735,9 @@ fn write_layout_axis_tick_into(
     let _ = write_number_into(out, x);
     out.push_str("\" y2=\"");
     let _ = write_number_into(out, y + 16.0);
-    out.push_str("\" stroke=\"var(--fm-edge-color, #94a3b8)\" stroke-width=\"1\"/><text x=\"");
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, edge_color);
+    out.push_str("\" stroke-width=\"1\"/><text x=\"");
     let _ = write_number_into(out, x + 3.0);
     out.push_str("\" y=\"");
     let _ = write_number_into(out, y);
@@ -6687,7 +6752,9 @@ fn write_layout_axis_tick_into(
         out,
         clamp_font_size(config.font_size * 0.72, config.min_font_size),
     );
-    out.push_str("\" fill=\"var(--fm-text-color, #64748b)\" class=\"fm-axis-tick-label\">");
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, text_color);
+    out.push_str("\" class=\"fm-axis-tick-label\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text></g>");
 }
@@ -6695,7 +6762,13 @@ fn write_layout_axis_tick_into(
 /// The `Element`-building axis-tick renderer, superseded by [`write_layout_axis_tick_into`] on the render
 /// path and retained only as the byte-identity oracle for `layout_axis_tick_streaming_matches_element`.
 #[cfg(test)]
-fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig) -> Element {
+fn render_layout_axis_tick(
+    label: &str,
+    x: f32,
+    y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Element {
     let mut group = Element::group().class("fm-axis-tick");
     group = group.child(
         Element::line()
@@ -6703,7 +6776,11 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
             .y1(y + 4.0)
             .x2(x)
             .y2(y + 16.0)
-            .stroke("var(--fm-edge-color, #94a3b8)")
+            .stroke(if config.embed_theme_css {
+                "var(--fm-edge-color, #94a3b8)"
+            } else {
+                &colors.edge
+            })
             .stroke_width(1.0),
     );
     group.child(
@@ -6715,7 +6792,11 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
                 config.font_size * 0.72,
                 config.min_font_size,
             ))
-            .fill("var(--fm-text-color, #64748b)")
+            .fill(if config.embed_theme_css {
+                "var(--fm-text-color, #64748b)"
+            } else {
+                &colors.text
+            })
             .class("fm-axis-tick-label")
             .build(),
     )
@@ -7524,6 +7605,7 @@ fn render_gantt_svg(
                     tick.position + offset_x,
                     axis.y + offset_y,
                     config,
+                    &theme.colors,
                 );
             }
             ticks_svg.push_str("</g>");
@@ -21601,9 +21683,11 @@ mod tests {
                         },
                     };
                     let mut streamed = String::new();
-                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
+                    let colors = resolve_theme(None, &config).colors;
+                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config, &colors);
                     let mut slow = String::new();
-                    render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
+                    render_layout_band(&band, 3.0, 5.0, &config, &colors)
+                        .write_to_string(&mut slow);
                     assert_eq!(
                         streamed, slow,
                         "band kind {kind:?} embed {embed} label {label:?}"
@@ -21625,9 +21709,11 @@ mod tests {
             };
             for label in ["2026-02-01", "a<b>&c"] {
                 let mut streamed = String::new();
-                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config);
+                let colors = resolve_theme(None, &config).colors;
+                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config, &colors);
                 let mut slow = String::new();
-                render_layout_axis_tick(label, 42.5, 17.0, &config).write_to_string(&mut slow);
+                render_layout_axis_tick(label, 42.5, 17.0, &config, &colors)
+                    .write_to_string(&mut slow);
                 assert_eq!(streamed, slow, "embed {embed} label {label:?}");
             }
         }
