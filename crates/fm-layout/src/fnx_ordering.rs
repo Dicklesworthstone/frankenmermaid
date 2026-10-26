@@ -12,8 +12,9 @@ use std::hash::Hash;
 
 use fm_core::{IrEndpoint, MermaidDiagramIr};
 use fnx_algorithms::degree_centrality;
+use fnx_classes::Graph;
 
-use crate::fnx_adapter::{ProjectionConfig, ir_to_graph};
+use crate::fnx_adapter::{ProjectionConfig, ProjectionTable, ir_to_graph, ir_to_graph_with_policy};
 
 // ============================================================================
 // Quantization Policy
@@ -94,7 +95,30 @@ pub fn compute_centrality_scores(ir: &MermaidDiagramIr) -> NodeCentralityScores 
     }
 
     let (graph, table) = ir_to_graph(ir);
-    let centrality_result = degree_centrality(&graph);
+    quantized_degree_scores(&graph, &table)
+}
+
+/// Compute centrality scores with a specific projection configuration.
+///
+/// Self-loop retention changes the projected topology and therefore the degree scores. These
+/// remain unweighted degree scores: policies that change edge weights, and parallel-edge weight
+/// aggregation, do not turn them into weighted centrality. Parallel connections count once in
+/// the simple projected graph, and port endpoints resolve to their owning IR nodes.
+#[must_use]
+pub fn compute_centrality_scores_with_config(
+    ir: &MermaidDiagramIr,
+    config: &ProjectionConfig,
+) -> NodeCentralityScores {
+    if ir.nodes.is_empty() {
+        return NodeCentralityScores::default();
+    }
+
+    let (graph, table, _) = ir_to_graph_with_policy(ir, config);
+    quantized_degree_scores(&graph, &table)
+}
+
+fn quantized_degree_scores(graph: &Graph, table: &ProjectionTable) -> NodeCentralityScores {
+    let centrality_result = degree_centrality(graph);
 
     let mut scores = NodeCentralityScores {
         degree: BTreeMap::new(),
@@ -111,17 +135,6 @@ pub fn compute_centrality_scores(ir: &MermaidDiagramIr) -> NodeCentralityScores 
 
     scores
 }
-
-/// Compute centrality scores with a specific projection configuration.
-#[must_use]
-pub fn compute_centrality_scores_with_config(
-    ir: &MermaidDiagramIr,
-    _config: &ProjectionConfig,
-) -> NodeCentralityScores {
-    // For now, use default projection. In future, use config to customize.
-    compute_centrality_scores(ir)
-}
-
 // ============================================================================
 // Ordering Integration
 // ============================================================================
@@ -301,7 +314,8 @@ pub fn classify_centrality_tiers(scores: &NodeCentralityScores) -> Vec<NodeCentr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{IrEdge, IrNode, IrNodeId, NodeShape};
+    use crate::fnx_adapter::DirectedProjectionPolicy;
+    use fm_core::{IrEdge, IrNode, IrNodeId, IrPort, IrPortId, NodeShape};
 
     fn make_chain_ir() -> MermaidDiagramIr {
         // A -> B -> C (B has highest centrality)
@@ -427,6 +441,167 @@ mod tests {
 
         assert!(b_score >= a_score);
         assert!(b_score >= c_score);
+    }
+
+    #[test]
+    fn configured_centrality_removes_self_loops_before_ordering() {
+        let mut ir = make_chain_ir();
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+
+        let preserved = compute_centrality_scores_with_config(&ir, &ProjectionConfig::default());
+        let removed = compute_centrality_scores_with_config(
+            &ir,
+            &ProjectionConfig {
+                preserve_self_loops: false,
+                ..Default::default()
+            },
+        );
+
+        // The loop contributes two to A's degree. Without it A has one neighbor out of two,
+        // while B has both. The configured scores must actually change ordering at a tie.
+        assert_eq!(preserved.get_degree(0).raw(), 10_000);
+        assert_eq!(removed.get_degree(0).raw(), 5_000);
+        assert_eq!(removed.get_degree(1).raw(), 10_000);
+        assert_eq!(removed.get_degree(2).raw(), 5_000);
+        assert_eq!(
+            compare_with_centrality((0, Some(1.0), 0), (1, Some(1.0), 1), &preserved),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_with_centrality((0, Some(1.0), 0), (1, Some(1.0), 1), &removed),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(preserved.degree, compute_centrality_scores(&ir).degree);
+    }
+
+    #[test]
+    fn configured_centrality_resolves_ports_and_rejects_invalid_endpoints() {
+        let mut ir = make_chain_ir();
+        ir.nodes.push(IrNode {
+            id: String::from("isolated"),
+            ..Default::default()
+        });
+        ir.ports = vec![
+            IrPort {
+                node: IrNodeId(1),
+                ..Default::default()
+            },
+            IrPort {
+                node: IrNodeId(0),
+                ..Default::default()
+            },
+            IrPort {
+                node: IrNodeId(0),
+                ..Default::default()
+            },
+            IrPort {
+                node: IrNodeId(usize::MAX),
+                ..Default::default()
+            },
+        ];
+        ir.edges[0].to = IrEndpoint::Port(IrPortId(0));
+        ir.edges[1].from = IrEndpoint::Port(IrPortId(0));
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Port(IrPortId(1)),
+            to: IrEndpoint::Port(IrPortId(2)),
+            ..Default::default()
+        });
+        for invalid in [
+            IrEndpoint::Node(IrNodeId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(3)),
+            IrEndpoint::Unresolved,
+        ] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(2)),
+                to: invalid,
+                ..Default::default()
+            });
+        }
+
+        let config = ProjectionConfig {
+            preserve_self_loops: false,
+            ..Default::default()
+        };
+        let scores = compute_centrality_scores_with_config(&ir, &config);
+        assert!(scores.computed);
+        assert_eq!(
+            scores.degree.len(),
+            4,
+            "invalid endpoints must not add nodes"
+        );
+        assert_eq!(scores.get_degree(0).raw(), 3_333);
+        assert_eq!(scores.get_degree(1).raw(), 6_666);
+        assert_eq!(scores.get_degree(2).raw(), 3_333);
+        assert_eq!(scores.get_degree(3).raw(), 0);
+        assert_eq!(
+            scores.degree,
+            compute_centrality_scores_with_config(&ir, &config).degree
+        );
+
+        let preserved = compute_centrality_scores_with_config(&ir, &ProjectionConfig::default());
+        assert_eq!(preserved.get_degree(0).raw(), 10_000);
+        assert_eq!(preserved.degree, compute_centrality_scores(&ir).degree);
+    }
+
+    #[test]
+    fn configured_centrality_keeps_degree_unweighted() {
+        let mut ir = make_chain_ir();
+        // Reverse and parallel declarations remain one connection in a simple graph.
+        ir.edges.push(ir.edges[0].clone());
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+
+        for directed_policy in [
+            DirectedProjectionPolicy::IgnoreDirection,
+            DirectedProjectionPolicy::BidirectionalHalfWeight,
+            DirectedProjectionPolicy::BidirectionalFullWeight,
+            DirectedProjectionPolicy::PenaltyWeighted,
+        ] {
+            for collapse_parallel_edges in [false, true] {
+                let scores = compute_centrality_scores_with_config(
+                    &ir,
+                    &ProjectionConfig {
+                        directed_policy,
+                        penalty_factor: 0.25,
+                        collapse_parallel_edges,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(scores.get_degree(0).raw(), 5_000);
+                assert_eq!(scores.get_degree(1).raw(), 10_000);
+                assert_eq!(scores.get_degree(2).raw(), 5_000);
+            }
+        }
+    }
+
+    #[test]
+    fn configured_centrality_handles_empty_and_singleton_graphs() {
+        let config = ProjectionConfig {
+            preserve_self_loops: false,
+            ..Default::default()
+        };
+        let mut ir = MermaidDiagramIr::default();
+        let empty = compute_centrality_scores_with_config(&ir, &config);
+        assert!(!empty.computed);
+        assert!(empty.is_empty());
+
+        ir.nodes.push(IrNode {
+            id: String::from("only"),
+            ..Default::default()
+        });
+        let singleton = compute_centrality_scores_with_config(&ir, &config);
+        assert!(singleton.computed);
+        assert_eq!(singleton.degree.len(), 1);
+        assert_eq!(singleton.get_degree(0).raw(), 10_000);
+        assert_eq!(singleton.degree, compute_centrality_scores(&ir).degree);
     }
 
     #[test]

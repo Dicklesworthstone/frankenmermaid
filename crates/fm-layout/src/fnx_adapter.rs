@@ -483,7 +483,7 @@ impl ProjectionTable {
         self.edge_meta_by_index.get(&ir_edge_index)
     }
 
-    /// Check determinism: verify counts match expected.
+    /// Verify the source IR counts, before projection removes or merges edges.
     #[must_use]
     pub fn verify_counts(&self, expected_nodes: usize, expected_edges: usize) -> bool {
         self.node_count == expected_nodes && self.edge_count == expected_edges
@@ -647,7 +647,7 @@ pub fn ir_to_graph(ir: &MermaidDiagramIr) -> (Graph, ProjectionTable) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{IrEdge, IrLabel, IrNode, IrNodeId, NodeShape, Span};
+    use fm_core::{IrEdge, IrLabel, IrNode, IrNodeId, IrPort, IrPortId, NodeShape, Span};
 
     fn make_test_ir() -> MermaidDiagramIr {
         // Create labels first
@@ -901,5 +901,134 @@ mod tests {
         // Verify valid/invalid diagnostics are populated
         assert!(trace.valid_diagnostics.contains(&"weighted_centrality"));
         assert!(trace.invalid_diagnostics.contains(&"exact_reachability"));
+    }
+
+    #[test]
+    fn projection_policy_preserves_configured_weights_and_source_counts() {
+        let mut ir = make_test_ir();
+        ir.edges.push(ir.edges[0].clone());
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            ..Default::default()
+        });
+
+        for (directed_policy, edge_weight) in [
+            (DirectedProjectionPolicy::IgnoreDirection, 1.0),
+            (DirectedProjectionPolicy::BidirectionalHalfWeight, 0.5),
+            (DirectedProjectionPolicy::BidirectionalFullWeight, 1.0),
+            (DirectedProjectionPolicy::PenaltyWeighted, 0.25),
+        ] {
+            for collapse_parallel_edges in [false, true] {
+                let config = ProjectionConfig {
+                    directed_policy,
+                    penalty_factor: 0.25,
+                    preserve_self_loops: false,
+                    collapse_parallel_edges,
+                };
+                let (graph, table, trace) = ir_to_graph_with_policy(&ir, &config);
+                let expected_weight = edge_weight * if collapse_parallel_edges { 3.0 } else { 1.0 };
+
+                assert_eq!(graph.node_count(), 3);
+                assert_eq!(graph.edge_count(), 2);
+                assert!(graph.has_edge("n0", "n1"));
+                assert!(graph.has_edge("n1", "n2"));
+                assert!(!graph.has_edge("n1", "n1"));
+                assert_eq!(trace.directed_edge_count, 5);
+                assert_eq!(trace.undirected_edge_count, 2);
+                assert_eq!(trace.collapsed_parallel_count, 2);
+                assert_eq!(trace.self_loop_count, 1);
+                assert!(table.verify_counts(3, 5));
+                assert!(!table.verify_counts(3, 2));
+                let meta = table.get_edge_meta("n0", "n1").expect("projected edge");
+                assert_eq!(meta.ir_edge_index, 0);
+                assert_eq!(meta.label.as_deref(), Some("edge 1"));
+                assert_eq!(meta.weight, expected_weight);
+                assert_eq!(
+                    graph
+                        .edge_attrs("n0", "n1")
+                        .and_then(|attrs| attrs.get("weight")),
+                    Some(&CgseValue::Float(expected_weight))
+                );
+                assert_eq!(
+                    graph
+                        .edge_attrs("n1", "n2")
+                        .and_then(|attrs| attrs.get("weight")),
+                    Some(&CgseValue::Float(edge_weight))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projections_resolve_port_owners_without_creating_invalid_nodes() {
+        let mut ir = make_test_ir();
+        ir.ports = vec![
+            IrPort {
+                node: IrNodeId(1),
+                ..Default::default()
+            },
+            IrPort {
+                node: IrNodeId(0),
+                ..Default::default()
+            },
+            IrPort {
+                node: IrNodeId(usize::MAX),
+                ..Default::default()
+            },
+        ];
+        ir.edges[0].to = IrEndpoint::Port(IrPortId(0));
+        ir.edges[1].from = IrEndpoint::Port(IrPortId(0));
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Port(IrPortId(1)),
+            ..Default::default()
+        });
+        for invalid in [
+            IrEndpoint::Port(IrPortId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(2)),
+            IrEndpoint::Node(IrNodeId(usize::MAX)),
+            IrEndpoint::Unresolved,
+        ] {
+            ir.edges.push(IrEdge {
+                from: invalid,
+                to: IrEndpoint::Node(IrNodeId(2)),
+                ..Default::default()
+            });
+        }
+
+        let (directed, directed_table) = ir_to_digraph(&ir);
+        assert_eq!(directed.node_count(), 3);
+        assert_eq!(directed.edge_count(), 3);
+        assert!(directed.has_edge("n0", "n1"));
+        assert!(!directed.has_edge("n1", "n0"));
+        assert!(directed.has_edge("n1", "n2"));
+        assert!(directed.has_edge("n0", "n0"));
+        assert!(directed_table.verify_counts(3, 7));
+        assert!(directed_table.get_edge_meta_by_index(3).is_none());
+
+        let (undirected, table, trace) = ir_to_graph_with_policy(
+            &ir,
+            &ProjectionConfig {
+                preserve_self_loops: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(undirected.node_count(), 3);
+        assert_eq!(undirected.edge_count(), 2);
+        assert!(undirected.has_edge("n0", "n1"));
+        assert!(undirected.has_edge("n1", "n2"));
+        assert!(!undirected.has_edge("n0", "n0"));
+        assert_eq!(trace.directed_edge_count, 3);
+        assert_eq!(trace.undirected_edge_count, 2);
+        assert_eq!(trace.self_loop_count, 1);
+        assert!(table.verify_counts(3, 7));
+        assert!(table.get_edge_meta_by_index(2).is_none());
+        assert!(table.get_edge_meta_by_index(3).is_none());
     }
 }
