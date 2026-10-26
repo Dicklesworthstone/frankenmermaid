@@ -27,8 +27,9 @@
 //! device layer is bd-2u0.2's next step; this is the part that can be proven correct headlessly.
 
 use crate::gpu_plan::{
-    ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance,
-    GpuRenderPlan, GpuTextQuad, GpuTriangleInstance, NODE_SDF_WGSL, TEXT_ATLAS_WGSL, TRIANGLE_WGSL,
+    ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance, GpuPieWedge,
+    GpuRenderPlan, GpuTextQuad, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL,
+    TEXT_ATLAS_WGSL, TRIANGLE_WGSL,
 };
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
@@ -105,6 +106,40 @@ pub enum PrimitiveFamily {
     XyArea,
     /// XY bars, beneath line series and their point markers.
     XyBar,
+    /// Subgraph containers behind their contents.
+    Cluster,
+    /// Sequence lifelines and other layout lanes.
+    BandLane,
+    /// Filled section backgrounds in journey, Gantt, and related layouts.
+    BandSection,
+    /// Column separators in banded layouts.
+    BandColumn,
+    /// Nested treemap tile outlines.
+    TreemapTile,
+    /// Radar rings, spokes, and series outlines.
+    Radar,
+    /// Layout-provided axis ticks.
+    AxisTick,
+    /// Dashed dividers inside composite states and subgraphs.
+    ClusterDivider,
+    /// State-note attachment lines, underneath their note boxes.
+    StateNoteLeader,
+    /// State-note boxes.
+    StateNote,
+    /// Mirrored sequence participant headers.
+    MirrorHeader,
+    /// Packet fields continuing onto another row.
+    PacketFieldContinuation,
+    /// Sequence activation rectangles over the lifelines.
+    Activation,
+    /// Sequence destruction crosses.
+    LifecycleMarker,
+    /// Sequence-note boxes above fragment backgrounds.
+    SequenceNote,
+    /// ER crow's-foot cardinality outlines, above their connector lines.
+    ErMarker,
+    /// Quantitative pie sectors.
+    Pie,
     /// Node boxes, drawn as SDF quads.
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
@@ -123,6 +158,70 @@ pub enum PrimitiveFamily {
     SequenceFragmentBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
+}
+
+/// Borrowed geometry for one submission layer. Both the batch count and the device upload read
+/// this mapping, so a populated plan buffer cannot acquire a count without its actual bytes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PrimitiveInstances<'a> {
+    Nodes(&'a [GpuNodeInstance]),
+    Edges(&'a [GpuEdgeSegment]),
+    Triangles(&'a [GpuTriangleInstance]),
+    Arrowheads(&'a [GpuArrowheadInstance]),
+    Pies(&'a [GpuPieWedge]),
+    Text(&'a [GpuTextQuad]),
+}
+
+impl PrimitiveInstances<'_> {
+    pub(crate) const fn len(self) -> usize {
+        match self {
+            Self::Nodes(instances) => instances.len(),
+            Self::Edges(instances) => instances.len(),
+            Self::Triangles(instances) => instances.len(),
+            Self::Arrowheads(instances) => instances.len(),
+            Self::Pies(instances) => instances.len(),
+            Self::Text(instances) => instances.len(),
+        }
+    }
+}
+
+impl PrimitiveFamily {
+    pub(crate) fn instances(self, plan: &GpuRenderPlan) -> PrimitiveInstances<'_> {
+        match self {
+            Self::XyPlot => PrimitiveInstances::Nodes(&plan.xy_plot_instances),
+            Self::XyAxis => PrimitiveInstances::Edges(&plan.xy_axis_segments),
+            Self::XyArea => PrimitiveInstances::Triangles(&plan.xy_area_triangles),
+            Self::XyBar => PrimitiveInstances::Nodes(&plan.xy_bar_instances),
+            Self::Cluster => PrimitiveInstances::Nodes(&plan.cluster_instances),
+            Self::BandLane => PrimitiveInstances::Edges(&plan.band_lane_segments),
+            Self::BandSection => PrimitiveInstances::Nodes(&plan.band_section_instances),
+            Self::BandColumn => PrimitiveInstances::Edges(&plan.band_column_segments),
+            Self::TreemapTile => PrimitiveInstances::Nodes(&plan.treemap_tile_instances),
+            Self::Radar => PrimitiveInstances::Edges(&plan.radar_segments),
+            Self::AxisTick => PrimitiveInstances::Edges(&plan.axis_tick_segments),
+            Self::ClusterDivider => PrimitiveInstances::Edges(&plan.cluster_divider_segments),
+            Self::StateNoteLeader => PrimitiveInstances::Edges(&plan.state_note_leader_segments),
+            Self::StateNote => PrimitiveInstances::Nodes(&plan.state_note_instances),
+            Self::MirrorHeader => PrimitiveInstances::Nodes(&plan.mirror_header_instances),
+            Self::PacketFieldContinuation => {
+                PrimitiveInstances::Nodes(&plan.packet_field_continuation_instances)
+            }
+            Self::Activation => PrimitiveInstances::Nodes(&plan.activation_instances),
+            Self::LifecycleMarker => PrimitiveInstances::Edges(&plan.lifecycle_marker_segments),
+            Self::SequenceFragment => PrimitiveInstances::Nodes(&plan.sequence_fragment_instances),
+            Self::SequenceFragmentBorder => {
+                PrimitiveInstances::Edges(&plan.sequence_fragment_border_segments)
+            }
+            Self::SequenceNote => PrimitiveInstances::Nodes(&plan.sequence_note_instances),
+            Self::Edge => PrimitiveInstances::Edges(&plan.edge_segments),
+            Self::Arrowhead => PrimitiveInstances::Arrowheads(&plan.arrowheads),
+            Self::ErMarker => PrimitiveInstances::Edges(&plan.er_marker_segments),
+            Self::Pie => PrimitiveInstances::Pies(&plan.pie_wedges),
+            Self::Node => PrimitiveInstances::Nodes(&plan.node_instances),
+            Self::NodeBorder => PrimitiveInstances::Edges(&plan.node_border_segments),
+            Self::Text => PrimitiveInstances::Text(&plan.text_quads),
+        }
+    }
 }
 
 /// Everything a caller needs to build one render pipeline, minus the device.
@@ -425,20 +524,56 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 11] {
+pub const fn pipelines() -> [PipelineDescriptor; 28] {
     [
         xy_plot_pipeline(),
         xy_axis_pipeline(),
         xy_area_pipeline(),
         xy_bar_pipeline(),
+        node_family(PrimitiveFamily::Cluster, "fm-cluster"),
+        edge_family(PrimitiveFamily::BandLane, "fm-band-lane"),
+        node_family(PrimitiveFamily::BandSection, "fm-band-section"),
+        edge_family(PrimitiveFamily::BandColumn, "fm-band-column"),
+        node_family(PrimitiveFamily::TreemapTile, "fm-treemap-tile"),
+        edge_family(PrimitiveFamily::Radar, "fm-radar"),
+        edge_family(PrimitiveFamily::AxisTick, "fm-axis-tick"),
+        edge_family(PrimitiveFamily::ClusterDivider, "fm-cluster-divider"),
+        edge_family(PrimitiveFamily::StateNoteLeader, "fm-state-note-leader"),
+        node_family(PrimitiveFamily::StateNote, "fm-state-note"),
+        node_family(PrimitiveFamily::MirrorHeader, "fm-mirror-header"),
+        node_family(
+            PrimitiveFamily::PacketFieldContinuation,
+            "fm-packet-continuation",
+        ),
+        node_family(PrimitiveFamily::Activation, "fm-activation"),
+        edge_family(PrimitiveFamily::LifecycleMarker, "fm-lifecycle-marker"),
         sequence_fragment_pipeline(),
         sequence_fragment_border_pipeline(),
+        node_family(PrimitiveFamily::SequenceNote, "fm-sequence-note"),
         edge_pipeline(),
         arrowhead_pipeline(),
+        edge_family(PrimitiveFamily::ErMarker, "fm-er-marker"),
+        pie_pipeline(),
         node_pipeline(),
         node_border_pipeline(),
         text_pipeline(),
     ]
+}
+
+const fn node_family(family: PrimitiveFamily, label: &'static str) -> PipelineDescriptor {
+    PipelineDescriptor {
+        family,
+        label,
+        ..node_pipeline()
+    }
+}
+
+const fn edge_family(family: PrimitiveFamily, label: &'static str) -> PipelineDescriptor {
+    PipelineDescriptor {
+        family,
+        label,
+        ..edge_pipeline()
+    }
 }
 
 /// XY plot backgrounds use the ordinary rectangle SDF.
@@ -514,6 +649,73 @@ pub const fn xy_area_pipeline() -> PipelineDescriptor {
     }
 }
 
+const PIE_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        shader_location: 0,
+        offset: core::mem::offset_of!(GpuPieWedge, center) as u64,
+        format: VertexFormat::Float32x2,
+        name: "center",
+    },
+    VertexAttribute {
+        shader_location: 1,
+        offset: core::mem::offset_of!(GpuPieWedge, radius) as u64,
+        format: VertexFormat::Float32,
+        name: "radius",
+    },
+    VertexAttribute {
+        shader_location: 2,
+        offset: core::mem::offset_of!(GpuPieWedge, start_angle) as u64,
+        format: VertexFormat::Float32,
+        name: "start_angle",
+    },
+    VertexAttribute {
+        shader_location: 3,
+        offset: core::mem::offset_of!(GpuPieWedge, sweep_angle) as u64,
+        format: VertexFormat::Float32,
+        name: "sweep_angle",
+    },
+    VertexAttribute {
+        shader_location: 4,
+        offset: core::mem::offset_of!(GpuPieWedge, fill) as u64,
+        format: VertexFormat::Float32x4,
+        name: "fill",
+    },
+    VertexAttribute {
+        shader_location: 5,
+        offset: core::mem::offset_of!(GpuPieWedge, stroke) as u64,
+        format: VertexFormat::Float32x4,
+        name: "stroke",
+    },
+    VertexAttribute {
+        shader_location: 6,
+        offset: core::mem::offset_of!(GpuPieWedge, stroke_width) as u64,
+        format: VertexFormat::Float32,
+        name: "stroke_width",
+    },
+    VertexAttribute {
+        shader_location: 7,
+        offset: core::mem::offset_of!(GpuPieWedge, slice_index) as u64,
+        format: VertexFormat::Uint32,
+        name: "slice_index",
+    },
+];
+
+/// One sector per instance, retaining the planned quantitative angles, fill, and outline.
+#[must_use]
+pub const fn pie_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-pie-wedge",
+        family: PrimitiveFamily::Pie,
+        wgsl: PIE_WEDGE_WGSL,
+        instance: InstanceLayout {
+            array_stride: size_of::<GpuPieWedge>() as u64,
+            attributes: PIE_ATTRIBUTES,
+        },
+        vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        samples_atlas: false,
+    }
+}
+
 /// Sequence interaction-frame fills use the ordinary rect SDF before message edges.
 #[must_use]
 pub const fn sequence_fragment_pipeline() -> PipelineDescriptor {
@@ -584,88 +786,18 @@ impl DrawBatch {
 /// the batch list is what a caller inspects when a diagram renders blank.
 #[must_use]
 pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
-    let mut batches = Vec::new();
-    for (family, count, vertices_per_instance) in [
-        (
-            PrimitiveFamily::XyPlot,
-            plan.xy_plot_instances.len(),
-            QUAD_VERTICES_PER_INSTANCE,
-        ),
-        (
-            PrimitiveFamily::XyAxis,
-            plan.xy_axis_segments.len(),
-            QUAD_VERTICES_PER_INSTANCE,
-        ),
-        (PrimitiveFamily::XyArea, plan.xy_area_triangles.len(), 3),
-        (
-            PrimitiveFamily::XyBar,
-            plan.xy_bar_instances.len(),
-            QUAD_VERTICES_PER_INSTANCE,
-        ),
-    ] {
-        if count > 0 {
-            batches.push(DrawBatch {
-                family,
+    pipelines()
+        .into_iter()
+        .filter_map(|pipeline| {
+            let count = pipeline.family.instances(plan).len();
+            if count == 0 {
+                return None;
+            }
+            Some(DrawBatch {
+                family: pipeline.family,
                 instance_count: u32::try_from(count).unwrap_or(u32::MAX),
-                vertices_per_instance,
-            });
-        }
-    }
-    if !plan.sequence_fragment_instances.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::SequenceFragment,
-            instance_count: u32::try_from(plan.sequence_fragment_instances.len())
-                .unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    if !plan.sequence_fragment_border_segments.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::SequenceFragmentBorder,
-            instance_count: u32::try_from(plan.sequence_fragment_border_segments.len())
-                .unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    // EDGES FIRST, matching `pipelines()` and the Canvas2D draw order: a node box paints over the
-    // segment that terminates at it, not under it.
-    if !plan.edge_segments.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::Edge,
-            instance_count: u32::try_from(plan.edge_segments.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    // Arrowheads ride with their edges, before the boxes those edges terminate at.
-    if !plan.arrowheads.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::Arrowhead,
-            instance_count: u32::try_from(plan.arrowheads.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    if !plan.node_instances.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::Node,
-            instance_count: u32::try_from(plan.node_instances.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    // Dashed borders after their nodes: a border sits on top of the fill it outlines (bd-l3nsf).
-    if !plan.node_border_segments.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::NodeBorder,
-            instance_count: u32::try_from(plan.node_border_segments.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    // TEXT LAST: a label must not be painted over by the box it labels.
-    if !plan.text_quads.is_empty() {
-        batches.push(DrawBatch {
-            family: PrimitiveFamily::Text,
-            instance_count: u32::try_from(plan.text_quads.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
-        });
-    }
-    batches
+                vertices_per_instance: pipeline.vertices_per_instance,
+            })
+        })
+        .collect()
 }

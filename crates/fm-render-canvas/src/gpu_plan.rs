@@ -462,6 +462,7 @@ pub struct GpuArrowheadInstance {
 
 /// One filled sector from Canvas2D's pie-chart pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct GpuPieWedge {
     pub center: [f32; 2],
     pub radius: f32,
@@ -1424,6 +1425,13 @@ impl GpuRenderPlan {
         {
             return Self::from_xychart(ir, meta, layout);
         }
+        // Pie parser nodes carry slice names for layout. They are not graph circles: drawing
+        // them after the sectors would cover the chart and duplicate its percentage labels.
+        let graph_nodes = if ir.diagram_type == fm_core::DiagramType::Pie && ir.pie_meta.is_some() {
+            &[][..]
+        } else {
+            layout.nodes.as_slice()
+        };
         // Clusters first, so the buffer order is the draw order.
         let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
         for cluster in &layout.clusters {
@@ -1593,21 +1601,32 @@ impl GpuRenderPlan {
         // AXIS TICKS (bd-adabx). The same extension drives the gantt date row and xychart
         // categories. A blank label is not drawn by Canvas2D, so it must not leave a line in the
         // GPU plan either.
-        let axis_tick_y = layout.bounds.y - 12.0;
-        let mut axis_tick_segments = Vec::with_capacity(layout.extensions.axis_ticks.len());
-        for tick in &layout.extensions.axis_ticks {
-            if tick.label.is_empty() {
-                continue;
+        let axis_rows: Vec<f32> = if layout.extensions.gantt_axis_rows.is_empty() {
+            vec![layout.bounds.y - 12.0]
+        } else {
+            layout
+                .extensions
+                .gantt_axis_rows
+                .iter()
+                .map(|row| row.y)
+                .collect()
+        };
+        let mut axis_tick_segments = Vec::new();
+        for &axis_y in &axis_rows {
+            for tick in &layout.extensions.axis_ticks {
+                if tick.label.is_empty() {
+                    continue;
+                }
+                axis_tick_segments.push(GpuEdgeSegment {
+                    from: [tick.position, axis_y + 4.0],
+                    to: [tick.position, axis_y + 16.0],
+                    edge_index: NO_EDGE_INDEX,
+                    color: DEFAULT_EDGE_STROKE_RGBA,
+                    dash_phase: 0.0,
+                    dash: [0.0, 0.0],
+                    width: AXIS_TICK_STROKE_WIDTH,
+                });
             }
-            axis_tick_segments.push(GpuEdgeSegment {
-                from: [tick.position, axis_tick_y + 4.0],
-                to: [tick.position, axis_tick_y + 16.0],
-                edge_index: NO_EDGE_INDEX,
-                color: DEFAULT_EDGE_STROKE_RGBA,
-                dash_phase: 0.0,
-                dash: [0.0, 0.0],
-                width: AXIS_TICK_STROKE_WIDTH,
-            });
         }
 
         // SUBGRAPH DIVIDERS (bd-adabx). One dashed segment each, in the cluster stroke.
@@ -1873,7 +1892,7 @@ impl GpuRenderPlan {
             });
         }
 
-        let mut node_instances = Vec::with_capacity(layout.nodes.len());
+        let mut node_instances = Vec::with_capacity(graph_nodes.len());
         let semantic_defaults = matches!(
             ir.diagram_type,
             fm_core::DiagramType::Flowchart
@@ -1884,7 +1903,10 @@ impl GpuRenderPlan {
         // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
         // them, so this costs an unused Vec and no allocation.
         let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
-        for node in &layout.nodes {
+        for node in graph_nodes {
+            if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
             let shape = ir
                 .nodes
                 .get(node.node_index)
@@ -2160,7 +2182,10 @@ impl GpuRenderPlan {
             Vec::new()
         };
         let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
-        for (position, node) in layout.nodes.iter().enumerate() {
+        for (position, node) in graph_nodes.iter().enumerate() {
+            if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
             if layout
                 .extensions
                 .journey
@@ -2712,18 +2737,21 @@ impl GpuRenderPlan {
         // AXIS LABELS (bd-adabx). `draw_axis_ticks` places each label three units to the right of
         // its own tick at the axis baseline. Axis ticks are not nodes, so their extension index is
         // preserved in the run discriminator rather than borrowing an unrelated node index.
-        for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
-            if tick.label.is_empty() {
-                continue;
+        for &axis_y in &axis_rows {
+            let center_y = axis_y - (GLYPH_BASELINE_RATIO - 0.5) * AXIS_TICK_FONT_SIZE_PX;
+            for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+                if tick.label.is_empty() {
+                    continue;
+                }
+                sink.push_left(
+                    tick.label.as_str(),
+                    (tick.position + 3.0, center_y),
+                    AXIS_TICK_FONT_SIZE_PX,
+                    DEFAULT_LABEL_RGBA,
+                    GpuTextSource::AxisTick,
+                    index,
+                );
             }
-            sink.push_left(
-                tick.label.as_str(),
-                (tick.position + 3.0, axis_tick_y),
-                AXIS_TICK_FONT_SIZE_PX,
-                DEFAULT_LABEL_RGBA,
-                GpuTextSource::AxisTick,
-                index,
-            );
         }
 
         // BAND LABELS (bd-adabx). This follows the raster branch exactly: sections and named
@@ -2872,8 +2900,20 @@ impl GpuRenderPlan {
             debug_assert_eq!(pie.slices.len(), pie_wedges.len());
         }
 
+        let mut bounds = layout.bounds;
+        if !layout.extensions.gantt_axis_rows.is_empty() {
+            for run in text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::AxisTick)
+            {
+                let start = run.first_quad as usize;
+                let end = start + run.quad_count as usize;
+                include_text_quad_bounds(&mut bounds, &text_quads[start..end]);
+            }
+        }
+
         Self {
-            bounds: layout.bounds,
+            bounds,
             xy_plot_instances: Vec::new(),
             xy_axis_segments: Vec::new(),
             xy_area_triangles: Vec::new(),
@@ -3155,18 +3195,7 @@ impl GpuRenderPlan {
         }
 
         let mut bounds = layout.bounds;
-        for quad in &text_quads {
-            let left = bounds.x.min(quad.center[0] - quad.half_extent[0]);
-            let top = bounds.y.min(quad.center[1] - quad.half_extent[1]);
-            let right = (bounds.x + bounds.width).max(quad.center[0] + quad.half_extent[0]);
-            let bottom = (bounds.y + bounds.height).max(quad.center[1] + quad.half_extent[1]);
-            bounds = LayoutRect {
-                x: left,
-                y: top,
-                width: right - left,
-                height: bottom - top,
-            };
-        }
+        include_text_quad_bounds(&mut bounds, &text_quads);
 
         let mut node_instances = Vec::new();
         let mut edge_segments = Vec::new();
@@ -3281,6 +3310,21 @@ impl GpuRenderPlan {
             text_runs,
             glyph_atlas,
         }
+    }
+}
+
+fn include_text_quad_bounds(bounds: &mut LayoutRect, quads: &[GpuTextQuad]) {
+    for quad in quads {
+        let left = bounds.x.min(quad.center[0] - quad.half_extent[0]);
+        let top = bounds.y.min(quad.center[1] - quad.half_extent[1]);
+        let right = (bounds.x + bounds.width).max(quad.center[0] + quad.half_extent[0]);
+        let bottom = (bounds.y + bounds.height).max(quad.center[1] + quad.half_extent[1]);
+        *bounds = LayoutRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        };
     }
 }
 
@@ -3792,6 +3836,104 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let out_rgb = (in.stroke.rgb * s + color.rgb * color.a * (1.0 - s)) / out_a;
     return vec4<f32>(out_rgb, out_a);
+}
+"#;
+
+/// Pie sectors retain their true angular extent and circular outline at every zoom level.
+pub const PIE_WEDGE_WGSL: &str = r#"
+struct Camera {
+    transform: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct PieWedge {
+    @location(0) center: vec2<f32>,
+    @location(1) radius: f32,
+    @location(2) start_angle: f32,
+    @location(3) sweep_angle: f32,
+    @location(4) fill: vec4<f32>,
+    @location(5) stroke: vec4<f32>,
+    @location(6) stroke_width: f32,
+    @location(7) slice_index: u32,
+};
+
+struct VertexOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) radius: f32,
+    @location(2) @interpolate(flat) start_angle: f32,
+    @location(3) @interpolate(flat) sweep_angle: f32,
+    @location(4) fill: vec4<f32>,
+    @location(5) stroke: vec4<f32>,
+    @location(6) @interpolate(flat) stroke_width: f32,
+};
+
+var<private> QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+);
+
+const TAU: f32 = 6.283185307179586;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, wedge: PieWedge) -> VertexOut {
+    let corner = QUAD[vertex_index];
+    let padded_radius = wedge.radius + max(wedge.stroke_width * 0.5, 0.0) + 2.0;
+    let local = corner * padded_radius;
+    let world = wedge.center + local;
+    var out: VertexOut;
+    out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.local = local;
+    out.radius = wedge.radius;
+    out.start_angle = wedge.start_angle;
+    out.sweep_angle = wedge.sweep_angle;
+    out.fill = wedge.fill;
+    out.stroke = wedge.stroke;
+    out.stroke_width = wedge.stroke_width;
+    return out;
+}
+
+fn radial_distance(point: vec2<f32>, direction: vec2<f32>, radius: f32) -> f32 {
+    return length(point - direction * clamp(dot(point, direction), 0.0, radius));
+}
+
+// Signed distance to the sector boundary: its circular arc and two finite radial sides.
+// The angular membership test also handles sectors larger than a semicircle and wraparound.
+fn sector_distance(point: vec2<f32>, radius: f32, start: f32, sweep: f32) -> f32 {
+    let circle_distance = length(point) - radius;
+    if (sweep >= TAU - 0.000001) {
+        return circle_distance;
+    }
+    let direction_start = vec2<f32>(cos(start), sin(start));
+    let direction_end = vec2<f32>(cos(start + sweep), sin(start + sweep));
+    let safe_point = select(point, vec2<f32>(0.000001, 0.0), dot(point, point) < 0.000000000001);
+    let angle = atan2(safe_point.y, safe_point.x) - start;
+    let relative_angle = angle - TAU * floor(angle / TAU);
+    let inside_angle = relative_angle <= sweep;
+    let sides = min(radial_distance(point, direction_start, radius), radial_distance(point, direction_end, radius));
+    let arc = select(1e20, abs(circle_distance), inside_angle);
+    let distance = min(sides, arc);
+    return select(distance, -distance, inside_angle && circle_distance <= 0.0);
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let distance = sector_distance(in.local, max(in.radius, 0.0), in.start_angle, clamp(in.sweep_angle, 0.0, TAU));
+    let aa = max(fwidth(distance), 0.0001);
+    if (in.radius <= 0.0 || in.sweep_angle <= 0.0) {
+        discard;
+    }
+    let fill_alpha = in.fill.a * (1.0 - smoothstep(-aa, aa, distance));
+    let half_stroke = max(in.stroke_width * 0.5, 0.0);
+    let stroke_coverage = 1.0 - smoothstep(half_stroke - aa, half_stroke + aa, abs(distance));
+    let stroke_alpha = select(0.0, in.stroke.a * stroke_coverage, in.stroke_width > 0.0);
+    let alpha = stroke_alpha + fill_alpha * (1.0 - stroke_alpha);
+    if (alpha <= 0.0) {
+        discard;
+    }
+    let color = (in.stroke.rgb * stroke_alpha + in.fill.rgb * fill_alpha * (1.0 - stroke_alpha)) / alpha;
+    return vec4<f32>(color, alpha);
 }
 "#;
 
@@ -5785,7 +5927,8 @@ mod tests {
 
         let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
         assert_eq!(plan.axis_tick_segments.len(), ticks.len());
-        let expected_y = layout.bounds.y - 12.0;
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 1);
+        let expected_y = layout.extensions.gantt_axis_rows[0].y;
         for ((tick_index, tick), segment) in ticks.iter().zip(&plan.axis_tick_segments) {
             assert_eq!(segment.from, [tick.position, expected_y + 4.0]);
             assert_eq!(segment.to, [tick.position, expected_y + 16.0]);
@@ -5818,7 +5961,9 @@ mod tests {
                     .abs()
                     < 0.01
             );
-            assert!((first_quad.center[1] - expected_y).abs() < 0.01);
+            let baseline = first_quad.center[1]
+                + (super::GLYPH_BASELINE_RATIO - 0.5) * super::AXIS_TICK_FONT_SIZE_PX;
+            assert!((baseline - expected_y).abs() < 0.01);
         }
     }
 

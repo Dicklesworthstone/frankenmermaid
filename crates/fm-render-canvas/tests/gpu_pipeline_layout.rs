@@ -14,7 +14,7 @@
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::gpu_pipeline::{
     DrawBatch, PipelineDescriptor, PrimitiveFamily, VertexFormat, draw_batches, edge_pipeline,
-    node_pipeline, pipelines, text_pipeline, xy_area_pipeline,
+    node_pipeline, pie_pipeline, pipelines, text_pipeline, xy_area_pipeline,
 };
 
 /// The stroke width the plan is built with, taken from the Canvas2D config rather than written as
@@ -158,6 +158,11 @@ fn the_edge_instance_layout_matches_the_shader_that_consumes_it() {
 #[test]
 fn the_area_triangle_layout_matches_the_shader_that_consumes_it() {
     assert_layout_matches_shader(&xy_area_pipeline(), "TriangleInstance");
+}
+
+#[test]
+fn the_pie_sector_layout_matches_the_shader_that_consumes_it() {
+    assert_layout_matches_shader(&pie_pipeline(), "PieWedge");
 }
 
 /// Every draw must submit exactly the private geometry array its vertex shader indexes.
@@ -433,10 +438,27 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::XyAxis,
             PrimitiveFamily::XyArea,
             PrimitiveFamily::XyBar,
+            PrimitiveFamily::Cluster,
+            PrimitiveFamily::BandLane,
+            PrimitiveFamily::BandSection,
+            PrimitiveFamily::BandColumn,
+            PrimitiveFamily::TreemapTile,
+            PrimitiveFamily::Radar,
+            PrimitiveFamily::AxisTick,
+            PrimitiveFamily::ClusterDivider,
+            PrimitiveFamily::StateNoteLeader,
+            PrimitiveFamily::StateNote,
+            PrimitiveFamily::MirrorHeader,
+            PrimitiveFamily::PacketFieldContinuation,
+            PrimitiveFamily::Activation,
+            PrimitiveFamily::LifecycleMarker,
             PrimitiveFamily::SequenceFragment,
             PrimitiveFamily::SequenceFragmentBorder,
+            PrimitiveFamily::SequenceNote,
             PrimitiveFamily::Edge,
             PrimitiveFamily::Arrowhead,
+            PrimitiveFamily::ErMarker,
+            PrimitiveFamily::Pie,
             PrimitiveFamily::Node,
             PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text
@@ -444,6 +466,351 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
          edges, boxes over both, dashed borders over boxes, and labels over everything"
     );
+}
+
+#[test]
+fn parsed_diagram_furniture_reaches_executable_batches() {
+    use PrimitiveFamily as Family;
+
+    let cases: &[(&str, &str, &[Family])] = &[
+        (
+            "subgraph",
+            "flowchart TD\n subgraph Group\n A[Alpha] --> B[Beta]\n end\n",
+            &[Family::Cluster],
+        ),
+        (
+            "sequence",
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n participant Alice\n participant Bob\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n",
+            &[
+                Family::BandLane,
+                Family::MirrorHeader,
+                Family::Activation,
+                Family::LifecycleMarker,
+                Family::SequenceNote,
+            ],
+        ),
+        (
+            "state note",
+            "stateDiagram-v2\n [*] --> Idle\n Idle --> Running\n note right of Idle\n Context\n end note\n",
+            &[Family::StateNoteLeader, Family::StateNote],
+        ),
+        (
+            "state regions",
+            "stateDiagram-v2\n state Active {\n [*] --> Processing\n --\n [*] --> Monitoring\n }\n",
+            &[Family::Cluster, Family::ClusterDivider],
+        ),
+        (
+            "packet continuation",
+            "packet-beta\n 0-7: Header\n 24-47: Wrapped field\n",
+            &[Family::PacketFieldContinuation],
+        ),
+        (
+            "Gantt",
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+            &[Family::BandSection, Family::AxisTick],
+        ),
+        (
+            "Sankey columns",
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
+            &[Family::BandColumn],
+        ),
+        (
+            "treemap",
+            "treemap\n\"Root\"\n    \"Group\"\n        \"A\": 10\n        \"B\": 20\n",
+            &[Family::TreemapTile],
+        ),
+        (
+            "radar",
+            "radar-beta\n axis a, b, c\n curve x{1,2,3}\n",
+            &[Family::Radar],
+        ),
+        (
+            "ER cardinality",
+            "erDiagram\n A }o--o{ B : relation\n",
+            &[Family::ErMarker],
+        ),
+        (
+            "pie",
+            "pie\n \"First\": 1\n \"Second\": 3\n",
+            &[Family::Pie],
+        ),
+    ];
+    for &(name, source, required) in cases {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        let batches = draw_batches(&plan);
+        for family in required {
+            assert!(
+                batches
+                    .iter()
+                    .any(|batch| batch.family == *family && batch.instance_count > 0),
+                "{name} planned no executable {family:?} geometry"
+            );
+        }
+        let planned: usize = [
+            plan.xy_plot_instances.len(),
+            plan.xy_axis_segments.len(),
+            plan.xy_area_triangles.len(),
+            plan.xy_bar_instances.len(),
+            plan.cluster_instances.len(),
+            plan.band_lane_segments.len(),
+            plan.band_section_instances.len(),
+            plan.band_column_segments.len(),
+            plan.treemap_tile_instances.len(),
+            plan.radar_segments.len(),
+            plan.axis_tick_segments.len(),
+            plan.cluster_divider_segments.len(),
+            plan.state_note_leader_segments.len(),
+            plan.state_note_instances.len(),
+            plan.mirror_header_instances.len(),
+            plan.packet_field_continuation_instances.len(),
+            plan.activation_instances.len(),
+            plan.lifecycle_marker_segments.len(),
+            plan.sequence_fragment_instances.len(),
+            plan.sequence_fragment_border_segments.len(),
+            plan.sequence_note_instances.len(),
+            plan.edge_segments.len(),
+            plan.arrowheads.len(),
+            plan.er_marker_segments.len(),
+            plan.pie_wedges.len(),
+            plan.node_instances.len(),
+            plan.node_border_segments.len(),
+            plan.text_quads.len(),
+        ]
+        .into_iter()
+        .sum();
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.instance_count as usize)
+                .sum::<usize>(),
+            planned,
+            "{name} populated geometry that never reaches a draw batch"
+        );
+    }
+}
+
+#[test]
+fn pie_submission_has_sectors_and_percentage_labels_without_graph_node_artifacts() {
+    use fm_render_canvas::GpuTextSource;
+
+    let ir = fm_parser::parse("pie\n \"First\": 1\n \"Second\": 3\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert_eq!(
+        layout.nodes.len(),
+        2,
+        "fixture must expose the parser's slice-name nodes"
+    );
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert_eq!(plan.pie_wedges.len(), 2);
+    assert!(plan.node_instances.is_empty());
+    assert!(plan.node_border_segments.is_empty());
+    assert!(
+        plan.text_runs
+            .iter()
+            .all(|run| run.source != GpuTextSource::Node)
+    );
+    let labels: Vec<_> = plan
+        .text_runs
+        .iter()
+        .filter(|run| run.source == GpuTextSource::PieSlice)
+        .collect();
+    assert_eq!(labels.len(), 2);
+    assert!(labels.iter().all(|run| run.quad_count > 0));
+    assert_eq!(
+        draw_batches(&plan)
+            .iter()
+            .map(|batch| batch.family)
+            .collect::<Vec<_>>(),
+        vec![PrimitiveFamily::Pie, PrimitiveFamily::Text]
+    );
+}
+
+#[test]
+fn referenced_composite_states_draw_their_containers_once_and_keep_child_geometry() {
+    use fm_render_canvas::GpuTextSource;
+
+    let ir = fm_parser::parse(
+        "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n [*] --> Inner\n state Inner {\n  A --> B : ready\n }\n Inner --> Finished : complete\n}\nOuter --> [*]",
+    ).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let composites: Vec<_> = layout
+        .nodes
+        .iter()
+        .filter(|node| fm_layout::is_composite_state_node(&ir, node))
+        .collect();
+    assert_eq!(
+        composites.len(),
+        2,
+        "fixture must reference both nested containers"
+    );
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert_eq!(
+        plan.node_instances.len(),
+        layout.nodes.len() - composites.len()
+    );
+    assert_eq!(plan.cluster_instances.len(), layout.clusters.len());
+    for composite in composites {
+        assert!(
+            !plan
+                .node_instances
+                .iter()
+                .any(|node| node.node_index as usize == composite.node_index)
+        );
+        assert!(
+            !plan
+                .node_border_segments
+                .iter()
+                .any(|edge| edge.edge_index as usize == composite.node_index)
+        );
+        assert!(
+            !plan
+                .text_runs
+                .iter()
+                .any(|run| run.source == GpuTextSource::Node
+                    && run.node_index as usize == composite.node_index)
+        );
+    }
+    for name in ["A", "B", "Finished"] {
+        let index = ir
+            .nodes
+            .iter()
+            .position(|node| node.id == name)
+            .expect("child node exists");
+        assert!(
+            plan.node_instances
+                .iter()
+                .any(|node| node.node_index as usize == index)
+        );
+        assert!(
+            plan.text_runs
+                .iter()
+                .any(|run| run.source == GpuTextSource::Node
+                    && run.node_index as usize == index
+                    && run.quad_count > 0)
+        );
+    }
+    for cluster in &layout.clusters {
+        assert_eq!(
+            plan.text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::Cluster
+                    && run.node_index as usize == cluster.cluster_index)
+                .count(),
+            1,
+            "a container title must be drawn exactly once"
+        );
+    }
+    for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
+        assert!(
+            plan.edge_segments
+                .iter()
+                .any(|segment| segment.edge_index as usize == edge.edge_index),
+            "suppressing a composite box must not remove its transitions"
+        );
+    }
+}
+
+#[test]
+fn gantt_axes_consume_measured_rows_and_keep_date_glyphs_in_view() {
+    use fm_render_canvas::{DrawOperation, GpuTextSource, MockCanvas2dContext};
+
+    for top_axis in [false, true] {
+        let source = format!(
+            "%%{{init: {{\"gantt\": {{\"topAxis\": {top_axis}}}}}}}%%\ngantt\n dateFormat YYYY-MM-DD\n section Core\n Design :a1, 2026-01-01, 3d\n Build :a2, after a1, 4d\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let rows = &layout.extensions.gantt_axis_rows;
+        assert_eq!(rows.len(), if top_axis { 2 } else { 1 });
+        let ticks: Vec<_> = layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .enumerate()
+            .filter(|(_, tick)| !tick.label.is_empty())
+            .collect();
+        assert!(!ticks.is_empty());
+        let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::AxisTick)
+            .collect();
+        assert_eq!(plan.axis_tick_segments.len(), rows.len() * ticks.len());
+        assert_eq!(runs.len(), rows.len() * ticks.len());
+        let atlas_baseline = plan.glyph_atlas.baseline_px / plan.glyph_atlas.cell_px as f32;
+        for (row_index, row) in rows.iter().enumerate() {
+            for (offset, (tick_index, tick)) in ticks.iter().enumerate() {
+                let slot = row_index * ticks.len() + offset;
+                let segment = &plan.axis_tick_segments[slot];
+                assert_eq!(segment.from, [tick.position, row.y + 4.0]);
+                assert_eq!(segment.to, [tick.position, row.y + 16.0]);
+                let run = runs[slot];
+                assert_eq!(run.node_index as usize, *tick_index);
+                assert!(run.quad_count > 0);
+                let glyphs = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                let first = &glyphs[0];
+                let font_size = first.half_extent[1] * 2.0;
+                let baseline = first.center[1] + (atlas_baseline - 0.5) * font_size;
+                assert!(
+                    (baseline - row.y).abs() < 0.001,
+                    "date label must use the measured alphabetic baseline"
+                );
+                let first_glyph = tick.label.chars().next().unwrap().to_string();
+                let advance =
+                    fm_render_canvas::gpu_pipeline::run_advance_for(&first_glyph, font_size);
+                assert!((first.center[0] - (tick.position + 3.0 + advance * 0.5)).abs() < 0.001);
+                let text: String = glyphs
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .unwrap()
+                            .glyph
+                    })
+                    .collect();
+                assert_eq!(text, tick.label);
+                for quad in glyphs {
+                    assert!(quad.center[0] - quad.half_extent[0] >= plan.bounds.x - 0.001);
+                    assert!(quad.center[1] - quad.half_extent[1] >= plan.bounds.y - 0.001);
+                    assert!(
+                        quad.center[0] + quad.half_extent[0]
+                            <= plan.bounds.x + plan.bounds.width + 0.001
+                    );
+                    assert!(
+                        quad.center[1] + quad.half_extent[1]
+                            <= plan.bounds.y + plan.bounds.height + 0.001
+                    );
+                }
+            }
+        }
+        let mut canvas = MockCanvas2dContext::new(1200.0, 800.0);
+        fm_render_canvas::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut canvas,
+            &CanvasRenderConfig::default(),
+        );
+        let first_label = &ticks[0].1.label;
+        let canvas_rows: Vec<_> = canvas
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, _, y) if text == first_label => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(canvas_rows.len(), rows.len());
+        let offset_y = canvas_rows[0] - f64::from(rows[0].y);
+        for (row, canvas_y) in rows.iter().zip(canvas_rows) {
+            assert!((canvas_y - offset_y - f64::from(row.y)).abs() < 0.001);
+        }
+    }
 }
 
 #[test]

@@ -94,6 +94,68 @@ const CASES: &[(&str, &str, &[&str])] = &[
 ];
 
 #[test]
+fn pie_sectors_and_percentage_labels_are_not_overpainted_by_parser_nodes() {
+    use fm_render_canvas::DrawOperation;
+
+    let ir = fm_parser::parse("pie title Share\n\"Alpha\": 1\n\"Beta\": 3\n").ir;
+    assert_eq!(
+        ir.nodes.len(),
+        2,
+        "the fixture must retain the parser's slice nodes"
+    );
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    let result = render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let arcs: Vec<_> = context
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            DrawOperation::Arc(x, y, radius, start, end) => Some((*x, *y, *radius, *start, *end)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arcs.len(), 2, "only the two sector arcs may be drawn");
+    assert_eq!(
+        (arcs[0].0, arcs[0].1, arcs[0].2),
+        (arcs[1].0, arcs[1].1, arcs[1].2)
+    );
+    assert!((arcs[0].4 - arcs[0].3 - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    assert!((arcs[1].4 - arcs[1].3 - 3.0 * std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(
+        context
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, DrawOperation::Fill))
+            .count(),
+        2
+    );
+    let texts: Vec<_> = context
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["Alpha: 25.0%", "Beta: 75.0%", "Share"]);
+    assert_eq!(result.labels_drawn, texts.len());
+    assert_eq!(
+        result.nodes_drawn, 0,
+        "slice metadata must not become graph nodes"
+    );
+
+    // The same circle-shaped IR nodes are real geometry when authored in a flowchart.
+    let flowchart = fm_parser::parse("flowchart LR\nA((Alpha)) --> B((Beta))\n").ir;
+    let mut control = MockCanvas2dContext::new(1200.0, 900.0);
+    let control_result = render_to_canvas(&flowchart, &mut control, &CanvasRenderConfig::default());
+    assert_eq!(control_result.nodes_drawn, 2);
+    for expected in ["Alpha", "Beta"] {
+        assert!(control.operations().iter().any(
+            |operation| matches!(operation, DrawOperation::FillText(text, _, _) if text == expected)
+        ));
+    }
+}
+
+#[test]
 fn requirement_metadata_is_complete_and_contained_with_compact_line_spacing() {
     use fm_render_canvas::{Canvas2dRenderer, DrawOperation};
 
@@ -965,7 +1027,7 @@ mod sankey {
             gpu_texts(&plan),
             labels.iter().map(|label| label.0).collect::<Vec<_>>()
         );
-        for (node, rows) in layout.nodes.iter().zip(labels.chunks_exact(2)) {
+        for (node, rows) in layout.nodes.iter().zip(labels.as_chunks::<2>().0) {
             let name = ir.node_display_text(&ir.nodes[node.node_index]);
             let total = match name {
                 "A" => "160",

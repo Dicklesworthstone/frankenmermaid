@@ -625,7 +625,7 @@ pub async fn render_diagram_async(
     width: u32,
     height: u32,
 ) -> Result<RenderedImage, GpuDeviceError> {
-    use crate::gpu_pipeline::PrimitiveFamily;
+    use crate::gpu_pipeline::{PrimitiveFamily, PrimitiveInstances};
 
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fm-diagram"),
@@ -659,55 +659,19 @@ pub async fn render_diagram_async(
     // must outlive it.
     let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
     for (family, _) in &pipelines.passes {
-        let (bytes, count) = match family {
-            PrimitiveFamily::XyPlot => (
-                node_instance_bytes(&plan.xy_plot_instances),
-                plan.xy_plot_instances.len(),
-            ),
-            PrimitiveFamily::XyAxis => (
-                edge_instance_bytes(&plan.xy_axis_segments),
-                plan.xy_axis_segments.len(),
-            ),
-            PrimitiveFamily::XyArea => (
-                triangle_instance_bytes(&plan.xy_area_triangles),
-                plan.xy_area_triangles.len(),
-            ),
-            PrimitiveFamily::XyBar => (
-                node_instance_bytes(&plan.xy_bar_instances),
-                plan.xy_bar_instances.len(),
-            ),
-            PrimitiveFamily::SequenceFragment => (
-                node_instance_bytes(&plan.sequence_fragment_instances),
-                plan.sequence_fragment_instances.len(),
-            ),
-            PrimitiveFamily::SequenceFragmentBorder => (
-                edge_instance_bytes(&plan.sequence_fragment_border_segments),
-                plan.sequence_fragment_border_segments.len(),
-            ),
-            PrimitiveFamily::Edge => (
-                edge_instance_bytes(&plan.edge_segments),
-                plan.edge_segments.len(),
-            ),
-            PrimitiveFamily::Arrowhead => (
-                arrowhead_instance_bytes(&plan.arrowheads),
-                plan.arrowheads.len(),
-            ),
-            PrimitiveFamily::Node => (
-                node_instance_bytes(&plan.node_instances),
-                plan.node_instances.len(),
-            ),
-            // Dashed node borders ride the EDGE pipeline (bd-l3nsf) but draw AFTER the nodes, since
-            // a border sits on top of the fill it outlines. Same pipeline, different slot in the
-            // order — which is why the family exists separately from `Edge`.
-            PrimitiveFamily::NodeBorder => (
-                edge_instance_bytes(&plan.node_border_segments),
-                plan.node_border_segments.len(),
-            ),
-            PrimitiveFamily::Text => (text_instance_bytes(&plan.text_quads), plan.text_quads.len()),
-        };
+        let instances = family.instances(plan);
+        let count = instances.len();
         if count == 0 {
             continue;
         }
+        let bytes = match instances {
+            PrimitiveInstances::Nodes(instances) => node_instance_bytes(instances),
+            PrimitiveInstances::Edges(instances) => edge_instance_bytes(instances),
+            PrimitiveInstances::Triangles(instances) => triangle_instance_bytes(instances),
+            PrimitiveInstances::Arrowheads(instances) => arrowhead_instance_bytes(instances),
+            PrimitiveInstances::Pies(instances) => pie_instance_bytes(instances),
+            PrimitiveInstances::Text(instances) => text_instance_bytes(instances),
+        };
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fm-instances"),
             size: bytes.len().max(4) as u64,
@@ -1191,6 +1155,56 @@ pub fn triangle_instance_bytes(triangles: &[crate::gpu_plan::GpuTriangleInstance
                 out[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
             }
         }
+    }
+    out
+}
+
+/// Pie-sector bytes at the offsets bound by the sector shader.
+#[must_use]
+pub fn pie_instance_bytes(wedges: &[crate::gpu_plan::GpuPieWedge]) -> Vec<u8> {
+    use crate::gpu_plan::GpuPieWedge;
+
+    let stride = size_of::<GpuPieWedge>();
+    let mut out = vec![0_u8; std::mem::size_of_val(wedges)];
+    for (index, wedge) in wedges.iter().enumerate() {
+        let base = index * stride;
+        for (offset, values) in [
+            (
+                core::mem::offset_of!(GpuPieWedge, center),
+                wedge.center.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, radius),
+                std::slice::from_ref(&wedge.radius),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, start_angle),
+                std::slice::from_ref(&wedge.start_angle),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, sweep_angle),
+                std::slice::from_ref(&wedge.sweep_angle),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, fill),
+                wedge.fill.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, stroke),
+                wedge.stroke.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, stroke_width),
+                std::slice::from_ref(&wedge.stroke_width),
+            ),
+        ] {
+            for (component, value) in values.iter().enumerate() {
+                let start = base + offset + component * size_of::<f32>();
+                out[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let start = base + core::mem::offset_of!(GpuPieWedge, slice_index);
+        out[start..start + size_of::<u32>()].copy_from_slice(&wedge.slice_index.to_ne_bytes());
     }
     out
 }

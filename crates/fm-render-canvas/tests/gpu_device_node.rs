@@ -256,6 +256,7 @@ fn the_shaders_this_crate_ships_compile_on_a_real_device() {
         ("ARROWHEAD_WGSL", fm_render_canvas::ARROWHEAD_WGSL),
         ("TEXT_ATLAS_WGSL", fm_render_canvas::TEXT_ATLAS_WGSL),
         ("TRIANGLE_WGSL", fm_render_canvas::TRIANGLE_WGSL),
+        ("PIE_WEDGE_WGSL", fm_render_canvas::PIE_WEDGE_WGSL),
     ] {
         if let Err(error) = gpu.validate_shader(name, wgsl) {
             panic!("{name} does not compile: {error}");
@@ -300,6 +301,139 @@ fn area_triangle_bytes_round_trip_through_the_shader_attribute_offsets() {
                 assert_eq!(value, *expected);
             }
         }
+    }
+}
+
+#[test]
+fn pie_bytes_round_trip_through_the_shader_attribute_offsets() {
+    use fm_render_canvas::GpuPieWedge;
+
+    let wedges = [
+        GpuPieWedge {
+            center: [-12.0, 45.0],
+            radius: 80.0,
+            start_angle: -1.5,
+            sweep_angle: 4.7,
+            fill: [0.1, 0.3, 0.7, 0.8],
+            stroke: [0.9, 0.6, 0.2, 1.0],
+            stroke_width: 2.5,
+            slice_index: 37,
+        },
+        GpuPieWedge {
+            center: [91.0, -6.0],
+            radius: 12.0,
+            start_angle: 3.2,
+            sweep_angle: 0.5,
+            fill: [0.8, 0.4, 0.1, 0.3],
+            stroke: [0.2, 0.7, 0.9, 0.5],
+            stroke_width: 1.0,
+            slice_index: 912,
+        },
+    ];
+    let bytes = fm_render_canvas::gpu_device::pie_instance_bytes(&wedges);
+    let descriptor = fm_render_canvas::gpu_pipeline::pie_pipeline();
+    let stride = descriptor.instance.array_stride as usize;
+    assert_eq!(bytes.len(), stride * wedges.len());
+    for (index, wedge) in wedges.iter().enumerate() {
+        for attribute in descriptor.instance.attributes {
+            let offset = index * stride + attribute.offset as usize;
+            if attribute.name == "slice_index" {
+                assert_eq!(
+                    u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+                    wedge.slice_index
+                );
+                continue;
+            }
+            let expected: &[f32] = match attribute.name {
+                "center" => &wedge.center,
+                "radius" => std::slice::from_ref(&wedge.radius),
+                "start_angle" => std::slice::from_ref(&wedge.start_angle),
+                "sweep_angle" => std::slice::from_ref(&wedge.sweep_angle),
+                "fill" => &wedge.fill,
+                "stroke" => &wedge.stroke,
+                "stroke_width" => std::slice::from_ref(&wedge.stroke_width),
+                name => panic!("unverified pie attribute {name}"),
+            };
+            for (component, expected) in expected.iter().enumerate() {
+                let start = offset + component * 4;
+                assert_eq!(
+                    f32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap()),
+                    *expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pie_sector_pixels_preserve_quantities_wraparound_and_zero_values() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let pass = InstancePass::new(&gpu, &fm_render_canvas::gpu_pipeline::pie_pipeline());
+    for source in [
+        "pie\n \"Quarter\": 1\n \"Remainder\": 3\n",
+        "pie\n \"Entire circle\": 7\n",
+        "pie\n \"Zero\": 0\n \"Also zero\": 0\n",
+    ] {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        assert!(!plan.pie_wedges.is_empty());
+        let bytes = fm_render_canvas::gpu_device::pie_instance_bytes(&plan.pie_wedges);
+        let draw = InstanceDraw {
+            bounds: &plan.bounds,
+            instance_bytes: &bytes,
+            instance_count: plan.pie_wedges.len() as u32,
+            atlas: None,
+        };
+        let image = render_instances(&gpu, &pass, &draw, 640, 480).expect("render pie sectors");
+        if plan.pie_wedges.iter().all(|wedge| wedge.sweep_angle == 0.0) {
+            assert!(
+                image
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[3] == 0),
+                "zero-valued pie slices painted pixels"
+            );
+            continue;
+        }
+        for wedge in &plan.pie_wedges {
+            if wedge.sweep_angle <= 0.0 {
+                continue;
+            }
+            for fraction in [0.25, 0.5, 0.75] {
+                let angle = wedge.start_angle + wedge.sweep_angle * fraction;
+                let x = wedge.center[0] + wedge.radius * 0.55 * angle.cos();
+                let y = wedge.center[1] + wedge.radius * 0.55 * angle.sin();
+                let (px, py) = image.pixel_for(&plan.bounds, x, y);
+                let pixel = image.pixel(px, py).unwrap();
+                let expected = wedge
+                    .fill
+                    .map(|component| (component * 255.0).round() as u8);
+                assert!(
+                    pixel
+                        .iter()
+                        .zip(expected)
+                        .all(|(actual, expected)| actual.abs_diff(expected) <= 3),
+                    "slice {} lost its angular extent or color at fraction {fraction}: {pixel:?} vs {expected:?}",
+                    wedge.slice_index
+                );
+            }
+        }
+        let first = plan.pie_wedges[0];
+        let (x, y) = image.pixel_for(
+            &plan.bounds,
+            first.center[0] + first.radius * 1.15,
+            first.center[1],
+        );
+        assert_eq!(
+            image.pixel(x, y).unwrap()[3],
+            0,
+            "pie fill escaped its circular boundary"
+        );
     }
 }
 
@@ -907,6 +1041,135 @@ fn one_submission_paints_a_sequence_fragment_interior() {
         "fragment interior at ({sample_x}, {sample_y}) is transparent after full device submission; \
          the frame was planned but not uploaded or drawn"
     );
+}
+
+/// Each omitted layer is compared against the same complete parsed diagram. This detects a
+/// populated CPU buffer that is never uploaded or submitted, even when its labels still render.
+#[test]
+fn whole_diagram_submission_paints_the_planned_furniture() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let pipelines = DiagramPipelines::new(&gpu);
+    const SEQUENCE: &str = "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n participant Alice\n participant Bob\n Alice->>Bob: request\n activate Bob\n Note over Alice,Bob: processing\n Bob-->>Alice: response\n deactivate Bob\n destroy Bob\n Alice->>Bob: goodbye\n";
+    const STATE_NOTE: &str = "stateDiagram-v2\n [*] --> Idle\n Idle --> Running\n note right of Idle\n Context\n end note\n";
+    type Omit = fn(&mut GpuRenderPlan);
+    let cases: &[(&str, &str, Omit)] = &[
+        (
+            "cluster",
+            "flowchart TD\n subgraph Group\n A[Alpha] --> B[Beta]\n end\n",
+            |plan| plan.cluster_instances.clear(),
+        ),
+        ("lifelines", SEQUENCE, |plan| {
+            plan.band_lane_segments.clear()
+        }),
+        ("activation", SEQUENCE, |plan| {
+            plan.activation_instances.clear()
+        }),
+        ("mirror headers", SEQUENCE, |plan| {
+            plan.mirror_header_instances.clear()
+        }),
+        ("destroy marker", SEQUENCE, |plan| {
+            plan.lifecycle_marker_segments.clear()
+        }),
+        ("sequence note", SEQUENCE, |plan| {
+            plan.sequence_note_instances.clear()
+        }),
+        ("state note leader", STATE_NOTE, |plan| {
+            plan.state_note_leader_segments.clear()
+        }),
+        ("state note", STATE_NOTE, |plan| {
+            plan.state_note_instances.clear()
+        }),
+        (
+            "state divider",
+            "stateDiagram-v2\n state Active {\n [*] --> Processing\n --\n [*] --> Monitoring\n }\n",
+            |plan| plan.cluster_divider_segments.clear(),
+        ),
+        (
+            "packet continuation",
+            "packet-beta\n 0-7: Header\n 24-47: Wrapped field\n",
+            |plan| plan.packet_field_continuation_instances.clear(),
+        ),
+        (
+            "Gantt section",
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+            |plan| plan.band_section_instances.clear(),
+        ),
+        (
+            "axis ticks",
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+            |plan| plan.axis_tick_segments.clear(),
+        ),
+        (
+            "column separators",
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
+            |plan| plan.band_column_segments.clear(),
+        ),
+        (
+            "treemap tiles",
+            "treemap\n\"Root\"\n    \"Group\"\n        \"A\": 10\n        \"B\": 20\n",
+            |plan| plan.treemap_tile_instances.clear(),
+        ),
+        (
+            "radar wheel",
+            "radar-beta\n axis a, b, c\n curve x{1,2,3}\n",
+            |plan| plan.radar_segments.clear(),
+        ),
+        (
+            "ER cardinality",
+            "erDiagram\n A }o--o{ B : relation\n",
+            |plan| plan.er_marker_segments.clear(),
+        ),
+        (
+            "pie sectors",
+            "pie\n \"First\": 1\n \"Second\": 3\n",
+            |plan| plan.pie_wedges.clear(),
+        ),
+    ];
+    for &(name, source, omit) in cases {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        let mut without_layer = plan.clone();
+        omit(&mut without_layer);
+        assert_ne!(
+            plan, without_layer,
+            "{name} fixture contains no target geometry"
+        );
+        let image = render_diagram(&gpu, &pipelines, &plan, None, 640, 480)
+            .expect("render complete diagram geometry");
+        let control = render_diagram(&gpu, &pipelines, &without_layer, None, 640, 480)
+            .expect("render diagram with one layer omitted");
+        let changed = image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(control.rgba.as_chunks::<4>().0)
+            .filter(|(actual, missing)| {
+                actual
+                    .iter()
+                    .zip(missing.iter())
+                    .any(|(a, b)| a.abs_diff(*b) > 2)
+            })
+            .count();
+        assert!(
+            changed > 3,
+            "{name} was planned but changed only {changed} pixels after submission"
+        );
+        if name == "cluster" {
+            // The newly visible background must remain behind its node boxes.
+            for node in &plan.node_instances {
+                let (x, y) = image.pixel_for(&plan.bounds, node.center[0], node.center[1]);
+                assert_eq!(
+                    image.pixel(x, y),
+                    control.pixel(x, y),
+                    "cluster covered its node"
+                );
+            }
+        }
+    }
 }
 
 /// A diagram with no labels must render without an atlas, or every unlabelled diagram would need a

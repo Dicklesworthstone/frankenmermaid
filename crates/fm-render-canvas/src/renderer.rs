@@ -2997,6 +2997,11 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) -> usize {
+        // Pie parser nodes retain slice labels for layout; their circles are not chart marks.
+        // The specialized wedge pass already paints each sector and its percentage label.
+        if ir.diagram_type == DiagramType::Pie {
+            return 0;
+        }
         let mut count = 0;
         let mut class_compartment_fonts = None;
         let mut standard_label_font = None;
