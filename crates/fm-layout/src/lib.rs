@@ -3544,12 +3544,21 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     root.clip = Some(RenderClip::Rect(bounds));
     root.children
         .push(RenderItem::Group(build_cluster_layer(layout)));
+    if ir.diagram_type == DiagramType::Sequence {
+        append_sequence_scene_layers(&mut root, ir, layout);
+    }
     root.children
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
     root.children
         .push(RenderItem::Group(build_node_layer(ir, layout)));
     root.children
         .push(RenderItem::Group(build_label_layer(ir, layout)));
+    if ir.diagram_type == DiagramType::Sequence {
+        let markers = build_sequence_lifecycle_layer(layout);
+        if !markers.children.is_empty() {
+            root.children.push(RenderItem::Group(markers));
+        }
+    }
     if let Some(journey) = &layout.extensions.journey
         && !journey.title.is_empty()
     {
@@ -3564,6 +3573,339 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     }
 
     RenderScene { bounds, root }
+}
+
+/// Sequence furniture is layout geometry, not graph nodes or edges. Project it into the shared
+/// scene so the SVG scene backend and Canvas scene API retain the same interaction semantics.
+/// Opaque `rect` backgrounds must precede lifelines, activations, notes and messages.
+fn append_sequence_scene_layers(
+    root: &mut RenderGroup,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+) {
+    let mut backgrounds = RenderGroup::new(Some(String::from("sequence-backgrounds")));
+    for fragment in &layout.extensions.sequence_fragments {
+        if fragment.kind != fm_core::FragmentKind::Rect {
+            continue;
+        }
+        if let Some(color) = fragment.color.as_deref().and_then(scene_paint) {
+            backgrounds.children.push(sequence_scene_path(
+                rounded_rect_path(fragment.bounds, 2.0),
+                Some(FillStyle::Solid {
+                    color,
+                    opacity: 1.0,
+                }),
+                None,
+            ));
+        }
+    }
+
+    let mut lifelines = RenderGroup::new(Some(String::from("sequence-lifelines")));
+    for band in &layout.extensions.bands {
+        if band.kind != LayoutBandKind::Lane || band.bounds.height <= 0.0 {
+            continue;
+        }
+        let x = band.bounds.center().x;
+        let mut stroke = StrokeStyle::solid("#94a3b8", 1.0);
+        stroke.dash_array = vec![6.0, 4.0];
+        lifelines.children.push(sequence_scene_path(
+            vec![
+                PathCmd::MoveTo {
+                    x,
+                    y: band.bounds.y,
+                },
+                PathCmd::LineTo {
+                    x,
+                    y: band.bounds.y + band.bounds.height,
+                },
+            ],
+            None,
+            Some(stroke),
+        ));
+    }
+
+    let mut activations = RenderGroup::new(Some(String::from("sequence-activations")));
+    for bar in &layout.extensions.activation_bars {
+        if bar.bounds.width <= 0.0 || bar.bounds.height <= 0.0 {
+            continue;
+        }
+        activations.children.push(sequence_scene_path(
+            node_path(bar.bounds, fm_core::NodeShape::Rect),
+            Some(FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            }),
+            Some(StrokeStyle::solid("#94a3b8", 1.2)),
+        ));
+    }
+
+    let fragments = build_sequence_fragment_layer(ir, layout);
+    let notes = build_sequence_note_layer(layout);
+    for group in [backgrounds, lifelines, activations, fragments, notes] {
+        if !group.children.is_empty() {
+            root.children.push(RenderItem::Group(group));
+        }
+    }
+}
+
+fn sequence_scene_path(
+    commands: Vec<PathCmd>,
+    fill: Option<FillStyle>,
+    stroke: Option<StrokeStyle>,
+) -> RenderItem {
+    RenderItem::Path(RenderPath {
+        source: RenderSource::Diagram,
+        commands,
+        fill,
+        stroke,
+        marker_start: MarkerKind::None,
+        marker_end: MarkerKind::None,
+    })
+}
+
+fn sequence_scene_text(
+    text: String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    align: TextAlign,
+    baseline: TextBaseline,
+) -> RenderItem {
+    RenderItem::Text(RenderText {
+        source: RenderSource::Diagram,
+        text,
+        x,
+        y,
+        font_size,
+        align,
+        baseline,
+        fill: FillStyle::Solid {
+            color: String::from("#0f172a"),
+            opacity: 1.0,
+        },
+    })
+}
+
+fn build_sequence_fragment_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("sequence-fragments")));
+    // The shared scene's node text uses 14px. Fragment labels use the same 75% scale as SVG.
+    const FONT_SIZE: f32 = 14.0;
+    const LABEL_FONT_SIZE: f32 = FONT_SIZE * 0.75;
+    const LABEL_HEIGHT: f32 = FONT_SIZE + 8.0;
+    for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
+        let bounds = fragment.bounds;
+        let mut stroke = StrokeStyle::solid("#94a3b8", 1.0);
+        if fragment.kind == fm_core::FragmentKind::Rect {
+            if let Some(color) = fragment.color.as_deref().and_then(scene_paint)
+                && !color.eq_ignore_ascii_case("transparent")
+            {
+                stroke.color = color;
+            }
+        } else {
+            stroke.dash_array = vec![6.0, 4.0];
+        }
+        layer.children.push(sequence_scene_path(
+            rounded_rect_path(bounds, 2.0),
+            None,
+            Some(stroke.clone()),
+        ));
+        if fragment.kind == fm_core::FragmentKind::Rect {
+            continue;
+        }
+
+        let keyword = match fragment.kind {
+            fm_core::FragmentKind::Loop => "loop",
+            fm_core::FragmentKind::Alt => "alt",
+            fm_core::FragmentKind::Opt => "opt",
+            fm_core::FragmentKind::Par => "par",
+            fm_core::FragmentKind::Critical => "critical",
+            fm_core::FragmentKind::Break => "break",
+            fm_core::FragmentKind::Rect => unreachable!("rect has no fragment tab"),
+        };
+        let tab = LayoutRect {
+            x: bounds.x,
+            y: bounds.y,
+            width: keyword.len() as f32 * 7.0 + 16.0,
+            height: LABEL_HEIGHT,
+        };
+        layer.children.push(sequence_scene_path(
+            node_path(tab, fm_core::NodeShape::Rect),
+            Some(FillStyle::Solid {
+                color: String::from("#e2e8f0"),
+                opacity: 1.0,
+            }),
+            Some(StrokeStyle::solid("#94a3b8", 1.0)),
+        ));
+        layer.children.push(sequence_scene_text(
+            keyword.to_owned(),
+            bounds.x + 6.0,
+            bounds.y + LABEL_HEIGHT / 2.0,
+            LABEL_FONT_SIZE,
+            TextAlign::Start,
+            TextBaseline::Middle,
+        ));
+        if !fragment.label.is_empty() {
+            layer.children.push(sequence_scene_text(
+                format!("[{}]", fragment.label),
+                bounds.center().x,
+                bounds.y + LABEL_HEIGHT + LABEL_FONT_SIZE,
+                LABEL_FONT_SIZE,
+                TextAlign::Middle,
+                TextBaseline::Middle,
+            ));
+        }
+
+        let Some(ir_fragment) = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.fragments.get(fragment_index))
+        else {
+            continue;
+        };
+        let message_y = |edge_index| {
+            layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .and_then(|edge| edge.points.first())
+                .map(|point| point.y)
+        };
+        let lead = message_y(ir_fragment.start_edge).map_or(0.0, |y| y - bounds.y);
+        for (branch_index, alternative) in ir_fragment.alternatives.iter().enumerate() {
+            // The source-order timeline can reserve a row for an empty or note-only branch.
+            // Such a branch has no first message, so deriving every divider from edges loses it.
+            let Some(y) = fragment
+                .branch_tops
+                .get(branch_index)
+                .copied()
+                .or_else(|| message_y(alternative.start_edge).map(|y| y - lead))
+            else {
+                continue;
+            };
+            layer.children.push(sequence_scene_path(
+                vec![
+                    PathCmd::MoveTo { x: bounds.x, y },
+                    PathCmd::LineTo {
+                        x: bounds.x + bounds.width,
+                        y,
+                    },
+                ],
+                None,
+                Some(stroke.clone()),
+            ));
+            if !alternative.label.is_empty() {
+                layer.children.push(sequence_scene_text(
+                    format!("[{}]", alternative.label),
+                    bounds.x + 6.0,
+                    y - 3.0,
+                    LABEL_FONT_SIZE,
+                    TextAlign::Start,
+                    TextBaseline::Bottom,
+                ));
+            }
+        }
+    }
+    layer
+}
+
+fn build_sequence_note_layer(layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("sequence-notes")));
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let font_size = metrics.font_size() * LayoutSequenceNote::FONT_SCALE;
+    let line_height = metrics.line_height_px() * LayoutSequenceNote::FONT_SCALE;
+    for note in &layout.extensions.sequence_notes {
+        layer.children.push(sequence_scene_path(
+            rounded_rect_path(note.bounds, 4.0),
+            Some(FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            }),
+            Some(StrokeStyle::solid("#94a3b8", 1.0)),
+        ));
+        if note.text.is_empty() {
+            continue;
+        }
+        for (row, text) in note.text.split('\n').enumerate() {
+            layer.children.push(sequence_scene_text(
+                text.to_owned(),
+                note.bounds.x + LayoutSequenceNote::PADDING_X,
+                note.bounds.y + LayoutSequenceNote::PADDING_Y + row as f32 * line_height,
+                font_size,
+                TextAlign::Start,
+                TextBaseline::Top,
+            ));
+        }
+    }
+    layer
+}
+
+fn build_sequence_lifecycle_layer(layout: &DiagramLayout) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("sequence-lifecycle")));
+    for marker in &layout.extensions.sequence_lifecycle_markers {
+        let half = marker.size / 2.0;
+        if !half.is_finite() || half <= 0.0 {
+            continue;
+        }
+        match marker.kind {
+            LayoutSequenceLifecycleMarkerKind::Destroy => {
+                let (x, y) = (marker.center.x, marker.center.y);
+                layer.children.push(sequence_scene_path(
+                    vec![
+                        PathCmd::MoveTo {
+                            x: x - half,
+                            y: y - half,
+                        },
+                        PathCmd::LineTo {
+                            x: x + half,
+                            y: y + half,
+                        },
+                        PathCmd::MoveTo {
+                            x: x + half,
+                            y: y - half,
+                        },
+                        PathCmd::LineTo {
+                            x: x - half,
+                            y: y + half,
+                        },
+                    ],
+                    None,
+                    Some(StrokeStyle::solid("#475569", 1.5)),
+                ));
+            }
+        }
+    }
+    layer
+}
+
+/// Accept colors without admitting resource-loading paint such as `url(...)` into a scene.
+/// SVG and Canvas both consume these strings, so use the common CSS color vocabulary and numeric
+/// color functions rather than depending on a browser retaining its last valid paint value.
+fn scene_paint(value: &str) -> Option<String> {
+    let value = fm_core::sanitize_style_value(value)?;
+    let lower = value.to_ascii_lowercase();
+    if fm_core::is_css_named_color(&lower) {
+        return Some(value);
+    }
+    if let Some(hex) = value.strip_prefix('#')
+        && matches!(hex.len(), 3 | 4 | 6 | 8)
+        && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Some(value);
+    }
+    for prefix in ["rgb(", "rgba(", "hsl(", "hsla("] {
+        if let Some(arguments) = lower
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(')'))
+            && !arguments.is_empty()
+            && arguments.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(byte, b',' | b'.' | b'%' | b'/' | b' ' | b'+' | b'-')
+            })
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 #[must_use]
@@ -3660,12 +4002,13 @@ fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
         RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
 
     for cluster in &layout.clusters {
+        let declared_color = cluster.color.as_deref().and_then(scene_paint);
         layer.children.push(RenderItem::Path(RenderPath {
             source: RenderSource::Cluster(cluster.cluster_index),
             commands: rounded_rect_path(cluster.bounds, 8.0),
             fill: Some(FillStyle::Solid {
-                color: String::from("#e2e8f0"),
-                opacity: 0.24,
+                opacity: if declared_color.is_some() { 1.0 } else { 0.24 },
+                color: declared_color.unwrap_or_else(|| String::from("#e2e8f0")),
             }),
             stroke: Some(StrokeStyle::solid("#94a3b8", 1.0)),
             marker_start: MarkerKind::None,
@@ -4114,13 +4457,15 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
             .get(cluster.cluster_index)
             .and_then(|cluster_ir| cluster_ir.title)
             .and_then(|label_id| ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str())
+            .or(cluster.title.as_deref())
         else {
             continue;
         };
 
         layer.children.push(RenderItem::Text(RenderText {
             source: RenderSource::Cluster(cluster.cluster_index),
-            text: title.text.clone(),
+            text: title.to_owned(),
             x: cluster.bounds.x + 10.0,
             y: cluster.bounds.y + 8.0,
             font_size: 12.0,
@@ -27980,6 +28325,161 @@ mod tests {
         let first = build_render_scene(&ir, &layout);
         let second = build_render_scene(&ir, &layout);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn render_scene_keeps_note_only_and_empty_sequence_alternatives() {
+        use super::{PathCmd, RenderGroup};
+        let ir = parse(
+            "sequenceDiagram\nparticipant A\nparticipant B\n\
+             alt pending\nNote over A,B: waiting\nelse empty\nend\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert!(layout.edges.is_empty(), "neither branch has a message");
+        let fragment = layout
+            .extensions
+            .sequence_fragments
+            .first()
+            .expect("alt frame");
+        let divider_y = fragment.branch_tops[0];
+        assert!(divider_y > fragment.bounds.y);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let groups: Vec<&RenderGroup> = scene
+            .root
+            .children
+            .iter()
+            .filter_map(|item| {
+                if let RenderItem::Group(group) = item {
+                    Some(group)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let frame = groups
+            .iter()
+            .find(|group| group.id.as_deref() == Some("sequence-fragments"))
+            .expect("fragment scene layer");
+        assert!(
+            frame.children.iter().any(|item| {
+                matches!(item, RenderItem::Path(path) if path.commands == [
+                    PathCmd::MoveTo { x: fragment.bounds.x, y: divider_y },
+                    PathCmd::LineTo { x: fragment.bounds.x + fragment.bounds.width, y: divider_y },
+                ])
+            }),
+            "a branch divider must come from the reserved layout row even without an edge"
+        );
+        for label in ["alt", "[pending]", "[empty]"] {
+            assert!(
+                frame
+                    .children
+                    .iter()
+                    .any(|item| { matches!(item, RenderItem::Text(text) if text.text == label) }),
+                "missing fragment label {label}"
+            );
+        }
+        let notes = groups
+            .iter()
+            .find(|group| group.id.as_deref() == Some("sequence-notes"))
+            .expect("note scene layer");
+        assert!(
+            notes
+                .children
+                .iter()
+                .any(|item| { matches!(item, RenderItem::Text(text) if text.text == "waiting") })
+        );
+        assert!(
+            !groups
+                .iter()
+                .any(|group| group.id.as_deref() == Some("sequence-activations"))
+        );
+        assert!(
+            !groups
+                .iter()
+                .any(|group| group.id.as_deref() == Some("sequence-lifecycle"))
+        );
+    }
+
+    #[test]
+    fn render_scene_falls_back_to_messages_for_external_sequence_fragment_layouts() {
+        use super::PathCmd;
+        let ir = parse(
+            "sequenceDiagram\nalt ready\nA->>B: first\n\
+             else busy\nB->>A: second\nend\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        layout.extensions.sequence_fragments[0].branch_tops.clear();
+        let fragment = &layout.extensions.sequence_fragments[0];
+        let first_y = layout.edges[0].points[0].y;
+        let second_y = layout.edges[1].points[0].y;
+        let expected_y = second_y - (first_y - fragment.bounds.y);
+        let scene = build_render_scene(&ir, &layout);
+        let frame = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("sequence-fragments") => {
+                    Some(group)
+                }
+                _ => None,
+            })
+            .expect("fragment scene layer");
+        assert!(frame.children.iter().any(|item| {
+            matches!(item, RenderItem::Path(path) if path.commands == [
+                PathCmd::MoveTo { x: fragment.bounds.x, y: expected_y },
+                PathCmd::LineTo { x: fragment.bounds.x + fragment.bounds.width, y: expected_y },
+            ])
+        }));
+        assert!(
+            frame
+                .children
+                .iter()
+                .any(|item| { matches!(item, RenderItem::Text(text) if text.text == "[busy]") })
+        );
+    }
+
+    #[test]
+    fn render_scene_plain_sequences_add_only_lifelines() {
+        let ir = parse("sequenceDiagram\nA->>B: ping\nB-->>A: pong\n").ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let layer_ids: Vec<&str> = scene
+            .root
+            .children
+            .iter()
+            .filter_map(|item| match item {
+                RenderItem::Group(group) => group.id.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            layer_ids,
+            ["clusters", "sequence-lifelines", "edges", "nodes", "labels"]
+        );
+        let labels = scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some("labels") => Some(group),
+                _ => None,
+            })
+            .expect("label scene layer");
+        for name in ["A", "B"] {
+            assert_eq!(
+                labels
+                    .children
+                    .iter()
+                    .filter(|item| { matches!(item, RenderItem::Text(text) if text.text == name) })
+                    .count(),
+                2,
+                "a lifeline must not repeat the head/foot participant label"
+            );
+        }
     }
 
     #[test]

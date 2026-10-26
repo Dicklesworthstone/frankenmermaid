@@ -20887,6 +20887,104 @@ mod tests {
     }
 
     #[test]
+    fn scene_backend_preserves_sequence_furniture_and_branch_meaning() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box rgb(230,240,250) Workers\n\
+             participant Alice\n\
+             participant Bob\n\
+             end\n\
+             rect rgb(250,240,220)\n\
+             Alice->>+Bob: request\n\
+             alt allowed\n\
+             Note right of Bob: Check<br/>Audit\n\
+             Bob-->>Alice: accept\n\
+             else denied\n\
+             Note over Alice,Bob: wait\n\
+             end\n\
+             Bob-->>-Alice: done\n\
+             end\n\
+             destroy Bob\n\
+             Bob->>Alice: bye\n",
+        )
+        .ir;
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        let drawn = issue14_drawn_text(&svg);
+        for label in [
+            "Workers",
+            "alt",
+            "[allowed]",
+            "[denied]",
+            "Check",
+            "Audit",
+            "wait",
+            "request",
+            "accept",
+            "done",
+            "bye",
+        ] {
+            assert_eq!(
+                drawn.get(label),
+                Some(&1),
+                "missing drawn sequence label {label:?}"
+            );
+        }
+        assert_eq!(drawn.get("Alice"), Some(&2), "head and foot headers only");
+        assert_eq!(drawn.get("Bob"), Some(&2), "head and foot headers only");
+        assert!(
+            !drawn.contains_key("rect"),
+            "a colored background has no keyword tab"
+        );
+        assert!(svg.contains("fill=\"rgb(230,240,250)\""));
+        assert!(svg.contains("fill=\"rgb(250,240,220)\""));
+
+        let layer_position = |id| svg.find(&format!("id=\"{id}\"")).expect("sequence layer");
+        let background = layer_position("sequence-backgrounds");
+        let lifelines = layer_position("sequence-lifelines");
+        let activations = layer_position("sequence-activations");
+        let fragments = layer_position("sequence-fragments");
+        let notes = layer_position("sequence-notes");
+        let messages = layer_position("edges");
+        let destroy = layer_position("sequence-lifecycle");
+        assert!(background < lifelines && lifelines < activations);
+        assert!(activations < fragments && fragments < notes && notes < messages);
+        assert!(messages < destroy);
+        assert!(svg[lifelines..activations].contains("stroke-dasharray=\"6,4\""));
+        assert!(svg[fragments..notes].contains("stroke-dasharray=\"6,4\""));
+    }
+
+    #[test]
+    fn scene_sequence_colors_do_not_admit_external_paints() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box red Workers\nparticipant A\nparticipant B\nend\n\
+             rect blue\nA->>B: request\nend\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        layout.clusters[0].color = Some(String::from("url(https://invalid.example/group.svg)"));
+        layout.extensions.sequence_fragments[0].color =
+            Some(String::from("url(https://invalid.example/fragment.svg)"));
+        let svg = render_svg_with_layout(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        assert!(!svg.contains("invalid.example"));
+        assert!(issue14_drawn_text(&svg).contains_key("request"));
+        assert!(svg.contains("id=\"sequence-fragments\""));
+    }
+
+    #[test]
     fn render_scene_to_svg_emits_paths_text_and_source_metadata() {
         let scene = create_scene_with_path_and_text();
         let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());

@@ -6351,6 +6351,157 @@ mod tests {
     }
 
     #[test]
+    fn canvas_scene_draws_sequence_geometry_and_notes_in_layout_coordinates() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box rgb(230,240,250) Workers\n\
+             participant Alice\n\
+             participant Bob\n\
+             end\n\
+             rect rgb(250,240,220)\n\
+             Alice->>+Bob: request\n\
+             alt allowed\n\
+             Note right of Bob: Check<br/>Audit\n\
+             Bob-->>Alice: accept\n\
+             else denied\n\
+             Note over Alice,Bob: wait\n\
+             end\n\
+             Bob-->>-Alice: done\n\
+             end\n\
+             destroy Bob\n\
+             Bob->>Alice: bye\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        assert_eq!(layout.extensions.activation_bars.len(), 1);
+        assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        let scene = build_render_scene(&ir, &layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1200.0, 1600.0);
+        let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+        let operations = ctx.operations();
+        let has_segment = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            let expected = [
+                f64::from(x0 - layout.bounds.x),
+                f64::from(y0 - layout.bounds.y),
+                f64::from(x1 - layout.bounds.x),
+                f64::from(y1 - layout.bounds.y),
+            ];
+            operations
+                .windows(2)
+                .any(|pair| match (&pair[0], &pair[1]) {
+                    (DrawOperation::MoveTo(a, b), DrawOperation::LineTo(c, d))
+                    | (DrawOperation::LineTo(a, b), DrawOperation::LineTo(c, d)) => {
+                        [*a, *b, *c, *d]
+                            .iter()
+                            .zip(expected)
+                            .all(|(actual, expected)| (actual - expected).abs() < 0.001)
+                    }
+                    _ => false,
+                })
+        };
+        for band in &layout.extensions.bands {
+            let x = band.bounds.center().x;
+            assert!(has_segment(
+                x,
+                band.bounds.y,
+                x,
+                band.bounds.y + band.bounds.height
+            ));
+        }
+        let activation = &layout.extensions.activation_bars[0].bounds;
+        assert!(has_segment(
+            activation.x,
+            activation.y,
+            activation.x + activation.width,
+            activation.y,
+        ));
+        assert!(has_segment(
+            activation.x + activation.width,
+            activation.y,
+            activation.x + activation.width,
+            activation.y + activation.height,
+        ));
+        let alternative = layout
+            .extensions
+            .sequence_fragments
+            .iter()
+            .find(|fragment| fragment.kind == fm_core::FragmentKind::Alt)
+            .expect("alt geometry");
+        let divider_y = alternative.branch_tops[0];
+        assert!(
+            has_segment(
+                alternative.bounds.x,
+                divider_y,
+                alternative.bounds.x + alternative.bounds.width,
+                divider_y,
+            ),
+            "the note-only branch retains its own divider row"
+        );
+        let destroyed = &layout.extensions.sequence_lifecycle_markers[0];
+        let half = destroyed.size / 2.0;
+        assert!(has_segment(
+            destroyed.center.x - half,
+            destroyed.center.y - half,
+            destroyed.center.x + half,
+            destroyed.center.y + half,
+        ));
+        assert!(has_segment(
+            destroyed.center.x + half,
+            destroyed.center.y - half,
+            destroyed.center.x - half,
+            destroyed.center.y + half,
+        ));
+
+        let labels: Vec<&str> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for label in [
+            "Workers",
+            "alt",
+            "[allowed]",
+            "[denied]",
+            "Check",
+            "Audit",
+            "wait",
+        ] {
+            assert_eq!(
+                labels.iter().filter(|drawn| **drawn == label).count(),
+                1,
+                "{label}"
+            );
+        }
+        for participant in ["Alice", "Bob"] {
+            assert_eq!(
+                labels.iter().filter(|drawn| **drawn == participant).count(),
+                2
+            );
+        }
+        let background = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::SetFillStyle(color) if color == "rgb(250,240,220)")
+        }).expect("author's background color");
+        let lifeline = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::SetLineDash(dash) if dash == &[6.0, 4.0])
+        }).expect("dashed lifeline");
+        let note = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::FillText(text, _, _) if text == "Check")
+        }).expect("note body");
+        assert!(background < lifeline && lifeline < note);
+        assert_eq!(result.nodes_drawn, ir.nodes.len());
+        assert_eq!(result.edges_drawn, ir.edges.len());
+        assert_eq!(result.clusters_drawn, 1);
+    }
+
+    #[test]
     fn render_scene_draws_path_markers() {
         let scene = RenderScene {
             bounds: fm_layout::RenderRect {
