@@ -1201,6 +1201,131 @@ fn a_diagram_with_no_text_renders_without_an_atlas() {
     );
 }
 
+#[test]
+fn image_exports_preserve_circles_on_wide_and_tall_targets() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let parsed = fm_parser::parse("flowchart LR\nA((Circle))\n");
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let mut plan = GpuRenderPlan::from_layout(&parsed.ir, &layout, plan_stroke_width());
+    plan.text_quads.clear();
+    plan.bounds = fm_layout::LayoutRect {
+        x: -50.0,
+        y: -50.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let node = &mut plan.node_instances[0];
+    node.center = [0.0, 0.0];
+    node.half_extent = [20.0, 20.0];
+    node.fill = [1.0, 0.0, 0.0, 1.0];
+    node.stroke = [0.0; 4];
+    node.stroke_width = 0.0;
+    let pipelines = DiagramPipelines::new(&gpu);
+    let pass = InstancePass::new(&gpu, &node_pipeline());
+    let bytes = node_instance_bytes(&plan.node_instances);
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &bytes,
+        instance_count: 1,
+        atlas: None,
+    };
+    for (width, height) in [(300, 100), (100, 300)] {
+        for image in [
+            render_diagram(&gpu, &pipelines, &plan, None, width, height).unwrap(),
+            render_instances(&gpu, &pass, &draw, width, height).unwrap(),
+        ] {
+            let center = image.pixel_for(&plan.bounds, 0.0, 0.0);
+            assert_eq!(center, (width / 2, height / 2));
+            let horizontal = (0..width)
+                .filter(|x| image.pixel(*x, height / 2).unwrap()[3] >= 128)
+                .count();
+            let vertical = (0..height)
+                .filter(|y| image.pixel(width / 2, *y).unwrap()[3] >= 128)
+                .count();
+            assert!(
+                (38..=42).contains(&horizontal),
+                "circle width={horizontal} in {width}x{height}"
+            );
+            assert!(
+                (38..=42).contains(&vertical),
+                "circle height={vertical} in {width}x{height}"
+            );
+            assert!(horizontal.abs_diff(vertical) <= 2);
+            assert_eq!(image.pixel(0, 0).unwrap(), [0, 0, 0, 0]);
+        }
+    }
+}
+
+#[test]
+fn image_readback_preserves_translucent_colors_and_source_over_composition() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let parsed = fm_parser::parse("flowchart LR\nA[Fill]\n");
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let mut plan = GpuRenderPlan::from_layout(&parsed.ir, &layout, plan_stroke_width());
+    plan.text_quads.clear();
+    plan.node_instances[0].fill = [1.0, 0.5, 0.25, 0.5];
+    plan.node_instances[0].stroke = [0.0; 4];
+    plan.node_instances[0].stroke_width = 0.0;
+    let center = plan.node_instances[0].center;
+    let pipelines = DiagramPipelines::new(&gpu);
+    let image = render_diagram(&gpu, &pipelines, &plan, None, 256, 128).unwrap();
+    let (x, y) = image.pixel_for(&plan.bounds, center[0], center[1]);
+    let pixel = image.pixel(x, y).unwrap();
+    for (actual, expected) in pixel.into_iter().zip([255_u8, 128, 64, 128]) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "translucent fill was darkened: {pixel:?}"
+        );
+    }
+
+    plan.node_instances[0].fill = [1.0, 0.0, 0.0, 0.5];
+    let mut over = plan.node_instances[0];
+    over.fill = [0.0, 0.0, 1.0, 0.5];
+    plan.node_instances.push(over);
+    let image = render_diagram(&gpu, &pipelines, &plan, None, 256, 128).unwrap();
+    let pixel = image.pixel(x, y).unwrap();
+    // Half-blue over half-red has alpha 3/4 and straight RGB (1/3, 0, 2/3).
+    for (actual, expected) in pixel.into_iter().zip([85_u8, 0, 170, 191]) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "source-over readback was not decoded: {pixel:?}"
+        );
+    }
+}
+
+#[test]
+fn invalid_image_sizes_and_bounds_return_errors_before_texture_creation() {
+    let bounds = fm_layout::LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    assert!(fm_render_canvas::gpu_device::camera_transform(&bounds, 0, 100).is_err());
+    let invalid = fm_layout::LayoutRect {
+        x: f32::NAN,
+        ..bounds
+    };
+    assert!(fm_render_canvas::gpu_device::camera_transform(&invalid, 100, 100).is_err());
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let parsed = fm_parser::parse("flowchart LR\nA\n");
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let plan = GpuRenderPlan::from_layout(&parsed.ir, &layout, plan_stroke_width());
+    let pipelines = DiagramPipelines::new(&gpu);
+    for (width, height) in [(0, 100), (100, 0), (u32::MAX, 1)] {
+        assert!(matches!(
+            render_diagram(&gpu, &pipelines, &plan, None, width, height),
+            Err(GpuDeviceError::InvalidInput(_))
+        ));
+    }
+}
+
 /// The camera must not flip the diagram. Layout space grows downward, clip space grows upward, so
 /// the Y scale is negative; getting that wrong renders every diagram upside down, which reads as a
 /// layout bug rather than a camera bug.
@@ -1213,7 +1338,7 @@ fn the_camera_maps_layout_space_the_right_way_up() {
         height: 50.0,
     };
     let [scale_x, scale_y, translate_x, translate_y] =
-        fm_render_canvas::gpu_device::camera_transform(&bounds);
+        fm_render_canvas::gpu_device::camera_transform(&bounds, 100, 50).unwrap();
 
     let clip = |x: f32, y: f32| (x * scale_x + translate_x, y * scale_y + translate_y);
 

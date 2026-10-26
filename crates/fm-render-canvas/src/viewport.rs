@@ -46,6 +46,62 @@ impl Viewport {
         }
     }
 
+    /// Fit layout bounds into an exported image without changing their aspect ratio.
+    ///
+    /// Unlike the interactive fit, exports may enlarge a diagram. Bounds may have a negative
+    /// origin or zero extent; unused image space is centered around the actual layout bounds.
+    /// Invalid dimensions and transforms that cannot be represented return `None`.
+    #[must_use]
+    pub fn fit_image(bounds: [f64; 4], canvas_width: f64, canvas_height: f64) -> Option<Self> {
+        let [x, y, width, height] = bounds;
+        if !bounds.into_iter().all(f64::is_finite)
+            || width < 0.0
+            || height < 0.0
+            || !canvas_width.is_finite()
+            || !canvas_height.is_finite()
+            || canvas_width <= 0.0
+            || canvas_height <= 0.0
+        {
+            return None;
+        }
+        let zoom = (canvas_width / width.max(1.0)).min(canvas_height / height.max(1.0));
+        let offset_x = (canvas_width - width * zoom) / 2.0 - x * zoom;
+        let offset_y = (canvas_height - height * zoom) / 2.0 - y * zoom;
+        if !zoom.is_finite() || zoom <= 0.0 || !offset_x.is_finite() || !offset_y.is_finite() {
+            return None;
+        }
+        Some(Self {
+            offset_x,
+            offset_y,
+            zoom,
+            canvas_width,
+            canvas_height,
+            device_pixel_ratio: 1.0,
+        })
+    }
+
+    /// Map layout coordinates to GPU clip space, including the canvas-to-clip Y reversal.
+    #[must_use]
+    pub fn clip_transform(&self) -> Option<[f32; 4]> {
+        if !self.canvas_width.is_finite()
+            || !self.canvas_height.is_finite()
+            || self.canvas_width <= 0.0
+            || self.canvas_height <= 0.0
+            || !self.zoom.is_finite()
+            || self.zoom <= 0.0
+        {
+            return None;
+        }
+        let camera = [
+            (2.0 * self.zoom / self.canvas_width) as f32,
+            (-2.0 * self.zoom / self.canvas_height) as f32,
+            (2.0 * self.offset_x / self.canvas_width - 1.0) as f32,
+            (1.0 - 2.0 * self.offset_y / self.canvas_height) as f32,
+        ];
+        (camera.into_iter().all(f32::is_finite) && camera[0] > 0.0 && camera[1] < 0.0)
+            .then_some(camera)
+    }
+
     /// Set the device pixel ratio for high-DPI displays.
     ///
     /// Values are clamped to the range `[0.25, 4.0]` to prevent rendering
@@ -237,6 +293,74 @@ pub fn fit_to_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_fit_preserves_aspect_ratio_and_centers_negative_origins() {
+        for (canvas_width, canvas_height) in [(300.0, 100.0), (100.0, 300.0)] {
+            let vp = Viewport::fit_image([-50.0, -25.0, 100.0, 50.0], canvas_width, canvas_height)
+                .expect("finite image bounds");
+            let center = vp.diagram_to_canvas(0.0, 0.0);
+            assert_eq!(center, (canvas_width / 2.0, canvas_height / 2.0));
+            let horizontal = vp.diagram_to_canvas(10.0, 0.0).0 - center.0;
+            let vertical = vp.diagram_to_canvas(0.0, 10.0).1 - center.1;
+            assert!((horizontal - vertical).abs() < 1e-9);
+            let [sx, sy, tx, ty] = vp.clip_transform().expect("representable clip transform");
+            for (x, y) in [(-50.0, -25.0), (0.0, 0.0), (50.0, 25.0)] {
+                let (px, py) = vp.diagram_to_canvas(x, y);
+                assert!(
+                    (f64::from(sx) * x + f64::from(tx) - (2.0 * px / canvas_width - 1.0)).abs()
+                        < 1e-6
+                );
+                assert!(
+                    (f64::from(sy) * y + f64::from(ty) - (1.0 - 2.0 * py / canvas_height)).abs()
+                        < 1e-6
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_fit_can_enlarge_shrink_and_center_empty_layouts() {
+        let enlarged = Viewport::fit_image([0.0, 0.0, 10.0, 10.0], 100.0, 100.0).unwrap();
+        assert_eq!(enlarged.zoom, 10.0);
+        let reduced = Viewport::fit_image([0.0, 0.0, 1000.0, 500.0], 100.0, 100.0).unwrap();
+        assert_eq!(reduced.zoom, 0.1);
+        assert_eq!(reduced.diagram_to_canvas(0.0, 0.0), (0.0, 25.0));
+        let empty = Viewport::fit_image([-10.0, -20.0, 0.0, 0.0], 100.0, 200.0).unwrap();
+        assert_eq!(empty.diagram_to_canvas(-10.0, -20.0), (50.0, 100.0));
+        assert!(empty.clip_transform().is_some());
+    }
+
+    #[test]
+    fn image_fit_rejects_invalid_dimensions_and_unrepresentable_transforms() {
+        for bounds in [
+            [f64::NAN, 0.0, 1.0, 1.0],
+            [0.0, f64::INFINITY, 1.0, 1.0],
+            [0.0, 0.0, -1.0, 1.0],
+            [0.0, 0.0, 1.0, -1.0],
+        ] {
+            assert!(Viewport::fit_image(bounds, 100.0, 100.0).is_none());
+        }
+        for (width, height) in [
+            (0.0, 100.0),
+            (100.0, 0.0),
+            (-1.0, 100.0),
+            (f64::NAN, 100.0),
+            (100.0, f64::INFINITY),
+        ] {
+            assert!(Viewport::fit_image([0.0, 0.0, 1.0, 1.0], width, height).is_none());
+        }
+        let invalid = Viewport {
+            offset_x: f64::INFINITY,
+            ..Viewport::default()
+        };
+        assert!(invalid.clip_transform().is_none());
+        let unrepresentable = Viewport {
+            zoom: f64::MIN_POSITIVE,
+            ..Viewport::default()
+        };
+        assert!(unrepresentable.clip_transform().is_none());
+    }
 
     #[test]
     fn viewport_pan() {
