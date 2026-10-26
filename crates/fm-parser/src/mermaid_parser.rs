@@ -11396,7 +11396,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
                 .entry(task_id_ref.clone())
                 .or_insert_with(|| task_id.clone());
         }
-        if let Some(after_task_id) = parsed_meta.depends_on.first() {
+        for after_task_id in &parsed_meta.depends_on {
             if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
                 pending_dependencies.push(PendingGanttDependency::Resolved { node, from, span });
             } else {
@@ -11514,6 +11514,7 @@ struct ParsedGanttTaskMeta {
 
 fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> ParsedGanttTaskMeta {
     let mut parsed = ParsedGanttTaskMeta::default();
+    let mut scheduling_tokens = Vec::new();
 
     for token in raw_meta
         .split(',')
@@ -11543,12 +11544,32 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             continue;
         }
 
-        // `after <task>` dependency: match the prefix case-insensitively, then lowercase ONLY the
-        // reference (as the old whole-token `to_ascii_lowercase` did before `strip_prefix("after ")`).
-        if token.len() >= 6 && token.as_bytes()[..6].eq_ignore_ascii_case(b"after ") {
-            let after = token[6..].to_ascii_lowercase();
-            let dependency = normalize_compound_identifier(&after);
-            if !dependency.is_empty() {
+        if let Some(progress) = parse_gantt_progress(token) {
+            parsed.progress.get_or_insert(progress);
+            continue;
+        }
+        scheduling_tokens.push(token);
+    }
+
+    // With one scheduling item Mermaid specifies an end, using the preceding task's end as
+    // the start. In particular, a lone absolute date is not an explicit start date. The permissive
+    // `id, end` form follows the same rule when its first item cannot be a start expression.
+    let end_only = scheduling_tokens.len() == 1
+        || (scheduling_tokens.len() == 2
+            && parse_gantt_absolute_date_checked(scheduling_tokens[0], date_format).is_none()
+            && !scheduling_tokens[0]
+                .split_once(char::is_whitespace)
+                .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("after")));
+    for token in scheduling_tokens {
+        if let Some((keyword, after)) = token.split_once(char::is_whitespace)
+            && keyword.eq_ignore_ascii_case("after")
+        {
+            // Task identifiers are case-sensitive. Each whitespace-separated reference is a
+            // separate predecessor; joining them would invent a task named `Build_Test`.
+            for dependency in after.split_whitespace().map(normalize_compound_identifier) {
+                if dependency.is_empty() || parsed.depends_on.contains(&dependency) {
+                    continue;
+                }
                 if parsed.start.is_none() {
                     parsed.start = Some(GanttDate::AfterTask(dependency.clone()));
                 }
@@ -11557,7 +11578,8 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             continue;
         }
 
-        if parsed.start.is_none()
+        if !end_only
+            && parsed.start.is_none()
             && let Some((date, fallback)) = parse_gantt_absolute_date_checked(token, date_format)
         {
             if fallback {
@@ -11581,13 +11603,6 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
                 parsed.date_format_mismatches.push(token.to_string());
             }
             parsed.end = Some(GanttDate::Absolute(date));
-            continue;
-        }
-
-        if parsed.progress.is_none()
-            && let Some(progress) = parse_gantt_progress(token)
-        {
-            parsed.progress = Some(progress);
             continue;
         }
 
@@ -11743,7 +11758,7 @@ fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
         return days.trim().parse::<u32>().ok();
     }
     if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
-        return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
+        return weeks.trim().parse::<u32>().ok()?.checked_mul(7);
     }
     None
 }
@@ -26522,6 +26537,77 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|class_name| class_name == "gantt-active")
         );
+    }
+
+    #[test]
+    fn gantt_dependencies_preserve_case_and_resolve_every_forward_reference() {
+        let parsed = parse_mermaid(
+            "gantt\nRelease :Ship, after Build TEST Build, 1d\n\
+             Build :Build, 2026-02-02, 2d\nTest :TEST, 2026-02-02, 4d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert_eq!(meta.tasks[0].depends_on, vec!["Build", "TEST"]);
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::AfterTask("Build".to_string()))
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+        for (edge, predecessor) in parsed.ir.edges.iter().zip(&meta.tasks[1..]) {
+            assert_eq!(edge.from, fm_core::IrEndpoint::Node(predecessor.node));
+            assert_eq!(edge.to, fm_core::IrEndpoint::Node(meta.tasks[0].node));
+        }
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_reports_each_missing_predecessor_without_creating_phantom_tasks() {
+        let parsed = parse_mermaid(
+            "gantt\nBuild :Build, 2026-02-02, 2d\n\
+             Release :Ship, after Build build Missing, 1d\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        for missing in ["build", "Missing"] {
+            assert!(
+                parsed.warnings.iter().any(|warning| {
+                    warning.contains(&format!("Unresolved gantt dependency 'after {missing}'"))
+                }),
+                "{:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn gantt_end_only_metadata_keeps_an_implicit_start() {
+        for metadata in ["2026-02-09", "done, 2026-02-09, 50%", "Ship, 2026-02-09"] {
+            let parsed = super::parse_gantt_task_metadata(metadata, None);
+            assert_eq!(parsed.start, None, "{metadata}");
+            assert_eq!(
+                parsed.end,
+                Some(GanttDate::Absolute("2026-02-09".to_string())),
+                "{metadata}"
+            );
+        }
+        let named_duration = super::parse_gantt_task_metadata("Ship, 2d", None);
+        assert_eq!(named_duration.task_id.as_deref(), Some("Ship"));
+        assert_eq!(named_duration.start, None);
+        assert_eq!(named_duration.end, Some(GanttDate::DurationDays(2)));
+        let explicit = super::parse_gantt_task_metadata("2026-02-06, 2026-02-09", None);
+        assert_eq!(
+            explicit.start,
+            Some(GanttDate::Absolute("2026-02-06".to_string()))
+        );
+        assert_eq!(
+            explicit.end,
+            Some(GanttDate::Absolute("2026-02-09".to_string()))
+        );
+    }
+
+    #[test]
+    fn gantt_week_durations_reject_overflow() {
+        assert_eq!(super::parse_gantt_duration_days("2w"), Some(14));
+        assert_eq!(super::parse_gantt_duration_days("4294967295w"), None);
     }
 
     #[test]

@@ -2651,7 +2651,10 @@ impl LayoutGanttDayAxis {
         if day < self.first_day || day > self.last_day {
             return None;
         }
-        Some(((day - self.first_day) as f32).mul_add(self.day_width, self.origin_x))
+        Some(
+            ((i64::from(day) - i64::from(self.first_day)) as f32)
+                .mul_add(self.day_width, self.origin_x),
+        )
     }
 }
 
@@ -9165,11 +9168,12 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
-    let mut section_to_nodes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    // A section's identity is its source index, not its caption. Repeated captions are valid
+    // and must retain separate bands in source order.
+    let mut section_to_nodes: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
     let task_count = gantt_meta.tasks.len();
     let mut explicit_starts = vec![None; task_count];
-    let mut durations = vec![1_i32; task_count];
     let mut milestones = vec![false; task_count];
     // Lookup-only (built once below, read via `.get` for dependency resolution; never iterated — the
     // resolved order comes from the task list). An `FxHashMap` replaces the `BTreeMap<String, _>`'s
@@ -9188,9 +9192,6 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
     for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
         explicit_starts[task_idx] = gantt_task_absolute_start(task);
-        durations[task_idx] = gantt_task_duration_days(task, inclusive_end_dates);
-        milestones[task_idx] = matches!(task.flags.primary_type(), GanttTaskType::Milestone)
-            || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
             task_id_to_idx.entry(task_id.as_str()).or_insert(task_idx);
         }
@@ -9201,83 +9202,100 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut start_days = vec![base_start_day; task_count];
     let mut end_exclusive_days = vec![base_start_day; task_count];
 
-    // Resolve each task's primary-dependency task index ONCE. The fixpoint below is O(task_count)
-    // iterations, and its inner loop previously did a `task_id_to_idx` (BTreeMap<String, _>) lookup per
-    // task per iteration — O(task_count^2 log) string comparisons (memcmp was ~22% of gantt layout on a
-    // dependency chain). `task_id_to_idx` is fully built above and never mutated, so the resolved index
-    // is loop-invariant; hoist it. Byte-identical: `dep_idx_by_task[i]` is `Some` exactly when the old
-    // `.get(after_id)` succeeded, and both the "no dependency" and "unresolved dependency" cases fell
-    // through to `section_end` before.
-    let dep_idx_by_task: Vec<Option<usize>> = gantt_meta
+    // Dates must be resolved in dependency order, independently of the visual row order. A task
+    // can name several predecessors (including later declarations), and starts after the latest
+    // completion. An omitted start depends on the preceding task, even across section boundaries.
+    let dependencies: Vec<Vec<usize>> = gantt_meta
         .tasks
         .iter()
-        .map(|task| {
-            gantt_task_primary_dependency(task).and_then(|id| task_id_to_idx.get(id).copied())
+        .enumerate()
+        .map(|(task_idx, task)| {
+            if explicit_starts[task_idx].is_some() {
+                return Vec::new();
+            }
+            let primary = match task.start.as_ref() {
+                Some(GanttDate::AfterTask(id)) => Some(id.as_str()),
+                _ => None,
+            };
+            let has_dependencies = primary.is_some() || !task.depends_on.is_empty();
+            let mut dependencies: Vec<usize> = primary
+                .into_iter()
+                .chain(task.depends_on.iter().map(String::as_str))
+                .filter_map(|id| task_id_to_idx.get(id).copied())
+                .collect();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            if !has_dependencies && task_idx > 0 {
+                dependencies.push(task_idx - 1);
+            }
+            dependencies
         })
         .collect();
-
-    for _ in 0..=task_count {
-        let mut changed = false;
-        let mut section_end = vec![base_start_day; section_count];
-
-        for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
-            let section_idx = task.section_idx.min(section_count.saturating_sub(1));
-            let start = if let Some(explicit) = explicit_starts[task_idx] {
-                explicit
-            } else if let Some(dep_idx) = dep_idx_by_task[task_idx] {
-                end_exclusive_days
-                    .get(dep_idx)
-                    .copied()
-                    .unwrap_or(section_end[section_idx])
-            } else {
-                section_end[section_idx]
-            };
-            let start = advance_gantt_start_day(start, skip_weekends, &excluded_dates);
-            let end_exclusive = advance_gantt_end_day(
-                start,
-                durations[task_idx].max(0),
-                skip_weekends,
-                &excluded_dates,
-            );
-
-            if start_days[task_idx] != start {
-                start_days[task_idx] = start;
-                changed = true;
-            }
-            if end_exclusive_days[task_idx] != end_exclusive {
-                end_exclusive_days[task_idx] = end_exclusive;
-                changed = true;
-            }
-            section_end[section_idx] = end_exclusive;
+    let mut dependents = vec![Vec::new(); task_count];
+    let mut unresolved: Vec<usize> = dependencies.iter().map(Vec::len).collect();
+    for (task_idx, predecessors) in dependencies.iter().enumerate() {
+        for &predecessor in predecessors {
+            dependents[predecessor].push(task_idx);
         }
-
-        if !changed {
-            break;
+    }
+    let mut ready: BTreeSet<usize> = unresolved
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &count)| (count == 0).then_some(index))
+        .collect();
+    let mut scheduled = vec![false; task_count];
+    for _ in 0..task_count {
+        let task_idx = ready.pop_first().unwrap_or_else(|| {
+            // Cyclic input has no valid schedule. Anchor the first remaining task using only
+            // resolved predecessors, then continue normally. The old fixpoint moved every date
+            // forward on every pass, making even unrelated tasks change the cycle's dates.
+            let index = scheduled.iter().position(|&done| !done).unwrap_or(0);
+            warn!(
+                task_index = index,
+                "Cyclic Gantt dependencies; anchoring unresolved task"
+            );
+            index
+        });
+        let task = &gantt_meta.tasks[task_idx];
+        let start = explicit_starts[task_idx].unwrap_or_else(|| {
+            dependencies[task_idx]
+                .iter()
+                .filter(|&&predecessor| scheduled[predecessor])
+                .map(|&predecessor| end_exclusive_days[predecessor])
+                .max()
+                .unwrap_or(base_start_day)
+        });
+        let start = advance_gantt_start_day(start, skip_weekends, &excluded_dates);
+        let end_exclusive = gantt_task_end_day(
+            task,
+            start,
+            inclusive_end_dates,
+            skip_weekends,
+            &excluded_dates,
+        );
+        start_days[task_idx] = start;
+        end_exclusive_days[task_idx] = end_exclusive;
+        milestones[task_idx] =
+            matches!(task.flags.primary_type(), GanttTaskType::Milestone) || end_exclusive == start;
+        scheduled[task_idx] = true;
+        for &dependent in &dependents[task_idx] {
+            unresolved[dependent] = unresolved[dependent].saturating_sub(1);
+            if unresolved[dependent] == 0 && !scheduled[dependent] {
+                ready.insert(dependent);
+            }
         }
     }
 
     let min_start_day = start_days.iter().copied().min().unwrap_or(base_start_day);
-    // ⚠️ THE AXIS RUNS TO THE CHART'S END BOUNDARY, NOT TO THE LAST OCCUPIED DAY (bd-pqp2f).
-    // `max_last_day` is `start + duration - 1`, the last day a bar covers, which is the right
-    // quantity for the BARS and one short for the AXIS. mermaid draws a tick on the exclusive end:
-    // `Design 2026-01-01, 3d` then `Build after a1, 4d` ends on 2026-01-08, and mermaid labels it
-    // while we stopped at 2026-01-07.
-    //
-    // `total_span_days` reaches exactly two places — the published `last_day` and the tick range
-    // below — so widening it moves the axis and nothing else; bar geometry is derived from
-    // `start_days`/`durations` directly.
-    //
-    // The `.max(1)` floor is why a ONE-DAY task already drew two ticks: its occupied span is 0 and
-    // the floor lifted it to 1, which happens to equal the end boundary. That case was right by
-    // accident and stays right by construction now.
-    let max_end_day = start_days
+    // Bars, dependency starts, and the date axis share the resolved calendar end. Exclusions
+    // lengthen a duration-based bar; drawing its raw working-day count hides the extension.
+    let max_end_day = end_exclusive_days
         .iter()
         .copied()
-        .zip(durations.iter().copied())
-        .map(|(start, duration)| start.saturating_add(duration.max(1)))
         .max()
-        .unwrap_or(min_start_day);
-    let total_span_days = usize::try_from((max_end_day - min_start_day).max(1)).unwrap_or(1);
+        .unwrap_or(min_start_day)
+        .max(min_start_day.saturating_add(1));
+    let total_span_days = i64::from(max_end_day) - i64::from(min_start_day);
 
     let mut section_base_y = 0.0_f32;
     let mut per_section_counts = vec![0_usize; section_count];
@@ -9288,30 +9306,19 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         }
 
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
-        let section_label: &str = gantt_meta
-            .sections
-            .get(section_idx)
-            .map_or("Backlog", |section| section.name.as_str());
-
-        while section_to_nodes.len() <= section_idx {
-            let idx = section_to_nodes.len();
-            let label = gantt_meta.sections.get(idx).map_or_else(
-                || format!("Section {}", idx + 1),
-                |section| section.name.clone(),
-            );
-            section_to_nodes.entry(label).or_default();
-        }
-
         let row_index = per_section_counts[section_idx];
-        let start_offset_days = (start_days[task_idx] - min_start_day).max(0) as f32;
-        let duration_days = durations[task_idx].max(1) as f32;
+        let start_offset_days =
+            (i64::from(start_days[task_idx]) - i64::from(min_start_day)).max(0) as f32;
+        let duration_days = (i64::from(end_exclusive_days[task_idx])
+            - i64::from(start_days[task_idx]))
+        .max(1) as f32;
         // A gantt bar's position and length ARE the data: where it starts is its start date and how
         // long it is is its duration. Both were wrong (bd-h9gx).
         //
         // The width used to be `max(label_width, duration * col, 156)`, so a long task NAME lengthened
         // the bar — a 1-day task with a 68-character name measured 524.10px against a 10-day task's
         // 480.00px, inverting the one comparison a gantt chart exists to support. Width is now purely
-        // temporal, and the 156px floor goes with it: `durations` is clamped to >= 1 above, so the
+        // temporal, and the 156px floor goes with it: the span is clamped to >= 1 above, so the
         // narrowest task bar is one column (48px), visible without lying about length.
         //
         // The centre used to be `start_offset_days * col`, and `node_boxes_from_centers` derives
@@ -9339,20 +9346,13 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         let y = (row_index as f32).mul_add(row_gap, section_base_y);
         centers[node_index] = (x, y);
         rank_by_node[node_index] =
-            usize::try_from((start_days[task_idx] - min_start_day).max(0)).unwrap_or(0);
+            usize::try_from((i64::from(start_days[task_idx]) - i64::from(min_start_day)).max(0))
+                .unwrap_or(0);
         order_by_node[node_index] = row_index + section_idx * 128;
-        // The pre-populate loop above already inserted every present section, so `entry` would clone
-        // `section_label` only to drop it on the (common) hit. Borrow-lookup first; allocate a key
-        // just on the rare miss — the empty-sections `"Backlog"` case, exactly as the original did.
-        // Byte-identical map contents.
-        if let Some(nodes) = section_to_nodes.get_mut(section_label) {
-            nodes.push(node_index);
-        } else {
-            section_to_nodes
-                .entry(section_label.to_string())
-                .or_default()
-                .push(node_index);
-        }
+        section_to_nodes
+            .entry(section_idx)
+            .or_default()
+            .push(node_index);
         per_section_counts[section_idx] += 1;
 
         let next_is_new_section = gantt_meta
@@ -9413,21 +9413,33 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let axis_format = gantt_meta.axis_format.as_deref();
     let tick_at = |day: i32| LayoutAxisTick {
         label: format_gantt_axis_label(day, axis_format),
-        position: ((day - min_start_day) as f32).mul_add(base_col_width, day_zero_x),
+        position: ((i64::from(day) - i64::from(min_start_day)) as f32)
+            .mul_add(base_col_width, day_zero_x),
     };
     // Publish the same mapping the ticks are built from, so anything placed at a DATE agrees with
     // the axis by construction rather than by a second derivation (bd-j0va).
     layout.extensions.gantt_day_axis = Some(LayoutGanttDayAxis {
         first_day: min_start_day,
-        last_day: min_start_day.saturating_add(i32::try_from(total_span_days).unwrap_or(i32::MAX)),
+        last_day: max_end_day,
         day_width: base_col_width,
         origin_x: day_zero_x,
     });
-    let mut axis_ticks: Vec<LayoutAxisTick> = (0..=total_span_days)
-        .map(|day_offset| min_start_day.saturating_add(day_offset as i32))
-        .filter(|&day| gantt_day_starts_interval(day, tick_interval, weekday_start))
-        .map(&tick_at)
-        .collect();
+    // A large duration must not allocate one tick per day or loop for billions of days. Thin
+    // only the labels while retaining the exact date-to-position mapping and interval alignment.
+    const MAX_AXIS_TICKS: i64 = 4096;
+    let tick_stride = ((total_span_days + MAX_AXIS_TICKS - 2) / (MAX_AXIS_TICKS - 1)).max(1);
+    let mut axis_ticks = Vec::new();
+    let mut next_tick = i64::from(min_start_day);
+    while next_tick <= i64::from(max_end_day) {
+        let Some(day) = next_gantt_tick_day(next_tick as i32, tick_interval, weekday_start) else {
+            break;
+        };
+        if day > max_end_day {
+            break;
+        }
+        axis_ticks.push(tick_at(day));
+        next_tick = i64::from(day) + tick_stride;
+    }
     // A short chart with a coarse interval can contain no boundary at all — `tickInterval 1month`
     // over six days crosses no first-of-month. Falling back to the first day keeps an axis the
     // reader can anchor on; emitting nothing would silently undo bd-trsd for exactly the documents
@@ -9438,11 +9450,14 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     layout.extensions.axis_ticks = axis_ticks;
     layout.extensions.bands = section_to_nodes
         .iter()
-        .filter_map(|(section, node_indexes)| {
+        .filter_map(|(&section_idx, node_indexes)| {
             let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
-                label: section.clone(),
+                label: gantt_meta
+                    .sections
+                    .get(section_idx)
+                    .map_or_else(|| "Backlog".to_string(), |section| section.name.clone()),
                 bounds,
             })
         })
@@ -10130,36 +10145,32 @@ fn gantt_task_absolute_start(task: &fm_core::IrGanttTask) -> Option<i32> {
     }
 }
 
-fn gantt_task_primary_dependency(task: &fm_core::IrGanttTask) -> Option<&str> {
-    if let Some(GanttDate::AfterTask(dependency)) = task.start.as_ref() {
-        return Some(dependency.as_str());
-    }
-    task.depends_on.first().map(String::as_str)
-}
-
-fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bool) -> i32 {
-    match task.end.as_ref() {
+fn gantt_task_end_day(
+    task: &fm_core::IrGanttTask,
+    start: i32,
+    inclusive_end_dates: bool,
+    skip_weekends: bool,
+    excluded_dates: &BTreeSet<i32>,
+) -> i32 {
+    let duration = match task.end.as_ref() {
         Some(GanttDate::DurationDays(days)) => i32::try_from(*days).unwrap_or(i32::MAX),
         Some(GanttDate::Absolute(end)) => {
-            let Some(start) = gantt_task_absolute_start(task) else {
-                return 1;
-            };
-            let Some(end) = parse_iso_day_number(end) else {
-                return 1;
-            };
-            let span = end.saturating_sub(start);
-            if inclusive_end_dates {
-                span.saturating_add(1).max(0)
-            } else {
-                span.max(0)
+            // A calendar deadline is already an end date, including when its start comes from
+            // a predecessor. Exclusions extend durations, never an explicitly authored deadline.
+            if let Some(end) = parse_iso_day_number(end) {
+                return end
+                    .saturating_add(i32::from(inclusive_end_dates))
+                    .max(start);
             }
+            1
         }
         Some(GanttDate::AfterTask(_)) => 1,
         None => i32::from(!matches!(
             task.flags.primary_type(),
             GanttTaskType::Milestone
         )),
-    }
+    };
+    advance_gantt_end_day(start, duration, skip_weekends, excluded_dates)
 }
 
 fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
@@ -10181,7 +10192,7 @@ fn advance_gantt_start_day(
     skip_weekends: bool,
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
-    while gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
+    while day < i32::MAX && gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
         day = day.saturating_add(1);
     }
     day
@@ -10197,13 +10208,42 @@ fn advance_gantt_end_day(
         return start;
     }
 
-    let mut day = start;
-    let mut scheduled = 0_i32;
-    while scheduled < duration_days {
-        if !gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
-            scheduled += 1;
+    let mut end = advance_gantt_duration(start, duration_days, skip_weekends);
+    // Each excluded working date adds one working day. Iteration follows the growing end, so
+    // holidays encountered during an extension are counted too, while weekend holidays count once.
+    for &excluded in excluded_dates.range(start..) {
+        if excluded >= end {
+            break;
         }
-        day = day.saturating_add(1);
+        if !skip_weekends || !is_weekend_day_number(excluded) {
+            end = advance_gantt_duration(end, 1, skip_weekends);
+        }
+    }
+    end
+}
+
+/// Advance a working-day duration without scanning every calendar day in a large input.
+fn advance_gantt_duration(mut day: i32, duration_days: i32, skip_weekends: bool) -> i32 {
+    if !skip_weekends {
+        return day.saturating_add(duration_days);
+    }
+    while day < i32::MAX && is_weekend_day_number(day) {
+        day += 1;
+    }
+    // Leave at least one working day for the tail so a Friday completion retains its Saturday
+    // exclusive boundary. The next task's start is separately advanced to Monday.
+    let full_weeks = (duration_days - 1) / 5;
+    let shifted = i64::from(day) + i64::from(full_weeks) * 7;
+    if shifted >= i64::from(i32::MAX) {
+        return i32::MAX;
+    }
+    day = shifted as i32;
+    let mut remaining = (duration_days - 1) % 5 + 1;
+    while remaining > 0 && day < i32::MAX {
+        if !is_weekend_day_number(day) {
+            remaining -= 1;
+        }
+        day += 1;
     }
     day
 }
@@ -10212,8 +10252,8 @@ fn gantt_day_is_excluded(day: i32, skip_weekends: bool, excluded_dates: &BTreeSe
     excluded_dates.contains(&day) || (skip_weekends && is_weekend_day_number(day))
 }
 
-const fn is_weekend_day_number(day: i32) -> bool {
-    matches!(day.rem_euclid(7), 0 | 6)
+fn is_weekend_day_number(day: i32) -> bool {
+    matches!(gantt_weekday(day), 0 | 6)
 }
 
 /// Civil `(year, month, day)` from a days-since-epoch count (Howard Hinnant's `civil_from_days`).
@@ -10222,7 +10262,7 @@ const fn is_weekend_day_number(day: i32) -> bool {
 /// `axisFormat` writer read the same calendar the ISO label always has. Two independent copies of
 /// this arithmetic is how an axis comes to disagree with itself about what month a tick is in.
 const fn gantt_civil_from_days(days_since_epoch: i32) -> (i32, i32, i32) {
-    let z = days_since_epoch + 719_468;
+    let z = days_since_epoch as i64 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
     let year_of_era =
@@ -10233,7 +10273,7 @@ const fn gantt_civil_from_days(days_since_epoch: i32) -> (i32, i32, i32) {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     let year = year + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
+    (year as i32, month as i32, day as i32)
 }
 
 /// Day of the week, `0` = Sunday, matching the parser's `weekday` encoding.
@@ -10241,23 +10281,44 @@ const fn gantt_civil_from_days(days_since_epoch: i32) -> (i32, i32, i32) {
 /// 1970-01-01 was a Thursday, hence the `+ 4`; `rem_euclid` so pre-epoch dates do not wrap
 /// negative.
 fn gantt_weekday(days_since_epoch: i32) -> u8 {
-    (days_since_epoch + 4).rem_euclid(7) as u8
+    (days_since_epoch.rem_euclid(7) + 4).rem_euclid(7) as u8
 }
 
-/// Does this day begin a `tickInterval` period?
-fn gantt_day_starts_interval(
+/// First interval boundary on or after a date, without walking through intervening days.
+fn next_gantt_tick_day(
     days_since_epoch: i32,
     interval: GanttTickInterval,
     weekday_start: u8,
-) -> bool {
-    let (_, month, day) = gantt_civil_from_days(days_since_epoch);
-    match interval {
-        GanttTickInterval::Day => true,
-        GanttTickInterval::Week => gantt_weekday(days_since_epoch) == weekday_start,
-        GanttTickInterval::Month => day == 1,
-        GanttTickInterval::Quarter => day == 1 && matches!(month, 1 | 4 | 7 | 10),
-        GanttTickInterval::Year => day == 1 && month == 1,
+) -> Option<i32> {
+    let (mut year, month, day) = gantt_civil_from_days(days_since_epoch);
+    let mut month = match interval {
+        GanttTickInterval::Day => return Some(days_since_epoch),
+        GanttTickInterval::Week => {
+            let offset = (i32::from(weekday_start % 7)
+                - i32::from(gantt_weekday(days_since_epoch)))
+            .rem_euclid(7);
+            return days_since_epoch.checked_add(offset);
+        }
+        GanttTickInterval::Month => month + i32::from(day > 1),
+        GanttTickInterval::Quarter => {
+            let first_month = ((month - 1) / 3) * 3 + 1;
+            first_month
+                + if month == first_month && day == 1 {
+                    0
+                } else {
+                    3
+                }
+        }
+        GanttTickInterval::Year => {
+            year += i32::from(month != 1 || day != 1);
+            1
+        }
+    };
+    if month > 12 {
+        month -= 12;
+        year += 1;
     }
+    i32::try_from(gantt_days_from_civil(year, month, 1)).ok()
 }
 
 const GANTT_MONTH_NAMES: [(&str, &str); 12] = [
@@ -10301,7 +10362,7 @@ fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> 
     let (year, month, day) = gantt_civil_from_days(days_since_epoch);
     let month_names = GANTT_MONTH_NAMES[(month.clamp(1, 12) - 1) as usize];
     let day_names = GANTT_DAY_NAMES[gantt_weekday(days_since_epoch) as usize];
-    let day_of_year = days_since_epoch - gantt_days_from_civil(year, 1, 1) + 1;
+    let day_of_year = i64::from(days_since_epoch) - gantt_days_from_civil(year, 1, 1) + 1;
 
     let mut out = String::with_capacity(format.len() + 8);
     let mut chars = format.chars();
@@ -10354,12 +10415,13 @@ fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> 
 }
 
 /// Days since epoch from a civil `(year, month, day)` — the inverse of [`gantt_civil_from_days`],
-/// used only to find January 1st for `%j`.
-const fn gantt_days_from_civil(year: i32, month: i32, day: i32) -> i32 {
-    let year = year - if month <= 2 { 1 } else { 0 };
+/// used for interval boundaries and January 1st for `%j`.
+const fn gantt_days_from_civil(year: i32, month: i32, day: i32) -> i64 {
+    let year = year as i64 - if month <= 2 { 1 } else { 0 };
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_year =
+        (153 * (month as i64 + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
@@ -27202,6 +27264,55 @@ mod tests {
         let verify = nodes.get("verify").expect("verify");
         assert!(build.bounds.width > 3.5 * 48.0);
         assert!(verify.bounds.center().x > build.bounds.center().x);
+    }
+
+    #[test]
+    fn gantt_working_calendar_uses_real_weekends_and_extends_through_holidays() {
+        for (start, duration, holidays, expected_end) in [
+            ("2026-02-05", 2, vec![], "2026-02-07"),
+            ("2026-02-06", 1, vec![], "2026-02-07"),
+            ("2026-02-06", 2, vec![], "2026-02-10"),
+            ("2026-02-06", 6, vec![], "2026-02-14"),
+            ("2026-02-06", 2, vec!["2026-02-07"], "2026-02-10"),
+            (
+                "2026-02-06",
+                2,
+                vec!["2026-02-09", "2026-02-10"],
+                "2026-02-12",
+            ),
+            ("1970-01-01", 2, vec![], "1970-01-03"),
+            ("1969-12-26", 2, vec![], "1969-12-30"),
+        ] {
+            let excluded = holidays
+                .iter()
+                .map(|day| super::parse_iso_day_number(day).unwrap())
+                .collect();
+            let start_day = super::parse_iso_day_number(start).unwrap();
+            assert_eq!(
+                super::advance_gantt_end_day(start_day, duration, true, &excluded),
+                super::parse_iso_day_number(expected_end).unwrap(),
+                "{start}, {duration} working days, holidays {holidays:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gantt_calendar_saturates_without_looping_or_overflowing() {
+        let excluded = BTreeSet::from([i32::MAX]);
+        assert_eq!(
+            super::advance_gantt_start_day(i32::MAX, true, &excluded),
+            i32::MAX
+        );
+        for skip_weekends in [false, true] {
+            assert_eq!(
+                super::advance_gantt_end_day(1, i32::MAX, skip_weekends, &excluded),
+                i32::MAX
+            );
+        }
+        assert_eq!(super::gantt_weekday(i32::MAX), 5);
+        assert_eq!(super::gantt_weekday(i32::MIN), 2);
+        assert!(super::format_gantt_axis_label(i32::MAX, Some("%Y-%m-%d %j")).contains('-'));
+        assert!(super::format_gantt_axis_label(i32::MIN, Some("%Y-%m-%d %j")).contains('-'));
     }
 
     #[test]
