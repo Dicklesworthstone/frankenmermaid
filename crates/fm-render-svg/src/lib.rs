@@ -3524,31 +3524,15 @@ fn resolve_cluster_inline_styles(
 }
 
 fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
-    use fm_core::{IrStyleTarget, parse_style_string};
-    if let Some(edge) = ir.edges.get(edge_index)
-        && let Some(style) = edge.inline_style.as_ref()
-    {
-        return style_map_to_css(&style.properties);
-    }
-    if ir.style_refs.is_empty() {
-        return None;
-    }
+    style_map_to_css(&fm_layout::edge_labels::edge_label_style(ir, edge_index))
+}
 
-    let mut merged = BTreeMap::new();
-    for sr in &ir.style_refs {
-        if sr.target == IrStyleTarget::LinkDefault {
-            merged.extend(parse_style_string(&sr.style).properties);
-        }
-    }
-    for sr in &ir.style_refs {
-        if let IrStyleTarget::Link(link_idx) = sr.target
-            && link_idx == edge_index
-        {
-            merged.extend(parse_style_string(&sr.style).properties);
-        }
-    }
-
-    style_map_to_css(&merged)
+fn edge_label_font_size(ir: &MermaidDiagramIr, edge_index: usize, default: f32) -> f32 {
+    fm_layout::edge_labels::edge_label_style(ir, edge_index)
+        .get("font-size")
+        .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+        .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        .unwrap_or(default)
 }
 
 fn truncate_label(label: &str, max_chars: Option<usize>) -> Cow<'_, str> {
@@ -4430,8 +4414,8 @@ fn svg_geometry(
                 continue;
             };
             let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
-            let (width, height, _) =
-                edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+            let font_size = edge_label_font_size(ir, index, detail.edge_font_size);
+            let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
             let x = position.x + frame.offset_x;
             let y = position.y + frame.offset_y;
             left = left.min(x - width / 2.0 - 2.0);
@@ -4681,6 +4665,18 @@ fn render_layout_to_svg(
         defs = defs.raw_gradients(grad_svg);
     }
 
+    let mut edge_label_mask_css = String::new();
+    if let Some((id, mask)) = graph_edge_label_mask(
+        ir,
+        config,
+        detail,
+        frame,
+        preserved_label_positions.as_deref(),
+    ) {
+        defs = defs.custom(mask);
+        doc = doc.class(&id);
+        edge_label_mask_css = format!(".{id} path[data-fm-edge-id]{{mask:url(#{id})}}");
+    }
     doc = doc.defs(defs);
 
     // Embed theme CSS if enabled
@@ -4715,6 +4711,7 @@ fn render_layout_to_svg(
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
         }
+        css.push_str(&edge_label_mask_css);
         if direct_minified_css {
             // The direct flowchart path returns before `apply_output_post_passes`, and it minifies
             // here, so prune while the stylesheet is still pretty. Pruning before the cache also
@@ -4758,6 +4755,7 @@ fn render_layout_to_svg(
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
         }
+        css.push_str(&edge_label_mask_css);
         if !css.is_empty() {
             doc = doc.style(css);
         }
@@ -15679,20 +15677,36 @@ fn edge_label_dimensions(
         .max()
         .unwrap_or(0);
     let legacy_width = max_chars as f32 * config.avg_char_width;
-    // Reserve at the base font size, which also leaves room for the smaller tier-specific edge
-    // face. Counting characters alone gives WWW the same width as iii and leaves wide glyphs
-    // outside both their opaque plate and the collision solver's idea of that plate.
+    // Measure the face actually drawn. Using the larger node face plus broad padding wastes
+    // scarce corridor space and displaces captions that fit beside their own transitions.
     let text_width = if collision_aware || config.preserve_labels {
-        preserved_label_width(label, config.font_size, config, &config.font_metrics())
+        preserved_label_width(
+            label,
+            if collision_aware {
+                font_size
+            } else {
+                config.font_size
+            },
+            config,
+            &config.font_metrics(),
+        )
     } else {
         legacy_width
     };
     let text_height = (line_count - 1.0) * font_size * config.line_height;
-    (
-        text_width + 8.0 + 20.0,
-        text_height + font_size + 14.0,
-        text_height,
-    )
+    if collision_aware {
+        (
+            text_width + 8.0,
+            text_height + font_size * 1.2 + 4.0,
+            text_height,
+        )
+    } else {
+        (
+            text_width + 28.0,
+            text_height + font_size + 14.0,
+            text_height,
+        )
+    }
 }
 
 /// Resolve generic graph labels in paint order, independently of the text-preservation setting.
@@ -15704,11 +15718,7 @@ fn resolve_graph_edge_label_positions(
     config: &SvgRenderConfig,
     detail: RenderDetailProfile,
 ) -> Option<Vec<Option<fm_layout::LayoutPoint>>> {
-    if !detail.show_edge_labels
-        || !matches!(
-            ir.diagram_type,
-            DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
-        )
+    if !detail.show_edge_labels || !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
     {
         return None;
     }
@@ -15728,12 +15738,79 @@ fn resolve_graph_edge_label_positions(
             continue;
         };
         let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
-        let (width, height, _) =
-            edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+        let font_size = edge_label_font_size(ir, path.edge_index, detail.edge_font_size);
+        let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
         let position = placer.place(path, width, height);
         positions[path.edge_index] = Some(position);
     }
     Some(positions)
+}
+
+/// Keep all connector strokes behind every label, including routes painted later in a shared
+/// corridor. A mask retains each edge's semantic group and cached fragment while hiding only
+/// the precise opaque plate. Its geometry-derived ID scopes multiple inline SVG documents.
+fn graph_edge_label_mask(
+    ir: &MermaidDiagramIr,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    frame: SvgFrame,
+    positions: Option<&[Option<fm_layout::LayoutPoint>]>,
+) -> Option<(String, Element)> {
+    use std::hash::{Hash, Hasher};
+    let positions = positions?;
+    let mut holes = Vec::new();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    frame.viewbox_width.to_bits().hash(&mut hash);
+    frame.viewbox_height.to_bits().hash(&mut hash);
+    for (index, position) in positions.iter().enumerate() {
+        let Some(position) = position else { continue };
+        let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let text = truncate_label(&label.text, detail.edge_label_max_chars);
+        let font = edge_label_font_size(ir, index, detail.edge_font_size);
+        let (width, height, _) = edge_label_dimensions(&text, font, config, true);
+        let x = position.x + frame.offset_x - width / 2.0;
+        let y = position.y + frame.offset_y - height / 2.0;
+        for value in [x, y, width, height] {
+            value.to_bits().hash(&mut hash);
+        }
+        holes.push(
+            Element::rect()
+                .x(x)
+                .y(y)
+                .width(width)
+                .height(height)
+                .rx(6.0)
+                .ry(6.0)
+                .fill("#000000"),
+        );
+    }
+    if holes.is_empty() {
+        return None;
+    }
+    let id = format!("fm-edge-label-mask-{:016x}", hash.finish());
+    let mut mask = Element::new(ElementKind::Mask)
+        .id(&id)
+        .attr("maskUnits", "userSpaceOnUse")
+        .attr("maskContentUnits", "userSpaceOnUse")
+        .attr("style", "mask-type:luminance")
+        .x(0.0)
+        .y(0.0)
+        .width(frame.viewbox_width)
+        .height(frame.viewbox_height)
+        .child(
+            Element::rect()
+                .x(0.0)
+                .y(0.0)
+                .width(frame.viewbox_width)
+                .height(frame.viewbox_height)
+                .fill("#ffffff"),
+        );
+    for hole in holes {
+        mask = mask.child(hole);
+    }
+    Some((id, mask))
 }
 
 #[cfg(test)]
@@ -16369,8 +16446,12 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
-        let label_font_size = detail.edge_font_size;
         let centered = preserved_label_positions.is_some();
+        let label_font_size = if centered {
+            edge_label_font_size(ir, edge_index, detail.edge_font_size)
+        } else {
+            detail.edge_font_size
+        };
         let (label_width, label_height, total_text_height) =
             edge_label_dimensions(label_text, label_font_size, config, centered);
         let start_y =
@@ -16411,6 +16492,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             let mut style = String::from("font-size:");
             let _ = attributes::write_number_into(&mut style, label_font_size);
             style.push_str("px");
+            if let Some(color) = fm_layout::edge_labels::edge_label_style(ir, edge_index)
+                .get("color")
+                .and_then(|value| sanitize_svg_paint(value))
+            {
+                style.push_str(";fill:");
+                style.push_str(&color);
+            }
             text = text.attr("style", &style);
         }
         group = group.child(text);
@@ -17265,7 +17353,14 @@ mod tests {
         let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
 
         assert_eq!(
-            svg_frame(&ir, &layout, &SvgRenderConfig::default()),
+            svg_frame(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    padding: 40.0,
+                    ..Default::default()
+                }
+            ),
             SvgFrame {
                 viewbox_width: 280.0,
                 viewbox_height: 160.0,
@@ -17283,7 +17378,14 @@ mod tests {
         // only with front-matter provenance, so the band is only reserved for that state.
         ir.meta.title_from_front_matter = true;
         let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
-        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+        let frame = svg_frame(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                padding: 40.0,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(frame.viewbox_height, 197.0);
         assert_eq!(frame.offset_y, 87.0);
@@ -17297,7 +17399,14 @@ mod tests {
     fn svg_frame_reserves_the_c4_legend_inset() {
         let ir = create_c4_ir_with_legend();
         let layout = frame_test_layout(20.0, -10.0, 100.0, 80.0);
-        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+        let frame = svg_frame(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                padding: 40.0,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(frame.viewbox_width, 400.0);
         assert_eq!(frame.viewbox_height, 288.0);
@@ -18135,7 +18244,7 @@ mod tests {
             &config,
             true,
         );
-        assert!(width >= 80.0 * config.font_size + 28.0 - 0.01);
+        assert!(width >= 80.0 * geometry.detail.edge_font_size + 8.0 - 0.01);
         assert!(geometry.frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
         let x = position.x + geometry.frame.offset_x;
         let y = position.y + geometry.frame.offset_y;
@@ -18166,11 +18275,132 @@ mod tests {
         config.font_size = 30.0;
         config.avg_char_width = 15.0;
         let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config, true);
-        assert!((doubled - 28.0 - (wide - 28.0) * 2.0).abs() < 0.01);
+        assert!((doubled - 8.0 - (wide - 8.0) * 2.0).abs() < 0.01);
         assert_eq!(
             edge_label_dimensions("e\u{301}", 25.5, &config, true),
             edge_label_dimensions("é", 25.5, &config, true),
             "a combining accent must not reserve another glyph advance"
+        );
+    }
+
+    #[test]
+    fn graph_label_font_size_is_measured_drawn_and_framed_consistently() {
+        let ir = fm_parser::parse(concat!(
+            "flowchart LR\nA -->|wide caption<br/>second row| B\n",
+            "linkStyle default font-size:18px,color:#123456\n",
+            "linkStyle 0 font-size:32px\n",
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let group = svg
+                .split_once("id=\"fm-edge-0\"")
+                .unwrap()
+                .1
+                .split_once("</g>")
+                .unwrap()
+                .0;
+            assert!(group.contains("font-size=\"32\""));
+            assert!(group.contains("font-size:32px;fill:#123456"));
+            let geometry = svg_geometry(&ir, &layout, &config);
+            let center = geometry.label_positions.as_ref().unwrap()[0].unwrap();
+            let text = &ir.labels[ir.edges[0].label.unwrap().0].text;
+            let (width, height, _) = edge_label_dimensions(text, 32.0, &config, true);
+            assert!(height >= 32.0 * 2.0);
+            assert!(center.x + geometry.frame.offset_x - width / 2.0 >= 0.0);
+            assert!(center.y + geometry.frame.offset_y - height / 2.0 >= 0.0);
+            assert!(
+                center.x + geometry.frame.offset_x + width / 2.0 <= geometry.frame.viewbox_width
+            );
+            assert!(
+                center.y + geometry.frame.offset_y + height / 2.0 <= geometry.frame.viewbox_height
+            );
+        }
+    }
+
+    #[test]
+    fn connector_masks_match_label_plates_and_are_scoped_to_each_inline_svg() {
+        let mut ids = Vec::new();
+        for text in ["first caption", "a substantially longer second caption"] {
+            let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B")).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+            assert_eq!(
+                svg,
+                render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default())
+            );
+            let mask = svg
+                .split_once("<mask ")
+                .unwrap()
+                .1
+                .split_once("</mask>")
+                .unwrap()
+                .0;
+            let id = mask
+                .split_once("id=\"")
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0;
+            assert!(svg.contains(&format!(".{id} path[data-fm-edge-id]{{mask:url(#{id})}}")));
+            assert_eq!(
+                mask.matches("<rect ").count(),
+                2,
+                "frame and one exact plate"
+            );
+            let hole = mask
+                .split("<rect ")
+                .nth(2)
+                .unwrap()
+                .split_once("/>")
+                .unwrap()
+                .0;
+            let group = svg
+                .split_once("id=\"fm-edge-0\"")
+                .unwrap()
+                .1
+                .split_once("</g>")
+                .unwrap()
+                .0;
+            let plate = group
+                .split_once("<rect ")
+                .unwrap()
+                .1
+                .split_once("/>")
+                .unwrap()
+                .0;
+            for name in ["x", "y", "width", "height", "rx", "ry"] {
+                let value = |tag: &str| {
+                    tag.split_once(&format!("{name}=\""))
+                        .unwrap()
+                        .1
+                        .split_once('"')
+                        .unwrap()
+                        .0
+                        .to_string()
+                };
+                assert_eq!(
+                    value(hole),
+                    value(plate),
+                    "mask must follow the painted plate"
+                );
+            }
+            let label = group.split_once("<text ").unwrap().1;
+            assert!(
+                !label.contains("mask="),
+                "only connector strokes are masked"
+            );
+            ids.push(id.to_string());
+        }
+        assert_ne!(
+            ids[0], ids[1],
+            "inline diagrams must not borrow another diagram's cutouts"
         );
     }
 
@@ -18248,10 +18478,21 @@ mod tests {
                         };
                         let edge = &layout.edges[1];
                         let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
-                        let (_, height, _) =
+                        let (width, height, _) =
                             edge_label_dimensions(label, detail.edge_font_size, &config, true);
-                        assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
-                        assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
+                        let plate = fm_layout::LayoutRect {
+                            x: x - 5.0 - width / 2.0,
+                            y: y - 7.0 - height / 2.0,
+                            width,
+                            height,
+                        };
+                        for node in &layout.nodes {
+                            edge_label_test_assert_clear(&plate, &node.bounds);
+                        }
+                        assert!(
+                            plate.y <= 100.02 && plate.y + height >= 99.98,
+                            "the caption must remain attached to its horizontal transition"
+                        );
                         let mut streamed = String::new();
                         render_edge_into(&mut streamed, edge, &context);
                         let element = render_edge(edge, &context).render();
@@ -18301,11 +18542,18 @@ mod tests {
             let last_index = layout.edges[1].edge_index;
             assert_eq!(positions[first_index], Some(anchor));
             let last = positions[last_index].expect("second position");
-            assert_eq!(last.x, anchor.x);
-            assert!(
-                (last.y - anchor.y - (detail.edge_font_size + 16.0)).abs() < 0.001,
-                "both whole plates have a two-pixel gap"
-            );
+            let plate = |index: usize, center: fm_layout::LayoutPoint| {
+                let text = &ir.labels[ir.edges[index].label.unwrap().0].text;
+                let (width, height, _) =
+                    edge_label_dimensions(text, detail.edge_font_size, &config, true);
+                fm_layout::LayoutRect {
+                    x: center.x - width / 2.0,
+                    y: center.y - height / 2.0,
+                    width,
+                    height,
+                }
+            };
+            edge_label_test_assert_clear(&plate(last_index, last), &plate(first_index, anchor));
             let context = EdgeRenderContext {
                 ir: &ir,
                 offset_x: 0.0,
@@ -18429,13 +18677,13 @@ mod tests {
                 2
             );
 
-            // Same nodes, routes, offsets, and explicit detail tier; only the available frame
-            // changes. Its lower edge now rules out the formerly closest downward adjustment.
+            // Changing only the frame height leaves the on-route plate valid. Cached edge
+            // fragments stay reusable while the resized document must still match a fresh render.
             blocked.bounds.height = 120.0;
             render(&mut renderer, blocked);
             assert_eq!(
                 renderer.previous.as_ref().unwrap().fragments.reused_edges,
-                1
+                2
             );
         }
     }
@@ -18447,7 +18695,7 @@ mod tests {
             "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
             "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
             "C[Short]\nA-->B\n",
-            "B-->|WW|C\n",
+            "B-->|W|C\n",
         );
         let make_input = |tail: &str| {
             let mut input = prefix_source.to_string();
@@ -18473,10 +18721,10 @@ mod tests {
         let config = SvgRenderConfig {
             detail_tier: MermaidTier::Rich,
             preserve_labels: true,
-            // The short IR label keeps the tree's fixed 80px rank gaps certifiable. Supply a
+            // The short IR label keeps the tree's fixed 64px rank gaps certifiable. Supply a
             // deliberately wider SVG calibration so its plate still reaches the changing
             // suffix; reuse must revalidate rendered label geometry, not only the IR prefix.
-            avg_char_width: 160.0,
+            avg_char_width: 320.0,
             ..Default::default()
         };
         let mut renderer = SvgBatchRenderer::default();
@@ -20888,7 +21136,7 @@ mod tests {
 
     #[test]
     fn scene_backend_preserves_sequence_furniture_and_branch_meaning() {
-        let ir = fm_parser::parse(
+        let mut ir = fm_parser::parse(
             "sequenceDiagram\n\
              box rgb(230,240,250) Workers\n\
              participant Alice\n\
@@ -20908,6 +21156,7 @@ mod tests {
              Bob->>Alice: bye\n",
         )
         .ir;
+        ir.meta.init.config.sequence_mirror_actors = Some(true);
         let svg = render_svg_with_config(
             &ir,
             &SvgRenderConfig {
@@ -23058,8 +23307,9 @@ marker#arrow-open path {
         .collect()
     }
 
-    /// Split a rendered document into its `<defs>` block and the body that follows it.
-    fn split_defs_and_body(svg: &str) -> (&str, &str) {
+    /// Inspect declarations against the complete document: stylesheets precede `<defs>` and
+    /// can contain valid references, including the connector mask's scoped CSS rule.
+    fn defs_and_document(svg: &str) -> (&str, &str) {
         let Some(defs_start) = svg.find("<defs>") else {
             return ("", svg);
         };
@@ -23067,7 +23317,7 @@ marker#arrow-open path {
             .find("</defs>")
             .expect("defs block should close")
             + defs_start;
-        (&svg[defs_start..defs_end], &svg[defs_end..])
+        (&svg[defs_start..defs_end], svg)
     }
 
     /// `<defs>` ids declared inside `defs` that no `url(#…)` in `defs` or `body` points at.
@@ -23281,7 +23531,14 @@ marker#arrow-open path {
     fn double_circle_inner_disc_is_filled_only_for_a_state_terminal() {
         let inner_fills = |src: &str| -> Vec<String> {
             let parsed = fm_parser::parse(src);
-            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            let svg = render_svg_with_config(
+                &parsed.ir,
+                &SvgRenderConfig {
+                    node_gradients: true,
+                    semantic_colors: false,
+                    ..Default::default()
+                },
+            );
             svg.split("<circle")
                 .skip(1)
                 .filter_map(|chunk| {
@@ -24103,7 +24360,7 @@ marker#arrow-open path {
         let mut checked = 0_usize;
         for (label, ir) in defs_hygiene_cases() {
             let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
-            let (defs, body) = split_defs_and_body(&svg);
+            let (defs, body) = defs_and_document(&svg);
 
             assert!(
                 unreferenced_defs_ids(defs, body).is_empty(),

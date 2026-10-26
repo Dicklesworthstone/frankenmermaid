@@ -172,17 +172,16 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
     ctx: &mut C,
     config: &CanvasRenderConfig,
 ) -> Option<CanvasEdgeLabelLayout> {
-    if !matches!(
-        ir.diagram_type,
-        DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
-    ) || !layout.edges.iter().any(|path| {
-        !path.bundled
-            && path.points.len() >= 2
-            && ir.edges.get(path.edge_index).is_some_and(|edge| {
-                edge.arrow != ArrowType::Invisible
-                    && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
-            })
-    }) {
+    if !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+        || !layout.edges.iter().any(|path| {
+            !path.bundled
+                && path.points.len() >= 2
+                && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                    edge.arrow != ArrowType::Invisible
+                        && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
+                })
+        })
+    {
         return None;
     }
 
@@ -230,17 +229,8 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
             height,
             line_height,
         });
-        let left = result.bounds.x.min(position.x - width as f32 / 2.0);
-        let top = result.bounds.y.min(position.y - height as f32 / 2.0);
-        let right = (result.bounds.x + result.bounds.width).max(position.x + width as f32 / 2.0);
-        let bottom = (result.bounds.y + result.bounds.height).max(position.y + height as f32 / 2.0);
-        result.bounds = fm_layout::LayoutRect {
-            x: left,
-            y: top,
-            width: right - left,
-            height: bottom - top,
-        };
     }
+    result.bounds = placer.bounds();
     ctx.restore();
     Some(result)
 }
@@ -2554,6 +2544,26 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) -> usize {
+        let count = self.draw_edge_pass(layout, ir, ctx, offset_x, offset_y, labels_drawn, false);
+        if self.edge_label_layout.is_some() {
+            // Shared corridors can carry several labels. Paint every connector first so a
+            // later route cannot cross the opaque plate and glyphs of an earlier label.
+            self.draw_edge_pass(layout, ir, ctx, offset_x, offset_y, labels_drawn, true);
+        }
+        count
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_edge_pass<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+        labels_only: bool,
+    ) -> usize {
         let mut count = 0;
         let mut edge_label_font = None;
         let sankey_widest = fm_layout::sankey_widest_flow(ir);
@@ -2618,164 +2628,181 @@ impl Canvas2dRenderer {
                 ctx.set_global_alpha(alpha);
             }
 
-            ctx.set_stroke_style(stroke);
-            ctx.set_line_width(stroke_width);
-            ctx.set_line_dash(dash);
+            if !labels_only {
+                ctx.set_stroke_style(stroke);
+                ctx.set_line_width(stroke_width);
+                ctx.set_line_dash(dash);
 
-            // Draw the same bounded connector geometry as SVG and the shared scene. Native
-            // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
-            // chart paths retain their polylines through the shared diagram-family policy.
-            ctx.begin_path();
-            let path_endpoints =
-                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
-                    self.emit_path_commands(
-                        ctx,
-                        std::slice::from_ref(&command),
-                        offset_x,
-                        offset_y,
-                    );
-                });
-            ctx.stroke();
-            self.draw_calls += 1;
+                // Draw the same bounded connector geometry as SVG and the shared scene. Native
+                // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
+                // chart paths retain their polylines through the shared diagram-family policy.
+                ctx.begin_path();
+                let path_endpoints =
+                    fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
+                        self.emit_path_commands(
+                            ctx,
+                            std::slice::from_ref(&command),
+                            offset_x,
+                            offset_y,
+                        );
+                    });
+                ctx.stroke();
+                self.draw_calls += 1;
 
-            // ER crow's-foot cardinality (bd-hh0o7), BEFORE the UML marker path and not through it.
-            //
-            // ⚠️ `legacy_uml_markers` IS KEYED ON `ArrowType`, and ER cardinality is not an
-            // ArrowType — it lives in `edge.er_notation()`. Adding the eight glyphs to
-            // `draw_marker_primitive` alone therefore left them as DEAD CODE: nothing on this
-            // surface ever asked for an `Er*` variant, and a draw-call test still passed because an
-            // ER diagram has plenty of other things to draw. Caught by disarming the arm and
-            // watching nothing fail.
-            //
-            // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
-            // the same pair fm-render-svg and the GPU plan select with, not a second table.
-            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
-                && let Some(endpoints) = path_endpoints
-            {
-                let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-                let start = endpoints.start;
-                let end = endpoints.end;
-                let placements = [
-                    (
-                        left.map(|form| MarkerKind::er_pair(form).0),
-                        f64::from(start.point.x) + offset_x,
-                        f64::from(start.point.y) + offset_y,
-                        f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
-                    ),
-                    (
-                        right.map(|form| MarkerKind::er_pair(form).1),
-                        f64::from(end.point.x) + offset_x,
-                        f64::from(end.point.y) + offset_y,
-                        f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
-                    ),
-                ];
-                for (kind, mx, my, angle) in placements {
-                    let Some(kind) = kind else {
-                        continue;
-                    };
-                    self.draw_calls += draw_er_cardinality_marker(
-                        ctx,
-                        kind,
-                        mx,
-                        my,
-                        angle,
-                        &self.config.node_fill,
-                        stroke,
-                    );
-                }
-            }
-
-            let uml_markers = if edge_path.reversed {
-                None
-            } else {
-                // A RELATION MARKED AT BOTH ENDS is two `ArrowType`s, not one (bd-f9t0r): the
-                // primary carries the source-end marker and `co_arrow` the target-end one, each
-                // named by the `ArrowType` that already draws it there. So the SAME derivation runs
-                // twice and the results merge — no second marker table to drift out of sync with
-                // this one.
-                let primary = legacy_uml_markers(arrow);
-                let co = ir_edge
-                    .and_then(fm_core::IrEdge::co_arrow)
-                    .and_then(legacy_uml_markers);
-                merge_uml_markers(primary, co)
-            };
-            if let Some((marker_start, marker_end)) = uml_markers
-                && let Some(endpoints) = path_endpoints
-            {
-                let start = endpoints.start;
-                let end = endpoints.end;
-
-                if marker_start != MarkerKind::None {
-                    let sx = f64::from(start.point.x) + offset_x;
-                    let sy = f64::from(start.point.y) + offset_y;
-                    let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
-                    let marker_calls = draw_marker_primitive(
-                        ctx,
-                        marker_start,
-                        sx,
-                        sy,
-                        start_marker_angle(marker_start, angle),
-                        &self.config.node_fill,
-                        stroke,
-                    );
-                    self.draw_calls += marker_calls;
+                // ER crow's-foot cardinality (bd-hh0o7), BEFORE the UML marker path and not through it.
+                //
+                // ⚠️ `legacy_uml_markers` IS KEYED ON `ArrowType`, and ER cardinality is not an
+                // ArrowType — it lives in `edge.er_notation()`. Adding the eight glyphs to
+                // `draw_marker_primitive` alone therefore left them as DEAD CODE: nothing on this
+                // surface ever asked for an `Er*` variant, and a draw-call test still passed because an
+                // ER diagram has plenty of other things to draw. Caught by disarming the arm and
+                // watching nothing fail.
+                //
+                // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
+                // the same pair fm-render-svg and the GPU plan select with, not a second table.
+                if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
+                    && let Some(endpoints) = path_endpoints
+                {
+                    let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+                    let start = endpoints.start;
+                    let end = endpoints.end;
+                    let placements = [
+                        (
+                            left.map(|form| MarkerKind::er_pair(form).0),
+                            f64::from(start.point.x) + offset_x,
+                            f64::from(start.point.y) + offset_y,
+                            f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
+                        ),
+                        (
+                            right.map(|form| MarkerKind::er_pair(form).1),
+                            f64::from(end.point.x) + offset_x,
+                            f64::from(end.point.y) + offset_y,
+                            f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
+                        ),
+                    ];
+                    for (kind, mx, my, angle) in placements {
+                        let Some(kind) = kind else {
+                            continue;
+                        };
+                        self.draw_calls += draw_er_cardinality_marker(
+                            ctx,
+                            kind,
+                            mx,
+                            my,
+                            angle,
+                            &self.config.node_fill,
+                            stroke,
+                        );
+                    }
                 }
 
-                if marker_end != MarkerKind::None {
+                let uml_markers = if edge_path.reversed {
+                    None
+                } else {
+                    // A RELATION MARKED AT BOTH ENDS is two `ArrowType`s, not one (bd-f9t0r): the
+                    // primary carries the source-end marker and `co_arrow` the target-end one, each
+                    // named by the `ArrowType` that already draws it there. So the SAME derivation runs
+                    // twice and the results merge — no second marker table to drift out of sync with
+                    // this one.
+                    let primary = legacy_uml_markers(arrow);
+                    let co = ir_edge
+                        .and_then(fm_core::IrEdge::co_arrow)
+                        .and_then(legacy_uml_markers);
+                    merge_uml_markers(primary, co)
+                };
+                if let Some((marker_start, marker_end)) = uml_markers
+                    && let Some(endpoints) = path_endpoints
+                {
+                    let start = endpoints.start;
+                    let end = endpoints.end;
+
+                    if marker_start != MarkerKind::None {
+                        let sx = f64::from(start.point.x) + offset_x;
+                        let sy = f64::from(start.point.y) + offset_y;
+                        let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
+                        let marker_calls = draw_marker_primitive(
+                            ctx,
+                            marker_start,
+                            sx,
+                            sy,
+                            start_marker_angle(marker_start, angle),
+                            &self.config.node_fill,
+                            stroke,
+                        );
+                        self.draw_calls += marker_calls;
+                    }
+
+                    if marker_end != MarkerKind::None {
+                        let ex = f64::from(end.point.x) + offset_x;
+                        let ey = f64::from(end.point.y) + offset_y;
+                        let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
+                        let marker_calls = draw_marker_primitive(
+                            ctx,
+                            marker_end,
+                            ex,
+                            ey,
+                            angle,
+                            &self.config.node_fill,
+                            stroke,
+                        );
+                        self.draw_calls += marker_calls;
+                    }
+                } else if let Some(endpoints) = path_endpoints {
+                    let end = endpoints.end;
+                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
+
                     let ex = f64::from(end.point.x) + offset_x;
                     let ey = f64::from(end.point.y) + offset_y;
-                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
-                    let marker_calls = draw_marker_primitive(
-                        ctx,
-                        marker_end,
-                        ex,
-                        ey,
-                        angle,
-                        &self.config.node_fill,
-                        stroke,
-                    );
-                    self.draw_calls += marker_calls;
-                }
-            } else if let Some(endpoints) = path_endpoints {
-                let end = endpoints.end;
-                let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
 
-                let ex = f64::from(end.point.x) + offset_x;
-                let ey = f64::from(end.point.y) + offset_y;
+                    match arrow {
+                        ArrowType::Line => {}
+                        ArrowType::Circle => {
+                            draw_circle_marker(
+                                ctx,
+                                ex,
+                                ey,
+                                4.0,
+                                Some(&self.config.node_fill),
+                                stroke,
+                            );
+                            self.draw_calls += 1;
+                        }
+                        ArrowType::Cross => {
+                            draw_cross_marker(ctx, ex, ey, 8.0, stroke);
+                            self.draw_calls += 1;
+                        }
+                        // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
+                        _ => {
+                            draw_arrowhead(ctx, ex, ey, angle, 10.0, stroke);
+                            self.draw_calls += 1;
+                        }
+                    }
 
-                match arrow {
-                    ArrowType::Line => {}
-                    ArrowType::Circle => {
-                        draw_circle_marker(ctx, ex, ey, 4.0, Some(&self.config.node_fill), stroke);
+                    // Draw arrowhead at start for double arrows
+                    if matches!(
+                        arrow,
+                        ArrowType::DoubleArrow
+                            | ArrowType::DoubleThickArrow
+                            | ArrowType::DoubleDottedArrow
+                    ) {
+                        let start = endpoints.start;
+                        let start_angle =
+                            f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
+                        let sx = f64::from(start.point.x) + offset_x;
+                        let sy = f64::from(start.point.y) + offset_y;
+
+                        draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
                         self.draw_calls += 1;
                     }
-                    ArrowType::Cross => {
-                        draw_cross_marker(ctx, ex, ey, 8.0, stroke);
-                        self.draw_calls += 1;
-                    }
-                    // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
-                    _ => {
-                        draw_arrowhead(ctx, ex, ey, angle, 10.0, stroke);
-                        self.draw_calls += 1;
-                    }
                 }
-
-                // Draw arrowhead at start for double arrows
-                if matches!(
-                    arrow,
-                    ArrowType::DoubleArrow
-                        | ArrowType::DoubleThickArrow
-                        | ArrowType::DoubleDottedArrow
-                ) {
-                    let start = endpoints.start;
-                    let start_angle =
-                        f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
-                    let sx = f64::from(start.point.x) + offset_x;
-                    let sy = f64::from(start.point.y) + offset_y;
-
-                    draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
-                    self.draw_calls += 1;
+            }
+            if !labels_only && self.edge_label_layout.is_some() {
+                ctx.set_line_dash(&[]);
+                if edge_opacity.is_some() {
+                    ctx.set_global_alpha(1.0);
                 }
+                count += 1;
+                continue;
             }
 
             // CLASS cardinalities reach the canvas (bd-rk14).
@@ -4041,29 +4068,7 @@ fn merged_edge_style(
     ir: &MermaidDiagramIr,
     edge_index: usize,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-
-    for style_ref in &ir.style_refs {
-        if matches!(style_ref.target, fm_core::IrStyleTarget::LinkDefault) {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    for style_ref in &ir.style_refs {
-        if let fm_core::IrStyleTarget::Link(target) = style_ref.target
-            && target == edge_index
-        {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    if let Some(edge) = ir.edges.get(edge_index)
-        && let Some(inline) = edge.inline_style.as_ref()
-    {
-        merged.extend(inline.properties.clone());
-    }
-
-    merged
+    fm_layout::edge_labels::edge_label_style(ir, edge_index)
 }
 
 /// The author's declared EDGE LABEL colour, if any (bd-lvj3).
@@ -4456,12 +4461,19 @@ fn resolve_edge_label_font(
     edge_index: usize,
     config: &CanvasRenderConfig,
 ) -> Option<String> {
+    resolve_edge_label_font_size(ir, edge_index)
+        .map(|size| format!("{size}px {}", config.font_family))
+}
+
+pub(crate) fn resolve_edge_label_font_size(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> Option<f64> {
     parse_declared_font_size(
         merged_edge_style(ir, edge_index)
             .get("font-size")
             .map(String::as_str),
     )
-    .map(|size| format!("{size}px {}", config.font_family))
 }
 
 /// A CSS `font-weight` this renderer is willing to put in a canvas font string.
@@ -6868,6 +6880,429 @@ mod tests {
             .expect("edge text needs its backing plate")
     }
 
+    const CYCLIC_STATE_LABEL_REPRO: &str = concat!(
+        "stateDiagram-v2\n[*] --> Idle\n",
+        "Idle --> Starting: Space down / tap\nStarting --> Idle: closed\n",
+        "Starting --> Recording: opened\nStarting --> Releasing: Space up, focus lost\n",
+        "Recording --> Idle: closed\nRecording --> Stopping: Space up, focus lost / tap\n",
+        "Releasing --> Idle: closed\nReleasing --> Stopping: opened / tap\n",
+        "Stopping --> Settling: closed\nSettling --> Idle: quiet 1 s\n",
+        "Settling --> Stopping: opened / tap\n",
+    );
+
+    #[test]
+    fn reported_cyclic_state_labels_are_clear_across_graphical_renderers() {
+        use crate::gpu_plan::rendered_label_gap;
+        fn clear(a: LayoutRect, b: LayoutRect) -> bool {
+            a.x + a.width <= b.x + 0.02
+                || b.x + b.width <= a.x + 0.02
+                || a.y + a.height <= b.y + 0.02
+                || b.y + b.height <= a.y + 0.02
+        }
+        fn number(element: &str, attr: &str) -> f32 {
+            element
+                .split_once(&format!("{attr}=\""))
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0
+                .parse()
+                .unwrap()
+        }
+        fn svg_path(tag: &str) -> Vec<PathCmd> {
+            let data = tag.split_once("d=\"").unwrap().1.split_once('"').unwrap().0;
+            let mut separated = String::new();
+            for character in data.chars() {
+                if matches!(character, 'M' | 'L' | 'Q' | 'C' | 'Z') {
+                    separated.push(' ');
+                    separated.push(character);
+                    separated.push(' ');
+                } else {
+                    separated.push(if character == ',' { ' ' } else { character });
+                }
+            }
+            let mut tokens = separated.split_whitespace();
+            let mut commands = Vec::new();
+            while let Some(operation) = tokens.next() {
+                let mut n = || tokens.next().unwrap().parse::<f32>().unwrap();
+                commands.push(match operation {
+                    "M" => PathCmd::MoveTo { x: n(), y: n() },
+                    "L" => PathCmd::LineTo { x: n(), y: n() },
+                    "Q" => PathCmd::QuadTo {
+                        cx: n(),
+                        cy: n(),
+                        x: n(),
+                        y: n(),
+                    },
+                    "C" => PathCmd::CubicTo {
+                        c1x: n(),
+                        c1y: n(),
+                        c2x: n(),
+                        c2y: n(),
+                        x: n(),
+                        y: n(),
+                    },
+                    "Z" => PathCmd::Close,
+                    other => panic!("unexpected connector command {other}"),
+                });
+            }
+            commands
+        }
+        fn scene_route(group: &RenderGroup, index: usize) -> Option<&fm_layout::RenderPath> {
+            group.children.iter().find_map(|item| match item {
+                RenderItem::Group(child) => scene_route(child, index),
+                RenderItem::Path(path)
+                    if path.source == RenderSource::Edge(index) && path.stroke.is_some() =>
+                {
+                    Some(path)
+                }
+                _ => None,
+            })
+        }
+        fn scene_plates(group: &RenderGroup, plates: &mut Vec<LayoutRect>) {
+            for item in &group.children {
+                match item {
+                    RenderItem::Group(child) => scene_plates(child, plates),
+                    RenderItem::Path(path)
+                        if matches!(path.source, RenderSource::Edge(_))
+                            && path.stroke.is_none()
+                            && path.fill.is_some() =>
+                    {
+                        let mut left = f32::INFINITY;
+                        let mut top = f32::INFINITY;
+                        let mut right = f32::NEG_INFINITY;
+                        let mut bottom = f32::NEG_INFINITY;
+                        for command in &path.commands {
+                            let (PathCmd::MoveTo { x, y }
+                            | PathCmd::LineTo { x, y }
+                            | PathCmd::QuadTo { x, y, .. }
+                            | PathCmd::CubicTo { x, y, .. }) = *command
+                            else {
+                                continue;
+                            };
+                            left = left.min(x);
+                            right = right.max(x);
+                            top = top.min(y);
+                            bottom = bottom.max(y);
+                        }
+                        plates.push(LayoutRect {
+                            x: left,
+                            y: top,
+                            width: right - left,
+                            height: bottom - top,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for direction in [fm_core::GraphDirection::TB, fm_core::GraphDirection::LR] {
+            for routing in [
+                fm_layout::EdgeRouting::Orthogonal,
+                fm_layout::EdgeRouting::Spline,
+            ] {
+                let mut ir = fm_parser::parse(CYCLIC_STATE_LABEL_REPRO).ir;
+                ir.direction = direction;
+                let layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        edge_routing: routing,
+                        ..Default::default()
+                    },
+                );
+                let check = |surface: &str,
+                             plates: &[LayoutRect],
+                             nodes: &[fm_layout::LayoutNodeBox]| {
+                    assert_eq!(
+                        plates.len(),
+                        11,
+                        "{surface}: all 55 label pairs must be checked"
+                    );
+                    for (index, plate) in plates.iter().enumerate() {
+                        assert!(plate.width > 0.0 && plate.height > 0.0);
+                        for previous in &plates[..index] {
+                            assert!(
+                                clear(*plate, *previous),
+                                "{surface} {direction:?}/{routing:?}: overlapping {plate:?}, {previous:?}"
+                            );
+                        }
+                        for node in nodes {
+                            assert!(
+                                clear(*plate, node.bounds),
+                                "{surface}: label {index} covers {}",
+                                node.node_id
+                            );
+                        }
+                    }
+                };
+                let config = CanvasRenderConfig {
+                    auto_fit: false,
+                    padding: 0.0,
+                    ..Default::default()
+                };
+                let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                assert_eq!(renderer.render(&layout, &ir, &mut context).edges_drawn, 12);
+                let frame = renderer.edge_label_layout.as_ref().unwrap().bounds;
+                let mut canvas = Vec::new();
+                let mut latest_plate = None;
+                for op in context.operations() {
+                    match op {
+                        DrawOperation::FillRect(x, y, width, height) => {
+                            latest_plate = Some(LayoutRect {
+                                x: *x as f32 + frame.x,
+                                y: *y as f32 + frame.y,
+                                width: *width as f32,
+                                height: *height as f32,
+                            })
+                        }
+                        DrawOperation::FillText(text, _, _)
+                            if ir.edges.iter().any(|edge| {
+                                edge.label.is_some_and(|id| ir.labels[id.0].text == *text)
+                            }) =>
+                        {
+                            canvas.push(
+                                latest_plate
+                                    .take()
+                                    .expect("whole caption has one backing plate"),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                check("Canvas", &canvas, &layout.nodes);
+                let mut strokes = Vec::new();
+                let mut start = 0;
+                let mut stroke_width = 1.0;
+                for (index, operation) in context.operations().iter().enumerate() {
+                    match operation {
+                        DrawOperation::SetLineWidth(width) => stroke_width = *width as f32,
+                        DrawOperation::BeginPath => start = index,
+                        DrawOperation::Stroke => strokes.push((
+                            first_stroked_path(&context.operations()[start..=index]),
+                            stroke_width,
+                        )),
+                        DrawOperation::FillText(_, _, _) => break,
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    strokes.len(),
+                    12,
+                    "all transitions precede caption painting"
+                );
+                let mut label_index = 0;
+                for (edge, (path, stroke)) in layout.edges.iter().zip(&strokes) {
+                    if ir.edges[edge.edge_index].label.is_none() {
+                        continue;
+                    }
+                    let mut plate = canvas[label_index];
+                    label_index += 1;
+                    plate.x -= frame.x;
+                    plate.y -= frame.y;
+                    let gap = rendered_label_gap(path, plate, 0.0, *stroke);
+                    assert!(
+                        gap <= 1.5,
+                        "Canvas {direction:?}/{routing:?} edge {} is {gap}px detached; plate={plate:?}, frame={frame:?}, path={path:?}, route={:?}, planned={:?}, font={}",
+                        edge.edge_index,
+                        edge.points,
+                        renderer.edge_label_layout.as_ref().unwrap().labels[edge.edge_index],
+                        config.font_size,
+                    );
+                }
+                let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+                Canvas2dRenderer::new(config).render(&layout, &ir, &mut repeated);
+                assert_eq!(context.operations(), repeated.operations());
+
+                let svg_config = fm_render_svg::SvgRenderConfig::default();
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
+                assert_eq!(
+                    svg,
+                    fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
+                );
+                let mut svg_plates = Vec::new();
+                for (index, edge) in ir
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, edge)| edge.label.is_some())
+                {
+                    let group = svg
+                        .split_once(&format!("id=\"fm-edge-{index}\""))
+                        .unwrap()
+                        .1
+                        .split_once("</g>")
+                        .unwrap()
+                        .0;
+                    let rect = group
+                        .split_once("<rect ")
+                        .unwrap()
+                        .1
+                        .split_once("/>")
+                        .unwrap()
+                        .0;
+                    let plate = LayoutRect {
+                        x: number(rect, "x"),
+                        y: number(rect, "y"),
+                        width: number(rect, "width"),
+                        height: number(rect, "height"),
+                    };
+                    let path = group
+                        .split_once("<path ")
+                        .unwrap()
+                        .1
+                        .split_once("/>")
+                        .unwrap()
+                        .0;
+                    let gap = rendered_label_gap(
+                        &svg_path(path),
+                        plate,
+                        number(rect, "rx"),
+                        number(path, "stroke-width"),
+                    );
+                    assert!(
+                        gap <= 1.5,
+                        "SVG {direction:?}/{routing:?} edge {index} is {gap}px detached"
+                    );
+                    svg_plates.push(plate);
+                    assert!(group.contains(&ir.labels[edge.label.unwrap().0].text));
+                }
+                check("SVG", &svg_plates, &[]);
+                let scene = fm_layout::build_render_scene(&ir, &layout);
+                let mut plates = Vec::new();
+                scene_plates(&scene.root, &mut plates);
+                check("Scene", &plates, &layout.nodes);
+                for (edge, plate) in layout
+                    .edges
+                    .iter()
+                    .filter(|edge| ir.edges[edge.edge_index].label.is_some())
+                    .zip(&plates)
+                {
+                    let path = scene_route(&scene.root, edge.edge_index).unwrap();
+                    let gap = rendered_label_gap(
+                        &path.commands,
+                        *plate,
+                        3.0,
+                        path.stroke.as_ref().unwrap().width,
+                    );
+                    assert!(
+                        gap <= 1.5,
+                        "Scene {direction:?}/{routing:?} edge {} is {gap}px detached",
+                        edge.edge_index
+                    );
+                }
+
+                let gpu = crate::gpu_plan::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+                assert_eq!(
+                    gpu,
+                    crate::gpu_plan::GpuRenderPlan::from_layout(&ir, &layout, 1.5)
+                );
+                let mut gpu_plates = Vec::new();
+                for run in gpu
+                    .text_runs
+                    .iter()
+                    .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Edge)
+                {
+                    let text = &ir.labels[ir.edges[run.node_index as usize].label.unwrap().0].text;
+                    assert_eq!(run.quad_count as usize, text.chars().count());
+                    let first = gpu.text_quads[run.first_quad as usize];
+                    let font = first.half_extent[1] * 2.0;
+                    let advance = crate::gpu_plan::run_advance(text, font);
+                    let center = first.center[0]
+                        - crate::gpu_plan::glyph_advance(text.chars().next().unwrap(), font) / 2.0
+                        + advance / 2.0;
+                    let width = advance + font + 8.0;
+                    let height = (font * 1.2).max(18.0) + 4.0;
+                    let plate = LayoutRect {
+                        x: center - width / 2.0,
+                        y: first.center[1] - height / 2.0,
+                        width,
+                        height,
+                    };
+                    assert!(
+                        plate.x >= gpu.bounds.x - 0.02
+                            && plate.x + width <= gpu.bounds.x + gpu.bounds.width + 0.02
+                    );
+                    assert!(
+                        plate.y >= gpu.bounds.y - 0.02
+                            && plate.y + height <= gpu.bounds.y + gpu.bounds.height + 0.02
+                    );
+                    let gap = gpu
+                        .edge_segments
+                        .iter()
+                        .filter(|segment| segment.edge_index == run.node_index)
+                        .map(|segment| {
+                            rendered_label_gap(
+                                &[
+                                    PathCmd::MoveTo {
+                                        x: segment.from[0],
+                                        y: segment.from[1],
+                                    },
+                                    PathCmd::LineTo {
+                                        x: segment.to[0],
+                                        y: segment.to[1],
+                                    },
+                                ],
+                                plate,
+                                0.0,
+                                segment.width,
+                            )
+                        })
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(
+                        gap <= 1.5,
+                        "GPU {direction:?}/{routing:?} edge {} is {gap}px detached",
+                        run.node_index
+                    );
+                    gpu_plates.push(plate);
+                }
+                check("GPU", &gpu_plates, &layout.nodes);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_corridor_connectors_are_painted_before_every_label() {
+        let ir = fm_parser::parse("flowchart LR\nA -->|first| B\nA -->|second| B\n").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes.clear();
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 160.0,
+        };
+        for edge in &mut layout.edges {
+            edge.points = [
+                fm_layout::LayoutPoint { x: 20.0, y: 80.0 },
+                fm_layout::LayoutPoint { x: 480.0, y: 80.0 },
+            ]
+            .into_iter()
+            .collect();
+        }
+        let mut context = MockCanvas2dContext::new(500.0, 160.0);
+        Canvas2dRenderer::new(CanvasRenderConfig::default()).render(&layout, &ir, &mut context);
+        let first_label = context
+            .operations()
+            .iter()
+            .position(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == "first"))
+            .unwrap();
+        assert!(
+            !context.operations()[first_label..]
+                .iter()
+                .any(|op| matches!(op, DrawOperation::Stroke))
+        );
+        let a = drawn_edge_plate(&context, "first");
+        let b = drawn_edge_plate(&context, "second");
+        assert!(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1);
+        assert_eq!(
+            a.1 + a.3 / 2.0,
+            b.1 + b.3 / 2.0,
+            "captions should slide along their shared route"
+        );
+    }
+
     #[test]
     fn graph_edge_label_plates_avoid_nodes_foreign_routes_and_each_other() {
         for diagram_type in [
@@ -7641,6 +8076,45 @@ mod tests {
             "line spacing must use the {expected_line_height}px rows reserved by layout: got {}",
             second_y - first_y
         );
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig {
+                font_family: config.font_family.clone(),
+                font_size: config.font_size as f32,
+                line_height: config.resolved_line_height(),
+                ..Default::default()
+            },
+        );
+        let note_text = svg
+            .split_once("class=\"fm-state-note-text\"")
+            .unwrap()
+            .1
+            .split_once("</text>")
+            .unwrap()
+            .0;
+        let row_offsets: Vec<f64> = note_text
+            .split("<tspan ")
+            .skip(1)
+            .map(|row| {
+                row.split_once("dy=\"")
+                    .unwrap()
+                    .1
+                    .split_once('"')
+                    .unwrap()
+                    .0
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(row_offsets.len(), lines.len());
+        assert_eq!(row_offsets[0], 0.0);
+        for (pair, offset) in lines.windows(2).zip(row_offsets.iter().skip(1)) {
+            assert!(
+                (pair[1].1 - pair[0].1 - offset).abs() < 0.01,
+                "Canvas note rows must match the font and spacing actually emitted by SVG"
+            );
+        }
     }
 
     /// The canvas gantt axis agrees with the SVG arm, tick marks included (bd-c7ijh).

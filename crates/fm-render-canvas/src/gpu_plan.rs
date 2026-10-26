@@ -1045,12 +1045,13 @@ fn edge_label_text<'a>(
     }
     ir.edges
         .get(edge.edge_index)
+        .filter(|ir_edge| ir_edge.arrow != fm_core::ArrowType::Invisible)
         .and_then(|ir_edge| ir_edge.label)
         .and_then(|id| ir.labels.get(id.0))
         .map(|label| label.text.as_str())
 }
 
-/// Where the raster pass anchors an edge label, duplicated rather than approximated (bd-qj46q).
+/// Anchor for specialized diagram families without generic graph-label placement.
 ///
 /// `draw_edges` picks the anchor by POINT COUNT, not by a general midpoint: a 4-point route uses the
 /// middle of its two interior points, a straight 2-point edge the middle of the whole span, and any
@@ -1074,6 +1075,73 @@ fn edge_label_anchor(points: &[LayoutPoint], label_offset: f32) -> Option<(f32, 
         }
     };
     Some((x, y - label_offset))
+}
+
+/// The GPU text pass has no opaque plate primitive. Cut covered connector intervals out of
+/// its segment buffer, preserving the original dash phase across every hidden interval.
+fn clip_segments_around_labels(
+    segments: &[GpuEdgeSegment],
+    plates: &[LayoutRect],
+) -> Vec<GpuEdgeSegment> {
+    let mut visible = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let dx = segment.to[0] - segment.from[0];
+        let dy = segment.to[1] - segment.from[1];
+        let length = dx.hypot(dy);
+        let mut intervals = Vec::new();
+        for plate in plates {
+            let clearance = segment.width * 0.5;
+            let mut low = 0.0_f32;
+            let mut high = 1.0_f32;
+            for (origin, delta, min, max) in [
+                (
+                    segment.from[0],
+                    dx,
+                    plate.x - clearance,
+                    plate.x + plate.width + clearance,
+                ),
+                (
+                    segment.from[1],
+                    dy,
+                    plate.y - clearance,
+                    plate.y + plate.height + clearance,
+                ),
+            ] {
+                if delta.abs() <= f32::EPSILON {
+                    if origin < min || origin > max {
+                        high = -1.0;
+                        break;
+                    }
+                } else {
+                    let a = (min - origin) / delta;
+                    let b = (max - origin) / delta;
+                    low = low.max(a.min(b));
+                    high = high.min(a.max(b));
+                }
+            }
+            if low < high {
+                intervals.push((low, high));
+            }
+        }
+        intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut emit = |low: f32, high: f32| {
+            if high > low {
+                visible.push(GpuEdgeSegment {
+                    from: [segment.from[0] + dx * low, segment.from[1] + dy * low],
+                    to: [segment.from[0] + dx * high, segment.from[1] + dy * high],
+                    dash_phase: segment.dash_phase + length * low,
+                    ..*segment
+                });
+            }
+        };
+        let mut current = 0.0_f32;
+        for (low, high) in intervals {
+            emit(current, low);
+            current = current.max(high);
+        }
+        emit(current, 1.0);
+    }
+    visible
 }
 
 /// A cluster's title, resolved the same way the Canvas2D pass resolves it (bd-dh6cy).
@@ -2280,6 +2348,11 @@ impl GpuRenderPlan {
             .iter()
             .copied()
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
+            .chain(layout.edges.iter().filter_map(|edge| {
+                edge_label_text(ir, edge)?;
+                crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
+                    .map(|size| size as f32)
+            }))
             .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
@@ -2505,24 +2578,70 @@ impl GpuRenderPlan {
         //
         // Cardinalities are placed OUTSIDE the label branch on purpose, mirroring the raster pass:
         // an edge may carry cardinality and no label at all.
+        let mut graph_label_placer =
+            fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type).then(|| {
+                fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, config.padding as f32)
+            });
+        let mut graph_label_plates = Vec::new();
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
             let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
-            if let Some(text) = edge_label_text(ir, edge)
-                && let Some(anchor) = edge_label_anchor(&edge.points, font_px * 0.8)
-            {
-                sink.push_centred_multiline(
-                    text,
-                    anchor,
-                    font_px * 0.85,
-                    font_px * 1.2,
-                    colour,
-                    GpuTextSource::Edge,
-                    edge.edge_index,
-                );
+            if let Some(text) = edge_label_text(ir, edge).filter(|_| edge.points.len() >= 2) {
+                if let Some(placer) = &mut graph_label_placer {
+                    let font = crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
+                        .map_or(font_px * 0.85, |size| size as f32);
+                    let line_height = (font_px * 1.2).max(font * 1.2);
+                    let mut label_metrics_config = metrics.config().clone();
+                    label_metrics_config.font_size = font;
+                    let label_metrics = fm_core::FontMetrics::new(label_metrics_config);
+                    let lines = text.lines().count().max(1);
+                    // Match TextSink's per-glyph advances: whole-string metrics can fuse joined
+                    // emoji, but the atlas emits each glyph separately. Square cells also overhang.
+                    let width = text
+                        .lines()
+                        .map(|line| {
+                            line.chars()
+                                .filter(|glyph| !glyph.is_control())
+                                .map(|glyph| {
+                                    let mut encoded = [0; 4];
+                                    label_metrics.estimate_width(glyph.encode_utf8(&mut encoded))
+                                })
+                                .sum::<f32>()
+                        })
+                        .fold(0.0_f32, f32::max)
+                        + font
+                        + 8.0;
+                    let height = lines as f32 * line_height + 4.0;
+                    let center = placer.place(edge, width, height);
+                    graph_label_plates.push(LayoutRect {
+                        x: center.x - width / 2.0,
+                        y: center.y - height / 2.0,
+                        width,
+                        height,
+                    });
+                    sink.push_centred_multiline(
+                        text,
+                        (center.x, center.y),
+                        font,
+                        line_height,
+                        colour,
+                        GpuTextSource::Edge,
+                        edge.edge_index,
+                    );
+                } else if let Some(anchor) = edge_label_anchor(&edge.points, font_px * 0.8) {
+                    sink.push_centred_multiline(
+                        text,
+                        anchor,
+                        font_px * 0.85,
+                        font_px * 1.2,
+                        colour,
+                        GpuTextSource::Edge,
+                        edge.edge_index,
+                    );
+                }
             }
 
             let (source_text, target_text) = edge_cardinality_texts(ir, edge);
@@ -2795,7 +2914,12 @@ impl GpuRenderPlan {
             debug_assert_eq!(pie.slices.len(), pie_wedges.len());
         }
 
-        let mut bounds = layout.bounds;
+        let mut bounds = graph_label_placer
+            .as_ref()
+            .map_or(layout.bounds, |placer| placer.bounds());
+        if !graph_label_plates.is_empty() {
+            edge_segments = clip_segments_around_labels(&edge_segments, &graph_label_plates);
+        }
         // Text can extend beyond the graph's geometry, especially with authored large faces
         // or chart annotations. The camera must fit the actual label quads as well as nodes.
         include_text_quad_bounds(&mut bounds, &text_quads);
@@ -4141,6 +4265,59 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Distance between the actually emitted connector stroke and rounded label plate. Tests use
+/// this after rendering, independently of the label placer's candidate/obstacle calculations.
+#[cfg(test)]
+pub(crate) fn rendered_label_gap(
+    commands: &[PathCmd],
+    plate: LayoutRect,
+    radius: f32,
+    stroke: f32,
+) -> f32 {
+    let radius = radius.min(plate.width / 2.0).min(plate.height / 2.0);
+    let (left, right) = (plate.x + radius, plate.x + plate.width - radius);
+    let (top, bottom) = (plate.y + radius, plate.y + plate.height - radius);
+    let mut distance = f32::INFINITY;
+    let mut current = None;
+    for command in commands {
+        flatten_connector_command(*command, &mut current, &mut |a, b| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let mut low = 0.0_f32;
+            let mut high = 1.0_f32;
+            for (origin, delta, min, max) in [(a.x, dx, left, right), (a.y, dy, top, bottom)] {
+                if delta.abs() < f32::EPSILON {
+                    if origin < min || origin > max {
+                        high = -1.0;
+                        break;
+                    }
+                } else {
+                    let (first, last) = ((min - origin) / delta, (max - origin) / delta);
+                    low = low.max(first.min(last));
+                    high = high.min(first.max(last));
+                }
+            }
+            if low <= high {
+                distance = 0.0;
+                return;
+            }
+            for point in [a, b] {
+                distance = distance.min(
+                    (point.x - point.x.clamp(left, right))
+                        .hypot(point.y - point.y.clamp(top, bottom)),
+                );
+            }
+            let length_squared = dx * dx + dy * dy;
+            if length_squared > f32::EPSILON {
+                for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+                    let t = (((x - a.x) * dx + (y - a.y) * dy) / length_squared).clamp(0.0, 1.0);
+                    distance = distance.min((x - a.x - t * dx).hypot(y - a.y - t * dy));
+                }
+            }
+        });
+    }
+    (distance - radius - stroke / 2.0).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GpuNodeShape, GpuRenderPlan};
@@ -4549,21 +4726,151 @@ mod tests {
         assert_eq!(runs[0].node_index, 7, "the run must index ir.edges");
         assert_eq!(runs[0].quad_count, 3, "three inked glyphs in \"yes\"");
 
-        // The fixture edge has THREE points, so the raster rule anchors on the middle POINT
-        // (70.0, 35.0) -- not on the midpoint of the whole span, which would be 70.0 but at a
-        // different y, and not on interior-pair midpoints, which is the 4-point branch.
         let quads = &plan.text_quads[runs[0].first_quad as usize..][..runs[0].quad_count as usize];
-        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 3.0;
-        assert!(
-            (mean_x - 70.0).abs() < 0.01,
-            "the run must be CENTRED on the anchor, not inset from it: {mean_x}"
-        );
         for quad in quads {
-            assert!(
-                (quad.center[1] - (35.0 - super::DEFAULT_FONT_SIZE_PX * 0.8)).abs() < 0.01,
-                "the label must be lifted off the line by the raster pass's own offset"
+            let left = quad.center[0] - quad.half_extent[0];
+            let right = quad.center[0] + quad.half_extent[0];
+            let top = quad.center[1] - quad.half_extent[1];
+            let bottom = quad.center[1] + quad.half_extent[1];
+            assert!(left >= plan.bounds.x && right <= plan.bounds.x + plan.bounds.width);
+            assert!(top >= plan.bounds.y && bottom <= plan.bounds.y + plan.bounds.height);
+            for node in &test_layout().nodes {
+                let bounds = node.bounds;
+                assert!(
+                    right <= bounds.x
+                        || left >= bounds.x + bounds.width
+                        || bottom <= bounds.y
+                        || top >= bounds.y + bounds.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_multiline_edge_text_keeps_its_rows_clear_and_inside_the_frame() {
+        let ir = fm_parser::parse(concat!(
+            "flowchart LR\nA -->|a much longer route 👩‍👩‍👧‍👦 label<br/>second row| B\n",
+            "B -->|return to origin| A\nA -->|parallel route| B\nlinkStyle 0 font-size:30px",
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for config in [
+            crate::CanvasRenderConfig::default(),
+            crate::CanvasRenderConfig {
+                font_family: "monospace".to_owned(),
+                font_size: 24.0,
+                line_height: 1.8,
+                ..Default::default()
+            },
+        ] {
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(
+                plan,
+                GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+            let mut boxes: Vec<LayoutRect> = Vec::new();
+            for run in plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == super::GpuTextSource::Edge)
+            {
+                let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+                let font = if run.node_index == 0 {
+                    30.0
+                } else {
+                    config.font_size as f32 * 0.85
+                };
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.half_extent[1] * 2.0 - font).abs() < 0.001)
+                );
+                let left = quads
+                    .iter()
+                    .map(|q| q.center[0] - q.half_extent[0])
+                    .fold(f32::INFINITY, f32::min);
+                let right = quads
+                    .iter()
+                    .map(|q| q.center[0] + q.half_extent[0])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let top = quads
+                    .iter()
+                    .map(|q| q.center[1] - q.half_extent[1])
+                    .fold(f32::INFINITY, f32::min);
+                let bottom = quads
+                    .iter()
+                    .map(|q| q.center[1] + q.half_extent[1])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(left >= plan.bounds.x && right <= plan.bounds.x + plan.bounds.width);
+                assert!(top >= plan.bounds.y && bottom <= plan.bounds.y + plan.bounds.height);
+                for bounds in boxes
+                    .iter()
+                    .chain(layout.nodes.iter().map(|node| &node.bounds))
+                {
+                    assert!(
+                        right <= bounds.x
+                            || left >= bounds.x + bounds.width
+                            || bottom <= bounds.y
+                            || top >= bounds.y + bounds.height
+                    );
+                }
+                for segment in &plan.edge_segments {
+                    for step in 0..=16 {
+                        let t = step as f32 / 16.0;
+                        let x = segment.from[0] + (segment.to[0] - segment.from[0]) * t;
+                        let y = segment.from[1] + (segment.to[1] - segment.from[1]) * t;
+                        assert!(
+                            x <= left || x >= right || y <= top || y >= bottom,
+                            "connector {} passes through label {}",
+                            segment.edge_index,
+                            run.node_index
+                        );
+                    }
+                }
+                boxes.push(LayoutRect {
+                    x: left,
+                    y: top,
+                    width: right - left,
+                    height: bottom - top,
+                });
+            }
+            assert_eq!(
+                boxes.len(),
+                4,
+                "both rows and both other captions must survive"
             );
         }
+    }
+
+    #[test]
+    fn gpu_label_cutouts_preserve_dash_phase_across_hidden_strokes() {
+        let segment = super::GpuEdgeSegment {
+            from: [0.0, 10.0],
+            to: [100.0, 10.0],
+            edge_index: 7,
+            color: [0.0, 0.0, 0.0, 1.0],
+            dash_phase: 13.0,
+            dash: [5.0, 3.0],
+            width: 2.0,
+        };
+        let plates = [LayoutRect {
+            x: 30.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        }];
+        let visible = super::clip_segments_around_labels(&[segment], &plates);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].from, segment.from);
+        assert_eq!(visible[1].to, segment.to);
+        assert!((visible[0].to[0] - 29.0).abs() < 0.001);
+        assert!((visible[1].from[0] - 51.0).abs() < 0.001);
+        assert!((visible[1].dash_phase - 64.0).abs() < 0.001);
+        assert!(
+            visible
+                .iter()
+                .all(|piece| piece.edge_index == 7 && piece.dash == segment.dash)
+        );
     }
 
     /// The anchor follows POINT COUNT, the way `draw_edges` does (bd-qj46q).
@@ -6026,7 +6333,6 @@ mod tests {
                     ir.diagram_type
                 );
             }
-
             if ir.diagram_type == fm_core::DiagramType::Journey {
                 // Journey task lanes repeat their section name in metadata, but the section
                 // heading must be drawn exactly once. Check all three surfaces retain it;
@@ -6065,6 +6371,27 @@ mod tests {
                         1,
                         "SVG must retain one section heading for {caption}"
                     );
+                }
+            }
+            if let Some(journey) = &layout.extensions.journey {
+                assert!(
+                    !journey.legend.is_empty(),
+                    "Journey actors need their shared legend"
+                );
+                for (index, row) in journey.legend.iter().enumerate() {
+                    let run = plan
+                        .text_runs
+                        .iter()
+                        .find(|run| {
+                            run.source == super::GpuTextSource::JourneyLegend
+                                && run.node_index == index as u32
+                        })
+                        .expect("each shared legend row reaches the GPU plan");
+                    assert_eq!(
+                        run.quad_count as usize,
+                        row.text.chars().filter(|c| !c.is_control()).count()
+                    );
+                    assert!(svg.contains(&fm_render_svg::escape_xml_text(&row.text)));
                 }
             }
         }
@@ -6570,6 +6897,7 @@ mod tests {
             "draw_pie_wedges",
             "draw_clusters",
             "draw_edges",
+            "draw_edge_pass", // Routes, markers, and measured labels already represented above.
             "draw_nodes",
         ];
 

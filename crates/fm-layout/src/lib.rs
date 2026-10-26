@@ -4921,8 +4921,8 @@ fn refine_graph_label_spacing(
         .fold(config.spacing.rank_spacing, f32::max);
     let mut best_quality = initial;
     let mut best = None;
-    for cross_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0] {
-        for rank_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0] {
+    for cross_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0] {
+        for rank_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0] {
             if cross_step == 0.0 && rank_step == 0.0 {
                 continue;
             }

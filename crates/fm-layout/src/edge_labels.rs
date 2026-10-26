@@ -150,6 +150,16 @@ impl<'a> EdgeLabelPlacer<'a> {
             height,
             &obstacles,
         )
+        .or_else(|| {
+            closest_clear_touching_route_position(
+                path,
+                edge_label_position(path),
+                width,
+                height,
+                &obstacles,
+                self.layout.bounds,
+            )
+        })
         .unwrap_or_else(|| {
             closest_clear_route_neighborhood(
                 path,
@@ -315,10 +325,87 @@ fn closest_clear_route_position(
     height: f32,
     obstacles: &[EdgeLabelObstacle],
 ) -> Option<LayoutPoint> {
+    closest_clear_route_position_with_offset(
+        path,
+        anchor,
+        width,
+        height,
+        obstacles,
+        LayoutPoint { x: 0.0, y: 0.0 },
+    )
+}
+
+/// Search the complete route for a clear plate whose side touches its connector. A
+/// narrow corridor may have no room for a centered plate while still having a readable
+/// slot beside it; checking only route vertices and midpoints misses these intervals.
+fn closest_clear_touching_route_position(
+    path: &LayoutEdgePath,
+    anchor: LayoutPoint,
+    width: f32,
+    height: f32,
+    obstacles: &[EdgeLabelObstacle],
+    bounds: LayoutRect,
+) -> Option<LayoutPoint> {
+    let mut best = None;
+    let mut best_score = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    for (x, y) in [
+        (width / 2.0, 0.0),
+        (-width / 2.0, 0.0),
+        (0.0, height / 2.0),
+        (0.0, -height / 2.0),
+    ] {
+        // Keep obstacles and shared-corridor exemptions from the original route.
+        // Only the candidate plate center is translated.
+        let Some(center) = closest_clear_route_position_with_offset(
+            path,
+            anchor,
+            width,
+            height,
+            obstacles,
+            LayoutPoint { x, y },
+        ) else {
+            continue;
+        };
+        let plate = LayoutRect {
+            x: center.x - width / 2.0,
+            y: center.y - height / 2.0,
+            width,
+            height,
+        };
+        let area = ((bounds.x + bounds.width).max(plate.x + width) - bounds.x.min(plate.x))
+            * ((bounds.y + bounds.height).max(plate.y + height) - bounds.y.min(plate.y));
+        let score = (
+            edge_label_route_distance_squared(path, plate),
+            area,
+            (center.x - anchor.x).powi(2) + (center.y - anchor.y).powi(2),
+        );
+        if score < best_score {
+            best = Some(center);
+            best_score = score;
+        }
+    }
+    best
+}
+
+fn closest_clear_route_position_with_offset(
+    path: &LayoutEdgePath,
+    anchor: LayoutPoint,
+    width: f32,
+    height: f32,
+    obstacles: &[EdgeLabelObstacle],
+    offset: LayoutPoint,
+) -> Option<LayoutPoint> {
     let mut best = None;
     let mut best_distance = f32::INFINITY;
     for pair in path.points.windows(2) {
-        let (from, to) = (pair[0], pair[1]);
+        let from = LayoutPoint {
+            x: pair[0].x + offset.x,
+            y: pair[0].y + offset.y,
+        };
+        let to = LayoutPoint {
+            x: pair[1].x + offset.x,
+            y: pair[1].y + offset.y,
+        };
         let (dx, dy) = (to.x - from.x, to.y - from.y);
         let length_squared = dx * dx + dy * dy;
         if length_squared <= f32::EPSILON {
@@ -968,10 +1055,37 @@ pub(crate) fn graph_label_attachment_quality(
     let mut detached = 0;
     let mut worst_gap = 0.0_f32;
     let mut area = layout.bounds.width * layout.bounds.height;
-    for (allowance, minimum_line_height) in [
-        (1.125, 0.0),
-        (1.15, 0.0),
-        (1.15, base_metrics.font_size() * 1.2),
+    // Canvas measures its installed face, which can have wider narrow letters than the
+    // proportional estimate. Score fixed-advance faces as well: a smaller plate does not
+    // necessarily reuse the same free interval after earlier labels have been placed.
+    for (allowance, minimum_line_height, preset, overhang_em) in [
+        (1.125, 0.0, base_metrics.config().preset, 0.0),
+        (1.15, 0.0, base_metrics.config().preset, 0.0),
+        (
+            1.15,
+            base_metrics.font_size() * 1.2,
+            base_metrics.config().preset,
+            0.0,
+        ),
+        (
+            0.95,
+            base_metrics.font_size() * 1.2,
+            fm_core::FontPreset::Monospace,
+            0.0,
+        ),
+        (
+            1.0,
+            base_metrics.font_size() * 1.2,
+            fm_core::FontPreset::Monospace,
+            0.0,
+        ),
+        // GPU glyph atlas cells extend beyond the proportional advance at either end.
+        (
+            1.0,
+            base_metrics.font_size() * 1.2,
+            base_metrics.config().preset,
+            1.0,
+        ),
     ] {
         let mut placer = EdgeLabelPlacer::new(ir, layout, 20.0);
         for path in &layout.edges {
@@ -991,11 +1105,31 @@ pub(crate) fn graph_label_attachment_quality(
                 .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
                 .unwrap_or(base_metrics.font_size() * 0.85);
             let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                preset,
                 font_size,
                 line_height: 1.2,
                 ..base_metrics.config().clone()
             });
-            let width = metrics.estimate_multiline_width(&label.text) * allowance + 8.0;
+            let advance = if overhang_em > 0.0 {
+                // Match the GPU atlas, which positions separate glyph cells even when
+                // native text shaping would fuse a joined emoji into one glyph.
+                label
+                    .text
+                    .lines()
+                    .map(|line| {
+                        line.chars()
+                            .filter(|glyph| !glyph.is_control())
+                            .map(|glyph| {
+                                let mut encoded = [0; 4];
+                                metrics.estimate_width(glyph.encode_utf8(&mut encoded))
+                            })
+                            .sum::<f32>()
+                    })
+                    .fold(0.0_f32, f32::max)
+            } else {
+                metrics.estimate_multiline_width(&label.text)
+            };
+            let width = advance * allowance + font_size * overhang_em + 8.0;
             let height = label.text.lines().count().max(1) as f32
                 * (font_size * 1.2).max(minimum_line_height)
                 + 4.0;
@@ -1095,6 +1229,50 @@ mod tests {
             bundle_count: 1,
             bundled: false,
         }
+    }
+
+    #[test]
+    fn continuous_side_contact_finds_a_slot_between_route_vertices() {
+        let path = route(&[(0.0, 50.0), (400.0, 50.0)]);
+        let anchor = LayoutPoint { x: 200.0, y: 50.0 };
+        let node = LayoutRect {
+            x: 120.0,
+            y: 10.0,
+            width: 190.0,
+            height: 35.0,
+        };
+        let obstacles = [
+            EdgeLabelObstacle::Segment(
+                LayoutPoint { x: 0.0, y: 60.0 },
+                LayoutPoint { x: 400.0, y: 60.0 },
+            ),
+            EdgeLabelObstacle::Bounds(node),
+        ];
+        let bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 100.0,
+        };
+        assert!(closest_clear_route_position(&path, anchor, 80.0, 20.0, &obstacles).is_none());
+        let center =
+            closest_clear_touching_route_position(&path, anchor, 80.0, 20.0, &obstacles, bounds)
+                .expect("a free interval beside the route must be used before detaching the label");
+        assert!(center.x > 70.0 && center.x < 80.0);
+        assert_eq!(center.y, 40.0);
+        let plate = LayoutRect {
+            x: center.x - 40.0,
+            y: center.y - 10.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        assert!(!overlap(plate, node));
+        assert!(plate.y + plate.height < 60.0);
+        assert!(edge_label_route_distance_squared(&path, plate) < 0.0001);
+        assert_eq!(
+            Some(center),
+            closest_clear_touching_route_position(&path, anchor, 80.0, 20.0, &obstacles, bounds,)
+        );
     }
 
     #[test]
@@ -1309,65 +1487,69 @@ mod tests {
     fn issue_16_scene_labels_are_readable_attached_and_deterministic() {
         for direction in [fm_core::GraphDirection::TB, fm_core::GraphDirection::LR] {
             for routing in [crate::EdgeRouting::Orthogonal, crate::EdgeRouting::Spline] {
-                let mut ir = fm_parser::parse(ISSUE_16).ir;
-                ir.direction = direction;
-                let config = crate::LayoutConfig {
-                    edge_routing: routing,
-                    ..Default::default()
-                };
-                let layout = crate::layout_diagram_traced_with_config(
-                    &ir,
+                for algorithm in [
+                    crate::LayoutAlgorithm::Auto,
                     crate::LayoutAlgorithm::Sugiyama,
-                    config.clone(),
-                )
-                .layout;
-                let scene = crate::build_render_scene(&ir, &layout);
-                let repeat = crate::layout_diagram_traced_with_config(
-                    &ir,
-                    crate::LayoutAlgorithm::Sugiyama,
-                    config,
-                )
-                .layout;
-                assert_eq!(layout, repeat);
-                assert_eq!(scene, crate::build_render_scene(&ir, &repeat));
-                let plates = scene_plates(&scene);
-                assert_eq!(layout.edges.len(), 12);
-                assert_eq!(plates.len(), 11);
-                let mut pairs = 0;
-                for (position, (index, plate)) in plates.iter().enumerate() {
-                    for (_, other) in &plates[position + 1..] {
-                        pairs += 1;
+                ] {
+                    let mut ir = fm_parser::parse(ISSUE_16).ir;
+                    ir.direction = direction;
+                    let config = crate::LayoutConfig {
+                        edge_routing: routing,
+                        ..Default::default()
+                    };
+                    let layout =
+                        crate::layout_diagram_traced_with_config(&ir, algorithm, config.clone())
+                            .layout;
+                    let scene = crate::build_render_scene(&ir, &layout);
+                    let repeat =
+                        crate::layout_diagram_traced_with_config(&ir, algorithm, config).layout;
+                    assert_eq!(layout, repeat);
+                    assert_eq!(scene, crate::build_render_scene(&ir, &repeat));
+                    let plates = scene_plates(&scene);
+                    assert_eq!(layout.edges.len(), 12);
+                    assert_eq!(plates.len(), 11);
+                    let mut pairs = 0;
+                    for (position, (index, plate)) in plates.iter().enumerate() {
+                        for (_, other) in &plates[position + 1..] {
+                            pairs += 1;
+                            assert!(
+                                !overlap(*plate, *other),
+                                "{algorithm:?} {direction:?} {routing:?}: {plate:?} overlaps {other:?}"
+                            );
+                        }
                         assert!(
-                            !overlap(*plate, *other),
-                            "{direction:?} {routing:?}: {plate:?} overlaps {other:?}"
+                            layout
+                                .nodes
+                                .iter()
+                                .all(|node| !overlap(*plate, node.bounds)),
+                            "label {index} hides a node"
+                        );
+                        assert!(
+                            plate.x >= scene.bounds.x - 0.01 && plate.y >= scene.bounds.y - 0.01
+                        );
+                        assert!(
+                            plate.x + plate.width <= scene.bounds.x + scene.bounds.width + 0.01
+                        );
+                        assert!(
+                            plate.y + plate.height <= scene.bounds.y + scene.bounds.height + 0.01
+                        );
+                        let path = layout
+                            .edges
+                            .iter()
+                            .find(|path| path.edge_index == *index)
+                            .unwrap();
+                        let gap = edge_label_route_distance_squared(path, *plate).sqrt();
+                        assert!(
+                            gap <= 2.0,
+                            "{algorithm:?} {direction:?} {routing:?} label {index} detached by {gap}px"
                         );
                     }
+                    assert_eq!(pairs, 55);
                     assert!(
-                        layout
-                            .nodes
-                            .iter()
-                            .all(|node| !overlap(*plate, node.bounds)),
-                        "label {index} hides a node"
-                    );
-                    assert!(plate.x >= scene.bounds.x - 0.01 && plate.y >= scene.bounds.y - 0.01);
-                    assert!(plate.x + plate.width <= scene.bounds.x + scene.bounds.width + 0.01);
-                    assert!(plate.y + plate.height <= scene.bounds.y + scene.bounds.height + 0.01);
-                    let path = layout
-                        .edges
-                        .iter()
-                        .find(|path| path.edge_index == *index)
-                        .unwrap();
-                    let gap = edge_label_route_distance_squared(path, *plate).sqrt();
-                    assert!(
-                        gap <= 2.0,
-                        "{direction:?} {routing:?} label {index} detached by {gap}px"
+                        scene.bounds.width * scene.bounds.height < 450_000.0,
+                        "readability must not require excessive whitespace"
                     );
                 }
-                assert_eq!(pairs, 55);
-                assert!(
-                    scene.bounds.width * scene.bounds.height < 450_000.0,
-                    "readability must not require excessive whitespace"
-                );
             }
         }
     }
