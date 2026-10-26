@@ -549,12 +549,47 @@ impl TermRenderer {
             }
         }
 
+        // Compact state markers occupy one character at their actual layout centre. Route
+        // their incident segments to that character rather than leaving an empty circle-sized
+        // gap between the connector's geometric port and the displayed dot.
+        let state_marker_centers: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .filter(|node| self.state_marker_cell_glyph(ir, node.node_index).is_some())
+            .map(|node| (node.node_index, node.bounds.center()))
+            .collect();
+
         // Render edges.
         for edge_path in &layout.edges {
             if is_invisible_edge(ir, edge_path) {
                 continue;
             }
-            self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
+            let marker_path = ir.edges.get(edge_path.edge_index).and_then(|edge| {
+                let from = ir
+                    .resolve_endpoint_node(edge.from)
+                    .and_then(|id| state_marker_centers.get(&id.0));
+                let to = ir
+                    .resolve_endpoint_node(edge.to)
+                    .and_then(|id| state_marker_centers.get(&id.0));
+                if from.is_none() && to.is_none() {
+                    return None;
+                }
+                let mut path = edge_path.clone();
+                if let (Some(center), Some(point)) = (from, path.points.first_mut()) {
+                    *point = *center;
+                }
+                if let (Some(center), Some(point)) = (to, path.points.last_mut()) {
+                    *point = *center;
+                }
+                Some(path)
+            });
+            self.render_edge_cell(
+                &mut buffer,
+                ir,
+                marker_path.as_ref().unwrap_or(edge_path),
+                scale_x,
+                scale_y,
+            );
         }
 
         for marker in &layout.extensions.sequence_lifecycle_markers {
@@ -1547,6 +1582,22 @@ impl TermRenderer {
         }
     }
 
+    fn state_marker_cell_glyph(&self, ir: &MermaidDiagramIr, node_index: usize) -> Option<char> {
+        if ir.diagram_type != fm_core::DiagramType::State {
+            return None;
+        }
+        let node = ir.nodes.get(node_index)?;
+        if !ir.is_textless_ornament_node(node) {
+            return None;
+        }
+        let ascii = matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
+        match node.shape {
+            NodeShape::FilledCircle => Some(if ascii { '*' } else { '●' }),
+            NodeShape::DoubleCircle => Some(if ascii { '@' } else { '◉' }),
+            _ => None,
+        }
+    }
+
     fn render_node_cell(
         &self,
         buffer: &mut CellBuffer,
@@ -1560,6 +1611,12 @@ impl TermRenderer {
             return;
         }
 
+        if let Some(glyph) = self.state_marker_cell_glyph(ir, node_box.node_index) {
+            let (cx, cy) = self.point_to_cells(&node_box.bounds.center(), scale_x, scale_y);
+            buffer.set(cx, cy, glyph);
+            return;
+        }
+
         let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
         if w < 3 || h < 1 {
             return;
@@ -1567,6 +1624,15 @@ impl TermRenderer {
 
         // Get node shape.
         let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
+
+        if shape == NodeShape::HorizontalBar {
+            for row in y..y + h {
+                for col in x..x + w {
+                    buffer.set(col, row, self.box_glyphs.block_full);
+                }
+            }
+            return;
+        }
 
         // Draw shape border.
         self.draw_shape_border(buffer, x, y, w, h, shape);
@@ -1944,11 +2010,35 @@ impl TermRenderer {
         let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
 
         match shape {
-            NodeShape::Circle | NodeShape::DoubleCircle => {
-                let radius = w.min(h) / 2;
-                let cx = x + w / 2;
-                let cy = y + h / 2;
-                canvas.draw_circle(cx as isize, cy as isize, radius as isize);
+            NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+                // Scale the layout circle along both axes, just like its connector ports.
+                // Taking min(w, h) after scaling shrank the outline away from those ports.
+                let center = node_box.bounds.center();
+                let radius = node_box.bounds.width.min(node_box.bounds.height) * 0.5;
+                let cx = (center.x * scale_x) as isize + padding_x as isize;
+                let cy = (center.y * scale_y) as isize
+                    + padding_y as isize
+                    + (caption_push * CANVAS_ROWS_PER_CELL) as isize;
+                let rx = (radius * scale_x) as isize;
+                let ry = (radius * scale_y) as isize;
+                if shape == NodeShape::FilledCircle {
+                    canvas.fill_ellipse(cx, cy, rx, ry);
+                } else {
+                    canvas.draw_ellipse(cx, cy, rx, ry);
+                }
+                if shape == NodeShape::DoubleCircle {
+                    let inner_radius = (radius - 4.0).max(radius * 0.5);
+                    let inner_x = (inner_radius * scale_x) as isize;
+                    let inner_y = (inner_radius * scale_y) as isize;
+                    if ir.diagram_type == fm_core::DiagramType::State {
+                        canvas.fill_ellipse(cx, cy, inner_x, inner_y);
+                    } else {
+                        canvas.draw_ellipse(cx, cy, inner_x, inner_y);
+                    }
+                }
+            }
+            NodeShape::HorizontalBar => {
+                canvas.fill_rect(x, y, w.max(1), h.max(1));
             }
             NodeShape::Diamond => {
                 // Draw diamond as four lines.
@@ -5369,11 +5459,8 @@ mod tests {
         assert!(x > 4, "adjacent labels need a separating blank cell");
     }
 
-    #[test]
-    fn cyclic_state_labels_remain_separate_and_complete_in_terminal_cells() {
-        // GitHub #16/#17: duplicate transition text and shared return corridors used to fuse
-        // labels, and a long transition's second row was painted through other routes.
-        let ir = fm_parser::parse(concat!(
+    fn cyclic_state_ir() -> MermaidDiagramIr {
+        fm_parser::parse(concat!(
             "stateDiagram-v2\n",
             "[*] --> Idle\n",
             "Idle --> Starting: Space down / tap\n",
@@ -5388,7 +5475,230 @@ mod tests {
             "Settling --> Idle: quiet 1 s\n",
             "Settling --> Stopping: opened / tap\n",
         ))
+        .ir
+    }
+
+    #[test]
+    fn state_markers_keep_their_fill_rings_and_scaled_connection_ports() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\nstate Fork <<fork>>\n[*] --> Fork\nFork --> Active\nActive --> [*]\n",
+        )
         .ir;
+        let layout = layout_diagram(&ir);
+        let renderer =
+            TermRenderer::new(ResolvedConfig::resolve(&TermRenderConfig::rich(), 100, 40));
+        for shape in [
+            NodeShape::FilledCircle,
+            NodeShape::DoubleCircle,
+            NodeShape::HorizontalBar,
+        ] {
+            let mut node = layout
+                .nodes
+                .iter()
+                .find(|node| ir.nodes[node.node_index].shape == shape)
+                .expect("parsed state marker")
+                .clone();
+            node.bounds.x = 16.0;
+            node.bounds.y = 16.0;
+            for (scale_x, scale_y) in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)] {
+                let mut canvas = Canvas::new(100, 40, MermaidRenderMode::Braille);
+                renderer.render_node_canvas(&mut canvas, &ir, &node, scale_x, scale_y, 0, 0, 0);
+                let center = node.bounds.center();
+                let cx = (center.x * scale_x) as usize;
+                let cy = (center.y * scale_y) as usize;
+                assert!(
+                    canvas.get_pixel(cx, cy),
+                    "{shape:?} must have a filled centre"
+                );
+                if shape == NodeShape::HorizontalBar {
+                    continue;
+                }
+                let radius = node.bounds.width.min(node.bounds.height) * 0.5;
+                let rx = (radius * scale_x) as usize;
+                let ry = (radius * scale_y) as usize;
+                for (x, y) in [(cx - rx, cy), (cx + rx, cy), (cx, cy - ry), (cx, cy + ry)] {
+                    assert!(
+                        canvas.get_pixel(x, y),
+                        "{shape:?} lost a connection port under scale ({scale_x}, {scale_y})"
+                    );
+                }
+                assert!(
+                    !canvas.get_pixel(cx + rx, cy + ry),
+                    "a circular mark must not become a rectangle"
+                );
+                if shape == NodeShape::DoubleCircle {
+                    let inner_x = ((radius - 4.0).max(radius * 0.5) * scale_x) as usize;
+                    if rx > inner_x + 1 {
+                        assert!(
+                            !canvas.get_pixel(cx + inner_x + 1, cy),
+                            "the final marker needs a clear annulus"
+                        );
+                    }
+                    let mut flowchart = ir.clone();
+                    flowchart.diagram_type = DiagramType::Flowchart;
+                    canvas.clear();
+                    renderer.render_node_canvas(
+                        &mut canvas,
+                        &flowchart,
+                        &node,
+                        scale_x,
+                        scale_y,
+                        0,
+                        0,
+                        0,
+                    );
+                    assert!(
+                        !canvas.get_pixel(cx, cy),
+                        "a flowchart double circle stays hollow"
+                    );
+                    assert!(
+                        canvas.get_pixel(cx + inner_x, cy),
+                        "a flowchart double circle needs its second ring"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_state_markers_are_distinct_and_connected_in_both_glyph_modes() {
+        let ir = fm_parser::parse("stateDiagram-v2\n[*] --> Idle\nIdle --> [*]\n").ir;
+        let layout = layout_diagram(&ir);
+        for (mode, start, end) in [
+            (fm_core::MermaidGlyphMode::Unicode, '●', '◉'),
+            (fm_core::MermaidGlyphMode::Ascii, '*', '@'),
+        ] {
+            let config = TermRenderConfig {
+                glyph_mode: mode,
+                ..TermRenderConfig::compact()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let result = renderer.render_layout(&ir, &layout);
+            assert!(result.output.contains("Idle"));
+            assert!(!result.output.contains("__state"));
+            let grid: Vec<Vec<char>> = result
+                .output
+                .lines()
+                .map(|line| line.chars().collect())
+                .collect();
+            for glyph in [start, end] {
+                assert_eq!(result.output.matches(glyph).count(), 1, "{}", result.output);
+                let (y, x) = grid
+                    .iter()
+                    .enumerate()
+                    .find_map(|(y, row)| row.iter().position(|ch| *ch == glyph).map(|x| (y, x)))
+                    .unwrap();
+                let connected = (y.saturating_sub(1)..=(y + 1).min(grid.len() - 1)).any(|ny| {
+                    (x.saturating_sub(1)..=(x + 1).min(grid[ny].len().saturating_sub(1))).any(
+                        |nx| (nx, ny) != (x, y) && grid[ny].get(nx).is_some_and(|ch| *ch != ' '),
+                    )
+                });
+                assert!(
+                    connected,
+                    "state marker {glyph} is detached:\n{}",
+                    result.output
+                );
+            }
+            if mode == fm_core::MermaidGlyphMode::Ascii {
+                assert!(result.output.is_ascii());
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_cyclic_state_keeps_a_visible_start_transition() {
+        let ir = cyclic_state_ir();
+        let layout = layout_diagram(&ir);
+        let start = layout
+            .nodes
+            .iter()
+            .find(|node| ir.nodes[node.node_index].shape == NodeShape::FilledCircle)
+            .unwrap();
+        let path = layout
+            .edges
+            .iter()
+            .find(|path| {
+                ir.resolve_endpoint_node(ir.edges[path.edge_index].from)
+                    == Some(IrNodeId(start.node_index))
+            })
+            .expect("start transition reaches layout");
+        let mut without_entry = layout.clone();
+        without_entry
+            .edges
+            .retain(|edge| edge.edge_index != path.edge_index);
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Block,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let (cols, rows, sx, sy) =
+                renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+            let (mx, my) = renderer.config.subcell_multiplier();
+            let mut marker = Canvas::new(cols, rows, mode);
+            renderer.render_node_canvas(
+                &mut marker,
+                &ir,
+                start,
+                sx * mx as f32,
+                sy * my as f32,
+                renderer.config.padding * mx,
+                renderer.config.padding * my,
+                0,
+            );
+            let port = path.points[0];
+            let px = (port.x * sx * mx as f32) as usize + renderer.config.padding * mx;
+            let py = (port.y * sy * my as f32) as usize + renderer.config.padding * my;
+            assert!(
+                (py.saturating_sub(1)..=py + 1)
+                    .any(|y| (px.saturating_sub(1)..=px + 1).any(|x| marker.get_pixel(x, y))),
+                "the start transition's port is detached from its {mode:?} marker"
+            );
+            let result = renderer.render_layout(&ir, &layout);
+            let control = renderer.render_layout(&ir, &without_entry);
+            let control_grid: Vec<Vec<char>> = control
+                .output
+                .lines()
+                .map(|line| line.chars().collect())
+                .collect();
+            let (x, y, w, h) = renderer.bounds_to_cells(&start.bounds, sx, sy);
+            let visible_route_cells = result
+                .output
+                .lines()
+                .enumerate()
+                .map(|(row, drawn)| {
+                    drawn
+                        .chars()
+                        .enumerate()
+                        .filter(|(col, ch)| {
+                            *ch != control_grid
+                                .get(row)
+                                .and_then(|line| line.get(*col))
+                                .copied()
+                                .unwrap_or(' ')
+                                && !(row >= y && row <= y + h && *col >= x && *col <= x + w)
+                        })
+                        .count()
+                })
+                .sum::<usize>();
+            assert!(
+                visible_route_cells >= 2,
+                "start transition vanished beneath the overlays in {mode:?}:\n{}",
+                result.output
+            );
+            assert!(result.width <= 80 && result.height <= 24);
+        }
+    }
+
+    #[test]
+    fn cyclic_state_labels_remain_separate_and_complete_in_terminal_cells() {
+        // GitHub #16/#17: duplicate transition text and shared return corridors used to fuse
+        // labels, and a long transition's second row was painted through other routes.
+        let ir = cyclic_state_ir();
         assert_eq!(ir.edges.len(), 12);
         let cases = [
             (TermRenderConfig::default(), 80, 24),
