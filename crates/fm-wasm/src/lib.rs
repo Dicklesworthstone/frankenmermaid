@@ -432,11 +432,11 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
 fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
     let geometry = build_diagram_geometry(input, config)?;
     let scene = fm_layout::build_render_scene(&geometry.ir, &geometry.layout);
-    let plan = GpuRenderPlan::from_layout_and_scene(
+    let plan = GpuRenderPlan::from_layout_and_scene_with_config(
         &geometry.ir,
         &geometry.layout,
         &scene,
-        geometry.canvas.edge_stroke_width as f32,
+        &geometry.canvas,
     );
 
     Ok(PlannedWebGpuDiagram {
@@ -2955,7 +2955,7 @@ mod tests {
         apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
         build_parse_lens, parse,
     };
-    use fm_render_canvas::CanvasRenderConfig;
+    use fm_render_canvas::{CanvasRenderConfig, GpuTextSource};
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
     use sha2::{Digest, Sha256};
     use std::{
@@ -5031,6 +5031,47 @@ mod tests {
         let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
         assert_eq!(planned.font_family, "Atlas Test Font, sans-serif");
         assert!(!planned.plan.text_quads.is_empty());
+    }
+
+    #[test]
+    fn webgpu_plan_uses_resolved_size_family_and_multiline_spacing() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        let mut runtime = RuntimeConfig::default();
+        runtime.svg.font_family = "monospace".to_string();
+        runtime.svg.font_size = 24.0;
+        runtime.svg.line_height = 1.75;
+        runtime.canvas.font_size = 9.0;
+        runtime.canvas.font_family = "serif".to_string();
+        write_runtime_config(runtime);
+        let planned = build_webgpu_plan("flowchart LR\n A[\"iiWW<br/><br/>Wi\"]", None).unwrap();
+        let runs: Vec<_> = planned
+            .plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node)
+            .collect();
+        assert_eq!(
+            runs.len(),
+            2,
+            "authored blank rows must separate the two visible rows"
+        );
+        let first =
+            &planned.plan.text_quads[runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let second = &planned.plan.text_quads[runs[1].first_quad as usize];
+        assert_eq!(first.len(), 4);
+        assert!(first.iter().all(|quad| quad.half_extent == [12.0, 12.0]));
+        for pair in first.windows(2) {
+            assert!((pair[1].center[0] - pair[0].center[0] - 14.4).abs() < 0.001);
+        }
+        assert!((second.center[1] - first[0].center[1] - 84.0).abs() < 0.001);
+        assert!(planned.plan.glyph_atlas.cell_px > 32);
     }
 
     #[cfg(feature = "webgpu")]

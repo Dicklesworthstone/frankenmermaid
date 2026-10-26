@@ -487,14 +487,6 @@ pub const DEFAULT_LABEL_RGBA: [f32; 4] = [30.0 / 255.0, 41.0 / 255.0, 59.0 / 255
 /// Label font size in layout units, mirroring `CanvasRenderConfig::default().font_size`.
 pub const DEFAULT_FONT_SIZE_PX: f32 = 15.0;
 
-/// Advance width as a fraction of font size.
-///
-/// The SAME 0.57 the Canvas2D `measure_text` uses, so a glyph quad lands where the raster pass puts
-/// the character. A GPU pass that invented its own advance would drift text out of its box on long
-/// labels while looking correct on short ones — the worst kind of disagreement, because it is
-/// invisible on every small test fixture.
-pub const CHAR_ADVANCE_RATIO: f32 = 0.57;
-
 /// Collapse an SVG `stroke-dasharray` to the `[on, off]` pair the edge shader takes.
 ///
 /// A dasharray may have any number of entries; the GPU dash is a two-value pattern, so a longer list
@@ -579,20 +571,8 @@ fn border_polyline(bounds: fm_layout::LayoutRect, shape: GpuNodeShape) -> Vec<[f
     }
 }
 
-/// Horizontal advance for one glyph at `font_px`, using the SAME model `fm-layout` sized the box
-/// with (bd-2u0.2).
-///
-/// ⚠️ THE FLAT [`CHAR_ADVANCE_RATIO`] WAS A REAL DIVERGENCE, not merely an approximation.
-/// `fm-core::FontMetrics` — which `fm-layout` uses to measure every label and therefore to decide how
-/// wide a node box must be — is PROPORTIONAL: `font_size * preset.avg_char_ratio() *
-/// CharWidthClass::classify(c).multiplier()`, where the multiplier runs from 0.4 for `i` and `l` to
-/// 2.0 for full-width forms. The GPU text pass advanced a flat `0.57 * font_px` for every character,
-/// so an `i` was laid out about two and a half times wider than the layout that sized its box
-/// believed, and a `W` narrower. A label of narrow letters overflowed its box; one of wide letters
-/// sat short inside it, and neither matched the SVG.
-///
-/// Sharing the function rather than re-deriving the constants is the point: a second table would be
-/// a second source of truth, and the two would drift the moment either changed.
+/// Horizontal advance for one glyph under the default sans-serif preset.
+/// Configured plans use `FontMetrics` directly so monospace and other presets retain their widths.
 #[must_use]
 pub fn glyph_advance(glyph: char, font_px: f32) -> f32 {
     font_px
@@ -828,6 +808,7 @@ struct TextSink<'a> {
     atlas: &'a GlyphAtlasPlan,
     quads: &'a mut Vec<GpuTextQuad>,
     runs: &'a mut Vec<GpuTextRun>,
+    metrics: &'a fm_core::FontMetrics,
 }
 
 impl TextSink<'_> {
@@ -839,10 +820,10 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        self.push_centred_with_font(text, center, DEFAULT_FONT_SIZE_PX, color, source, index);
+        self.push_centred_with_font(text, center, self.metrics.font_size(), color, source, index);
     }
 
-    /// Emit one centred text run with an explicit raster font size.
+    /// Centre the complete label block, preserving authored rows and empty interior lines.
     fn push_centred_with_font(
         &mut self,
         text: &str,
@@ -852,47 +833,40 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-        if inked.is_empty() {
-            return;
-        }
-        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let half_height = font_px * 0.5;
-        // PROPORTIONAL: the pen moves by each glyph's own advance, so the run is exactly as wide as
-        // the metric `fm-layout` sized the box with.
-        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
-        let mut pen_x = center.0 - (run_width * 0.5);
-        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for glyph in &inked {
-            let advance = glyph_advance(*glyph, font_px);
-            let Some(cell) = self.atlas.cell(*glyph) else {
-                pen_x += advance;
-                continue;
-            };
-            self.quads.push(GpuTextQuad {
-                // The quad is the glyph's DRAWING box and is SQUARE, matching the square atlas cell;
-                // the advance is how far the pen moves and is a different quantity. Sizing the quad
-                // to the advance — as this did — squeezed every glyph's image into its advance
-                // width, so an `i` was drawn as a compressed `i` rather than a narrow one. Centring
-                // the square box on the middle of the advance keeps the ink, which `glyph_raster`
-                // centres inside the cell, exactly one advance apart between neighbours.
-                center: [pen_x + (advance * 0.5), center.1],
-                half_extent: [half_height, half_height],
-                uv_min: cell.uv_min,
-                uv_max: cell.uv_max,
+        self.push_centred_multiline(
+            text,
+            center,
+            font_px,
+            font_px * self.metrics.config().line_height,
+            color,
+            source,
+            index,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_centred_multiline(
+        &mut self,
+        text: &str,
+        center: (f32, f32),
+        font_px: f32,
+        line_height: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let rows = text.lines().count().max(1);
+        let first_y = center.1 - (rows - 1) as f32 * line_height * 0.5;
+        for (row, line) in text.lines().enumerate() {
+            self.push_line(
+                line,
+                (center.0, first_y + row as f32 * line_height),
+                font_px,
                 color,
-                run_index,
-            });
-            pen_x += advance;
-        }
-        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
-        if quad_count > 0 {
-            self.runs.push(GpuTextRun {
                 source,
-                node_index: u32::try_from(index).unwrap_or(u32::MAX),
-                first_quad,
-                quad_count,
-            });
+                index,
+                crate::TextAlign::Center,
+            );
         }
     }
 
@@ -906,39 +880,15 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-        if inked.is_empty() {
-            return;
-        }
-        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let half_height = font_px * 0.5;
-        let mut pen_x = anchor.0;
-        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for glyph in &inked {
-            let advance = glyph_advance(*glyph, font_px);
-            let Some(cell) = self.atlas.cell(*glyph) else {
-                pen_x += advance;
-                continue;
-            };
-            self.quads.push(GpuTextQuad {
-                center: [pen_x + (advance * 0.5), anchor.1],
-                half_extent: [half_height, half_height],
-                uv_min: cell.uv_min,
-                uv_max: cell.uv_max,
-                color,
-                run_index,
-            });
-            pen_x += advance;
-        }
-        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
-        if quad_count > 0 {
-            self.runs.push(GpuTextRun {
-                source,
-                node_index: u32::try_from(index).unwrap_or(u32::MAX),
-                first_quad,
-                quad_count,
-            });
-        }
+        self.push_line(
+            text,
+            anchor,
+            font_px,
+            color,
+            source,
+            index,
+            crate::TextAlign::Left,
+        );
     }
 
     /// Emit one right-aligned text run at the raster pass's anchor point.
@@ -951,19 +901,58 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-        if inked.is_empty() {
+        self.push_line(
+            text,
+            anchor,
+            font_px,
+            color,
+            source,
+            index,
+            crate::TextAlign::Right,
+        );
+    }
+
+    /// All text sources use the configured font preset, including fixed-width faces. Square
+    /// drawing quads are independent of the pen advance so narrow letters are not squeezed.
+    #[allow(clippy::too_many_arguments)]
+    fn push_line(
+        &mut self,
+        text: &str,
+        anchor: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+        align: crate::TextAlign,
+    ) {
+        let mut config = self.metrics.config().clone();
+        config.font_size = font_px;
+        let metrics = fm_core::FontMetrics::new(config);
+        let glyphs: Vec<_> = text
+            .chars()
+            .filter(|glyph| !glyph.is_control())
+            .map(|glyph| {
+                let mut encoded = [0; 4];
+                let advance = metrics.estimate_width(glyph.encode_utf8(&mut encoded));
+                (glyph, advance)
+            })
+            .collect();
+        if glyphs.is_empty() {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let half_height = font_px * 0.5;
-        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
-        // RIGHT-ALIGNED: the run ends at the anchor, so it starts a full run width before it.
-        let mut pen_x = anchor.0 - run_width;
+        let half_height = metrics.font_size() * 0.5;
+        let run_width: f32 = glyphs.iter().map(|(_, advance)| advance).sum();
+        let mut pen_x = anchor.0
+            - run_width
+                * match align {
+                    crate::TextAlign::Left => 0.0,
+                    crate::TextAlign::Center => 0.5,
+                    crate::TextAlign::Right => 1.0,
+                };
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for glyph in &inked {
-            let advance = glyph_advance(*glyph, font_px);
-            let Some(cell) = self.atlas.cell(*glyph) else {
+        for (glyph, advance) in glyphs {
+            let Some(cell) = self.atlas.cell(glyph) else {
                 pen_x += advance;
                 continue;
             };
@@ -1000,45 +989,18 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        let half_height = font_px * 0.5;
         for (row, line) in text.lines().enumerate() {
-            let inked: Vec<char> = line.chars().filter(|c| !c.is_control()).collect();
-            if inked.is_empty() {
-                continue;
-            }
-            let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-            let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-            let row = u16::try_from(row).map_or(f32::from(u16::MAX), f32::from);
-            // Each LINE restarts the pen at the origin; the advance is per glyph within the line.
-            let mut pen_x = origin.0;
-            for glyph in &inked {
-                let advance = glyph_advance(*glyph, font_px);
-                let Some(cell) = self.atlas.cell(*glyph) else {
-                    pen_x += advance;
-                    continue;
-                };
-                self.quads.push(GpuTextQuad {
-                    center: [
-                        pen_x + (advance * 0.5),
-                        origin.1 + half_height + (row * line_height),
-                    ],
-                    half_extent: [half_height, half_height],
-                    uv_min: cell.uv_min,
-                    uv_max: cell.uv_max,
-                    color,
-                    run_index,
-                });
-                pen_x += advance;
-            }
-            let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
-            if quad_count > 0 {
-                self.runs.push(GpuTextRun {
-                    source,
-                    node_index: u32::try_from(index).unwrap_or(u32::MAX),
-                    first_quad,
-                    quad_count,
-                });
-            }
+            self.push_left(
+                line,
+                (
+                    origin.0,
+                    origin.1 + font_px * 0.5 + row as f32 * line_height,
+                ),
+                font_px,
+                color,
+                source,
+                index,
+            );
         }
     }
 }
@@ -1392,7 +1354,7 @@ pub struct GpuRenderPlan {
     pub node_border_segments: Vec<GpuEdgeSegment>,
     /// Per-glyph textured quads for the text pass.
     pub text_quads: Vec<GpuTextQuad>,
-    /// One entry per drawn label — the unit the Canvas2D pass draws in.
+    /// One entry per visible text row — the unit the Canvas2D pass draws in.
     pub text_runs: Vec<GpuTextRun>,
     /// Where each glyph lives in the atlas the quads sample.
     pub glyph_atlas: GlyphAtlasPlan,
@@ -1420,10 +1382,32 @@ impl GpuRenderPlan {
         layout: &DiagramLayout,
         edge_stroke_width: f32,
     ) -> Self {
+        Self::from_layout_with_config(
+            ir,
+            layout,
+            &crate::CanvasRenderConfig {
+                edge_stroke_width: f64::from(edge_stroke_width),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Build primitives using the same resolved typography as Canvas2D and layout measurement.
+    /// The atlas's raster font family must match `config.font_family`.
+    #[must_use]
+    pub fn from_layout_with_config(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        config: &crate::CanvasRenderConfig,
+    ) -> Self {
+        let metrics = config.font_metrics();
+        let font_px = metrics.font_size();
+        let font_scale = font_px / DEFAULT_FONT_SIZE_PX;
+        let edge_stroke_width = config.edge_stroke_width as f32;
         if ir.diagram_type == fm_core::DiagramType::XyChart
             && let Some(meta) = ir.xy_chart_meta.as_ref()
         {
-            return Self::from_xychart(ir, meta, layout);
+            return Self::from_xychart(ir, meta, layout, &metrics);
         }
         // Pie parser nodes carry slice names for layout. They are not graph circles: drawing
         // them after the sectors would cover the chart and duplicate its percentage labels.
@@ -2165,8 +2149,8 @@ impl GpuRenderPlan {
             }
         }
 
-        // TEXT (bd-2u0.2 component 3). Sankey names and totals each get their own line/run,
-        // matching the raster pass rather than collapsing a newline into adjacent glyphs.
+        // Collect complete label blocks; TextSink emits one run per visible row. Node labels,
+        // including Sankey names and totals, share the Canvas2D line-height and centering rules.
         //
         // Two passes on purpose: the atlas has to know every glyph the diagram uses before any quad
         // can be given a UV, and a quad built against a half-finished atlas would point at a cell
@@ -2195,22 +2179,14 @@ impl GpuRenderPlan {
                 continue;
             }
             if let Some(Some(label)) = sankey_labels.get(position) {
-                let font_px = crate::renderer::resolve_declared_node_font(ir, node.node_index)
-                    .size
-                    .map(|size| size as f32)
-                    .filter(|size| size.is_finite() && *size > 0.0)
-                    .unwrap_or(DEFAULT_FONT_SIZE_PX);
-                let line_height = font_px * fm_core::FontMetricsConfig::default().line_height;
-                let center_x = node.bounds.x + node.bounds.width * 0.5;
-                let center_y = node.bounds.y + node.bounds.height * 0.5;
-                let start_y = center_y - (label.lines().count() as f32 - 1.0) * line_height * 0.5;
-                for (line_index, line) in label.lines().enumerate() {
-                    labelled.push((
-                        node.node_index.try_into().unwrap_or(u32::MAX),
-                        [center_x, start_y + line_index as f32 * line_height],
-                        line,
-                    ));
-                }
+                labelled.push((
+                    node.node_index.try_into().unwrap_or(u32::MAX),
+                    [
+                        node.bounds.x + node.bounds.width * 0.5,
+                        node.bounds.y + node.bounds.height * 0.5,
+                    ],
+                    label,
+                ));
                 continue;
             }
             if let Some(ir_node) = ir.nodes.get(node.node_index)
@@ -2242,7 +2218,7 @@ impl GpuRenderPlan {
                 .size
                 .map(|size| size as f32)
                 .filter(|size| size.is_finite() && *size > 0.0)
-                .unwrap_or(DEFAULT_FONT_SIZE_PX)
+                .unwrap_or(font_px)
             })
             .collect();
 
@@ -2304,7 +2280,7 @@ impl GpuRenderPlan {
             .iter()
             .copied()
             .chain(journey_rows.iter().map(|(row, _, _, _)| row.font_size))
-            .fold(DEFAULT_FONT_SIZE_PX, f32::max);
+            .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
@@ -2464,28 +2440,14 @@ impl GpuRenderPlan {
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
         let mut text_runs: Vec<GpuTextRun> = Vec::with_capacity(labelled.len());
+        let mut sink = TextSink {
+            atlas: &glyph_atlas,
+            quads: &mut text_quads,
+            runs: &mut text_runs,
+            metrics: &metrics,
+        };
 
-        for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
-            let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
-            let font_px = run_font_px
-                .get(run_index)
-                .copied()
-                .unwrap_or(DEFAULT_FONT_SIZE_PX);
-            let half_height = font_px * 0.5;
-            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
-
-            // Control characters carry no ink and are excluded from the atlas, so they must not
-            // consume an advance either — otherwise a label with a newline would render with a gap
-            // where nothing is drawn.
-            // The author's declared label colour, resolved through the SAME helper the Canvas2D
-            // pass uses (bd-lvj3). This quad carried DEFAULT_LABEL_RGBA unconditionally, so
-            // `style a color:#f00` and a `classDef` carrying `color:` reached the raster path and
-            // stopped here -- the field existed and was populated with a constant, which is the
-            // failure an ABI check cannot see and a plan test can.
-            //
-            // Resolved once per RUN rather than per glyph: every glyph of one label belongs to one
-            // node, so resolving inside the glyph loop would repeat the lookup for each character
-            // and could not produce a different answer.
+        for ((node_index, center, text), font_px) in labelled.iter().zip(run_font_px) {
             let label_rgba = crate::renderer::resolve_node_text_color(
                 ir,
                 usize::try_from(*node_index).unwrap_or(usize::MAX),
@@ -2493,119 +2455,47 @@ impl GpuRenderPlan {
             .as_deref()
             .and_then(parse_paint_rgba)
             .unwrap_or(DEFAULT_LABEL_RGBA);
-
-            let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-            let width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
-            let mut pen_x = center[0] - (width * 0.5);
-
-            for glyph in &inked {
-                let advance = glyph_advance(*glyph, font_px);
-                let Some(cell) = glyph_atlas.cell(*glyph) else {
-                    pen_x += advance;
-                    continue;
-                };
-                text_quads.push(GpuTextQuad {
-                    center: [pen_x + (advance * 0.5), center[1]],
-                    half_extent: [half_height, half_height],
-                    uv_min: cell.uv_min,
-                    uv_max: cell.uv_max,
-                    color: label_rgba,
-                    run_index: run_index_u32,
-                });
-                pen_x += advance;
-            }
-
-            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
-            text_runs.push(GpuTextRun {
-                source: GpuTextSource::Node,
-                node_index: *node_index,
-                first_quad,
-                quad_count,
-            });
+            sink.push_centred_with_font(
+                text,
+                (center[0], center[1]),
+                font_px,
+                label_rgba,
+                GpuTextSource::Node,
+                *node_index as usize,
+            );
         }
 
         for (row, source, node_index, color) in journey_rows {
             let center = row.bounds.center();
-            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
-            let run_index = u32::try_from(text_runs.len()).unwrap_or(u32::MAX);
-            let width: f32 = row
-                .text
-                .chars()
-                .filter(|c| !c.is_control())
-                .map(|c| glyph_advance(c, row.font_size))
-                .sum();
-            let mut pen_x = center.x - width * 0.5;
-            for glyph in row.text.chars().filter(|c| !c.is_control()) {
-                let advance = glyph_advance(glyph, row.font_size);
-                if let Some(cell) = glyph_atlas.cell(glyph) {
-                    text_quads.push(GpuTextQuad {
-                        center: [pen_x + advance * 0.5, center.y],
-                        half_extent: [row.font_size * 0.5, row.font_size * 0.5],
-                        uv_min: cell.uv_min,
-                        uv_max: cell.uv_max,
-                        color,
-                        run_index,
-                    });
-                }
-                pen_x += advance;
-            }
-            text_runs.push(GpuTextRun {
+            sink.push_centred_with_font(
+                &row.text,
+                (center.x, center.y),
+                row.font_size,
+                color,
                 source,
-                node_index,
-                first_quad,
-                quad_count: u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad,
-            });
+                node_index as usize,
+            );
         }
 
-        // CLUSTER TITLES (bd-dh6cy). Containers were planned without their titles; this is the
-        // other half.
-        //
-        // ⚠️ LEFT-ALIGNED AT THE TOP-LEFT INSET, NOT CENTRED. The Canvas2D pass draws a subgraph
-        // title with `fill_text(title, x + 8.0, y + 4.0)` — a corner label, not a centred one — so
-        // centring these the way node labels are centred would put every subgraph title in the
-        // middle of its own box, on top of the nodes it contains. The first glyph's CENTRE is half
-        // an advance right of the inset because a quad is centred on its cell.
+        // Cluster titles use the Canvas2D top-left inset and 90% label font. They share the
+        // configured advances and square glyph cells with node text.
         for cluster in &layout.clusters {
             let Some(title) = cluster_title(ir, cluster) else {
                 continue;
             };
-            let inked: Vec<char> = title.chars().filter(|c| !c.is_control()).collect();
-            if inked.is_empty() {
-                continue;
-            }
-            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
-            let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
-            let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
             let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_LABEL_RGBA);
-            for (offset, glyph) in inked.iter().enumerate() {
-                let Some(cell) = glyph_atlas.cell(*glyph) else {
-                    continue;
-                };
-                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
-                text_quads.push(GpuTextQuad {
-                    center: [
-                        cluster.bounds.x + 8.0 + (advance * 0.5) + (step * advance),
-                        cluster.bounds.y + 4.0 + half_height,
-                    ],
-                    half_extent: [advance * 0.5, half_height],
-                    uv_min: cell.uv_min,
-                    uv_max: cell.uv_max,
-                    color: colour,
-                    run_index: u32::try_from(text_runs.len()).unwrap_or(u32::MAX),
-                });
-            }
-            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
-            if quad_count > 0 {
-                text_runs.push(GpuTextRun {
-                    source: GpuTextSource::Cluster,
-                    node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
-                    first_quad,
-                    quad_count,
-                });
-            }
+            sink.push_left_multiline(
+                title,
+                (cluster.bounds.x + 8.0, cluster.bounds.y + 4.0),
+                font_px * 0.9,
+                metrics.line_height_px() * 0.9,
+                colour,
+                GpuTextSource::Cluster,
+                cluster.cluster_index,
+            );
         }
 
         // EDGE LABELS AND CARDINALITIES (bd-qj46q, bd-2ogh5). `draw_edges` emits a fill_text for a
@@ -2615,11 +2505,6 @@ impl GpuRenderPlan {
         //
         // Cardinalities are placed OUTSIDE the label branch on purpose, mirroring the raster pass:
         // an edge may carry cardinality and no label at all.
-        let mut sink = TextSink {
-            atlas: &glyph_atlas,
-            quads: &mut text_quads,
-            runs: &mut text_runs,
-        };
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
             let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
@@ -2627,9 +2512,17 @@ impl GpuRenderPlan {
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
             if let Some(text) = edge_label_text(ir, edge)
-                && let Some(anchor) = edge_label_anchor(&edge.points, DEFAULT_FONT_SIZE_PX * 0.8)
+                && let Some(anchor) = edge_label_anchor(&edge.points, font_px * 0.8)
             {
-                sink.push_centred(text, anchor, colour, GpuTextSource::Edge, edge.edge_index);
+                sink.push_centred_multiline(
+                    text,
+                    anchor,
+                    font_px * 0.85,
+                    font_px * 1.2,
+                    colour,
+                    GpuTextSource::Edge,
+                    edge.edge_index,
+                );
             }
 
             let (source_text, target_text) = edge_cardinality_texts(ir, edge);
@@ -2650,9 +2543,10 @@ impl GpuRenderPlan {
                     };
                     let from = edge.points[from_idx];
                     let toward = edge.points[toward_idx];
-                    sink.push_centred(
+                    sink.push_centred_with_font(
                         text,
-                        cardinality_anchor(from, toward, DEFAULT_FONT_SIZE_PX * 1.2),
+                        cardinality_anchor(from, toward, font_px * 1.2),
+                        font_px * 0.85,
                         colour,
                         source,
                         edge.edge_index,
@@ -2691,8 +2585,8 @@ impl GpuRenderPlan {
                     note.bounds.x + fm_layout::LayoutSequenceNote::PADDING_X,
                     note.bounds.y + fm_layout::LayoutSequenceNote::PADDING_Y,
                 ),
-                DEFAULT_FONT_SIZE_PX * fm_layout::LayoutSequenceNote::FONT_SCALE,
-                DEFAULT_FONT_SIZE_PX * fm_layout::LayoutSequenceNote::FONT_SCALE * 1.5,
+                font_px * fm_layout::LayoutSequenceNote::FONT_SCALE,
+                metrics.line_height_px() * fm_layout::LayoutSequenceNote::FONT_SCALE,
                 DEFAULT_LABEL_RGBA,
                 GpuTextSource::SequenceNote,
                 index,
@@ -2708,7 +2602,7 @@ impl GpuRenderPlan {
                     .get(index)
                     .map_or("", String::as_str),
                 (fragment.bounds.x + 6.0, fragment.bounds.y + 4.0),
-                SEQUENCE_FRAGMENT_FONT_SIZE_PX,
+                SEQUENCE_FRAGMENT_FONT_SIZE_PX * font_scale,
                 DEFAULT_LABEL_RGBA,
                 GpuTextSource::SequenceFragment,
                 index,
@@ -2726,8 +2620,8 @@ impl GpuRenderPlan {
             sink.push_left_multiline(
                 note.text.as_str(),
                 (note.bounds.x + 10.0, note.bounds.y + 8.0),
-                STATE_NOTE_FONT_SIZE_PX,
-                STATE_NOTE_LINE_HEIGHT,
+                STATE_NOTE_FONT_SIZE_PX * font_scale,
+                STATE_NOTE_LINE_HEIGHT * font_scale,
                 DEFAULT_LABEL_RGBA,
                 GpuTextSource::StateNote,
                 index,
@@ -2738,7 +2632,8 @@ impl GpuRenderPlan {
         // its own tick at the axis baseline. Axis ticks are not nodes, so their extension index is
         // preserved in the run discriminator rather than borrowing an unrelated node index.
         for &axis_y in &axis_rows {
-            let center_y = axis_y - (GLYPH_BASELINE_RATIO - 0.5) * AXIS_TICK_FONT_SIZE_PX;
+            let axis_font_px = AXIS_TICK_FONT_SIZE_PX * font_scale;
+            let center_y = axis_y - (GLYPH_BASELINE_RATIO - 0.5) * axis_font_px;
             for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
                 if tick.label.is_empty() {
                     continue;
@@ -2746,7 +2641,7 @@ impl GpuRenderPlan {
                 sink.push_left(
                     tick.label.as_str(),
                     (tick.position + 3.0, center_y),
-                    AXIS_TICK_FONT_SIZE_PX,
+                    axis_font_px,
                     DEFAULT_LABEL_RGBA,
                     GpuTextSource::AxisTick,
                     index,
@@ -2769,7 +2664,7 @@ impl GpuRenderPlan {
             sink.push_left(
                 band.label.as_str(),
                 (band.bounds.x + 4.0, band.bounds.y + 2.0),
-                BAND_LABEL_FONT_SIZE_PX,
+                BAND_LABEL_FONT_SIZE_PX * font_scale,
                 DEFAULT_LABEL_RGBA,
                 GpuTextSource::Band,
                 index,
@@ -2815,7 +2710,7 @@ impl GpuRenderPlan {
             let right = layout.bounds.x + layout.bounds.width;
             let top = layout.bounds.y;
             let bottom = layout.bounds.y + layout.bounds.height;
-            let pad = DEFAULT_FONT_SIZE_PX;
+            let pad = font_px;
             let axis_labels = [
                 (
                     quad.x_axis_left.as_deref(),
@@ -2842,7 +2737,7 @@ impl GpuRenderPlan {
                     sink.push_right(
                         label,
                         anchor,
-                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        QUADRANT_LABEL_FONT_SIZE_PX * font_scale,
                         DEFAULT_LABEL_RGBA,
                         GpuTextSource::QuadrantAxis,
                         index,
@@ -2851,7 +2746,7 @@ impl GpuRenderPlan {
                     sink.push_left(
                         label,
                         anchor,
-                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        QUADRANT_LABEL_FONT_SIZE_PX * font_scale,
                         DEFAULT_LABEL_RGBA,
                         GpuTextSource::QuadrantAxis,
                         index,
@@ -2873,7 +2768,7 @@ impl GpuRenderPlan {
                 sink.push_centred_with_font(
                     label,
                     centre,
-                    QUADRANT_LABEL_FONT_SIZE_PX,
+                    QUADRANT_LABEL_FONT_SIZE_PX * font_scale,
                     DEFAULT_LABEL_RGBA,
                     GpuTextSource::QuadrantLabel,
                     index,
@@ -2891,7 +2786,7 @@ impl GpuRenderPlan {
                         wedge.center[0] + label_radius * angle.cos(),
                         wedge.center[1] + label_radius * angle.sin(),
                     ),
-                    STATE_NOTE_FONT_SIZE_PX,
+                    STATE_NOTE_FONT_SIZE_PX * font_scale,
                     DEFAULT_LABEL_RGBA,
                     GpuTextSource::PieSlice,
                     index,
@@ -2901,16 +2796,9 @@ impl GpuRenderPlan {
         }
 
         let mut bounds = layout.bounds;
-        if !layout.extensions.gantt_axis_rows.is_empty() {
-            for run in text_runs
-                .iter()
-                .filter(|run| run.source == GpuTextSource::AxisTick)
-            {
-                let start = run.first_quad as usize;
-                let end = start + run.quad_count as usize;
-                include_text_quad_bounds(&mut bounds, &text_quads[start..end]);
-            }
-        }
+        // Text can extend beyond the graph's geometry, especially with authored large faces
+        // or chart annotations. The camera must fit the actual label quads as well as nodes.
+        include_text_quad_bounds(&mut bounds, &text_quads);
 
         Self {
             bounds,
@@ -2960,7 +2848,26 @@ impl GpuRenderPlan {
         scene: &RenderScene,
         edge_stroke_width: f32,
     ) -> Self {
-        let mut plan = Self::from_layout(ir, layout, edge_stroke_width);
+        Self::from_layout_and_scene_with_config(
+            ir,
+            layout,
+            scene,
+            &crate::CanvasRenderConfig {
+                edge_stroke_width: f64::from(edge_stroke_width),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Build scene markers and text using the resolved rendering configuration.
+    #[must_use]
+    pub fn from_layout_and_scene_with_config(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scene: &RenderScene,
+        config: &crate::CanvasRenderConfig,
+    ) -> Self {
+        let mut plan = Self::from_layout_with_config(ir, layout, config);
         // A chart's connections are data series, not directed graph relationships. The
         // generic scene must not reintroduce markers after dedicated chart planning.
         if ir.diagram_type != fm_core::DiagramType::XyChart {
@@ -2986,10 +2893,12 @@ impl GpuRenderPlan {
         ir: &MermaidDiagramIr,
         meta: &fm_core::IrXyChartMeta,
         layout: &DiagramLayout,
+        metrics: &fm_core::FontMetrics,
     ) -> Self {
         use crate::TextAlign;
         use fm_core::IrXySeriesKind;
 
+        let font_px = metrics.font_size();
         let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
         let (left, top) = (plot.x, plot.y);
         let (right, bottom) = (left + plot.width, top + plot.height);
@@ -3007,7 +2916,7 @@ impl GpuRenderPlan {
                 index,
             });
         };
-        let value_font = (DEFAULT_FONT_SIZE_PX * 0.72).max(8.0);
+        let value_font = (font_px * 0.72).max(8.0);
         for (index, value) in fm_layout::xychart_y_ticks(min, max).into_iter().enumerate() {
             let (from, to, tick_end, text_anchor, align) = if meta.horizontal {
                 let x = fm_layout::xychart_value_to_x(value, min, max, plot);
@@ -3067,7 +2976,7 @@ impl GpuRenderPlan {
             [0.0, 0.0],
         ));
 
-        let category_font = (DEFAULT_FONT_SIZE_PX * 0.74).max(8.0);
+        let category_font = (font_px * 0.74).max(8.0);
         let band = if meta.horizontal {
             plot.height
         } else {
@@ -3103,7 +3012,7 @@ impl GpuRenderPlan {
             );
         }
 
-        let axis_font = (DEFAULT_FONT_SIZE_PX * 0.76).max(8.0);
+        let axis_font = (font_px * 0.76).max(8.0);
         if let Some(text) = meta.y_axis.label.as_ref() {
             let (anchor, align) = if meta.horizontal {
                 ((left + plot.width / 2.0, top - 34.0), TextAlign::Center)
@@ -3141,23 +3050,29 @@ impl GpuRenderPlan {
                     layout.bounds.x + layout.bounds.width / 2.0,
                     top - if meta.horizontal { 70.0 } else { 34.0 },
                 ),
-                (DEFAULT_FONT_SIZE_PX * 1.18).max(8.0),
+                (font_px * 1.18).max(8.0),
                 TextAlign::Center,
                 GpuTextSource::DiagramTitle,
                 0,
             );
         }
 
-        let glyph_atlas = GlyphAtlasPlan::for_texts(
-            labels.iter().map(|label| label.text.as_str()),
-            DEFAULT_GLYPH_CELL_PX,
-        );
+        let max_font_px = labels
+            .iter()
+            .map(|label| label.font_size)
+            .fold(font_px, f32::max);
+        let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
+            .ceil()
+            .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
+        let glyph_atlas =
+            GlyphAtlasPlan::for_texts(labels.iter().map(|label| label.text.as_str()), cell_px);
         let mut text_quads = Vec::new();
         let mut text_runs = Vec::new();
         let mut sink = TextSink {
             atlas: &glyph_atlas,
             quads: &mut text_quads,
             runs: &mut text_runs,
+            metrics,
         };
         for label in labels {
             // Canvas uses an alphabetic baseline. Glyph cells share the explicit atlas
@@ -4722,7 +4637,7 @@ mod tests {
         let centre_of = |run: super::GpuTextRun, text: &str| {
             let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
             (
-                run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX),
+                run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX * 0.85),
                 quads[0].center[1],
             )
         };
