@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+mod browser_glyph_atlas;
 #[cfg(any(target_arch = "wasm32", test))]
 mod canvas_selection;
 
@@ -375,6 +377,8 @@ impl From<&GpuRenderPlan> for WebGpuPlanSummary {
 struct PlannedWebGpuDiagram {
     #[cfg(test)]
     ir: fm_core::MermaidDiagramIr,
+    #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+    font_family: String,
     plan: GpuRenderPlan,
 }
 
@@ -438,6 +442,8 @@ fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebG
     Ok(PlannedWebGpuDiagram {
         #[cfg(test)]
         ir: geometry.ir,
+        #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+        font_family: geometry.canvas.font_family,
         plan,
     })
 }
@@ -2041,8 +2047,20 @@ pub async fn render_webgpu_to_rgba_js(
     height: u32,
     config: Option<JsValue>,
 ) -> Result<js_sys::Uint8Array, JsValue> {
+    if width == 0 || height == 0 {
+        return Err(js_error("WebGPU render dimensions must be nonzero"));
+    }
     let planned = build_webgpu_plan(&input, config).map_err(js_error)?;
-    let pixels = render_webgpu_pixels(&planned.plan, width, height)
+    let coverage = if planned.plan.text_quads.is_empty() {
+        None
+    } else {
+        Some(
+            browser_glyph_atlas::rasterize(&planned.plan.glyph_atlas, &planned.font_family)
+                .await
+                .map_err(js_error)?,
+        )
+    };
+    let pixels = render_webgpu_pixels(&planned.plan, coverage.as_deref(), width, height)
         .await
         .map_err(js_error)?;
     Ok(js_sys::Uint8Array::from(pixels.as_slice()))
@@ -2056,10 +2074,11 @@ pub async fn render_webgpu_to_rgba_js(
 /// path. This half is compiled and exercised on both targets.
 ///
 /// # Errors
-/// Returns the device or readback failure.
+/// Returns a missing/invalid text atlas, invalid dimensions, or device/readback failure.
 #[cfg(all(feature = "webgpu", any(test, target_arch = "wasm32")))]
 pub(crate) async fn render_webgpu_pixels(
     plan: &GpuRenderPlan,
+    coverage: Option<&[u8]>,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
@@ -2067,19 +2086,25 @@ pub(crate) async fn render_webgpu_pixels(
         DiagramPipelines, GlyphAtlasTexture, GpuDevice, render_diagram_async,
     };
 
+    if width == 0 || height == 0 {
+        return Err("WebGPU render dimensions must be nonzero".to_string());
+    }
+    let coverage = if plan.text_quads.is_empty() {
+        None
+    } else {
+        let expected = browser_glyph_atlas::coverage_len(plan.glyph_atlas.texture_px)?;
+        let coverage = coverage.ok_or("WebGPU text requires a rasterized glyph atlas")?;
+        if coverage.len() != expected {
+            return Err(format!(
+                "WebGPU glyph atlas requires {expected} coverage bytes, received {}",
+                coverage.len()
+            ));
+        }
+        Some(coverage)
+    };
     let gpu = GpuDevice::request().await.map_err(|e| e.to_string())?;
     let pipelines = DiagramPipelines::new(&gpu);
-
-    // The atlas is required exactly when there is text to draw. `solid_coverage` is the placeholder
-    // the device tests use; a browser caller that wants readable labels supplies a rasterised atlas
-    // through `glyph_raster`, which needs a font this crate deliberately does not ship.
-    let atlas = (!plan.text_quads.is_empty()).then(|| {
-        GlyphAtlasTexture::new(
-            &gpu,
-            &plan.glyph_atlas,
-            &fm_render_canvas::gpu_device::solid_coverage(&plan.glyph_atlas),
-        )
-    });
+    let atlas = coverage.map(|pixels| GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, pixels));
 
     let image = render_diagram_async(&gpu, &pipelines, plan, atlas.as_ref(), width, height)
         .await
@@ -4987,6 +5012,50 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn webgpu_labels_retain_the_resolved_font_family() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        let mut runtime = RuntimeConfig::default();
+        runtime.svg.font_family = "Atlas Test Font, sans-serif".to_string();
+        // SVG typography is the resolved source of truth for layout and all raster surfaces.
+        runtime.canvas.font_family = "stale canvas font".to_string();
+        write_runtime_config(runtime);
+        let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
+        assert_eq!(planned.font_family, "Atlas Test Font, sans-serif");
+        assert!(!planned.plan.text_quads.is_empty());
+    }
+
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn webgpu_text_rejects_missing_or_incomplete_coverage_before_requesting_a_device() {
+        let _serial = config_guard();
+        let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
+        let missing =
+            pollster::block_on(super::render_webgpu_pixels(&planned.plan, None, 512, 512));
+        assert!(
+            missing
+                .unwrap_err()
+                .contains("requires a rasterized glyph atlas")
+        );
+        let incomplete = pollster::block_on(super::render_webgpu_pixels(
+            &planned.plan,
+            Some(&[255]),
+            512,
+            512,
+        ));
+        assert!(incomplete.unwrap_err().contains("coverage bytes"));
+        let empty = pollster::block_on(super::render_webgpu_pixels(&planned.plan, None, 0, 512));
+        assert!(empty.unwrap_err().contains("dimensions must be nonzero"));
+    }
+
     /// THE BROWSER ENTRY POINT'S OWN PATH, exercised natively (bd-2u0.2).
     ///
     /// `renderWebGpuToRgba` is `async` and wasm-only, but the half that does the work —
@@ -5020,8 +5089,16 @@ mod tests {
             "CONTROL FAILED: no text"
         );
 
-        let rgba = pollster::block_on(super::render_webgpu_pixels(&planned.plan, 512, 512))
-            .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
+        // This native test verifies GPU composition. Browser letterforms come from Canvas2D;
+        // supplying synthetic coverage here explicitly keeps it out of the production path.
+        let coverage = fm_render_canvas::gpu_device::solid_coverage(&planned.plan.glyph_atlas);
+        let rgba = pollster::block_on(super::render_webgpu_pixels(
+            &planned.plan,
+            Some(&coverage),
+            512,
+            512,
+        ))
+        .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
         assert_eq!(
             rgba.len(),
             512 * 512 * 4,
