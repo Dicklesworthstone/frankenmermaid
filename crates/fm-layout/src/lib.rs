@@ -3529,7 +3529,8 @@ pub enum RenderItem {
 /// Build a target-agnostic render scene from semantic IR and computed layout.
 #[must_use]
 pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
-    let bounds = RenderRect::from(layout.bounds);
+    let (label_layer, label_bounds) = build_label_layer(ir, layout);
+    let bounds = RenderRect::from(label_bounds);
 
     let mut root =
         RenderGroup::new(Some(String::from("diagram-root"))).with_source(RenderSource::Diagram);
@@ -3551,8 +3552,7 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
     root.children
         .push(RenderItem::Group(build_node_layer(ir, layout)));
-    root.children
-        .push(RenderItem::Group(build_label_layer(ir, layout)));
+    root.children.push(RenderItem::Group(label_layer));
     if ir.diagram_type == DiagramType::Sequence {
         let markers = build_sequence_lifecycle_layer(layout);
         if !markers.children.is_empty() {
@@ -4352,9 +4352,11 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
     layer
 }
 
-fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGroup {
+fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> (RenderGroup, LayoutRect) {
     let mut layer =
         RenderGroup::new(Some(String::from("labels"))).with_source(RenderSource::Diagram);
+    let mut edge_labels = edge_labels::uses_graph_edge_labels(ir.diagram_type)
+        .then(|| edge_labels::EdgeLabelPlacer::new(ir, layout, 20.0));
 
     if let Some(journey) = &layout.extensions.journey {
         layer.children.extend(
@@ -4426,29 +4428,91 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
     }
 
     for edge in &layout.edges {
-        let Some(label) = ir
-            .edges
-            .get(edge.edge_index)
-            .and_then(|edge_ir| edge_ir.label)
-            .and_then(|label_id| ir.labels.get(label_id.0))
-        else {
+        let Some(edge_ir) = ir.edges.get(edge.edge_index) else {
+            continue;
+        };
+        if edge.bundled
+            || edge.points.len() < 2
+            || edge_ir.arrow == fm_core::ArrowType::Invisible
+            || ir.diagram_type == DiagramType::Sankey
+        {
+            continue;
+        }
+        let Some(label) = edge_ir.label.and_then(|label_id| ir.labels.get(label_id.0)) else {
             continue;
         };
 
-        let midpoint = edge_label_position(edge);
-        layer.children.push(RenderItem::Text(RenderText {
-            source: RenderSource::Edge(edge.edge_index),
-            text: label.text.clone(),
-            x: midpoint.x,
-            y: midpoint.y,
-            font_size: 12.0,
-            align: TextAlign::Middle,
-            baseline: TextBaseline::Middle,
-            fill: FillStyle::Solid {
-                color: String::from("#334155"),
-                opacity: 1.0,
-            },
-        }));
+        if let Some(placer) = edge_labels.as_mut() {
+            let style = edge_labels::edge_label_style(ir, edge.edge_index);
+            let font_size = style
+                .get("font-size")
+                .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+                .unwrap_or(12.75);
+            let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                line_height: 1.2,
+                ..Default::default()
+            });
+            let width = metrics.estimate_multiline_width(&label.text) * 1.15 + 8.0;
+            let line_count = label.text.lines().count().max(1);
+            let line_height = font_size * 1.2;
+            let height = line_count as f32 * line_height + 4.0;
+            let center = placer.place(edge, width, height);
+            layer.children.push(RenderItem::Path(RenderPath {
+                source: RenderSource::Edge(edge.edge_index),
+                commands: rounded_rect_path(
+                    LayoutRect {
+                        x: center.x - width / 2.0,
+                        y: center.y - height / 2.0,
+                        width,
+                        height,
+                    },
+                    6.0,
+                ),
+                fill: Some(FillStyle::Solid {
+                    color: String::from("#ffffff"),
+                    opacity: 1.0,
+                }),
+                stroke: None,
+                marker_start: MarkerKind::None,
+                marker_end: MarkerKind::None,
+            }));
+            let color = style
+                .get("color")
+                .cloned()
+                .unwrap_or_else(|| String::from("#334155"));
+            for (row, text) in label.text.lines().enumerate() {
+                layer.children.push(RenderItem::Text(RenderText {
+                    source: RenderSource::Edge(edge.edge_index),
+                    text: text.to_owned(),
+                    x: center.x,
+                    y: center.y + (row as f32 - (line_count - 1) as f32 / 2.0) * line_height,
+                    font_size,
+                    align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity: 1.0,
+                    },
+                }));
+            }
+        } else {
+            let midpoint = edge_label_position(edge);
+            layer.children.push(RenderItem::Text(RenderText {
+                source: RenderSource::Edge(edge.edge_index),
+                text: label.text.clone(),
+                x: midpoint.x,
+                y: midpoint.y,
+                font_size: 12.0,
+                align: TextAlign::Middle,
+                baseline: TextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: String::from("#334155"),
+                    opacity: 1.0,
+                },
+            }));
+        }
     }
 
     for cluster in &layout.clusters {
@@ -4478,11 +4542,14 @@ fn build_label_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGro
         }));
     }
 
-    layer
+    let bounds = edge_labels
+        .as_ref()
+        .map_or(layout.bounds, edge_labels::EdgeLabelPlacer::bounds);
+    (layer, bounds)
 }
 
-/// Where an edge's label is anchored: the middle of its middle segment. The one rule the SVG
-/// renderer, the canvas renderer and the render scene all place labels by.
+/// Preferred label anchor before measured collision-aware placement. Graph renderers pass
+/// their actual plate dimensions to [`edge_labels::EdgeLabelPlacer`] before painting.
 #[must_use]
 pub fn edge_label_position(edge_path: &LayoutEdgePath) -> LayoutPoint {
     let points = &edge_path.points;
@@ -4672,6 +4739,10 @@ fn compute_traced_layout_with_config_and_guardrails(
     if guard.fallback_applied {
         guarded_dispatch.reason = guard.reason;
     }
+    let label_spacing_config = (guarded_dispatch.selected == LayoutAlgorithm::Sugiyama
+        && !config.collapse_cycle_clusters
+        && edge_labels::can_refine_graph_label_spacing(ir))
+    .then(|| config.clone());
 
     // Captured before `config` is moved into the dispatch arms; a caller that supplied custom
     // `font_metrics` must have its notes measured with them, not with the default preset.
@@ -4767,6 +4838,9 @@ fn compute_traced_layout_with_config_and_guardrails(
         }
         _ => {}
     }
+    if let Some(config) = label_spacing_config {
+        refine_graph_label_spacing(ir, &config, &mut traced);
+    }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
     traced.trace.snapshots.insert(
@@ -4783,6 +4857,90 @@ fn compute_traced_layout_with_config_and_guardrails(
     // Freshly built by the dispatch match (refcount 1) ⇒ clone-free `make_mut`.
     Arc::make_mut(&mut traced.layout).stats.phase_iterations = phase_iterations;
     traced
+}
+
+/// Give congested labelled corridors a little room, measuring the FINAL routes after port
+/// spreading. Keep ranks, ordering, algorithm and user constraints intact. Candidate count
+/// and area growth are bounded, and ordinary diagrams that already fit do no extra layout work.
+fn refine_graph_label_spacing(
+    ir: &MermaidDiagramIr,
+    config: &LayoutConfig,
+    traced: &mut TracedLayout,
+) {
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+    let initial = edge_labels::graph_label_attachment_quality(ir, &traced.layout, &metrics);
+    if initial.0 == 0 {
+        return;
+    }
+    let horizontal = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let mut rank_bounds: BTreeMap<usize, (f32, f32)> = BTreeMap::new();
+    for node in &traced.layout.nodes {
+        let (start, size) = if horizontal {
+            (node.bounds.x, node.bounds.width)
+        } else {
+            (node.bounds.y, node.bounds.height)
+        };
+        let bounds = rank_bounds
+            .entry(node.rank)
+            .or_insert((start, start + size));
+        bounds.0 = bounds.0.min(start);
+        bounds.1 = bounds.1.max(start + size);
+    }
+    let physical_ranks: Vec<_> = {
+        let mut ranks: Vec<_> = rank_bounds.values().copied().collect();
+        ranks.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        ranks
+    };
+    // Long horizontal labels may already force a larger rank gap than the configured minimum.
+    let rank_base = physical_ranks
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].1)
+        .fold(config.spacing.rank_spacing, f32::max);
+    let mut best_quality = initial;
+    let mut best = None;
+    for cross_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0] {
+        for rank_step in [0.0, 1.0, 2.0, 3.0, 4.0, 6.0] {
+            if cross_step == 0.0 && rank_step == 0.0 {
+                continue;
+            }
+            let mut candidate_config = config.clone();
+            candidate_config.spacing.node_spacing +=
+                cross_step * (metrics.font_size() * 2.0 / 3.0).max(4.0);
+            candidate_config.spacing.rank_spacing =
+                rank_base + rank_step * (metrics.font_size() * 0.8).max(4.0);
+            let mut candidate = layout_diagram_sugiyama_traced_with_config(ir, candidate_config);
+            let layout = Arc::make_mut(&mut candidate.layout);
+            if !ir.state_notes.is_empty() {
+                layout.extensions.state_notes =
+                    build_state_note_geometry(ir, &layout.nodes, &metrics);
+                extend_bounds_for_state_notes(layout);
+            }
+            spread_shared_edge_ends(
+                ir,
+                layout,
+                matches!(ir.diagram_type, DiagramType::Flowchart | DiagramType::State),
+            );
+            let quality = edge_labels::graph_label_attachment_quality(ir, layout, &metrics);
+            if quality.0 < initial.0 && quality.2 <= initial.2 * 1.8 && quality < best_quality {
+                best_quality = quality;
+                best = Some(candidate);
+            }
+        }
+    }
+    if let Some(mut candidate) = best {
+        push_snapshot(
+            &mut candidate.trace,
+            "edge_label_spacing",
+            ir.nodes.len(),
+            ir.edges.len(),
+            candidate.layout.stats.reversed_edges,
+            candidate.layout.stats.crossing_count,
+        );
+        *traced = candidate;
+    }
 }
 
 impl IncrementalLayoutEngine {
@@ -5310,6 +5468,19 @@ impl IncrementalLayoutEngine {
                     });
                 }
             }
+        }
+
+        // Corridor refinement couples rank gaps across this small graph. A geometry-changing
+        // edit must rerun it; the size-stable text-only fast path above remains valid.
+        if edge_labels::can_refine_graph_label_spacing(ir)
+            || cached_layout
+                .traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|snapshot| snapshot.stage == "edge_label_spacing")
+        {
+            return None;
         }
 
         let dispatch = dispatch_layout_algorithm(ir, algorithm);
