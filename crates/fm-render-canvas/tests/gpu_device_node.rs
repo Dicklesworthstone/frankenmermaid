@@ -255,10 +255,142 @@ fn the_shaders_this_crate_ships_compile_on_a_real_device() {
         ("EDGE_WGSL", fm_render_canvas::EDGE_WGSL),
         ("ARROWHEAD_WGSL", fm_render_canvas::ARROWHEAD_WGSL),
         ("TEXT_ATLAS_WGSL", fm_render_canvas::TEXT_ATLAS_WGSL),
+        ("TRIANGLE_WGSL", fm_render_canvas::TRIANGLE_WGSL),
     ] {
         if let Err(error) = gpu.validate_shader(name, wgsl) {
             panic!("{name} does not compile: {error}");
         }
+    }
+}
+
+#[test]
+fn area_triangle_bytes_round_trip_through_the_shader_attribute_offsets() {
+    use fm_render_canvas::GpuTriangleInstance;
+
+    let triangles = [
+        GpuTriangleInstance {
+            a: [-12.0, 4.0],
+            b: [7.0, -9.0],
+            c: [14.0, 23.0],
+            color: [0.2, 0.6, 0.9, 0.16],
+        },
+        GpuTriangleInstance {
+            a: [91.0, 17.0],
+            b: [-35.0, 40.0],
+            c: [44.0, 28.0],
+            color: [0.7, 0.1, 0.3, 0.5],
+        },
+    ];
+    let bytes = fm_render_canvas::gpu_device::triangle_instance_bytes(&triangles);
+    let descriptor = fm_render_canvas::gpu_pipeline::xy_area_pipeline();
+    let stride = descriptor.instance.array_stride as usize;
+    assert_eq!(bytes.len(), stride * triangles.len());
+    for (index, triangle) in triangles.iter().enumerate() {
+        for attribute in descriptor.instance.attributes {
+            let expected: &[f32] = match attribute.name {
+                "a" => &triangle.a,
+                "b" => &triangle.b,
+                "c" => &triangle.c,
+                "color" => &triangle.color,
+                name => panic!("unverified triangle field {name}"),
+            };
+            for (component, expected) in expected.iter().enumerate() {
+                let start = index * stride + attribute.offset as usize + component * 4;
+                let value = f32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap());
+                assert_eq!(value, *expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn xy_area_fills_reach_the_gpu_on_both_sides_of_zero() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let pipelines = DiagramPipelines::new(&gpu);
+    for orientation in ["", " horizontal"] {
+        let ir = fm_parser::parse(&format!(
+            "xychart-beta{orientation}\n x-axis [A, B]\n y-axis -10 --> 10\n area [-8, 8]\n"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        assert_eq!(plan.xy_area_triangles.len(), 2);
+        let mut without_fill = plan.clone();
+        without_fill.xy_area_triangles.clear();
+        let image =
+            render_diagram(&gpu, &pipelines, &plan, None, 800, 600).expect("render filled chart");
+        let control = render_diagram(&gpu, &pipelines, &without_fill, None, 800, 600)
+            .expect("render fill-free control");
+        for triangle in &plan.xy_area_triangles {
+            let x = (triangle.a[0] + triangle.b[0] + triangle.c[0]) / 3.0;
+            let y = (triangle.a[1] + triangle.b[1] + triangle.c[1]) / 3.0;
+            let (px, py) = image.pixel_for(&plan.bounds, x, y);
+            let alpha = image.pixel(px, py).unwrap()[3];
+            let control_alpha = control.pixel(px, py).unwrap()[3];
+            assert!(
+                u16::from(alpha) > u16::from(control_alpha) + 20,
+                "area lobe at ({x}, {y}) was planned but not submitted: alpha {alpha} versus control {control_alpha}"
+            );
+        }
+    }
+}
+
+#[test]
+fn xy_line_segments_remain_visible_over_bar_interiors() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let pipelines = DiagramPipelines::new(&gpu);
+    for orientation in ["", " horizontal"] {
+        let ir = fm_parser::parse(&format!(
+            "xychart-beta{orientation}\n x-axis [A, B]\n y-axis 0 --> 25\n bar [20, 20]\n line [10, 10]\n"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+        assert_eq!(plan.xy_bar_instances.len(), 2);
+        assert_eq!(plan.edge_segments.len(), 1);
+        let line = &plan.edge_segments[0];
+        let mut sample = line.from;
+        let category_axis = usize::from(ir.xy_chart_meta.as_ref().unwrap().horizontal);
+        // The point marker already used to cover bars. Sample the line itself,
+        // inside the first bar but well away from the marker's radius.
+        sample[category_axis] += 12.0;
+        let bar = &plan.xy_bar_instances[0];
+        for (axis, coordinate) in sample.iter().enumerate() {
+            assert!((coordinate - bar.center[axis]).abs() < bar.half_extent[axis] - 2.0);
+        }
+        let mut without_bars = plan.clone();
+        without_bars.xy_bar_instances.clear();
+        let image = render_diagram(&gpu, &pipelines, &plan, None, 800, 600)
+            .expect("render mixed bar/line chart");
+        let control = render_diagram(&gpu, &pipelines, &without_bars, None, 800, 600)
+            .expect("render line-only control");
+        let (px, py) = image.pixel_for(&plan.bounds, sample[0], sample[1]);
+        let expected = line
+            .color
+            .map(|component| (component * 255.0).round() as u8);
+        let error = |pixel: [u8; 4]| {
+            pixel
+                .iter()
+                .zip(expected.iter())
+                .map(|(actual, expected)| u16::from(actual.abs_diff(*expected)))
+                .sum::<u16>()
+        };
+        // Pick the nearest fully covered ribbon pixel to avoid depending on
+        // subpixel rounding or antialiasing at the line boundary.
+        let (px, py) = (py.saturating_sub(1)..=py + 1)
+            .flat_map(|y| (px.saturating_sub(1)..=px + 1).map(move |x| (x, y)))
+            .min_by_key(|&(x, y)| error(control.pixel(x, y).unwrap()))
+            .unwrap();
+        assert!(error(control.pixel(px, py).unwrap()) < 12);
+        assert!(
+            error(image.pixel(px, py).unwrap()) < 12,
+            "{orientation:?} line was covered by a bar: expected {expected:?}, got {:?}",
+            image.pixel(px, py).unwrap()
+        );
     }
 }
 

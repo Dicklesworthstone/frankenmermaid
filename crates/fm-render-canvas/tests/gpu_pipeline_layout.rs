@@ -14,7 +14,7 @@
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::gpu_pipeline::{
     DrawBatch, PipelineDescriptor, PrimitiveFamily, VertexFormat, draw_batches, edge_pipeline,
-    node_pipeline, pipelines, text_pipeline,
+    node_pipeline, pipelines, text_pipeline, xy_area_pipeline,
 };
 
 /// The stroke width the plan is built with, taken from the Canvas2D config rather than written as
@@ -153,6 +153,11 @@ fn the_node_instance_layout_matches_the_shader_that_consumes_it() {
 #[test]
 fn the_edge_instance_layout_matches_the_shader_that_consumes_it() {
     assert_layout_matches_shader(&edge_pipeline(), "EdgeSegment");
+}
+
+#[test]
+fn the_area_triangle_layout_matches_the_shader_that_consumes_it() {
+    assert_layout_matches_shader(&xy_area_pipeline(), "TriangleInstance");
 }
 
 /// Every draw must submit exactly the private geometry array its vertex shader indexes.
@@ -424,6 +429,10 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
     assert_eq!(
         pipeline_families,
         vec![
+            PrimitiveFamily::XyPlot,
+            PrimitiveFamily::XyAxis,
+            PrimitiveFamily::XyArea,
+            PrimitiveFamily::XyBar,
             PrimitiveFamily::SequenceFragment,
             PrimitiveFamily::SequenceFragmentBorder,
             PrimitiveFamily::Edge,
@@ -435,6 +444,44 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
         "pipeline order must keep sequence frames behind message edges, then keep heads with their \
          edges, boxes over both, dashed borders over boxes, and labels over everything"
     );
+}
+
+#[test]
+fn xy_charts_submit_axes_and_filled_areas_before_series_and_labels() {
+    let ir = fm_parser::parse(
+        "xychart-beta\n title Growth\n x-axis [A, B]\n y-axis -5 --> 10\n bar [4, 9]\n area [-3, 8]\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    let batches = draw_batches(&plan);
+    assert_eq!(
+        batches.iter().map(|batch| batch.family).collect::<Vec<_>>(),
+        vec![
+            PrimitiveFamily::XyPlot,
+            PrimitiveFamily::XyAxis,
+            PrimitiveFamily::XyArea,
+            PrimitiveFamily::XyBar,
+            PrimitiveFamily::Edge,
+            PrimitiveFamily::Node,
+            PrimitiveFamily::Text,
+        ]
+    );
+    let area = batches
+        .iter()
+        .find(|batch| batch.family == PrimitiveFamily::XyArea)
+        .unwrap();
+    assert_eq!(area.instance_count as usize, plan.xy_area_triangles.len());
+    assert_eq!(area.vertices_per_instance, 3);
+    assert!(
+        area.instance_count > 0,
+        "a planned fill must reach an executable draw batch"
+    );
+    let bars = batches
+        .iter()
+        .find(|batch| batch.family == PrimitiveFamily::XyBar)
+        .unwrap();
+    assert_eq!(bars.instance_count, 2);
 }
 
 /// Interaction fragments use two executable GPU families: an SDF fill followed by EDGE-shader

@@ -660,6 +660,22 @@ pub async fn render_diagram_async(
     let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
     for (family, _) in &pipelines.passes {
         let (bytes, count) = match family {
+            PrimitiveFamily::XyPlot => (
+                node_instance_bytes(&plan.xy_plot_instances),
+                plan.xy_plot_instances.len(),
+            ),
+            PrimitiveFamily::XyAxis => (
+                edge_instance_bytes(&plan.xy_axis_segments),
+                plan.xy_axis_segments.len(),
+            ),
+            PrimitiveFamily::XyArea => (
+                triangle_instance_bytes(&plan.xy_area_triangles),
+                plan.xy_area_triangles.len(),
+            ),
+            PrimitiveFamily::XyBar => (
+                node_instance_bytes(&plan.xy_bar_instances),
+                plan.xy_bar_instances.len(),
+            ),
             PrimitiveFamily::SequenceFragment => (
                 node_instance_bytes(&plan.sequence_fragment_instances),
                 plan.sequence_fragment_instances.len(),
@@ -1141,6 +1157,42 @@ fn instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
 #[must_use]
 pub fn node_instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
     instance_bytes(instances)
+}
+
+/// Area triangle bytes at the offsets bound by the triangle pipeline.
+#[must_use]
+pub fn triangle_instance_bytes(triangles: &[crate::gpu_plan::GpuTriangleInstance]) -> Vec<u8> {
+    use crate::gpu_plan::GpuTriangleInstance;
+
+    let stride = size_of::<GpuTriangleInstance>();
+    let mut out = vec![0_u8; std::mem::size_of_val(triangles)];
+    for (index, triangle) in triangles.iter().enumerate() {
+        let base = index * stride;
+        for (offset, values) in [
+            (
+                core::mem::offset_of!(GpuTriangleInstance, a),
+                triangle.a.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, b),
+                triangle.b.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, c),
+                triangle.c.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, color),
+                triangle.color.as_slice(),
+            ),
+        ] {
+            for (component, value) in values.iter().enumerate() {
+                let start = base + offset + component * size_of::<f32>();
+                out[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+    }
+    out
 }
 
 /// Text quads as instance bytes, each field written AT ITS `offset_of!` POSITION.

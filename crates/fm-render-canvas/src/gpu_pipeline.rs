@@ -28,7 +28,7 @@
 
 use crate::gpu_plan::{
     ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance,
-    GpuRenderPlan, GpuTextQuad, NODE_SDF_WGSL, TEXT_ATLAS_WGSL,
+    GpuRenderPlan, GpuTextQuad, GpuTriangleInstance, NODE_SDF_WGSL, TEXT_ATLAS_WGSL, TRIANGLE_WGSL,
 };
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
@@ -97,6 +97,14 @@ pub struct InstanceLayout {
 /// Which primitive family a pipeline draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveFamily {
+    /// XY plot background, beneath grid lines and series marks.
+    XyPlot,
+    /// XY value/category axes and grid lines.
+    XyAxis,
+    /// Filled area-series triangles, beneath their line and point marks.
+    XyArea,
+    /// XY bars, beneath line series and their point markers.
+    XyBar,
     /// Node boxes, drawn as SDF quads.
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
@@ -417,8 +425,12 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 7] {
+pub const fn pipelines() -> [PipelineDescriptor; 11] {
     [
+        xy_plot_pipeline(),
+        xy_axis_pipeline(),
+        xy_area_pipeline(),
+        xy_bar_pipeline(),
         sequence_fragment_pipeline(),
         sequence_fragment_border_pipeline(),
         edge_pipeline(),
@@ -427,6 +439,79 @@ pub const fn pipelines() -> [PipelineDescriptor; 7] {
         node_border_pipeline(),
         text_pipeline(),
     ]
+}
+
+/// XY plot backgrounds use the ordinary rectangle SDF.
+#[must_use]
+pub const fn xy_plot_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::XyPlot,
+        label: "fm-xy-plot",
+        ..node_pipeline()
+    }
+}
+
+/// XY axes and dashed grids use the ordinary line pipeline.
+#[must_use]
+pub const fn xy_axis_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::XyAxis,
+        label: "fm-xy-axis",
+        ..edge_pipeline()
+    }
+}
+
+/// XY bars use the rectangle SDF before line series are drawn over them.
+#[must_use]
+pub const fn xy_bar_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::XyBar,
+        label: "fm-xy-bar",
+        ..node_pipeline()
+    }
+}
+
+const TRIANGLE_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        shader_location: 0,
+        offset: core::mem::offset_of!(GpuTriangleInstance, a) as u64,
+        format: VertexFormat::Float32x2,
+        name: "a",
+    },
+    VertexAttribute {
+        shader_location: 1,
+        offset: core::mem::offset_of!(GpuTriangleInstance, b) as u64,
+        format: VertexFormat::Float32x2,
+        name: "b",
+    },
+    VertexAttribute {
+        shader_location: 2,
+        offset: core::mem::offset_of!(GpuTriangleInstance, c) as u64,
+        format: VertexFormat::Float32x2,
+        name: "c",
+    },
+    VertexAttribute {
+        shader_location: 3,
+        offset: core::mem::offset_of!(GpuTriangleInstance, color) as u64,
+        format: VertexFormat::Float32x4,
+        name: "color",
+    },
+];
+
+/// Quantitative area fills use actual triangles, rather than node bounding boxes.
+#[must_use]
+pub const fn xy_area_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-xy-area",
+        family: PrimitiveFamily::XyArea,
+        wgsl: TRIANGLE_WGSL,
+        instance: InstanceLayout {
+            array_stride: size_of::<GpuTriangleInstance>() as u64,
+            attributes: TRIANGLE_ATTRIBUTES,
+        },
+        vertices_per_instance: 3,
+        samples_atlas: false,
+    }
 }
 
 /// Sequence interaction-frame fills use the ordinary rect SDF before message edges.
@@ -500,6 +585,32 @@ impl DrawBatch {
 #[must_use]
 pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
     let mut batches = Vec::new();
+    for (family, count, vertices_per_instance) in [
+        (
+            PrimitiveFamily::XyPlot,
+            plan.xy_plot_instances.len(),
+            QUAD_VERTICES_PER_INSTANCE,
+        ),
+        (
+            PrimitiveFamily::XyAxis,
+            plan.xy_axis_segments.len(),
+            QUAD_VERTICES_PER_INSTANCE,
+        ),
+        (PrimitiveFamily::XyArea, plan.xy_area_triangles.len(), 3),
+        (
+            PrimitiveFamily::XyBar,
+            plan.xy_bar_instances.len(),
+            QUAD_VERTICES_PER_INSTANCE,
+        ),
+    ] {
+        if count > 0 {
+            batches.push(DrawBatch {
+                family,
+                instance_count: u32::try_from(count).unwrap_or(u32::MAX),
+                vertices_per_instance,
+            });
+        }
+    }
     if !plan.sequence_fragment_instances.is_empty() {
         batches.push(DrawBatch {
             family: PrimitiveFamily::SequenceFragment,

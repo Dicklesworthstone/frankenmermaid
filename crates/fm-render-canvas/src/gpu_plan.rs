@@ -369,6 +369,17 @@ pub struct GpuEdgeSegment {
     pub width: f32,
 }
 
+/// A filled triangle in diagram coordinates. Area charts use these to retain their
+/// quantitative extent, including the lobes on either side of a zero baseline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct GpuTriangleInstance {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    pub c: [f32; 2],
+    pub color: [f32; 4],
+}
+
 /// Shape of a path-end marker consumed by the marker shader.
 ///
 /// These values intentionally mirror [`MarkerKind`].  The GPU plan receives a render scene, not
@@ -1163,6 +1174,14 @@ pub enum GpuTextSource {
     /// `node_index` indexes `layout.extensions.axis_ticks`: ticks are layout furniture, not IR
     /// nodes, so resolving this as a node index would attach a date to an unrelated shape.
     AxisTick,
+    /// An XY value-axis tick, indexed in the shared nice-tick sequence.
+    XyValueTick,
+    /// An XY category-axis tick, indexed in the shared category sequence.
+    XyCategory,
+    /// An XY axis title: zero is the category axis, one is the value axis.
+    XyAxisTitle,
+    /// The diagram's declared title.
+    DiagramTitle,
     /// A label attached to a non-sequence layout band.
     ///
     /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
@@ -1220,6 +1239,14 @@ pub const DEFAULT_GLYPH_CELL_PX: u32 = 32;
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuRenderPlan {
     pub bounds: LayoutRect,
+    /// XY plot background, before the grid and quantitative marks.
+    pub xy_plot_instances: Vec<GpuNodeInstance>,
+    /// XY axes, tick marks, and grid lines, before the series marks.
+    pub xy_axis_segments: Vec<GpuEdgeSegment>,
+    /// XY area fills, behind the series lines, points, and bars.
+    pub xy_area_triangles: Vec<GpuTriangleInstance>,
+    /// XY bar marks, below line series and their point markers.
+    pub xy_bar_instances: Vec<GpuNodeInstance>,
     /// Subgraph containers, as rect instances (bd-dh6cy).
     ///
     /// ⚠️ DECLARED BEFORE `node_instances` BECAUSE THAT IS THE DRAW ORDER. A container painted after
@@ -1392,6 +1419,11 @@ impl GpuRenderPlan {
         layout: &DiagramLayout,
         edge_stroke_width: f32,
     ) -> Self {
+        if ir.diagram_type == fm_core::DiagramType::XyChart
+            && let Some(meta) = ir.xy_chart_meta.as_ref()
+        {
+            return Self::from_xychart(ir, meta, layout);
+        }
         // Clusters first, so the buffer order is the draw order.
         let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
         for cluster in &layout.clusters {
@@ -2842,6 +2874,10 @@ impl GpuRenderPlan {
 
         Self {
             bounds: layout.bounds,
+            xy_plot_instances: Vec::new(),
+            xy_axis_segments: Vec::new(),
+            xy_area_triangles: Vec::new(),
+            xy_bar_instances: Vec::new(),
             cluster_instances,
             band_lane_segments,
             band_section_instances,
@@ -2885,8 +2921,443 @@ impl GpuRenderPlan {
         edge_stroke_width: f32,
     ) -> Self {
         let mut plan = Self::from_layout(ir, layout, edge_stroke_width);
-        plan.arrowheads = scene_marker_instances(&scene.root);
+        // A chart's connections are data series, not directed graph relationships. The
+        // generic scene must not reintroduce markers after dedicated chart planning.
+        if ir.diagram_type != fm_core::DiagramType::XyChart {
+            plan.arrowheads = scene_marker_instances(&scene.root);
+        }
         plan
+    }
+}
+
+struct XyChartLabel {
+    text: String,
+    anchor: (f32, f32),
+    font_size: f32,
+    align: crate::TextAlign,
+    source: GpuTextSource,
+    index: usize,
+}
+
+impl GpuRenderPlan {
+    /// XY charts consume the same domain, category slots, and measured mark boxes as
+    /// Canvas2D. Generic node labels and directed graph markers do not belong in a chart.
+    fn from_xychart(
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrXyChartMeta,
+        layout: &DiagramLayout,
+    ) -> Self {
+        use crate::TextAlign;
+        use fm_core::IrXySeriesKind;
+
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (left, top) = (plot.x, plot.y);
+        let (right, bottom) = (left + plot.width, top + plot.height);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let categories = fm_layout::xychart_categories(meta);
+        let mut axes = Vec::new();
+        let mut labels = Vec::new();
+        let mut label = |text: String, anchor, font_size, align, source, index| {
+            labels.push(XyChartLabel {
+                text,
+                anchor,
+                font_size,
+                align,
+                source,
+                index,
+            });
+        };
+        let value_font = (DEFAULT_FONT_SIZE_PX * 0.72).max(8.0);
+        for (index, value) in fm_layout::xychart_y_ticks(min, max).into_iter().enumerate() {
+            let (from, to, tick_end, text_anchor, align) = if meta.horizontal {
+                let x = fm_layout::xychart_value_to_x(value, min, max, plot);
+                (
+                    [x, top],
+                    [x, bottom],
+                    [x, top - 5.0],
+                    (x, top - 11.0),
+                    TextAlign::Center,
+                )
+            } else {
+                let y = fm_layout::xychart_value_to_y(value, min, max, plot);
+                (
+                    [left, y],
+                    [right, y],
+                    [left - 5.0, y],
+                    (left - 10.0, y + 4.0),
+                    TextAlign::Right,
+                )
+            };
+            axes.push(xy_segment(
+                from,
+                to,
+                [148.0 / 255.0, 163.0 / 255.0, 184.0 / 255.0, 0.35],
+                1.0,
+                [4.0, 4.0],
+            ));
+            axes.push(xy_segment(
+                from,
+                tick_end,
+                DEFAULT_LABEL_RGBA,
+                1.0,
+                [0.0, 0.0],
+            ));
+            label(
+                fm_layout::format_xychart_tick_value(value),
+                text_anchor,
+                value_font,
+                align,
+                GpuTextSource::XyValueTick,
+                index,
+            );
+        }
+        axes.push(xy_segment(
+            [left, top],
+            [left, bottom],
+            DEFAULT_EDGE_STROKE_RGBA,
+            1.5,
+            [0.0, 0.0],
+        ));
+        let axis_y = if meta.horizontal { top } else { bottom };
+        axes.push(xy_segment(
+            [left, axis_y],
+            [right, axis_y],
+            DEFAULT_EDGE_STROKE_RGBA,
+            1.5,
+            [0.0, 0.0],
+        ));
+
+        let category_font = (DEFAULT_FONT_SIZE_PX * 0.74).max(8.0);
+        let band = if meta.horizontal {
+            plot.height
+        } else {
+            plot.width
+        } / categories.len().max(1) as f32;
+        for (index, category) in categories.into_iter().enumerate() {
+            let position = band * (index as f32 + 0.5);
+            let (from, to, anchor, align) = if meta.horizontal {
+                let y = top + position;
+                (
+                    [left - 5.0, y],
+                    [left, y],
+                    (left - 11.0, y + category_font * 0.35),
+                    TextAlign::Right,
+                )
+            } else {
+                let x = left + position;
+                (
+                    [x, bottom],
+                    [x, bottom + 5.0],
+                    (x, bottom + 24.0),
+                    TextAlign::Center,
+                )
+            };
+            axes.push(xy_segment(from, to, DEFAULT_LABEL_RGBA, 1.0, [0.0, 0.0]));
+            label(
+                category,
+                anchor,
+                category_font,
+                align,
+                GpuTextSource::XyCategory,
+                index,
+            );
+        }
+
+        let axis_font = (DEFAULT_FONT_SIZE_PX * 0.76).max(8.0);
+        if let Some(text) = meta.y_axis.label.as_ref() {
+            let (anchor, align) = if meta.horizontal {
+                ((left + plot.width / 2.0, top - 34.0), TextAlign::Center)
+            } else {
+                ((left - 52.0, top - 12.0), TextAlign::Left)
+            };
+            label(
+                text.clone(),
+                anchor,
+                axis_font,
+                align,
+                GpuTextSource::XyAxisTitle,
+                1,
+            );
+        }
+        if let Some(text) = meta.x_axis.label.as_ref() {
+            let (anchor, align) = if meta.horizontal {
+                ((left - 11.0, top - 34.0), TextAlign::Right)
+            } else {
+                ((left + plot.width / 2.0, bottom + 48.0), TextAlign::Center)
+            };
+            label(
+                text.clone(),
+                anchor,
+                axis_font,
+                align,
+                GpuTextSource::XyAxisTitle,
+                0,
+            );
+        }
+        if let Some(title) = ir.declared_title_if_drawn() {
+            label(
+                title.to_owned(),
+                (
+                    layout.bounds.x + layout.bounds.width / 2.0,
+                    top - if meta.horizontal { 70.0 } else { 34.0 },
+                ),
+                (DEFAULT_FONT_SIZE_PX * 1.18).max(8.0),
+                TextAlign::Center,
+                GpuTextSource::DiagramTitle,
+                0,
+            );
+        }
+
+        let glyph_atlas = GlyphAtlasPlan::for_texts(
+            labels.iter().map(|label| label.text.as_str()),
+            DEFAULT_GLYPH_CELL_PX,
+        );
+        let mut text_quads = Vec::new();
+        let mut text_runs = Vec::new();
+        let mut sink = TextSink {
+            atlas: &glyph_atlas,
+            quads: &mut text_quads,
+            runs: &mut text_runs,
+        };
+        for label in labels {
+            // Canvas uses an alphabetic baseline. Glyph cells share the explicit atlas
+            // baseline, so convert it to the cell-centre anchor used by TextSink.
+            let anchor = (
+                label.anchor.0,
+                label.anchor.1 - (GLYPH_BASELINE_RATIO - 0.5) * label.font_size,
+            );
+            match label.align {
+                TextAlign::Left => sink.push_left(
+                    &label.text,
+                    anchor,
+                    label.font_size,
+                    DEFAULT_LABEL_RGBA,
+                    label.source,
+                    label.index,
+                ),
+                TextAlign::Right => sink.push_right(
+                    &label.text,
+                    anchor,
+                    label.font_size,
+                    DEFAULT_LABEL_RGBA,
+                    label.source,
+                    label.index,
+                ),
+                TextAlign::Center => sink.push_centred_with_font(
+                    &label.text,
+                    anchor,
+                    label.font_size,
+                    DEFAULT_LABEL_RGBA,
+                    label.source,
+                    label.index,
+                ),
+            }
+        }
+
+        let mut bounds = layout.bounds;
+        for quad in &text_quads {
+            let left = bounds.x.min(quad.center[0] - quad.half_extent[0]);
+            let top = bounds.y.min(quad.center[1] - quad.half_extent[1]);
+            let right = (bounds.x + bounds.width).max(quad.center[0] + quad.half_extent[0]);
+            let bottom = (bounds.y + bounds.height).max(quad.center[1] + quad.half_extent[1]);
+            bounds = LayoutRect {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            };
+        }
+
+        let mut node_instances = Vec::new();
+        let mut edge_segments = Vec::new();
+        let mut xy_area_triangles = Vec::new();
+        let mut xy_bar_instances = Vec::new();
+        let by_index: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        let baseline = min.min(0.0).max(max.min(0.0));
+        let baseline = if meta.horizontal {
+            fm_layout::xychart_value_to_x(baseline, min, max, plot)
+        } else {
+            fm_layout::xychart_value_to_y(baseline, min, max, plot)
+        };
+        let accents = crate::CanvasRenderConfig::default().accents;
+        for (series_index, series) in meta.series.iter().enumerate() {
+            let color = parse_paint_rgba(&accents[series_index % accents.len()])
+                .unwrap_or(DEFAULT_NODE_FILL_RGBA);
+            let nodes: Vec<_> = series
+                .nodes
+                .iter()
+                .filter_map(|id| by_index.get(&id.0).copied())
+                .collect();
+            let is_bar = series.kind == IrXySeriesKind::Bar;
+            for node in &nodes {
+                let mut mark = xy_node(
+                    node.bounds,
+                    if is_bar {
+                        GpuNodeShape::Rect
+                    } else {
+                        GpuNodeShape::Circle
+                    },
+                    color,
+                    if is_bar {
+                        color
+                    } else {
+                        DEFAULT_NODE_FILL_RGBA
+                    },
+                    if is_bar { 1.0 } else { 2.0 },
+                );
+                mark.node_index = u32::try_from(node.node_index).unwrap_or(u32::MAX);
+                if is_bar {
+                    mark.fill[3] *= 0.78;
+                    xy_bar_instances.push(mark);
+                } else {
+                    let radius = (node.bounds.width.min(node.bounds.height) / 2.0).max(3.5);
+                    mark.half_extent = [radius, radius];
+                    node_instances.push(mark);
+                }
+            }
+            if is_bar {
+                continue;
+            }
+            for pair in nodes.windows(2) {
+                let first = pair[0].bounds.center();
+                let last = pair[1].bounds.center();
+                let first = [first.x, first.y];
+                let last = [last.x, last.y];
+                edge_segments.push(xy_segment(first, last, color, 3.0, [0.0, 0.0]));
+                if series.kind == IrXySeriesKind::Area {
+                    let fill = [color[0], color[1], color[2], color[3] * 0.16];
+                    push_xy_area_strip(
+                        &mut xy_area_triangles,
+                        first,
+                        last,
+                        baseline,
+                        meta.horizontal,
+                        fill,
+                    );
+                }
+            }
+        }
+
+        Self {
+            bounds,
+            xy_plot_instances: vec![xy_node(
+                plot,
+                GpuNodeShape::Rect,
+                [148.0 / 255.0, 163.0 / 255.0, 184.0 / 255.0, 0.06],
+                [148.0 / 255.0, 163.0 / 255.0, 184.0 / 255.0, 0.16],
+                1.0,
+            )],
+            xy_axis_segments: axes,
+            xy_area_triangles,
+            xy_bar_instances,
+            cluster_instances: Vec::new(),
+            band_lane_segments: Vec::new(),
+            band_section_instances: Vec::new(),
+            band_column_segments: Vec::new(),
+            treemap_tile_instances: Vec::new(),
+            radar_segments: Vec::new(),
+            axis_tick_segments: Vec::new(),
+            cluster_divider_segments: Vec::new(),
+            state_note_leader_segments: Vec::new(),
+            state_note_instances: Vec::new(),
+            mirror_header_instances: Vec::new(),
+            packet_field_continuation_instances: Vec::new(),
+            activation_instances: Vec::new(),
+            lifecycle_marker_segments: Vec::new(),
+            sequence_fragment_instances: Vec::new(),
+            sequence_fragment_border_segments: Vec::new(),
+            sequence_note_instances: Vec::new(),
+            edge_segments,
+            arrowheads: Vec::new(),
+            er_marker_segments: Vec::new(),
+            pie_wedges: Vec::new(),
+            node_instances,
+            node_border_segments: Vec::new(),
+            text_quads,
+            text_runs,
+            glyph_atlas,
+        }
+    }
+}
+
+fn xy_node(
+    bounds: LayoutRect,
+    shape: GpuNodeShape,
+    fill: [f32; 4],
+    stroke: [f32; 4],
+    stroke_width: f32,
+) -> GpuNodeInstance {
+    GpuNodeInstance {
+        center: [
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        ],
+        half_extent: [bounds.width / 2.0, bounds.height / 2.0],
+        fill,
+        stroke,
+        stroke_width,
+        shape: shape as u32,
+        node_index: u32::MAX,
+    }
+}
+
+fn xy_segment(
+    from: [f32; 2],
+    to: [f32; 2],
+    color: [f32; 4],
+    width: f32,
+    dash: [f32; 2],
+) -> GpuEdgeSegment {
+    GpuEdgeSegment {
+        from,
+        to,
+        edge_index: NO_EDGE_INDEX,
+        color,
+        dash_phase: 0.0,
+        dash,
+        width,
+    }
+}
+
+fn push_xy_area_strip(
+    triangles: &mut Vec<GpuTriangleInstance>,
+    first: [f32; 2],
+    last: [f32; 2],
+    baseline: f32,
+    horizontal: bool,
+    color: [f32; 4],
+) {
+    let value_axis = usize::from(!horizontal);
+    let mut first_base = first;
+    let mut last_base = last;
+    first_base[value_axis] = baseline;
+    last_base[value_axis] = baseline;
+    let first_delta = first[value_axis] - baseline;
+    let last_delta = last[value_axis] - baseline;
+    let mut triangle = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        let twice_area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if twice_area.is_finite() && twice_area.abs() > f32::EPSILON {
+            triangles.push(GpuTriangleInstance { a, b, c, color });
+        }
+    };
+    if (first_delta < 0.0 && last_delta > 0.0) || (first_delta > 0.0 && last_delta < 0.0) {
+        // A strip crossing zero is a bow-tie, not a convex quad. Split at its
+        // baseline intersection or the two triangles overlap and overstate its area.
+        let t = first_delta / (first_delta - last_delta);
+        let mut crossing = [
+            first[0] + t * (last[0] - first[0]),
+            first[1] + t * (last[1] - first[1]),
+        ];
+        crossing[value_axis] = baseline;
+        triangle(first_base, first, crossing);
+        triangle(crossing, last, last_base);
+    } else {
+        triangle(first_base, first, last);
+        triangle(first_base, last, last_base);
     }
 }
 
@@ -3321,6 +3792,47 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let out_rgb = (in.stroke.rgb * s + color.rgb * color.a * (1.0 - s)) / out_a;
     return vec4<f32>(out_rgb, out_a);
+}
+"#;
+
+/// Filled quantitative area triangles. The barycentric vertex array expands one
+/// instance without any per-vertex upload or a shape-specific approximation.
+pub const TRIANGLE_WGSL: &str = r#"
+struct Camera {
+    transform: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct TriangleInstance {
+    @location(0) a: vec2<f32>,
+    @location(1) b: vec2<f32>,
+    @location(2) c: vec2<f32>,
+    @location(3) color: vec4<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+var<private> BARYCENTRIC: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+);
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, triangle: TriangleInstance) -> VertexOut {
+    let weights = BARYCENTRIC[vertex_index];
+    let world = triangle.a + weights.x * (triangle.b - triangle.a) + weights.y * (triangle.c - triangle.a);
+    var out: VertexOut;
+    out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.color = triangle.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 "#;
 
@@ -5895,6 +6407,8 @@ mod tests {
 
         // Mirrored by the plan today.
         const PLANNED: &[&str] = &[
+            "draw_xychart_axes",
+            "draw_xychart_series",
             "draw_activation_bars",
             "draw_sequence_mirror_headers",
             "draw_cluster_dividers",
@@ -5922,14 +6436,6 @@ mod tests {
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
-            (
-                "draw_xychart_axes",
-                "bd-adabx: XY value/category axes and titles are not in the GPU scene",
-            ),
-            (
-                "draw_xychart_series",
-                "bd-adabx: XY series palette and area fills are not in the GPU scene",
-            ),
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
             (
                 "draw_path_markers",
