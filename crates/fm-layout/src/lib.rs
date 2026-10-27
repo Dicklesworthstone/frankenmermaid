@@ -5195,7 +5195,14 @@ fn compute_traced_layout_with_config_and_guardrails(
             layout_diagram_tree_traced_with_metrics(ir, &metrics)
         }
         LayoutAlgorithm::Radial => layout_diagram_radial_traced_with_config(ir, config),
-        LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
+        LayoutAlgorithm::Timeline => layout_diagram_timeline_traced_with_metrics(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
+        ),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
         LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
@@ -5205,6 +5212,7 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .font_metrics
                 .as_ref()
                 .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+            config.spacing,
         ),
         LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
         LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
@@ -9171,8 +9179,20 @@ pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
 
 #[must_use]
 pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    layout_diagram_timeline_traced_with_metrics(
+        ir,
+        &fm_core::FontMetrics::default_metrics(),
+        LayoutSpacing::default(),
+    )
+}
+
+fn layout_diagram_timeline_traced_with_metrics(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
+) -> TracedLayout {
     let node_count = ir.nodes.len();
-    let node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
+    let node_sizes = compute_node_sizes(ir, metrics);
     let mut trace = LayoutTrace::default();
     push_snapshot(
         &mut trace,
@@ -9183,7 +9203,6 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
@@ -9215,47 +9234,108 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             events_by_period.entry(source).or_default().push(target);
         }
     }
-    let period_gap_x = spacing.rank_spacing + 104.0;
-    let event_gap_y = spacing.node_spacing + 22.0;
-    // Membership set (`.insert` returns the same newly-inserted bool, `.contains` the same result); never
-    // iterated, so `FxHashSet` is byte-identical and skips the BTreeSet's O(log N) inserts + node allocs.
-    let mut assigned: FxHashSet<usize> = FxHashSet::default();
-
-    for (period_order, period_index) in period_indexes.iter().enumerate() {
-        let x = period_order as f32 * period_gap_x;
-        centers[*period_index] = (x, 0.0);
-        rank_by_node[*period_index] = 0;
-        order_by_node[*period_index] = period_order;
-        assigned.insert(*period_index);
-
-        let mut event_row = 1_usize;
-        if let Some(targets) = events_by_period.get(period_index) {
-            for target in targets {
-                if assigned.insert(*target) {
-                    centers[*target] = (x, (event_row as f32).mul_add(event_gap_y, 48.0));
-                    rank_by_node[*target] = event_row;
-                    order_by_node[*target] = period_order;
-                    event_row = event_row.saturating_add(1);
-                }
+    let mut assigned = period_set;
+    let mut columns: Vec<Vec<usize>> = period_indexes
+        .iter()
+        .map(|&period| {
+            let mut column = vec![period];
+            if let Some(events) = events_by_period.get(&period) {
+                column.extend(
+                    events
+                        .iter()
+                        .copied()
+                        .filter(|event| assigned.insert(*event)),
+                );
             }
+            column
+        })
+        .collect();
+
+    // Edited or hand-built IR may contain an event without a period edge. Keep it below its
+    // column's actual contents: a fixed fallback row can land on the fourth authored event.
+    for (spill, node_index) in (0..node_count)
+        .filter(|node_index| !assigned.contains(node_index))
+        .enumerate()
+    {
+        let column = spill % columns.len();
+        columns[column].push(node_index);
+    }
+
+    let mut column_widths: Vec<f32> = columns
+        .iter()
+        .map(|column| {
+            column
+                .iter()
+                .map(|&node_index| node_sizes[node_index].0)
+                .fold(0.0_f32, f32::max)
+        })
+        .collect();
+    let column_gap = if ir.clusters.is_empty() {
+        spacing.rank_spacing
+    } else {
+        // Adjacent section frames each consume padding outside their content column.
+        spacing.rank_spacing.max(
+            spacing
+                .cluster_padding
+                .mul_add(2.0, spacing.node_spacing * 0.5),
+        )
+    };
+    let mut column_by_node = vec![0; node_count];
+    for (column_index, column) in columns.iter().enumerate() {
+        for &node_index in column {
+            column_by_node[node_index] = column_index;
+        }
+    }
+    for cluster in &ir.clusters {
+        let mut first = usize::MAX;
+        let mut last = 0;
+        for member in &cluster.members {
+            if let Some(&column) = column_by_node.get(member.0) {
+                first = first.min(column);
+                last = last.max(column);
+            }
+        }
+        if first == usize::MAX {
+            continue;
+        }
+        let title_width = cluster
+            .title
+            .and_then(|label| ir.labels.get(label.0))
+            .map_or(0.0, |label| cluster_title_width(&label.text, metrics));
+        let reserved_width = column_widths[first..=last].iter().sum::<f32>()
+            + (last - first) as f32 * column_gap
+            + 2.0 * spacing.cluster_padding;
+        let extra_per_column = (title_width - reserved_width).max(0.0) / (last - first + 1) as f32;
+        for width in &mut column_widths[first..=last] {
+            *width += extra_per_column;
         }
     }
 
-    let period_count = period_indexes.len().max(1);
-    let mut spill = 0_usize;
-    let leftovers: Vec<usize> = (0..node_count)
-        .filter(|node_index| !assigned.contains(node_index))
-        .collect();
-    for node_index in leftovers {
-        let col = spill % period_count;
-        let row = spill / period_count;
-        centers[node_index] = (col as f32 * period_gap_x, (4.0 + row as f32) * event_gap_y);
-        rank_by_node[node_index] = row.saturating_add(1);
-        order_by_node[node_index] = col;
-        spill = spill.saturating_add(1);
+    let period_half_height = period_indexes
+        .iter()
+        .map(|&period| node_sizes[period].1 * 0.5)
+        .fold(0.0_f32, f32::max);
+    let mut column_left = 0.0;
+    for (column_index, column) in columns.iter().enumerate() {
+        let center_x = column_left + column_widths[column_index] * 0.5;
+        let mut event_top = period_half_height + spacing.rank_spacing;
+        for (row, &node_index) in column.iter().enumerate() {
+            let center_y = if row == 0 {
+                0.0
+            } else {
+                let height = node_sizes[node_index].1;
+                let center_y = event_top + height * 0.5;
+                event_top += height + spacing.node_spacing;
+                center_y
+            };
+            centers[node_index] = (center_x, center_y);
+            rank_by_node[node_index] = row;
+            order_by_node[node_index] = column_index;
+        }
+        column_left += column_widths[column_index] + column_gap;
     }
 
-    let mut traced = finalize_specialized_layout(
+    let mut traced = finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -9263,6 +9343,8 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         centers,
         trace,
         true,
+        spacing,
+        metrics,
     );
     // Axis tick x-positions via a node_index -> center_x map (was a linear `layout.nodes.iter().find`
     // PER period_index — and the timeline gives most events a distinct period, so `period_indexes ≈ nodes`,
@@ -12832,7 +12914,8 @@ fn kanban_lane_columns(ir: &MermaidDiagramIr) -> Option<Vec<Vec<usize>>> {
         columns.push(orphans);
     }
 
-    columns.iter().any(|c| !c.is_empty()).then_some(columns)
+    // Empty lanes are still authored columns, including a board with no cards yet.
+    Some(columns)
 }
 
 const JOURNEY_TEXT_WIDTH: f32 = 240.0;
@@ -13069,6 +13152,7 @@ fn place_journey_content(
 fn layout_diagram_kanban_traced(
     ir: &MermaidDiagramIr,
     metrics: &fm_core::FontMetrics,
+    spacing: LayoutSpacing,
 ) -> TracedLayout {
     let node_count = ir.nodes.len();
     let journey = ir.diagram_type == DiagramType::Journey;
@@ -13078,10 +13162,7 @@ fn layout_diagram_kanban_traced(
             .map(|index| measure_journey_step(ir, index, metrics))
             .unzip()
     } else {
-        (
-            Vec::new(),
-            compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics()),
-        )
+        (Vec::new(), compute_node_sizes(ir, metrics))
     };
     let mut trace = LayoutTrace::default();
     push_snapshot(
@@ -13125,36 +13206,82 @@ fn layout_diagram_kanban_traced(
         by_rank
     });
 
-    let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
     let mut order_by_node = vec![0_usize; node_count];
     let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
 
-    let column_gap = spacing.rank_spacing + 170.0;
-    let row_gap = spacing.node_spacing + 22.0;
+    let row_gap = if journey {
+        spacing.node_spacing + 22.0
+    } else {
+        spacing.node_spacing
+    };
+    let lane_header = if columns_are_declared_lanes {
+        ir.clusters
+            .iter()
+            .filter_map(|cluster| cluster.title.and_then(|label| ir.labels.get(label.0)))
+            .map(|label| {
+                spacing.cluster_padding
+                    + cluster_title_extra_header(&label.text, spacing.cluster_padding, metrics)
+            })
+            .fold(spacing.cluster_padding, f32::max)
+    } else {
+        0.0
+    };
+    let mut lane_bounds = Vec::with_capacity(ir.clusters.len());
+    let mut board_content_height = 44.0_f32;
     let mut column_left = 0.0;
     for (rank, nodes) in nodes_by_rank.iter().enumerate() {
-        let column_width = nodes
+        let mut column_width = nodes
             .iter()
             .map(|index| node_sizes[*index].0)
-            .fold(0.0, f32::max);
-        let mut row_top = 0.0;
-        for (order_index, node_index) in nodes.iter().enumerate() {
-            centers[*node_index] = if journey {
-                let height = node_sizes[*node_index].1;
-                let center = (column_left + column_width * 0.5, row_top + height * 0.5);
-                row_top += height + row_gap;
-                center
+            .fold(if journey { 0.0 } else { 144.0 }, f32::max);
+        if columns_are_declared_lanes {
+            let title_width = ir
+                .clusters
+                .get(rank)
+                .and_then(|cluster| cluster.title)
+                .and_then(|label| ir.labels.get(label.0))
+                .map_or(0.0, |label| cluster_title_width(&label.text, metrics));
+            column_width = column_width.max(title_width - 2.0 * spacing.cluster_padding);
+        }
+        let content_left = column_left
+            + if columns_are_declared_lanes {
+                spacing.cluster_padding
             } else {
-                (rank as f32 * column_gap, order_index as f32 * row_gap)
+                0.0
             };
+        let mut row_top = lane_header;
+        for (order_index, node_index) in nodes.iter().enumerate() {
+            if !journey {
+                // A lane is a stack of aligned cards, not a stack of unrelated centered labels.
+                node_sizes[*node_index].0 = column_width;
+            }
+            let height = node_sizes[*node_index].1;
+            centers[*node_index] = (content_left + column_width * 0.5, row_top + height * 0.5);
+            row_top += height + row_gap;
             rank_by_node[*node_index] = rank;
             order_by_node[*node_index] = order_index;
         }
-        column_left += column_width + spacing.rank_spacing + 40.0;
+        board_content_height = board_content_height
+            .max(row_top - lane_header - if nodes.is_empty() { 0.0 } else { row_gap });
+        if columns_are_declared_lanes {
+            let width = column_width + 2.0 * spacing.cluster_padding;
+            if rank < ir.clusters.len() {
+                lane_bounds.push(LayoutRect {
+                    x: column_left,
+                    y: 0.0,
+                    width,
+                    height: 0.0,
+                });
+            }
+            column_left += width + spacing.rank_spacing;
+        } else {
+            column_left += column_width + spacing.rank_spacing + 40.0;
+        }
     }
 
-    let mut traced = finalize_specialized_layout(
+    let first_center = centers.first().copied();
+    let mut traced = finalize_specialized_layout_with_metrics(
         ir,
         &node_sizes,
         &rank_by_node,
@@ -13162,12 +13289,44 @@ fn layout_diagram_kanban_traced(
         centers,
         trace,
         true,
+        spacing,
+        metrics,
     );
     if columns_are_declared_lanes {
-        // The lanes are already drawn — as cluster boxes carrying their declared titles ("Todo",
-        // "In Progress", …). A generic "lane N" band over each column would be a second rectangle
-        // around the same cards with a worse label. Journey, which has no lane clusters, still
-        // gets its bands from the block below.
+        let layout = Arc::make_mut(&mut traced.layout);
+        let offset =
+            first_center
+                .zip(layout.nodes.first())
+                .map_or((20.0, 20.0), |((x, y), node)| {
+                    let center = node.bounds.center();
+                    (center.x - x, center.y - y)
+                });
+        let board_height = lane_header + board_content_height + spacing.cluster_padding;
+        layout.clusters = lane_bounds
+            .into_iter()
+            .enumerate()
+            .map(|(cluster_index, bounds)| {
+                let cluster = &ir.clusters[cluster_index];
+                LayoutClusterBox {
+                    cluster_index,
+                    span: cluster.span,
+                    title: cluster
+                        .title
+                        .and_then(|label| ir.labels.get(label.0))
+                        .map(|label| label.text.clone()),
+                    color: None,
+                    bounds: LayoutRect {
+                        x: bounds.x + offset.0,
+                        y: bounds.y + offset.1,
+                        height: board_height,
+                        ..bounds
+                    },
+                }
+            })
+            .collect();
+        layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
+        // Each lane is drawn exactly once, including an empty lane. Equal frame heights and a
+        // shared header baseline make the board readable without duplicating it as generic bands.
         return traced;
     }
     // Lane bands: the per-rank `layout_band_for_rank` re-scanned ALL nodes twice per rank (build the
@@ -14110,12 +14269,35 @@ fn finalize_specialized_layout(
     node_sizes: &[(f32, f32)],
     rank_by_node: &[usize],
     order_by_node: &[usize],
+    centers: Vec<(f32, f32)>,
+    trace: LayoutTrace,
+    horizontal_edges: bool,
+) -> TracedLayout {
+    finalize_specialized_layout_with_metrics(
+        ir,
+        node_sizes,
+        rank_by_node,
+        order_by_node,
+        centers,
+        trace,
+        horizontal_edges,
+        LayoutSpacing::default(),
+        &fm_core::FontMetrics::default_metrics(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_specialized_layout_with_metrics(
+    ir: &MermaidDiagramIr,
+    node_sizes: &[(f32, f32)],
+    rank_by_node: &[usize],
+    order_by_node: &[usize],
     mut centers: Vec<(f32, f32)>,
     mut trace: LayoutTrace,
     horizontal_edges: bool,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
 ) -> TracedLayout {
-    let spacing = LayoutSpacing::default();
-
     normalize_center_positions(&mut centers, node_sizes);
     let nodes = node_boxes_from_centers(ir, node_sizes, rank_by_node, order_by_node, &centers);
     let edges = build_edge_paths_with_orientation(
@@ -14126,11 +14308,7 @@ fn finalize_specialized_layout(
         horizontal_edges,
         EdgeRouting::default(),
     );
-    // Same metrics this function's node sizes were computed with: every caller on these
-    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
-    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -21704,9 +21882,14 @@ fn build_edge_paths_with_orientation(
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
             let target_box = nodes.get(target)?;
-            // Inside a subgraph laid out in its own direction, its edges run that way too.
-            let horizontal_ranks =
-                subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks);
+            // A timeline has two axes: periods connect horizontally, while their events descend
+            // vertically. Horizontal ports on both sent the event connector through its period.
+            // Other families follow the direction of their innermost directed subgraph.
+            let horizontal_ranks = if ir.diagram_type == DiagramType::Timeline {
+                force_parallel_axis(source_box.bounds, target_box.bounds)
+            } else {
+                subgraph_rank_axis(ir, source, target).unwrap_or(horizontal_ranks)
+            };
 
             let is_self_loop = source == target;
             let (pair_total, pair_idx, pair_label_width) = if any_parallel {
@@ -28472,6 +28655,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timeline_content_sizing_separates_long_events_and_section_headers() {
+        let parsed = parse(concat!(
+            "timeline\n",
+            "  section Discovery and customer interviews across all delivery teams\n",
+            "    Research : Interview customers across all supported markets\n",
+            "        : Summarize<br/>the findings<br/>and risks<br/>for review\n",
+            "    Planning : Prioritize the roadmap and agree on delivery milestones\n",
+            "  section Delivery readiness and post-launch monitoring across every supported environment\n",
+            "    Launch : Release<br/>Monitor<br/>Measure<br/>Improve\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let layout = layout_diagram(&parsed.ir);
+        assert_eq!(layout.nodes.len(), 7);
+        assert!(layout.nodes.iter().any(|node| node.bounds.width > 168.0));
+        assert!(layout.nodes.iter().any(|node| node.bounds.height > 62.0));
+        for (index, left) in layout.nodes.iter().enumerate() {
+            for right in &layout.nodes[index + 1..] {
+                assert!(
+                    !rects_overlap(left.bounds, right.bounds),
+                    "timeline content overlaps: {} and {}",
+                    left.node_id,
+                    right.node_id
+                );
+            }
+        }
+        assert_eq!(layout.clusters.len(), 2);
+        assert!(layout.clusters[1].bounds.width > 400.0);
+        assert!(
+            !rects_overlap(layout.clusters[0].bounds, layout.clusters[1].bounds),
+            "a wide section heading must not consume the next section's column"
+        );
+        for node in &layout.nodes {
+            assert!(node.bounds.x >= layout.bounds.x);
+            assert!(node.bounds.y >= layout.bounds.y);
+            assert!(node.bounds.x + node.bounds.width <= layout.bounds.x + layout.bounds.width);
+            assert!(node.bounds.y + node.bounds.height <= layout.bounds.y + layout.bounds.height);
+        }
+        assert_eq!(layout, layout_diagram(&parsed.ir));
+    }
+
+    #[test]
+    fn timeline_connectors_use_the_horizontal_and_vertical_faces() {
+        let parsed = parse("timeline\n  Q1 : Build : Review\n  Q2 : Launch\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let layout = layout_diagram(&parsed.ir);
+        assert_eq!(layout.edges.len(), parsed.ir.edges.len());
+        let mut horizontal = 0;
+        let mut vertical = 0;
+        for path in &layout.edges {
+            let edge = &parsed.ir.edges[path.edge_index];
+            let source = super::endpoint_node_index(&parsed.ir, edge.from).unwrap();
+            let target = super::endpoint_node_index(&parsed.ir, edge.to).unwrap();
+            let from = &layout.nodes[source];
+            let to = &layout.nodes[target];
+            let start = path.points.first().unwrap();
+            let end = path.points.last().unwrap();
+            if from.order == to.order {
+                vertical += 1;
+                assert!((start.y - (from.bounds.y + from.bounds.height)).abs() < 0.001);
+                assert!((end.y - to.bounds.y).abs() < 0.001);
+            } else {
+                horizontal += 1;
+                assert!((start.x - (from.bounds.x + from.bounds.width)).abs() < 0.001);
+                assert!((end.x - to.bounds.x).abs() < 0.001);
+            }
+            let obstacles: Vec<_> = layout
+                .nodes
+                .iter()
+                .filter(|node| node.node_index != source && node.node_index != target)
+                .map(|node| node.bounds)
+                .collect();
+            assert!(
+                path.points.windows(2).all(|segment| {
+                    super::segment_blocked(segment[0], segment[1], &obstacles, None).is_none()
+                }),
+                "timeline connector crossed another event: {path:?}"
+            );
+        }
+        assert_eq!((horizontal, vertical), (1, 3));
+    }
+
+    #[test]
+    fn timeline_content_sizing_respects_custom_font_and_spacing() {
+        let ir = parse("timeline\n  Q1 : First<br/>Second : Review\n  Q2 : Release\n").ir;
+        let baseline = layout_diagram(&ir);
+        let spacing = LayoutSpacing {
+            node_spacing: 83.0,
+            rank_spacing: 101.0,
+            cluster_padding: 44.0,
+            ..LayoutSpacing::default()
+        };
+        let config = LayoutConfig {
+            font_metrics: Some(fm_core::FontMetrics::monospace(30.0)),
+            spacing,
+            ..LayoutConfig::default()
+        };
+        let layout = layout_diagram_with_config(&ir, config);
+        assert!(layout.nodes[0].bounds.width > baseline.nodes[0].bounds.width);
+        assert!(layout.nodes[1].bounds.height > baseline.nodes[1].bounds.height);
+        let first_column: Vec<_> = layout.nodes.iter().filter(|node| node.order == 0).collect();
+        assert_eq!(first_column.len(), 3);
+        for pair in first_column.windows(2) {
+            let gap = pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height;
+            let requested = if pair[0].rank == 0 {
+                spacing.rank_spacing
+            } else {
+                spacing.node_spacing
+            };
+            assert!(
+                gap >= requested - 0.001,
+                "configured event gap was lost: {gap}"
+            );
+        }
+    }
+
     /// A tick that merely EXISTS is not an axis. If the tick labelled with a task's start date does
     /// not sit on that task's left edge, the axis indexes days the bars do not start on — which is
     /// strictly worse than the no-axis state bd-trsd found, because a wrong axis is still read as
@@ -28526,8 +28825,12 @@ mod tests {
             });
         }
 
-        let layout =
-            crate::layout_diagram_kanban_traced(&ir, &fm_core::FontMetrics::default()).layout;
+        let layout = crate::layout_diagram_kanban_traced(
+            &ir,
+            &fm_core::FontMetrics::default(),
+            LayoutSpacing::default(),
+        )
+        .layout;
         let labels: Vec<&str> = layout
             .extensions
             .bands
@@ -28565,8 +28868,12 @@ mod tests {
         });
         ir.graph.nodes.push(IrGraphNode::default());
 
-        let layout =
-            crate::layout_diagram_kanban_traced(&ir, &fm_core::FontMetrics::default()).layout;
+        let layout = crate::layout_diagram_kanban_traced(
+            &ir,
+            &fm_core::FontMetrics::default(),
+            LayoutSpacing::default(),
+        )
+        .layout;
         for band in &layout.extensions.bands {
             assert!(
                 !band.label.is_empty(),
@@ -29717,6 +30024,146 @@ mod tests {
             (boxes["orphan"].x - boxes["in_lane"].x).abs() > 0.001,
             "the lane-less card must not land in lane 0's column: {boxes:?}"
         );
+    }
+
+    #[test]
+    fn kanban_content_sizing_aligns_cards_and_preserves_empty_lanes() {
+        let parsed = parse(concat!(
+            "kanban\n",
+            "  inbox[Inbox]\n",
+            "  delivery[Delivery coordination and cross-team release approval]\n",
+            "    wide[Coordinate release readiness with every customer-facing team]\n",
+            "    multiline[Review<br/>dependencies<br/>and risks<br/>before rollout]\n",
+            "    final[Ship]\n",
+            "  review[In review]\n",
+            "    check[Verify]\n",
+            "  done[Done]\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let layout = layout_diagram(ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(
+            layout.clusters.len(),
+            4,
+            "empty Inbox and Done must remain visible"
+        );
+        assert!(layout.extensions.bands.is_empty());
+        let frames: Vec<_> = layout
+            .clusters
+            .iter()
+            .map(|cluster| cluster.bounds)
+            .collect();
+        for pair in frames.windows(2) {
+            assert!(pair[0].x + pair[0].width < pair[1].x);
+            assert!((pair[0].y - pair[1].y).abs() < 0.001);
+            assert!((pair[0].height - pair[1].height).abs() < 0.001);
+        }
+        let cards: Vec<_> = layout.nodes.iter().filter(|node| node.rank == 1).collect();
+        assert_eq!(cards.len(), 3);
+        assert!(
+            cards[0].bounds.width > 234.0,
+            "fixture must exceed the former fixed pitch"
+        );
+        assert!(
+            cards[1].bounds.height > 62.0,
+            "fixture must exceed the former fixed row height"
+        );
+        for pair in cards.windows(2) {
+            assert!((pair[0].bounds.x - pair[1].bounds.x).abs() < 0.001);
+            assert!((pair[0].bounds.width - pair[1].bounds.width).abs() < 0.001);
+            assert!(pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height >= 39.999);
+        }
+        for (index, left) in layout.nodes.iter().enumerate() {
+            for right in &layout.nodes[index + 1..] {
+                assert!(!rects_overlap(left.bounds, right.bounds));
+            }
+            let frame = frames[left.rank];
+            assert!(left.bounds.x > frame.x);
+            assert!(left.bounds.y > frame.y);
+            assert!(left.bounds.x + left.bounds.width < frame.x + frame.width);
+            assert!(left.bounds.y + left.bounds.height < frame.y + frame.height);
+        }
+        assert_eq!(layout, layout_diagram(ir));
+    }
+
+    #[test]
+    fn kanban_content_sizing_renders_an_entirely_empty_board() {
+        let parsed = parse("kanban\n  todo[To do]\n  doing[In progress]\n  done[Done]\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert!(parsed.ir.nodes.is_empty());
+        assert_eq!(parsed.ir.clusters.len(), 3);
+        let layout = layout_diagram(&parsed.ir);
+        assert!(layout.nodes.is_empty());
+        assert!(layout.edges.is_empty());
+        assert_eq!(layout.clusters.len(), 3);
+        assert_eq!(
+            layout
+                .clusters
+                .iter()
+                .map(|cluster| cluster.title.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("To do"), Some("In progress"), Some("Done")]
+        );
+        assert!(layout.bounds.width.is_finite() && layout.bounds.width > 0.0);
+        assert!(layout.bounds.height.is_finite() && layout.bounds.height > 0.0);
+        for pair in layout.clusters.windows(2) {
+            assert!(pair[0].bounds.x + pair[0].bounds.width < pair[1].bounds.x);
+        }
+        for cluster in &layout.clusters {
+            assert!(cluster.bounds.x >= layout.bounds.x);
+            assert!(cluster.bounds.y >= layout.bounds.y);
+            assert!(
+                cluster.bounds.x + cluster.bounds.width <= layout.bounds.x + layout.bounds.width
+            );
+            assert!(
+                cluster.bounds.y + cluster.bounds.height <= layout.bounds.y + layout.bounds.height
+            );
+        }
+    }
+
+    #[test]
+    fn kanban_content_sizing_respects_custom_font_headers_and_spacing() {
+        let ir = parse(concat!(
+            "kanban\n",
+            "  first[Waiting for<br/>cross-team approval]\n",
+            "    one[Long customer-facing release notes]\n",
+            "    two[Read<br/>Review<br/>Approve]\n",
+            "  second[Done]\n",
+            "    three[Complete]\n",
+        ))
+        .ir;
+        let baseline = layout_diagram(&ir);
+        let spacing = LayoutSpacing {
+            node_spacing: 71.0,
+            rank_spacing: 93.0,
+            cluster_padding: 36.0,
+            ..LayoutSpacing::default()
+        };
+        let metrics = fm_core::FontMetrics::monospace(32.0);
+        let layout = layout_diagram_with_config(
+            &ir,
+            LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                spacing,
+                ..LayoutConfig::default()
+            },
+        );
+        assert_eq!(layout.nodes.len(), 3);
+        assert_eq!(layout.clusters.len(), 2);
+        assert!(layout.nodes[0].bounds.width > baseline.nodes[0].bounds.width);
+        assert!(layout.nodes[1].bounds.height > baseline.nodes[1].bounds.height);
+        let first = layout.nodes[0].bounds;
+        let second = layout.nodes[1].bounds;
+        assert!(second.y - first.y - first.height >= spacing.node_spacing - 0.001);
+        let lane = layout.clusters[0].bounds;
+        let next_lane = layout.clusters[1].bounds;
+        assert!(next_lane.x - lane.x - lane.width >= spacing.rank_spacing - 0.001);
+        assert!(first.x - lane.x >= spacing.cluster_padding - 0.001);
+        let header_size = metrics.font_size() * super::CLUSTER_FONT_SCALE;
+        let header_bottom = lane.y + (header_size + 2.0).max(16.0) + header_size * 1.4;
+        assert!(first.y > header_bottom + header_size * 0.3);
+        assert!((first.y - layout.nodes[2].bounds.y).abs() < 0.001);
     }
 
     #[test]
