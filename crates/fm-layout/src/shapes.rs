@@ -1,4 +1,4 @@
-use crate::{LayoutRect, PathCmd};
+use crate::{LayoutPoint, LayoutRect, PathCmd};
 use fm_core::NodeShape;
 use std::f32::consts::PI;
 
@@ -59,6 +59,104 @@ pub(crate) fn circle_bounds(bounds: LayoutRect) -> LayoutRect {
         width: diameter,
         height: diameter,
     }
+}
+
+/// A port on the polygon's painted boundary, viewed from `direction` along a line through
+/// `origin`. Using the emitted outline keeps routing in agreement with the renderer, including
+/// the centred square used by regular polygons inside non-square layout bounds.
+///
+/// The line crosses the whole shape rather than stopping at its centre: an offset port can lie
+/// beside a star's concave valley, with several crossings before it reaches the opposite side.
+/// The first intersection approached from outside is the one whose terminal stub stays clear.
+pub(crate) fn polygon_face_port(
+    bounds: LayoutRect,
+    shape: NodeShape,
+    origin: LayoutPoint,
+    direction: LayoutPoint,
+) -> Option<LayoutPoint> {
+    use fm_core::cga::{CgaLineSegment, CgaPoint};
+
+    if !matches!(
+        shape,
+        NodeShape::Triangle | NodeShape::FlippedTriangle | NodeShape::Pentagon | NodeShape::Star
+    ) || ![
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+        origin.x,
+        origin.y,
+        direction.x,
+        direction.y,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
+        || bounds.width <= 0.0
+        || bounds.height <= 0.0
+    {
+        return None;
+    }
+    let (dx, dy) = (f64::from(direction.x), f64::from(direction.y));
+    let length = dx.hypot(dy);
+    if length <= f64::EPSILON {
+        return None;
+    }
+    let (dx, dy) = (dx / length, dy / length);
+    let center_x = f64::from(bounds.x) + f64::from(bounds.width) / 2.0;
+    let center_y = f64::from(bounds.y) + f64::from(bounds.height) / 2.0;
+    let (ox, oy) = (f64::from(origin.x), f64::from(origin.y));
+    let reach = f64::from(bounds.width).hypot(f64::from(bounds.height))
+        + (ox - center_x).hypot(oy - center_y)
+        + 1.0;
+    let query = CgaLineSegment::new(
+        CgaPoint::new(ox + dx * reach, oy + dy * reach),
+        CgaPoint::new(ox - dx * reach, oy - dy * reach),
+    );
+    let mut nearest: Option<(f64, CgaPoint)> = None;
+    let mut intersect = |from, to| {
+        if let Some(hit) = query.intersect(&CgaLineSegment::new(from, to)) {
+            let distance = (query.start.x - hit.x).hypot(query.start.y - hit.y);
+            if nearest.is_none_or(|(previous, _)| distance < previous) {
+                nearest = Some((distance, hit));
+            }
+        }
+    };
+    let mut first = None;
+    let mut previous = None;
+    for command in node_path(bounds, shape) {
+        match command {
+            PathCmd::MoveTo { x, y } => {
+                let point = CgaPoint::new(f64::from(x), f64::from(y));
+                first = Some(point);
+                previous = Some(point);
+            }
+            PathCmd::LineTo { x, y } => {
+                let point = CgaPoint::new(f64::from(x), f64::from(y));
+                if let Some(from) = previous {
+                    intersect(from, point);
+                }
+                previous = Some(point);
+            }
+            PathCmd::Close => {
+                if let Some((from, to)) = previous.zip(first) {
+                    intersect(from, to);
+                }
+            }
+            _ => return None,
+        }
+    }
+    nearest.map(|(_, point)| LayoutPoint {
+        x: if direction.x == 0.0 {
+            origin.x
+        } else {
+            point.x as f32
+        },
+        y: if direction.y == 0.0 {
+            origin.y
+        } else {
+            point.y as f32
+        },
+    })
 }
 
 #[must_use]
@@ -871,6 +969,37 @@ mod tests {
             (actual - expected).abs() < 0.000_1,
             "{actual} != {expected}"
         );
+    }
+
+    #[test]
+    fn polygon_face_ports_reject_invalid_geometry() {
+        let bounds = test_bounds();
+        let origin = bounds.center();
+        let direction = crate::LayoutPoint { x: 1.0, y: 0.0 };
+        assert!(super::polygon_face_port(bounds, NodeShape::Rect, origin, direction).is_none());
+        assert!(
+            super::polygon_face_port(
+                bounds,
+                NodeShape::Star,
+                origin,
+                crate::LayoutPoint { x: 0.0, y: 0.0 },
+            )
+            .is_none()
+        );
+        for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            assert!(
+                super::polygon_face_port(
+                    LayoutRect {
+                        width: invalid,
+                        ..bounds
+                    },
+                    NodeShape::Star,
+                    origin,
+                    direction,
+                )
+                .is_none()
+            );
+        }
     }
 
     fn vertices(path: &[PathCmd]) -> Vec<(f32, f32)> {

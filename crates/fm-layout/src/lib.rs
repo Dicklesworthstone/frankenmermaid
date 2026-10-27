@@ -31,6 +31,7 @@ pub mod invariants;
 mod ishikawa;
 pub mod layout_lens;
 mod pie;
+mod quadrant;
 mod radar;
 mod tree_view;
 mod treemap;
@@ -39,6 +40,10 @@ mod wardley;
 use event_model::layout_diagram_event_model_traced;
 use ishikawa::layout_diagram_ishikawa_traced;
 pub use pie::{PieChartLayout, PieLegendEntry, PieSliceLayout, PieTextBlock};
+pub use quadrant::{
+    QuadrantChartLayout, QuadrantHeading, QuadrantLeader, QuadrantPointGeometry,
+    QuadrantPointLabel, QuadrantTextBlock, QuadrantTextRole,
+};
 pub use radar::{RadarChartLayout, RadarPath, RadarPathRole, RadarTextBlock, RadarTextRole};
 use tree_view::layout_diagram_tree_view_traced;
 pub use treemap::{
@@ -16754,9 +16759,20 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 .nodes
                 .get(to_idx)
                 .map_or(fm_core::NodeShape::Rect, |node| node.shape);
-            let horizontal_ranks = fan_offset.is_some()
+            // Polygon ports need a cardinal approach too: clipping a diagonal centre ray and
+            // then leaving vertically can immediately re-enter a sloping face or a star's arm.
+            let polygon_ports = [from_shape, to_shape].into_iter().any(|shape| {
+                matches!(
+                    shape,
+                    fm_core::NodeShape::Triangle
+                        | fm_core::NodeShape::FlippedTriangle
+                        | fm_core::NodeShape::Pentagon
+                        | fm_core::NodeShape::Star
+                )
+            });
+            let horizontal_ranks = (fan_offset.is_some() || polygon_ports)
                 && force_parallel_axis(nodes[from_idx].bounds, nodes[to_idx].bounds);
-            let (from_pt, to_pt) = if fan_offset.is_some() {
+            let (from_pt, to_pt) = if fan_offset.is_some() || polygon_ports {
                 let (from_anchor, to_anchor) = edge_anchors(
                     &nodes[from_idx],
                     &nodes[to_idx],
@@ -16903,6 +16919,15 @@ fn clip_to_shape_border(
 
     if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
         return from;
+    }
+
+    if let Some(port) = shapes::polygon_face_port(
+        rect,
+        shape,
+        LayoutPoint { x: cx, y: cy },
+        LayoutPoint { x: dx, y: dy },
+    ) {
+        return port;
     }
 
     let half_w = rect.width / 2.0;
@@ -23332,6 +23357,27 @@ fn parallel_edge_anchor(
         (bounds.height / 2.0, bounds.width / 2.0, anchor.y - center.y)
     };
     let across = offset.clamp(-half_across, half_across);
+    let side = if original_along < 0.0 { -1.0 } else { 1.0 };
+    let (origin, direction) = if horizontal_ranks {
+        (
+            LayoutPoint {
+                x: center.x,
+                y: center.y + across,
+            },
+            LayoutPoint { x: side, y: 0.0 },
+        )
+    } else {
+        (
+            LayoutPoint {
+                x: center.x + across,
+                y: center.y,
+            },
+            LayoutPoint { x: 0.0, y: side },
+        )
+    };
+    if let Some(port) = shapes::polygon_face_port(bounds, shape, origin, direction) {
+        return port;
+    }
     let along = match shape {
         NodeShape::Circle
         | NodeShape::FilledCircle
@@ -23664,7 +23710,9 @@ fn node_outline_bounds(bounds: LayoutRect, shape: fm_core::NodeShape) -> LayoutR
         fm_core::NodeShape::Circle
         | fm_core::NodeShape::FilledCircle
         | fm_core::NodeShape::DoubleCircle
-        | fm_core::NodeShape::CrossedCircle => shapes::circle_bounds(bounds),
+        | fm_core::NodeShape::CrossedCircle
+        | fm_core::NodeShape::Pentagon
+        | fm_core::NodeShape::Star => shapes::circle_bounds(bounds),
         _ => bounds,
     }
 }
@@ -23681,7 +23729,7 @@ fn edge_anchors(
     let source_center = source_bounds.center();
     let target_center = target_bounds.center();
 
-    if horizontal_ranks {
+    let (source_anchor, target_anchor) = if horizontal_ranks {
         // Slanted shapes pull away from their box between the horizontal edges, so the side
         // midpoint is not on the drawn outline. Anchoring at the box there leaves the arrowhead
         // floating beside the node — a triangle is a quarter of its own width adrift.
@@ -23725,7 +23773,29 @@ fn edge_anchors(
                 y: target_y,
             },
         )
-    }
+    };
+    (
+        shapes::polygon_face_port(
+            source_box.bounds,
+            source_shape,
+            source_center,
+            LayoutPoint {
+                x: source_anchor.x - source_center.x,
+                y: source_anchor.y - source_center.y,
+            },
+        )
+        .unwrap_or(source_anchor),
+        shapes::polygon_face_port(
+            target_box.bounds,
+            target_shape,
+            target_center,
+            LayoutPoint {
+                x: target_anchor.x - target_center.x,
+                y: target_anchor.y - target_center.y,
+            },
+        )
+        .unwrap_or(target_anchor),
+    )
 }
 
 #[cfg(test)]
@@ -35736,6 +35806,200 @@ mod tests {
                         ),
                         "self-loop runs through an unrelated node: {path:?}"
                     );
+                }
+            }
+        }
+    }
+
+    fn assert_polygon_port_is_attached_and_leaves_the_fill(
+        shape: NodeShape,
+        bounds: LayoutRect,
+        port: LayoutPoint,
+        outside: LayoutPoint,
+    ) {
+        let vertices: Vec<_> = super::shapes::node_path(bounds, shape)
+            .into_iter()
+            .filter_map(|command| match command {
+                super::PathCmd::MoveTo { x, y } | super::PathCmd::LineTo { x, y } => {
+                    Some(LayoutPoint { x, y })
+                }
+                _ => None,
+            })
+            .collect();
+        let sides: Vec<_> = vertices
+            .iter()
+            .copied()
+            .zip(vertices.iter().copied().cycle().skip(1))
+            .collect();
+        let distance = sides
+            .iter()
+            .map(|(a, b)| {
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let t = (((port.x - a.x) * dx + (port.y - a.y) * dy) / (dx * dx + dy * dy))
+                    .clamp(0.0, 1.0);
+                (port.x - (a.x + t * dx)).hypot(port.y - (a.y + t * dy))
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            distance < 0.001,
+            "{shape:?} port {port:?} floats {distance}px from the drawn outline {bounds:?}"
+        );
+        assert!(
+            (port.x - outside.x).abs() < 0.001 || (port.y - outside.y).abs() < 0.001,
+            "polygon terminal stub must preserve its cardinal approach"
+        );
+        for step in 1..=20 {
+            let t = step as f32 / 20.0;
+            let point = LayoutPoint {
+                x: port.x + (outside.x - port.x) * t,
+                y: port.y + (outside.y - port.y) * t,
+            };
+            let mut inside = false;
+            for (a, b) in &sides {
+                if (a.y > point.y) != (b.y > point.y)
+                    && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
+                {
+                    inside = !inside;
+                }
+            }
+            assert!(
+                !inside,
+                "{shape:?} terminal stub enters its own fill at {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn polygon_routing_ports_follow_drawn_outlines_in_all_directions() {
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for (width, height) in [(200.0, 80.0), (80.0, 200.0)] {
+                for (direction, dx, dy) in [
+                    (GraphDirection::TB, 0.0, 400.0),
+                    (GraphDirection::BT, 0.0, -400.0),
+                    (GraphDirection::LR, 400.0, 0.0),
+                    (GraphDirection::RL, -400.0, 0.0),
+                ] {
+                    let mut ir = labeled_graph_ir(2, &[(0, 1)]);
+                    ir.direction = direction;
+                    for node in &mut ir.nodes {
+                        node.shape = shape;
+                    }
+                    let nodes: Vec<_> = [
+                        LayoutRect {
+                            x: 300.0 - width / 2.0,
+                            y: 300.0 - height / 2.0,
+                            width,
+                            height,
+                        },
+                        LayoutRect {
+                            x: 300.0 + dx - height / 2.0,
+                            y: 300.0 + dy - width / 2.0,
+                            width: height,
+                            height: width,
+                        },
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(node_index, bounds)| LayoutNodeBox {
+                        node_index,
+                        node_id: ir.nodes[node_index].id.clone(),
+                        rank: node_index,
+                        order: 0,
+                        span: Span::default(),
+                        bounds,
+                    })
+                    .collect();
+                    for paths in [
+                        build_edge_paths(
+                            &ir,
+                            &nodes,
+                            &[],
+                            &BTreeSet::new(),
+                            EdgeRouting::Orthogonal,
+                        ),
+                        build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Spline),
+                        super::force_build_edge_paths(&ir, &nodes),
+                    ] {
+                        assert_eq!(paths.len(), 1);
+                        let points = &paths[0].points;
+                        assert_polygon_port_is_attached_and_leaves_the_fill(
+                            shape,
+                            nodes[0].bounds,
+                            points[0],
+                            points[1],
+                        );
+                        assert_polygon_port_is_attached_and_leaves_the_fill(
+                            shape,
+                            nodes[1].bounds,
+                            points[points.len() - 1],
+                            points[points.len() - 2],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn polygon_parallel_and_self_loop_ports_stay_on_the_outline() {
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for direction in [GraphDirection::TB, GraphDirection::LR] {
+                let mut ir = labeled_graph_ir(2, &[(0, 1), (0, 1), (0, 1), (0, 0), (0, 0), (0, 0)]);
+                ir.direction = direction;
+                for node in &mut ir.nodes {
+                    node.shape = shape;
+                }
+                // A diagonal pair also exercises the force router's cardinal port selection.
+                let nodes: Vec<_> = [(100.0, 100.0), (500.0, 400.0)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(node_index, (x, y))| LayoutNodeBox {
+                        node_index,
+                        node_id: ir.nodes[node_index].id.clone(),
+                        rank: node_index,
+                        order: 0,
+                        span: Span::default(),
+                        bounds: LayoutRect {
+                            x,
+                            y,
+                            width: 180.0,
+                            height: 100.0,
+                        },
+                    })
+                    .collect();
+                for paths in [
+                    build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal),
+                    super::force_build_edge_paths(&ir, &nodes),
+                ] {
+                    assert_eq!(paths.len(), ir.edges.len());
+                    for path in paths {
+                        let edge = &ir.edges[path.edge_index];
+                        let from = endpoint_node_index(&ir, edge.from).unwrap();
+                        let to = endpoint_node_index(&ir, edge.to).unwrap();
+                        let points = &path.points;
+                        assert_polygon_port_is_attached_and_leaves_the_fill(
+                            shape,
+                            nodes[from].bounds,
+                            points[0],
+                            points[1],
+                        );
+                        assert_polygon_port_is_attached_and_leaves_the_fill(
+                            shape,
+                            nodes[to].bounds,
+                            points[points.len() - 1],
+                            points[points.len() - 2],
+                        );
+                    }
                 }
             }
         }

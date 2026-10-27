@@ -3142,6 +3142,9 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "double-circle" | "doublecircle" | "dbl-circ" => NodeShape::DoubleCircle,
         "diamond" | "decision" | "diam" | "question" => NodeShape::Diamond,
         "hexagon" | "hex" | "prepare" => NodeShape::Hexagon,
+        // FrankenMermaid also exposes the regular polygons supported by its shared renderers.
+        "pentagon" => NodeShape::Pentagon,
+        "star" => NodeShape::Star,
         "parallelogram" | "lean-r" | "lean-right" | "in-out" => NodeShape::Parallelogram,
         "trapezoid" | "trap-b" | "trapezoid-bottom" | "priority" => NodeShape::Trapezoid,
         // ── THE MIRRORED HALF (bd-3ra5y) ──────────────────────────────────────────────────────
@@ -26356,6 +26359,25 @@ Rel_Back(db, app, "Responds")"#,
                 "recognised shape {name} warned: {:?}",
                 parsed.warnings
             );
+        }
+    }
+
+    #[test]
+    fn regular_polygon_metadata_preserves_shape_and_label() {
+        for (name, shape) in [("pentagon", NodeShape::Pentagon), ("star", NodeShape::Star)] {
+            let source = format!(
+                "flowchart LR\n  A@{{ shape: {name}, label: \"Ready to publish\" }}\n  A --> B[Done]\n"
+            );
+            let parsed = parse_mermaid(&source);
+            let node = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+            assert_eq!(node.shape, shape);
+            assert_eq!(
+                node.label
+                    .map(|label| parsed.ir.labels[label.0].text.as_str()),
+                Some("Ready to publish")
+            );
+            assert_eq!(parsed.ir.edges.len(), 1);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         }
     }
 

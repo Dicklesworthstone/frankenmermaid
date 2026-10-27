@@ -420,9 +420,25 @@ impl Canvas2dRenderer {
             });
         let treemap = (ir.diagram_type == DiagramType::Treemap && ir.treemap_meta.is_some())
             .then(|| fm_layout::TreemapChartLayout::new(ir, layout, &self.config.font_metrics()));
-        let render_bounds = treemap
+        let quadrant = ir
+            .quadrant_meta
+            .as_ref()
+            .filter(|_| ir.diagram_type == DiagramType::QuadrantChart)
+            .map(|meta| {
+                fm_layout::QuadrantChartLayout::new(
+                    layout,
+                    meta,
+                    ir.meta.title.as_deref().or(meta.title.as_deref()),
+                    (0.0, 0.0),
+                    &self.config.font_metrics(),
+                    8.0,
+                    self.config.font_size as f32 * 0.5,
+                )
+            });
+        let render_bounds = quadrant
             .as_ref()
             .map(|chart| chart.bounds)
+            .or_else(|| treemap.as_ref().map(|chart| chart.bounds))
             .or_else(|| radar.as_ref().map(|chart| chart.bounds))
             .unwrap_or_else(|| {
                 pie.as_ref().map_or_else(
@@ -512,6 +528,25 @@ impl Canvas2dRenderer {
             };
         }
 
+        if let Some(chart) = &quadrant {
+            let meta = ir.quadrant_meta.as_ref().expect("quadrant metadata");
+            let labels_drawn = self.draw_quadrant_chart(chart, meta, ctx, offset_x, offset_y);
+            ctx.restore();
+            // The interaction wrapper accounts for the original layout origin. Include the
+            // extra measured chart margin so fitting long axis captions keeps picking aligned.
+            viewport.offset_x += f64::from(layout.bounds.x - chart.bounds.x) * viewport.zoom;
+            viewport.offset_y += f64::from(layout.bounds.y - chart.bounds.y) * viewport.zoom;
+            return CanvasRenderResult {
+                draw_calls: self.draw_calls,
+                nodes_drawn: chart.points.len(),
+                edges_drawn: 0,
+                clusters_drawn: 0,
+                labels_drawn,
+                viewport,
+                hit_regions: crate::interaction::hit_regions(ir, layout),
+            };
+        }
+
         // XY marks are data, not labelled graph nodes. The generic path loses the numeric
         // scale and axis titles, paints every series alike, and never fills area series.
         if let Some(meta) = ir.xy_chart_meta.as_ref()
@@ -593,11 +628,6 @@ impl Canvas2dRenderer {
         // Draw sequence notes and fragments.
         self.draw_sequence_fragments(layout, ir, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
-
-        // Draw quadrant axis labels (bd-59o4).
-        if ir.diagram_type == DiagramType::QuadrantChart {
-            self.draw_quadrant_axis_labels(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
-        }
 
         // Draw edges
         let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
@@ -1374,124 +1404,195 @@ impl Canvas2dRenderer {
         }
     }
 
-    /// Draw layout extension bands (sequence lifelines, gantt sections, etc.).
-    /// Draw a quadrant chart's four axis labels (bd-59o4).
-    ///
-    /// Measured: `x_axis_left` had ZERO references anywhere in this crate — against one in
-    /// fm-render-term and two in fm-render-svg — so the canvas never read the field at all. The
-    /// chart's TITLE and its data POINTS still appeared, because both come from the generic title
-    /// and node paths, which is why only the axes were missing and the chart looked almost right.
-    ///
-    /// That is a DIFFERENT cause from the terminal's, which drew these labels correctly but only on
-    /// a render path `TermRenderConfig::rich()` never takes. Keeping the two halves of bd-59o4
-    /// apart is what kept this one visible after the terminal was fixed.
-    ///
-    /// Placed at the layout bounds rather than at chart-relative margins: unlike fm-render-svg,
-    /// which computes `margin_left` from the label's own width, this renderer has no quadrant
-    /// geometry pass to borrow margins from, and an invented margin would drift from the axis it
-    /// labels.
-    fn draw_quadrant_axis_labels<C: Canvas2dContext>(
+    /// Use the shared chart composition so data markers, readable labels, and axes occupy the
+    /// same coordinates in raster, SVG, and GPU output. Generic graph nodes obscure this chart.
+    fn draw_quadrant_chart<C: Canvas2dContext>(
         &mut self,
-        layout: &DiagramLayout,
-        ir: &MermaidDiagramIr,
+        chart: &fm_layout::QuadrantChartLayout,
+        meta: &fm_core::IrQuadrantMeta,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
-        labels_drawn: &mut usize,
-    ) {
-        let Some(quad) = ir.quadrant_meta.as_ref() else {
-            return;
-        };
-
-        let left = f64::from(layout.bounds.x) + offset_x;
-        let right = f64::from(layout.bounds.x + layout.bounds.width) + offset_x;
-        let top = f64::from(layout.bounds.y) + offset_y;
-        let bottom = f64::from(layout.bounds.y + layout.bounds.height) + offset_y;
-        let pad = self.config.font_size;
-
-        ctx.set_fill_style(&self.config.label_color);
-        ctx.set_font(&secondary_label_font_css(&self.config));
-        ctx.set_text_baseline(TextBaseline::Middle);
-
-        let mut draw = |text: Option<&String>, x: f64, y: f64, align: TextAlign| {
-            let Some(text) = text.map(String::as_str).filter(|t| !t.is_empty()) else {
-                return;
-            };
-            ctx.set_text_align(align);
-            ctx.fill_text(text, x, y);
+    ) -> usize {
+        let plot = chart.plot;
+        let left = f64::from(plot.x) + offset_x;
+        let top = f64::from(plot.y) + offset_y;
+        let width = f64::from(plot.width);
+        let height = f64::from(plot.height);
+        let mid_x = left + width / 2.0;
+        let mid_y = top + height / 2.0;
+        let mut labels_drawn = 0;
+        ctx.save();
+        ctx.set_line_dash(&[]);
+        ctx.set_global_alpha(0.10);
+        for (index, (x, y)) in [(mid_x, top), (left, top), (left, mid_y), (mid_x, mid_y)]
+            .into_iter()
+            .enumerate()
+        {
+            ctx.set_fill_style(&self.config.accents[index]);
+            ctx.fill_rect(x, y, width / 2.0, height / 2.0);
             self.draw_calls += 1;
-            *labels_drawn += 1;
-        };
+        }
+        ctx.set_global_alpha(1.0);
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_text_baseline(TextBaseline::Middle);
+        ctx.set_text_align(TextAlign::Left);
+        for heading in &chart.headings {
+            ctx.set_font(&format!(
+                "600 {}px {}",
+                heading.font_size, self.config.font_family
+            ));
+            for (line, text) in heading.lines.iter().enumerate() {
+                ctx.fill_text(
+                    text,
+                    f64::from(heading.bounds.x) + offset_x,
+                    f64::from(heading.bounds.y + heading.font_size * (0.65 + line as f32 * 1.3))
+                        + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+        }
 
-        draw(
-            quad.x_axis_left.as_ref(),
-            left + pad,
-            bottom + pad,
-            TextAlign::Left,
-        );
-        draw(
-            quad.x_axis_right.as_ref(),
-            right - pad,
-            bottom + pad,
-            TextAlign::Right,
-        );
-        draw(
-            quad.y_axis_top.as_ref(),
-            left - pad,
-            top + pad,
-            TextAlign::Right,
-        );
-        draw(
-            quad.y_axis_bottom.as_ref(),
-            left - pad,
-            bottom - pad,
-            TextAlign::Right,
-        );
+        ctx.set_stroke_style(&self.config.edge_stroke);
+        ctx.set_line_width(1.0);
+        for ((x1, y1), (x2, y2)) in [
+            ((mid_x, top), (mid_x, top + height)),
+            ((left, mid_y), (left + width, mid_y)),
+        ] {
+            ctx.begin_path();
+            ctx.move_to(x1, y1);
+            ctx.line_to(x2, y2);
+            ctx.stroke();
+            self.draw_calls += 1;
+        }
+        ctx.set_line_width(0.5);
+        ctx.set_line_dash(&[4.0, 4.0]);
+        ctx.set_global_alpha(0.3);
+        for fraction in [0.25, 0.75] {
+            for ((x1, y1), (x2, y2)) in [
+                (
+                    (left + width * fraction, top),
+                    (left + width * fraction, top + height),
+                ),
+                (
+                    (left, top + height * fraction),
+                    (left + width, top + height * fraction),
+                ),
+            ] {
+                ctx.begin_path();
+                ctx.move_to(x1, y1);
+                ctx.line_to(x2, y2);
+                ctx.stroke();
+                self.draw_calls += 1;
+            }
+        }
+        ctx.set_line_dash(&[]);
+        ctx.set_global_alpha(1.0);
+        ctx.set_text_baseline(TextBaseline::Alphabetic);
+        for annotation in &chart.annotations {
+            let weight = if annotation.role == fm_layout::QuadrantTextRole::Title {
+                600
+            } else {
+                400
+            };
+            ctx.set_font(&format!(
+                "{weight} {}px {}",
+                annotation.font_size, self.config.font_family
+            ));
+            ctx.set_text_align(match annotation.align {
+                IrTextAlign::Start => TextAlign::Left,
+                IrTextAlign::Middle => TextAlign::Center,
+                IrTextAlign::End => TextAlign::Right,
+            });
+            for (text, position) in annotation.rows() {
+                ctx.fill_text(
+                    text,
+                    f64::from(position.x) + offset_x,
+                    f64::from(position.y) + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+        }
 
-        // The quadrant NAMES, which this drew none of (bd-039t, third widening of
-        // `renderer_agreement.rs`). bd-59o4 fixed the four AXIS labels in both this renderer and
-        // the terminal and stopped there, so `quadrant-1 Do it` reached the SVG and neither of the
-        // other two. The chart still looked almost right — title, points and axes all present —
-        // which is why a three-renderer gate caught it and looking at it did not.
-        //
-        // `quadrant_labels` is documented index-ordered [Q1 top-right, Q2 top-left, Q3 bottom-left,
-        // Q4 bottom-right], so placement follows the INDEX rather than a guess. `.get()` rather
-        // than indexing: a chart may declare fewer than four.
-        //
-        // Centred in each quadrant, INSIDE the plot area — unlike the axis labels above, which sit
-        // outside it by design. A quadrant name belongs to the region it names, so anchoring it to
-        // the region's own centre is what makes it readable as that region's label.
-        let mid_x = f64::midpoint(left, right);
-        let mid_y = f64::midpoint(top, bottom);
-        let quarter_x_left = f64::midpoint(left, mid_x);
-        let quarter_x_right = f64::midpoint(mid_x, right);
-        let quarter_y_top = f64::midpoint(top, mid_y);
-        let quarter_y_bottom = f64::midpoint(mid_y, bottom);
-
-        draw(
-            quad.quadrant_labels.first(),
-            quarter_x_right,
-            quarter_y_top,
-            TextAlign::Center,
-        );
-        draw(
-            quad.quadrant_labels.get(1),
-            quarter_x_left,
-            quarter_y_top,
-            TextAlign::Center,
-        );
-        draw(
-            quad.quadrant_labels.get(2),
-            quarter_x_left,
-            quarter_y_bottom,
-            TextAlign::Center,
-        );
-        draw(
-            quad.quadrant_labels.get(3),
-            quarter_x_right,
-            quarter_y_bottom,
-            TextAlign::Center,
-        );
+        ctx.set_global_alpha(0.65);
+        ctx.set_line_width(0.75);
+        for leader in &chart.leaders {
+            ctx.begin_path();
+            ctx.move_to(
+                f64::from(leader.start.x) + offset_x,
+                f64::from(leader.start.y) + offset_y,
+            );
+            ctx.line_to(
+                f64::from(leader.end.x) + offset_x,
+                f64::from(leader.end.y) + offset_y,
+            );
+            ctx.stroke();
+            self.draw_calls += 1;
+        }
+        let background = self
+            .config
+            .background
+            .as_deref()
+            .and_then(sanitize_canvas_paint)
+            .unwrap_or_else(|| "#ffffff".to_owned());
+        ctx.set_fill_style(&background);
+        ctx.set_global_alpha(0.92);
+        for label in &chart.labels {
+            ctx.begin_path();
+            self.emit_path_commands(
+                ctx,
+                &fm_layout::shapes::rounded_rect_path(label.bounds, 3.0),
+                offset_x,
+                offset_y,
+            );
+            ctx.fill();
+            self.draw_calls += 1;
+        }
+        ctx.set_global_alpha(1.0);
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&format!(
+            "{}px {}",
+            chart.label_font_size, self.config.font_family
+        ));
+        ctx.set_text_baseline(TextBaseline::Middle);
+        ctx.set_text_align(TextAlign::Left);
+        for label in &chart.labels {
+            for (line, text) in label.lines.iter().enumerate() {
+                ctx.fill_text(
+                    text,
+                    f64::from(label.bounds.x + 3.0) + offset_x,
+                    f64::from(
+                        label.bounds.y + 2.0 + chart.label_font_size * (0.65 + line as f32 * 1.3),
+                    ) + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+        }
+        for (index, point) in chart.points.iter().enumerate() {
+            let (fill, stroke) = quadrant_point_colors(meta.points.get(index), index, &self.config);
+            ctx.set_fill_style(&fill);
+            ctx.set_stroke_style(&stroke);
+            ctx.begin_path();
+            ctx.arc(
+                f64::from(point.center.x) + offset_x,
+                f64::from(point.center.y) + offset_y,
+                f64::from(point.radius),
+                0.0,
+                std::f64::consts::TAU,
+            );
+            ctx.fill();
+            self.draw_calls += 1;
+            if point.stroke_width > 0.0 {
+                ctx.set_line_width(f64::from(point.stroke_width));
+                ctx.stroke();
+                self.draw_calls += 1;
+            }
+        }
+        ctx.restore();
+        labels_drawn
     }
 }
 
@@ -3858,6 +3959,25 @@ fn path_marker_end_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
 #[cfg(test)]
 fn angle_between(start: (f64, f64), end: (f64, f64)) -> f64 {
     (end.1 - start.1).atan2(end.0 - start.0)
+}
+
+/// Resolve the authored quadrant marker palette once for the Canvas and GPU consumers.
+pub(crate) fn quadrant_point_colors(
+    point: Option<&fm_core::IrQuadrantPoint>,
+    index: usize,
+    config: &CanvasRenderConfig,
+) -> (String, String) {
+    let style = point.and_then(|point| point.style.as_ref());
+    let fill = style
+        .and_then(|style| style.color.as_deref())
+        .and_then(sanitize_canvas_paint)
+        .unwrap_or_else(|| config.accents[index % config.accents.len()].clone());
+    let stroke = style
+        .and_then(|style| style.stroke_color.as_deref())
+        .and_then(sanitize_canvas_paint)
+        .or_else(|| config.background.as_deref().and_then(sanitize_canvas_paint))
+        .unwrap_or_else(|| "#ffffff".to_owned());
+    (fill, stroke)
 }
 
 fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
@@ -6662,6 +6782,133 @@ mod tests {
             ctx.operations()
                 .iter()
                 .any(|operation| matches!(operation, DrawOperation::FillText(_, _, _)))
+        );
+    }
+
+    #[test]
+    fn quadrant_canvas_draws_small_styled_markers_and_fits_all_captions() {
+        let mut ir = fm_parser::parse(
+            "quadrantChart\n\
+             title Priorities across the product roadmap\n\
+             x-axis Low effort --> High effort\n\
+             y-axis Limited customer benefit --> Significant lasting customer benefit\n\
+             quadrant-1 Invest next\n\
+             quadrant-2 Quick wins\n\
+             quadrant-3 Reconsider\n\
+             quadrant-4 Research first\n\
+             Reliable exports: [0.52, 0.52] radius: 12, color: #ef4444, stroke-color: #f8fafc, stroke-width: 2px\n\
+             Fast previews: [0.52, 0.52]\n\
+             Accessible labels: [0.52, 0.52]\n\
+             Search across projects: [0.52, 0.52]\n\
+             Shared editing: [0.52, 0.52]\n\
+             Offline workspace: [0.52, 0.52]",
+        ).ir;
+        ir.meta.theme_overrides.theme_variables.extend([
+            ("background".to_owned(), "#0f172a".to_owned()),
+            ("primaryTextColor".to_owned(), "#e2e8f0".to_owned()),
+            ("lineColor".to_owned(), "#94a3b8".to_owned()),
+        ]);
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 6, "all styled data points must parse");
+        let config = CanvasRenderConfig::default();
+        let meta = ir.quadrant_meta.as_ref().unwrap();
+        let chart = fm_layout::QuadrantChartLayout::new(
+            &layout,
+            meta,
+            ir.meta.title.as_deref().or(meta.title.as_deref()),
+            (0.0, 0.0),
+            &config.font_metrics(),
+            8.0,
+            config.font_size as f32 * 0.5,
+        );
+        assert!(
+            !chart.leaders.is_empty(),
+            "crowded captions need leader lines"
+        );
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let result = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+        assert_eq!(result.nodes_drawn, 6);
+        assert_eq!(result.edges_drawn, 0);
+        let markers: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                if let DrawOperation::Arc(x, y, radius, _, _) = operation {
+                    Some((*x, *y, *radius))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            markers.len(),
+            6,
+            "generic label-sized graph circles must not be drawn"
+        );
+        assert_eq!(markers[0].2, 12.0, "the authored marker radius wins");
+        assert!(markers[1..].iter().all(|marker| marker.2 == 6.0));
+        for (marker, node) in markers.iter().zip(&layout.nodes) {
+            let center = node.bounds.center();
+            assert!((marker.0 - f64::from(center.x - chart.bounds.x)).abs() < 0.001);
+            assert!((marker.1 - f64::from(center.y - chart.bounds.y)).abs() < 0.001);
+        }
+        let (fills, texts) = record_gantt_canvas_paint(ctx.operations());
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|fill| (fill.paint.alpha - 0.10).abs() < 1e-6)
+                .count(),
+            4
+        );
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|fill| (fill.paint.alpha - 0.92).abs() < 1e-6)
+                .count(),
+            6
+        );
+        assert!(texts.iter().all(|text| text.paint.fill == "#e2e8f0"));
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.text == "Reliable exports")
+                .count(),
+            1
+        );
+        assert!(
+            ctx.operations()
+                .contains(&DrawOperation::SetFillStyle("#ef4444".to_owned()))
+        );
+        assert!(
+            ctx.operations()
+                .contains(&DrawOperation::SetStrokeStyle("#f8fafc".to_owned()))
+        );
+        assert!(ctx.operations().contains(&DrawOperation::SetLineWidth(2.0)));
+        for bounds in chart
+            .labels
+            .iter()
+            .map(|label| label.bounds)
+            .chain(chart.annotations.iter().map(|text| text.bounds))
+        {
+            let left = f64::from(bounds.x) * result.viewport.zoom + result.viewport.offset_x;
+            let top = f64::from(bounds.y) * result.viewport.zoom + result.viewport.offset_y;
+            let right = left + f64::from(bounds.width) * result.viewport.zoom;
+            let bottom = top + f64::from(bounds.height) * result.viewport.zoom;
+            assert!(
+                left >= config.padding - 0.01 && right <= 800.0 - config.padding + 0.01,
+                "caption horizontally clipped: {bounds:?}"
+            );
+            assert!(
+                top >= config.padding - 0.01 && bottom <= 600.0 - config.padding + 0.01,
+                "caption vertically clipped: {bounds:?}"
+            );
+        }
+        let mut second = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas_with_layout(&ir, &layout, &mut second, &config);
+        assert_eq!(
+            ctx.operations(),
+            second.operations(),
+            "chart placement must be deterministic"
         );
     }
 

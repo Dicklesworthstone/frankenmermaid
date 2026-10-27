@@ -55,8 +55,9 @@ use fm_core::{
 use fm_layout::{
     CentralityTier, DiagramLayout, DirectedPathLayoutPrefix, FillStyle, LayoutBand, LayoutBandKind,
     LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
-    MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
-    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+    MarkerKind, PathCmd, QuadrantChartLayout, QuadrantPointGeometry, QuadrantPointLabel,
+    QuadrantTextRole, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource,
+    RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
     TextBaseline as RenderTextBaseline, build_render_scene_with_metrics,
     certify_directed_path_layout_prefix, format_xychart_tick_value, is_composite_state_node,
     resolve_xychart_y_domain, sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
@@ -4652,29 +4653,27 @@ fn svg_geometry(
         frame.offset_y -= top;
     }
     if let Some(meta) = ir.quadrant_meta.as_ref() {
-        let chart = quadrant_plot_bounds(layout, meta, (frame.offset_x, frame.offset_y));
-        for label in quadrant_label_placements(
+        let chart = QuadrantChartLayout::new(
             layout,
             meta,
-            chart,
+            diagram_title(ir, meta.title.as_deref()),
             (frame.offset_x, frame.offset_y),
-            config,
-        ) {
-            frame.viewbox_width = frame
-                .viewbox_width
-                .max(label.bounds.x + label.bounds.width + padding);
-            frame.viewbox_height = frame
-                .viewbox_height
-                .max(label.bounds.y + label.bounds.height + padding);
-        }
-        for heading in quadrant_headings(meta, chart, config) {
-            frame.viewbox_width = frame
-                .viewbox_width
-                .max(heading.bounds.x + heading.bounds.width + padding);
-            frame.viewbox_height = frame
-                .viewbox_height
-                .max(heading.bounds.y + heading.bounds.height + padding);
-        }
+            &config.font_metrics(),
+            config.min_font_size,
+            config.avg_char_width,
+        );
+        let left = (chart.bounds.x - padding).min(0.0);
+        let top = (chart.bounds.y - padding).min(0.0);
+        frame.viewbox_width = frame
+            .viewbox_width
+            .max(chart.bounds.x + chart.bounds.width + padding)
+            - left;
+        frame.viewbox_height = frame
+            .viewbox_height
+            .max(chart.bounds.y + chart.bounds.height + padding)
+            - top;
+        frame.offset_x -= left;
+        frame.offset_y -= top;
     }
     SvgGeometry {
         frame,
@@ -7170,7 +7169,16 @@ fn render_quadrant_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let chart = quadrant_plot_bounds(layout, quad_meta, (offset_x, offset_y));
+    let composition = QuadrantChartLayout::new(
+        layout,
+        quad_meta,
+        diagram_title(ir, quad_meta.title.as_deref()),
+        (offset_x, offset_y),
+        &config.font_metrics(),
+        config.min_font_size,
+        config.avg_char_width,
+    );
+    let chart = composition.plot;
     let chart_w = chart.width;
     let chart_h = chart.height;
     let margin_left = chart.x;
@@ -7207,7 +7215,7 @@ fn render_quadrant_svg(
 
     // Section headings belong in a consistent header band, leaving the middle of each quadrant
     // available to its data. Point-label placement reserves these same bands below.
-    for heading in quadrant_headings(quad_meta, chart, config) {
+    for heading in &composition.headings {
         doc = doc.child(
             TextBuilder::new(&heading.lines.join("\n"))
                 .x(heading.bounds.x)
@@ -7282,126 +7290,52 @@ fn render_quadrant_svg(
         );
     }
 
-    // Axis labels.
-    if let Some(left) = &quad_meta.x_axis_left {
+    for annotation in &composition.annotations {
+        let is_title = annotation.role == QuadrantTextRole::Title;
+        let mut text = Element::text()
+            .x(annotation.position.x)
+            .y(annotation.position.y)
+            .content(&annotation.lines[0])
+            .attr("text-anchor", map_text_align(annotation.align).as_str())
+            .attr_num("font-size", annotation.font_size);
+        if is_title {
+            text = text.attr("font-weight", "600");
+        }
         doc = doc.child(
-            Element::text()
-                .x(margin_left)
-                .y(margin_top + chart_h + 20.0)
-                .content(left)
-                .attr("text-anchor", "start")
-                .attr_num("font-size", config.font_size * 0.8)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            text.font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
-                .class("fm-quadrant-axis-label"),
-        );
-    }
-    if let Some(right) = &quad_meta.x_axis_right {
-        doc = doc.child(
-            Element::text()
-                .x(margin_left + chart_w)
-                .y(margin_top + chart_h + 20.0)
-                .content(right)
-                .attr("text-anchor", "end")
-                .attr_num("font-size", config.font_size * 0.8)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&theme.colors.text)
-                .class("fm-quadrant-axis-label"),
-        );
-    }
-
-    // Y-axis labels.
-    if let Some(bottom) = &quad_meta.y_axis_bottom {
-        doc = doc.child(
-            Element::text()
-                .x(margin_left - 10.0)
-                .y(margin_top + chart_h)
-                .content(bottom)
-                .attr("text-anchor", "end")
-                .attr_num("font-size", config.font_size * 0.8)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&theme.colors.text)
-                .class("fm-quadrant-axis-label"),
-        );
-    }
-    if let Some(top) = &quad_meta.y_axis_top {
-        doc = doc.child(
-            Element::text()
-                .x(margin_left - 10.0)
-                .y(margin_top + config.font_size * 0.3)
-                .content(top)
-                .attr("text-anchor", "end")
-                .attr_num("font-size", config.font_size * 0.8)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&theme.colors.text)
-                .class("fm-quadrant-axis-label"),
-        );
-    }
-
-    // Title.
-    if let Some(title) = diagram_title(ir, quad_meta.title.as_deref()) {
-        doc = doc.child(
-            Element::text()
-                .x(margin_left + half_w)
-                .y(margin_top - 20.0)
-                .content(title)
-                .attr("text-anchor", "middle")
-                .attr_num("font-size", config.font_size + 4.0)
-                .attr("font-weight", "600")
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&theme.colors.text)
-                .class("fm-quadrant-title"),
+                .class(if is_title {
+                    "fm-quadrant-title"
+                } else {
+                    "fm-quadrant-axis-label"
+                }),
         );
     }
 
     // Move labels rather than data: each point remains at its authored coordinate, while the
     // labels fit inside the plotting area and avoid every point, heading, and preceding label.
-    let label_font_size = clamp_font_size(config.font_size * 0.8, config.min_font_size);
-    let label_placements =
-        quadrant_label_placements(layout, quad_meta, chart, (offset_x, offset_y), config);
-    for (node, placement) in layout.nodes.iter().zip(&label_placements) {
-        let center = node.bounds.center();
-        let point = fm_layout::LayoutPoint {
-            x: center.x + offset_x,
-            y: center.y + offset_y,
-        };
-        let target = fm_layout::LayoutPoint {
-            x: point.x.clamp(
-                placement.bounds.x,
-                placement.bounds.x + placement.bounds.width,
-            ),
-            y: point.y.clamp(
-                placement.bounds.y,
-                placement.bounds.y + placement.bounds.height,
-            ),
-        };
-        let dx = target.x - point.x;
-        let dy = target.y - point.y;
-        let distance = dx.hypot(dy);
-        if distance > placement.radius + 10.0 {
-            let start_distance = placement.radius + 2.0;
-            doc = doc.child(
-                Element::line()
-                    .x1(point.x + dx * start_distance / distance)
-                    .y1(point.y + dy * start_distance / distance)
-                    .x2(target.x)
-                    .y2(target.y)
-                    .stroke(&theme.colors.edge)
-                    .stroke_width(0.75)
-                    .attr("opacity", "0.65")
-                    .class("fm-quadrant-label-leader"),
-            );
-        }
+    for leader in &composition.leaders {
+        doc = doc.child(
+            Element::line()
+                .x1(leader.start.x)
+                .y1(leader.start.y)
+                .x2(leader.end.x)
+                .y2(leader.end.y)
+                .stroke(&theme.colors.edge)
+                .stroke_width(0.75)
+                .attr("opacity", "0.65")
+                .class("fm-quadrant-label-leader"),
+        );
     }
 
-    for placement in &label_placements {
+    for placement in &composition.labels {
         doc = doc.child(quadrant_label_background(
             placement,
             &theme.colors.background,
         ));
         doc = doc.child(quadrant_label_text(
             placement,
-            label_font_size,
+            composition.label_font_size,
             config,
             &theme.colors.text,
         ));
@@ -7466,285 +7400,6 @@ fn render_quadrant_svg(
     }
 
     doc
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct QuadrantPointLabel {
-    lines: Vec<String>,
-    bounds: fm_layout::LayoutRect,
-    radius: f32,
-}
-
-fn quadrant_plot_bounds(
-    layout: &DiagramLayout,
-    meta: &fm_core::IrQuadrantMeta,
-    offset: (f32, f32),
-) -> fm_layout::LayoutRect {
-    // These are the layout engine's plot dimensions, not the enclosing node-label boxes.
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let width = (300.0_f32 + (layout.nodes.len() as f32 * 15.0).min(200.0)).clamp(200.0, 600.0);
-    let axis_width = meta
-        .x_axis_left
-        .as_ref()
-        .map_or(0.0, |label| metrics.estimate_dimensions(label).0);
-    fm_layout::LayoutRect {
-        x: (axis_width + 20.0).clamp(50.0, 120.0) + offset.0,
-        y: 60.0 + offset.1,
-        width,
-        height: width,
-    }
-}
-
-fn quadrant_wrapped_lines(
-    text: &str,
-    font_size: f32,
-    max_width: f32,
-    config: &SvgRenderConfig,
-) -> (Vec<String>, f32) {
-    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
-        preset: fm_core::FontPreset::from_family(&config.font_family),
-        font_size,
-        line_height: 1.3,
-        ..Default::default()
-    });
-    let measure = |text: &str| {
-        metrics.estimate_preserved_width(
-            text,
-            font_size,
-            config.avg_char_width * font_size / config.font_size.max(1.0),
-        )
-    };
-    let mut wrap_width = max_width / 1.125;
-    let mut lines = metrics.wrap_to_width(text, wrap_width);
-    let mut width = lines
-        .iter()
-        .map(|line| measure(line))
-        .fold(0.0_f32, f32::max);
-    // Account for wide glyphs and caller calibrations using the measured excess, not char counts.
-    for _ in 0..3 {
-        if width <= max_width {
-            break;
-        }
-        wrap_width *= max_width / width;
-        lines = metrics.wrap_to_width(text, wrap_width);
-        width = lines
-            .iter()
-            .map(|line| measure(line))
-            .fold(0.0_f32, f32::max);
-    }
-    (lines, width)
-}
-
-struct QuadrantHeading {
-    lines: Vec<String>,
-    bounds: fm_layout::LayoutRect,
-    font_size: f32,
-}
-
-fn quadrant_headings(
-    meta: &fm_core::IrQuadrantMeta,
-    chart: fm_layout::LayoutRect,
-    config: &SvgRenderConfig,
-) -> Vec<QuadrantHeading> {
-    let font_size = clamp_font_size(config.font_size * 0.9, config.min_font_size);
-    let mut headings = Vec::new();
-    let mut overflow_y = chart.y + chart.height + (config.font_size * 2.0 + 20.0).max(48.0);
-    for (index, text) in meta.quadrant_labels.iter().take(4).enumerate() {
-        if text.trim().is_empty() {
-            continue;
-        }
-        let max_width = (chart.width / 2.0 - 24.0).max(1.0);
-        let (mut lines, mut width) = quadrant_wrapped_lines(text, font_size, max_width, config);
-        let mut height = font_size * 1.3 * lines.len() as f32;
-        if height > chart.height / 2.0 - 20.0 {
-            // Long section descriptions cannot cover another quadrant. A short in-plot key
-            // preserves their association while the complete heading gets its own annotation.
-            let key = format!("Q{}", index + 1);
-            let (annotation, annotation_width) = quadrant_wrapped_lines(
-                &format!("{key}: {text}"),
-                font_size,
-                (chart.width - 24.0).max(1.0),
-                config,
-            );
-            let annotation_height = font_size * 1.3 * annotation.len() as f32;
-            headings.push(QuadrantHeading {
-                lines: annotation,
-                bounds: fm_layout::LayoutRect {
-                    x: chart.x + 12.0,
-                    y: overflow_y,
-                    width: annotation_width,
-                    height: annotation_height,
-                },
-                font_size,
-            });
-            overflow_y += annotation_height + 14.0;
-            (lines, width) = quadrant_wrapped_lines(&key, font_size, max_width, config);
-            height = font_size * 1.3 * lines.len() as f32;
-        }
-        headings.push(QuadrantHeading {
-            lines,
-            bounds: fm_layout::LayoutRect {
-                x: chart.x
-                    + 12.0
-                    + if matches!(index, 0 | 3) {
-                        chart.width / 2.0
-                    } else {
-                        0.0
-                    },
-                y: chart.y + 8.0 + if index >= 2 { chart.height / 2.0 } else { 0.0 },
-                width,
-                height,
-            },
-            font_size,
-        });
-    }
-    headings
-}
-
-fn quadrant_overlap_area(a: fm_layout::LayoutRect, b: fm_layout::LayoutRect) -> f32 {
-    let width = ((a.x + a.width).min(b.x + b.width) - a.x.max(b.x)).max(0.0);
-    let height = ((a.y + a.height).min(b.y + b.height) - a.y.max(b.y)).max(0.0);
-    width * height
-}
-
-/// Stable, bounded placement for scatter labels. Candidate rectangles radiate from the fixed
-/// data point; the least occluded candidate wins, with distance and source order breaking ties.
-/// We reserve all dots up front so an earlier label cannot conceal a later point. A label that
-/// cannot fit without occlusion receives an annotation row below the plot, inside the SVG frame.
-fn quadrant_label_placements(
-    layout: &DiagramLayout,
-    meta: &fm_core::IrQuadrantMeta,
-    chart: fm_layout::LayoutRect,
-    offset: (f32, f32),
-    config: &SvgRenderConfig,
-) -> Vec<QuadrantPointLabel> {
-    use fm_layout::LayoutRect;
-
-    let font_size = clamp_font_size(config.font_size * 0.8, config.min_font_size);
-    let centers: Vec<_> = layout
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            let center = node.bounds.center();
-            let paint = QuadrantPointPaint::resolve(meta.points.get(index), "", "");
-            let radius = paint.radius + paint.stroke_width.max(0.0) / 2.0;
-            (center.x + offset.0, center.y + offset.1, radius)
-        })
-        .collect();
-    let mut obstacles: Vec<_> = centers
-        .iter()
-        .map(|&(x, y, radius)| LayoutRect {
-            x: x - radius - 3.0,
-            y: y - radius - 3.0,
-            width: (radius + 3.0) * 2.0,
-            height: (radius + 3.0) * 2.0,
-        })
-        .collect();
-    let mut overflow_y = chart.y + chart.height + (config.font_size * 2.0 + 20.0).max(48.0);
-    for heading in quadrant_headings(meta, chart, config) {
-        if heading.bounds.y >= chart.y + chart.height {
-            overflow_y = overflow_y.max(heading.bounds.y + heading.bounds.height + 14.0);
-        }
-        obstacles.push(LayoutRect {
-            x: heading.bounds.x - 4.0,
-            y: heading.bounds.y - 4.0,
-            width: heading.bounds.width + 8.0,
-            height: heading.bounds.height + 8.0,
-        });
-    }
-
-    let mut labels = Vec::with_capacity(layout.nodes.len());
-    for (index, node) in layout.nodes.iter().enumerate() {
-        let text = meta
-            .points
-            .get(index)
-            .map_or(node.node_id.as_str(), |point| point.label.as_str());
-        let max_width = (chart.width * 0.38)
-            .max(80.0)
-            .min((chart.width - 12.0).max(1.0));
-        let (mut lines, text_width) = quadrant_wrapped_lines(text, font_size, max_width, config);
-        let width = text_width + 6.0;
-        let height = font_size * 1.3 * lines.len().max(1) as f32 + 4.0;
-        let (cx, cy, radius) = centers[index];
-        let mut best = LayoutRect {
-            x: chart.x + 4.0,
-            y: chart.y + 4.0,
-            width,
-            height,
-        };
-        let mut best_score = (f32::INFINITY, f32::INFINITY);
-        for ring in 0..if height <= chart.height / 2.0 { 16 } else { 0 } {
-            let gap = radius + 5.0 + ring as f32 * (font_size * 1.3 + 6.0);
-            let candidates = [
-                (cx + gap, cy - height / 2.0),
-                (cx - gap - width, cy - height / 2.0),
-                (cx - width / 2.0, cy - gap - height),
-                (cx - width / 2.0, cy + gap),
-                (cx + gap, cy - gap - height),
-                (cx - gap - width, cy - gap - height),
-                (cx + gap, cy + gap),
-                (cx - gap - width, cy + gap),
-            ];
-            for (x, y) in candidates {
-                let candidate = LayoutRect {
-                    x: x.clamp(
-                        chart.x + 4.0,
-                        (chart.x + chart.width - width - 4.0).max(chart.x + 4.0),
-                    ),
-                    y: y.clamp(
-                        chart.y + 4.0,
-                        (chart.y + chart.height - height - 4.0).max(chart.y + 4.0),
-                    ),
-                    width,
-                    height,
-                };
-                let overlap = obstacles
-                    .iter()
-                    .map(|&other| quadrant_overlap_area(candidate, other))
-                    .sum::<f32>();
-                let dx = cx - cx.clamp(candidate.x, candidate.x + width);
-                let dy = cy - cy.clamp(candidate.y, candidate.y + height);
-                let distance = dx * dx + dy * dy;
-                if overlap < best_score.0 || (overlap == best_score.0 && distance < best_score.1) {
-                    best = candidate;
-                    best_score = (overlap, distance);
-                }
-            }
-            // Every later ring starts farther from the point; a clear local placement needs no
-            // further search. Clamping may shorten a distant candidate, but cannot improve on the
-            // ordinary immediate placements enough to justify detaching a clear label.
-            if best_score.0 == 0.0 {
-                break;
-            }
-        }
-        if best_score.0 > 0.0 {
-            // A paragraph or truly dense chart needs annotation space, not smaller type, clipped
-            // text, or a plate over its data. The shared SVG frame expands to include these rows.
-            let (overflow_lines, overflow_width) =
-                quadrant_wrapped_lines(text, font_size, (chart.width - 14.0).max(1.0), config);
-            lines = overflow_lines;
-            best = LayoutRect {
-                x: chart.x + 4.0,
-                y: overflow_y,
-                width: overflow_width + 6.0,
-                height: font_size * 1.3 * lines.len().max(1) as f32 + 4.0,
-            };
-            overflow_y += best.height + 10.0;
-        }
-        obstacles.push(LayoutRect {
-            x: best.x - 2.0,
-            y: best.y - 2.0,
-            width: best.width + 4.0,
-            height: best.height + 4.0,
-        });
-        labels.push(QuadrantPointLabel {
-            lines,
-            bounds: best,
-            radius,
-        });
-    }
-    labels
 }
 
 fn quadrant_label_background(placement: &QuadrantPointLabel, fill: &str) -> Element {
@@ -7815,25 +7470,21 @@ struct QuadrantPointPaint<'a> {
 }
 
 impl<'a> QuadrantPointPaint<'a> {
-    const DEFAULT_RADIUS: f32 = 6.0;
-    const DEFAULT_STROKE_WIDTH: f32 = 1.5;
+    const DEFAULT_RADIUS: f32 = QuadrantPointGeometry::DEFAULT_RADIUS;
+    const DEFAULT_STROKE_WIDTH: f32 = QuadrantPointGeometry::DEFAULT_STROKE_WIDTH;
 
     fn resolve(point: Option<&'a fm_core::IrQuadrantPoint>, accent: &'a str, bg: &'a str) -> Self {
         let style = point.and_then(|point| point.style.as_ref());
+        let (radius, stroke_width) = QuadrantPointGeometry::style_dimensions(point);
         Self {
-            radius: style
-                .and_then(|style| style.radius)
-                .filter(|radius| *radius > 0.0)
-                .unwrap_or(Self::DEFAULT_RADIUS),
+            radius,
             fill: style
                 .and_then(|style| style.color.as_deref())
                 .unwrap_or(accent),
             stroke: style
                 .and_then(|style| style.stroke_color.as_deref())
                 .unwrap_or(bg),
-            stroke_width: style
-                .and_then(|style| style.stroke_width)
-                .unwrap_or(Self::DEFAULT_STROKE_WIDTH),
+            stroke_width,
         }
     }
 }
@@ -26848,6 +26499,12 @@ marker#arrow-open path {
         assert!(!circles[1].contains("#ff3300"), "{}", circles[1]);
     }
 
+    fn quadrant_overlap_area(a: fm_layout::LayoutRect, b: fm_layout::LayoutRect) -> f32 {
+        let width = ((a.x + a.width).min(b.x + b.width) - a.x.max(b.x)).max(0.0);
+        let height = ((a.y + a.height).min(b.y + b.height) - a.y.max(b.y)).max(0.0);
+        width * height
+    }
+
     fn assert_quadrant_label_leader_geometry(svg: &str) -> usize {
         let elements: Vec<_> = svg.split('<').collect();
         let points: Vec<_> = elements
@@ -27017,6 +26674,100 @@ marker#arrow-open path {
     }
 
     #[test]
+    fn quadrant_wide_annotations_and_large_corner_markers_stay_inside_the_export() {
+        let ir = fm_parser::parse(concat!(
+            "quadrantChart\n",
+            "title Release planning across international markets with operational readiness and customer adoption\n",
+            "x-axis Low engineering effort --> High engineering effort\n",
+            "y-axis Limited immediate customer impact --> Significant international customer adoption and reliability impact\n",
+            "Corner release: [0.0, 1.0] radius: 80, stroke-width: 8px\n",
+            "Later release: [1.0, 0.0] radius: 48, stroke-width: 6px\n",
+        )).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let meta = ir.quadrant_meta.as_ref().unwrap();
+        let config = SvgRenderConfig {
+            font_family: "monospace".to_string(),
+            font_size: 30.0,
+            avg_char_width: 19.0,
+            ..SvgRenderConfig::default()
+        };
+        let frame = svg_frame(&ir, &layout, &config);
+        assert!(frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
+        assert!(frame.offset_x > config.padding - layout.bounds.x);
+        assert!(frame.offset_y > config.padding - layout.bounds.y);
+        let composition = QuadrantChartLayout::new(
+            &layout,
+            meta,
+            diagram_title(&ir, meta.title.as_deref()),
+            (frame.offset_x, frame.offset_y),
+            &config.font_metrics(),
+            config.min_font_size,
+            config.avg_char_width,
+        );
+        let fits = |bounds: fm_layout::LayoutRect| {
+            bounds.x >= config.padding - 0.02
+                && bounds.y >= config.padding - 0.02
+                && bounds.x + bounds.width <= frame.viewbox_width - config.padding + 0.02
+                && bounds.y + bounds.height <= frame.viewbox_height - config.padding + 0.02
+        };
+        for embed_theme_css in [true, false] {
+            let svg = render_svg_with_layout(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    embed_theme_css,
+                    ..config.clone()
+                },
+            );
+            let annotations: Vec<_> = svg
+                .split('<')
+                .filter(|element| {
+                    element.contains("class=\"fm-quadrant-title\"")
+                        || element.contains("class=\"fm-quadrant-axis-label\"")
+                })
+                .collect();
+            assert_eq!(annotations.len(), 5);
+            for (element, annotation) in annotations.iter().zip(&composition.annotations) {
+                assert!(
+                    fits(annotation.bounds),
+                    "annotation is clipped: {annotation:?}"
+                );
+                assert!(
+                    (edge_label_test_number(element, "x") - annotation.position.x).abs() < 0.02
+                );
+                assert!(
+                    (edge_label_test_number(element, "y") - annotation.position.y).abs() < 0.02
+                );
+            }
+            let points: Vec<_> = svg
+                .split('<')
+                .filter(|element| element.contains("class=\"fm-quadrant-point\""))
+                .collect();
+            assert_eq!(points.len(), 2);
+            for ((element, authored), geometry) in
+                points.iter().zip(&meta.points).zip(&composition.points)
+            {
+                let x = edge_label_test_number(element, "cx");
+                let y = edge_label_test_number(element, "cy");
+                let radius = edge_label_test_number(element, "r") + geometry.stroke_width / 2.0;
+                assert!(fits(fm_layout::LayoutRect {
+                    x: x - radius,
+                    y: y - radius,
+                    width: radius * 2.0,
+                    height: radius * 2.0,
+                }));
+                assert!(
+                    (x - composition.plot.x - authored.x * composition.plot.width).abs() < 0.02
+                );
+                assert!(
+                    (y - composition.plot.y - (1.0 - authored.y) * composition.plot.height).abs()
+                        < 0.02
+                );
+            }
+        }
+    }
+
+    #[test]
     fn quadrant_label_wrapping_preserves_words_and_export_geometry() {
         let source = concat!(
             "quadrantChart\n",
@@ -27036,13 +26787,17 @@ marker#arrow-open path {
                 width: 330.0,
                 height: 330.0,
             };
-            let placements = quadrant_label_placements(
+            let composition = QuadrantChartLayout::new(
                 &layout,
                 ir.quadrant_meta.as_ref().unwrap(),
-                chart,
+                None,
                 (0.0, 0.0),
-                &config,
+                &config.font_metrics(),
+                config.min_font_size,
+                config.avg_char_width,
             );
+            assert_eq!(composition.plot, chart);
+            let placements = &composition.labels;
             for (label, authored) in placements
                 .iter()
                 .zip(&ir.quadrant_meta.as_ref().unwrap().points)
@@ -27096,8 +26851,17 @@ marker#arrow-open path {
             };
             let frame = svg_frame(&ir, &layout, &config);
             let offset = (frame.offset_x, frame.offset_y);
-            let chart = quadrant_plot_bounds(&layout, meta, offset);
-            let labels = quadrant_label_placements(&layout, meta, chart, offset, &config);
+            let composition = QuadrantChartLayout::new(
+                &layout,
+                meta,
+                None,
+                offset,
+                &config.font_metrics(),
+                config.min_font_size,
+                config.avg_char_width,
+            );
+            let chart = composition.plot;
+            let labels = &composition.labels;
             assert!(
                 labels[0].bounds.y > chart.y + chart.height,
                 "paragraph needs annotation space"
@@ -27116,11 +26880,11 @@ marker#arrow-open path {
                 assert!(!line.starts_with('\u{200d}'));
                 assert!(!line.ends_with('\u{200d}'));
             }
-            for label in &labels {
+            for label in labels {
                 assert!(label.bounds.x + label.bounds.width <= frame.viewbox_width);
                 assert!(label.bounds.y + label.bounds.height <= frame.viewbox_height);
             }
-            let headings = quadrant_headings(meta, chart, &config);
+            let headings = &composition.headings;
             assert!(headings[0].lines.len() > 1);
             let all_heading_text = compact(
                 &headings
@@ -27139,7 +26903,7 @@ marker#arrow-open path {
                 for other in &headings[..index] {
                     assert_eq!(quadrant_overlap_area(heading.bounds, other.bounds), 0.0);
                 }
-                for label in &labels {
+                for label in labels {
                     assert_eq!(quadrant_overlap_area(heading.bounds, label.bounds), 0.0);
                 }
             }

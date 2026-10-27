@@ -81,6 +81,62 @@ fn silhouette(svg: &str) -> String {
     out.join("|")
 }
 
+/// Triangle dimensions grow to contain their label; direction and symmetry define the shape.
+fn assert_triangle_orientation(svg: &str, downward: bool) {
+    let node = svg.split_once("data-id=\"A\"").unwrap().1;
+    let path = node
+        .split_once("<path ")
+        .unwrap()
+        .1
+        .split_once("d=\"")
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap();
+    let commands: String = path
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .collect();
+    assert_eq!(
+        commands, "MLLZ",
+        "a triangle must have three straight sides"
+    );
+    let coordinates: Vec<f32> = path
+        .split(|character: char| character.is_ascii_alphabetic() || character.is_whitespace())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(coordinates.len(), 6);
+    let vertices = [
+        (coordinates[0], coordinates[1]),
+        (coordinates[2], coordinates[3]),
+        (coordinates[4], coordinates[5]),
+    ];
+    let (left, right, apex) = if downward {
+        (vertices[0], vertices[1], vertices[2])
+    } else {
+        (vertices[2], vertices[1], vertices[0])
+    };
+    assert!(left.0 < right.0, "the base must span the node: {path}");
+    assert!(
+        (left.1 - right.1).abs() < 0.02,
+        "the base must be level: {path}"
+    );
+    assert!(
+        (apex.0 - (left.0 + right.0) / 2.0).abs() < 0.02,
+        "the apex must be centered over the base: {path}"
+    );
+    assert!(
+        if downward {
+            apex.1 > left.1
+        } else {
+            apex.1 < left.1
+        },
+        "the triangle points in the wrong direction: {path}"
+    );
+}
+
 #[test]
 fn each_new_shape_draws_its_measured_silhouette() {
     let notch = render("notch-rect");
@@ -118,13 +174,9 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "fr-circ is not two concentric fixed rings: {framed}"
     );
 
-    // Full-width top edge (92..192 at y=92), apex at the bottom centre (142, 158.50).
+    // Full-width top edge and bottom-center apex, with dimensions fitted to the label.
     let flipped = render("flip-tri");
-    assert!(
-        flipped.contains("M92 92 L192 92 L142 158.50 Z"),
-        "flip-tri does not point downward: {}",
-        silhouette(&flipped)
-    );
+    assert_triangle_orientation(&flipped, true);
 
     // Cuts of 100*0.1 = 10 horizontally and 66.50*0.2 = 13.30 vertically, on BOTH top corners.
     let pentagon = render("notch-pent");
@@ -756,16 +808,8 @@ fn the_horizontal_cylinder_is_not_the_vertical_one() {
 fn the_flipped_triangle_is_not_the_upward_one() {
     let up = render("tri");
     let down = render("flip-tri");
-    assert!(
-        up.contains("M142 92") || up.contains("142 92"),
-        "the upward triangle no longer starts at its top apex: {}",
-        silhouette(&up)
-    );
-    assert!(
-        down.contains("M92 92 L192 92"),
-        "the flipped triangle no longer starts along its top edge: {}",
-        silhouette(&down)
-    );
+    assert_triangle_orientation(&up, false);
+    assert_triangle_orientation(&down, true);
     assert_ne!(
         silhouette(&up),
         silhouette(&down),
