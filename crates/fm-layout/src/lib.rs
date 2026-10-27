@@ -3450,18 +3450,11 @@ impl MarkerKind {
         matches!(self, Self::Lollipop | Self::LollipopStart)
     }
 
-    /// Shapes the WebGPU marker shader has no glyph for, which the scene collector must therefore
-    /// SKIP rather than map.
-    ///
-    /// This predicate exists because the fallback is the dangerous direction: `GpuMarkerKind`'s
-    /// `_ => Arrow` turns an unglyphed marker into an arrowhead, and an arrowhead standing in for a
-    /// crow's foot or a lollipop states a relationship the author never wrote — false, not merely
-    /// incomplete. Drawing nothing is the honest degradation. Naming the concept once (rather than
-    /// spelling `!is_er_cardinality()` at each call site, which is how the lollipop would have been
-    /// forgotten) means the next marker added without a glyph is a one-line change here.
+    /// Shapes emitted by the GPU's separate ER segment pass rather than its marker shader.
+    /// They must never be replaced with ordinary arrowheads, which change the relationship.
     #[must_use]
     pub const fn lacks_gpu_glyph(self) -> bool {
-        self.is_er_cardinality() || self.is_lollipop()
+        self.is_er_cardinality()
     }
 
     /// The start-slot and end-slot markers for an ER cardinality shape.
@@ -3474,6 +3467,99 @@ impl MarkerKind {
             fm_core::ErCardinality::ZeroOrMore => (Self::ErZeroOrMoreStart, Self::ErZeroOrMoreEnd),
         }
     }
+}
+
+/// Resolve the semantic decorations on both ends of an edge for every rendering backend.
+///
+/// ER cardinalities take precedence over arrow types. Directed layout-reversed graph edges retain
+/// their open feedback marker, while plain lines remain undirected through cycle removal. A class
+/// relation's co-arrow contributes its authored target marker.
+/// Keeping this mapping shared prevents raster surfaces from inventing target arrows for plain
+/// lines, losing source-only relationships, or collapsing half arrows into full triangles.
+#[must_use]
+pub fn edge_marker_kinds(edge: &fm_core::IrEdge, reversed: bool) -> (MarkerKind, MarkerKind) {
+    use MarkerKind as M;
+    use fm_core::ArrowType;
+
+    if edge.arrow == ArrowType::Invisible {
+        return (M::None, M::None);
+    }
+    if let Some(notation) = edge.er_notation() {
+        let (start, end) = fm_core::parse_er_cardinality_forms(notation);
+        return (
+            start.map_or(M::None, |kind| M::er_pair(kind).0),
+            end.map_or(M::None, |kind| M::er_pair(kind).1),
+        );
+    }
+    if matches!(
+        edge.arrow,
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine
+    ) {
+        // Cycle removal changes the ranking direction, not the authored relationship. A plain
+        // connector must not acquire an arrow, but independently supplied target metadata survives.
+        return (
+            M::None,
+            edge.co_arrow()
+                .and_then(co_arrow_marker_end)
+                .unwrap_or(M::None),
+        );
+    }
+    if reversed {
+        return (M::None, M::Open);
+    }
+
+    let (start, end) = match edge.arrow {
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine | ArrowType::Invisible => {
+            (M::None, M::None)
+        }
+        ArrowType::Arrow | ArrowType::DottedArrow => (M::None, M::Arrow),
+        ArrowType::ThickArrow => (M::None, M::ThickArrow),
+        ArrowType::OpenArrow | ArrowType::DottedOpenArrow => (M::None, M::Open),
+        ArrowType::HalfArrowTop | ArrowType::HalfArrowTopDotted => (M::None, M::HalfArrowTop),
+        ArrowType::HalfArrowBottom | ArrowType::HalfArrowBottomDotted => {
+            (M::None, M::HalfArrowBottom)
+        }
+        ArrowType::HalfArrowTopReverse | ArrowType::HalfArrowTopReverseDotted => {
+            (M::HalfArrowBottom, M::None)
+        }
+        ArrowType::HalfArrowBottomReverse | ArrowType::HalfArrowBottomReverseDotted => {
+            (M::HalfArrowTop, M::None)
+        }
+        ArrowType::StickArrowTop | ArrowType::StickArrowTopDotted => (M::None, M::StickArrowTop),
+        ArrowType::StickArrowBottom | ArrowType::StickArrowBottomDotted => {
+            (M::None, M::StickArrowBottom)
+        }
+        ArrowType::StickArrowTopReverse | ArrowType::StickArrowTopReverseDotted => {
+            (M::StickArrowBottom, M::None)
+        }
+        ArrowType::StickArrowBottomReverse | ArrowType::StickArrowBottomReverseDotted => {
+            (M::StickArrowTop, M::None)
+        }
+        ArrowType::Circle | ArrowType::ThickCircle | ArrowType::DottedCircle => {
+            (M::None, M::Circle)
+        }
+        ArrowType::Cross | ArrowType::ThickCross | ArrowType::DottedCross => (M::None, M::Cross),
+        ArrowType::CircleBoth | ArrowType::ThickCircleBoth | ArrowType::DottedCircleBoth => {
+            (M::Circle, M::Circle)
+        }
+        ArrowType::CrossBoth | ArrowType::ThickCrossBoth | ArrowType::DottedCrossBoth => {
+            (M::Cross, M::Cross)
+        }
+        ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => (M::Arrow, M::Arrow),
+        ArrowType::DoubleThickArrow => (M::ThickArrow, M::ThickArrow),
+        ArrowType::Aggregation => (M::DiamondOpen, M::None),
+        ArrowType::AggregationReverse => (M::None, M::DiamondOpen),
+        ArrowType::Composition => (M::Diamond, M::None),
+        ArrowType::CompositionReverse => (M::None, M::Diamond),
+        ArrowType::Inheritance => (M::TriangleOpenStart, M::None),
+        ArrowType::InheritanceReverse => (M::None, M::TriangleOpen),
+        ArrowType::Lollipop => (M::LollipopStart, M::None),
+        ArrowType::LollipopReverse => (M::None, M::Lollipop),
+    };
+    (
+        start,
+        edge.co_arrow().and_then(co_arrow_marker_end).unwrap_or(end),
+    )
 }
 
 /// A path primitive in the shared render IR.
@@ -4532,224 +4618,48 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         }
 
         let mut stroke = StrokeStyle::solid("#475569", 1.5);
-        let mut marker_end = MarkerKind::None;
-        let mut marker_start = MarkerKind::None;
+        let (marker_start, marker_end) = ir
+            .edges
+            .get(edge.edge_index)
+            .map_or((MarkerKind::None, MarkerKind::None), |ir_edge| {
+                edge_marker_kinds(ir_edge, edge.reversed)
+            });
 
         if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
-            // ⚠️ ER CARDINALITY IS DECIDED FIRST AND WINS, because an ER relationship carries an
-            // `arrow` too and the arm below would put a flowchart arrowhead on it. mermaid draws no
-            // arrowhead on a relationship line at all — the crow's-foot markers ARE its end
-            // decoration (bd-dun16). A notation naming no shape on a side leaves that side bare.
-            let er_forms = ir_edge
-                .er_notation()
-                .map(fm_core::parse_er_cardinality_forms);
-            if let Some((left, right)) = er_forms {
-                if let Some(left) = left {
-                    marker_start = MarkerKind::er_pair(left).0;
-                }
-                if let Some(right) = right {
-                    marker_end = MarkerKind::er_pair(right).1;
-                }
-            } else if edge.reversed {
+            if edge.reversed && ir_edge.er_notation().is_none() {
                 stroke.dash_array = vec![4.0, 4.0];
                 stroke.color = String::from("#94a3b8");
-                marker_end = MarkerKind::Open;
-            } else {
+            } else if ir_edge.er_notation().is_none() {
                 match ir_edge.arrow {
-                    fm_core::ArrowType::Line => marker_end = MarkerKind::None,
-                    fm_core::ArrowType::Arrow => marker_end = MarkerKind::Arrow,
-                    fm_core::ArrowType::OpenArrow => marker_end = MarkerKind::Open,
-                    fm_core::ArrowType::HalfArrowTop => marker_end = MarkerKind::HalfArrowTop,
-                    fm_core::ArrowType::HalfArrowBottom => {
-                        marker_end = MarkerKind::HalfArrowBottom;
-                    }
-                    fm_core::ArrowType::HalfArrowTopReverse => {
-                        marker_start = MarkerKind::HalfArrowBottom;
-                    }
-                    fm_core::ArrowType::HalfArrowBottomReverse => {
-                        marker_start = MarkerKind::HalfArrowTop;
-                    }
-                    fm_core::ArrowType::StickArrowTop => marker_end = MarkerKind::StickArrowTop,
-                    fm_core::ArrowType::StickArrowBottom => {
-                        marker_end = MarkerKind::StickArrowBottom;
-                    }
-                    fm_core::ArrowType::StickArrowTopReverse => {
-                        marker_start = MarkerKind::StickArrowBottom;
-                    }
-                    fm_core::ArrowType::StickArrowBottomReverse => {
-                        marker_start = MarkerKind::StickArrowTop;
-                    }
-                    fm_core::ArrowType::ThickArrow => {
+                    fm_core::ArrowType::ThickArrow
+                    | fm_core::ArrowType::ThickLine
+                    | fm_core::ArrowType::DoubleThickArrow
+                    | fm_core::ArrowType::ThickCircle
+                    | fm_core::ArrowType::ThickCross
+                    | fm_core::ArrowType::ThickCircleBoth
+                    | fm_core::ArrowType::ThickCrossBoth => {
                         stroke.width = 2.5;
-                        marker_end = MarkerKind::ThickArrow;
                     }
-                    fm_core::ArrowType::DottedArrow => {
+                    fm_core::ArrowType::DottedArrow
+                    | fm_core::ArrowType::DottedOpenArrow
+                    | fm_core::ArrowType::DottedCross
+                    | fm_core::ArrowType::HalfArrowTopDotted
+                    | fm_core::ArrowType::HalfArrowBottomDotted
+                    | fm_core::ArrowType::HalfArrowTopReverseDotted
+                    | fm_core::ArrowType::HalfArrowBottomReverseDotted
+                    | fm_core::ArrowType::StickArrowTopDotted
+                    | fm_core::ArrowType::StickArrowBottomDotted
+                    | fm_core::ArrowType::StickArrowTopReverseDotted
+                    | fm_core::ArrowType::StickArrowBottomReverseDotted
+                    | fm_core::ArrowType::DottedCircle
+                    | fm_core::ArrowType::DottedCircleBoth
+                    | fm_core::ArrowType::DottedCrossBoth
+                    | fm_core::ArrowType::DottedLine
+                    | fm_core::ArrowType::DoubleDottedArrow => {
                         stroke.dash_array = vec![6.0, 4.0];
                         stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::Arrow;
                     }
-                    fm_core::ArrowType::DottedOpenArrow => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::Open;
-                    }
-                    fm_core::ArrowType::DottedCross => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::Cross;
-                    }
-                    fm_core::ArrowType::HalfArrowTopDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::HalfArrowTop;
-                    }
-                    fm_core::ArrowType::HalfArrowBottomDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::HalfArrowBottom;
-                    }
-                    fm_core::ArrowType::HalfArrowTopReverseDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::HalfArrowBottom;
-                    }
-                    fm_core::ArrowType::HalfArrowBottomReverseDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::HalfArrowTop;
-                    }
-                    fm_core::ArrowType::StickArrowTopDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::StickArrowTop;
-                    }
-                    fm_core::ArrowType::StickArrowBottomDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::StickArrowBottom;
-                    }
-                    fm_core::ArrowType::StickArrowTopReverseDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::StickArrowBottom;
-                    }
-                    fm_core::ArrowType::StickArrowBottomReverseDotted => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::StickArrowTop;
-                    }
-                    fm_core::ArrowType::Circle => marker_end = MarkerKind::Circle,
-                    fm_core::ArrowType::Cross => marker_end = MarkerKind::Cross,
-                    // `o--o` / `x--x` mark BOTH ends (bd-zdpwd), exactly as `<-->` does below.
-                    fm_core::ArrowType::CircleBoth => {
-                        marker_start = MarkerKind::Circle;
-                        marker_end = MarkerKind::Circle;
-                    }
-                    fm_core::ArrowType::CrossBoth => {
-                        marker_start = MarkerKind::Cross;
-                        marker_end = MarkerKind::Cross;
-                    }
-                    // `o==o` / `x==x` — same markers, THICK stroke (bd-lrl48). mermaid strips the
-                    // leading marker before reading the stroke, so the weight comes from the `==`.
-                    fm_core::ArrowType::ThickCircle => {
-                        stroke.width = 2.5;
-                        marker_end = MarkerKind::Circle;
-                    }
-                    fm_core::ArrowType::ThickCross => {
-                        stroke.width = 2.5;
-                        marker_end = MarkerKind::Cross;
-                    }
-                    fm_core::ArrowType::ThickCircleBoth => {
-                        stroke.width = 2.5;
-                        marker_start = MarkerKind::Circle;
-                        marker_end = MarkerKind::Circle;
-                    }
-                    fm_core::ArrowType::ThickCrossBoth => {
-                        stroke.width = 2.5;
-                        marker_start = MarkerKind::Cross;
-                        marker_end = MarkerKind::Cross;
-                    }
-                    fm_core::ArrowType::DottedCircle => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::Circle;
-                    }
-                    fm_core::ArrowType::DottedCircleBoth => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::Circle;
-                        marker_end = MarkerKind::Circle;
-                    }
-                    fm_core::ArrowType::DottedCrossBoth => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::Cross;
-                        marker_end = MarkerKind::Cross;
-                    }
-                    fm_core::ArrowType::ThickLine => {
-                        stroke.width = 2.5;
-                        marker_end = MarkerKind::None;
-                    }
-                    fm_core::ArrowType::DottedLine => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_end = MarkerKind::None;
-                    }
-                    fm_core::ArrowType::DoubleArrow => {
-                        marker_start = MarkerKind::Arrow;
-                        marker_end = MarkerKind::Arrow;
-                    }
-                    fm_core::ArrowType::DoubleThickArrow => {
-                        stroke.width = 2.5;
-                        marker_start = MarkerKind::ThickArrow;
-                        marker_end = MarkerKind::ThickArrow;
-                    }
-                    fm_core::ArrowType::DoubleDottedArrow => {
-                        stroke.dash_array = vec![6.0, 4.0];
-                        stroke.line_cap = LineCap::Round;
-                        marker_start = MarkerKind::Arrow;
-                        marker_end = MarkerKind::Arrow;
-                    }
-                    // UML aggregation/composition mark the OWNING end: the source for `o--`/`*--`,
-                    // the target for the reversed `--o`/`--*`.
-                    fm_core::ArrowType::Aggregation => {
-                        marker_start = MarkerKind::DiamondOpen;
-                    }
-                    fm_core::ArrowType::AggregationReverse => {
-                        marker_end = MarkerKind::DiamondOpen;
-                    }
-                    fm_core::ArrowType::Composition => {
-                        marker_start = MarkerKind::Diamond;
-                    }
-                    fm_core::ArrowType::CompositionReverse => {
-                        marker_end = MarkerKind::Diamond;
-                    }
-                    // Generalization marks the PARENT end: source for `<|--`, target for `--|>`.
-                    fm_core::ArrowType::Inheritance => {
-                        marker_start = MarkerKind::TriangleOpenStart;
-                    }
-                    fm_core::ArrowType::InheritanceReverse => {
-                        marker_end = MarkerKind::TriangleOpen;
-                    }
-                    // Lollipop marks the end that PROVIDES the interface (bd-lkm9i).
-                    fm_core::ArrowType::Lollipop => {
-                        marker_start = MarkerKind::LollipopStart;
-                    }
-                    fm_core::ArrowType::LollipopReverse => {
-                        marker_end = MarkerKind::Lollipop;
-                    }
-                    // Skipped at the top of the loop; it has no marker to give.
-                    fm_core::ArrowType::Invisible => {}
-                }
-
-                // A RELATION MARKED AT BOTH ENDS carries its target-end marker as a second
-                // `ArrowType` (bd-f9t0r). The match above is a statement, not an expression, so it
-                // cannot simply be run twice the way fm-render-canvas reuses `legacy_uml_markers`;
-                // the mapping is restated here for the six variants a co-arrow can be, and
-                // `layout_co_arrow_markers_match_the_primary_mapping` asserts the two agree for
-                // every one of them so this copy cannot drift.
-                if let Some(co_arrow) = ir_edge.co_arrow() {
-                    marker_end = co_arrow_marker_end(co_arrow).unwrap_or(marker_end);
+                    _ => {}
                 }
             }
         }
@@ -24718,6 +24628,77 @@ mod tests {
         clippy::similar_names,
         clippy::many_single_char_names
     )]
+
+    #[test]
+    fn undirected_cycles_do_not_acquire_feedback_arrowheads() {
+        use super::{MarkerKind, RenderItem, build_edge_layer, layout_diagram};
+        use fm_core::ArrowType;
+
+        for (link, arrow) in [
+            ("---", ArrowType::Line),
+            ("-.-", ArrowType::DottedLine),
+            ("===", ArrowType::ThickLine),
+        ] {
+            let source = format!("flowchart LR\nA {link} B\nB {link} C\nC {link} A\n");
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 3, "{source}");
+            assert!(ir.edges.iter().all(|edge| edge.arrow == arrow), "{source}");
+            let layout = layout_diagram(&ir);
+            assert!(
+                layout.edges.iter().any(|edge| edge.reversed),
+                "the parsed cycle must exercise a layout-reversed connector: {source}"
+            );
+            let layer = build_edge_layer(&ir, &layout);
+            let paths: Vec<_> = layer
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Path(path) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                paths.len(),
+                3,
+                "every connector must remain drawn: {source}"
+            );
+            for path in paths {
+                assert_eq!(
+                    (path.marker_start, path.marker_end),
+                    (MarkerKind::None, MarkerKind::None),
+                    "cycle removal must not invent a direction: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_feedback_edges_preserve_authored_endpoint_metadata() {
+        use super::{MarkerKind, edge_marker_kinds};
+        use fm_core::{ArrowType, IrEdge};
+
+        let mut edge = IrEdge::default();
+        edge.extras_mut().co_arrow = Some(ArrowType::InheritanceReverse);
+        for arrow in [ArrowType::Line, ArrowType::DottedLine, ArrowType::ThickLine] {
+            edge.arrow = arrow;
+            for reversed in [false, true] {
+                assert_eq!(
+                    edge_marker_kinds(&edge, reversed),
+                    (MarkerKind::None, MarkerKind::TriangleOpen),
+                    "an explicit target marker survives on {arrow:?}, reversed={reversed}"
+                );
+            }
+        }
+
+        // ER notation is authoritative even if a caller supplies unrelated arrow metadata.
+        edge.extras_mut().er_notation = Some("||--o{".into());
+        for reversed in [false, true] {
+            assert_eq!(
+                edge_marker_kinds(&edge, reversed),
+                (MarkerKind::ErOnlyOneStart, MarkerKind::ErZeroOrMoreEnd)
+            );
+        }
+    }
 
     /// ⚠️ THIS CRATE RESTATES THE MARKER MAPPING, SO THE COPY IS PINNED TO THE ORIGINAL.
     ///

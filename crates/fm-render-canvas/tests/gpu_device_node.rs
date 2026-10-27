@@ -703,6 +703,69 @@ fn an_undirected_link_plans_no_arrowhead() {
     );
 }
 
+/// Check the actual shader silhouette, including the empty regions that distinguish an open
+/// marker from a filled one. Planning the right enum alone cannot prove the GPU draws it.
+#[test]
+fn the_marker_pipeline_preserves_half_open_and_interface_glyphs() {
+    use fm_render_canvas::{GpuArrowheadInstance, GpuMarkerKind as K};
+
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let pass = InstancePass::new(&gpu, &arrowhead_pipeline());
+    let bounds = fm_layout::LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 40.0,
+    };
+    for (kind, painted, empty) in [
+        (K::Arrow, (-6.0, 0.0), (2.0, 0.0)),
+        (K::Circle, (0.0, 3.0), (0.0, 6.0)),
+        (K::Cross, (2.0, 2.0), (3.0, 0.0)),
+        (K::Diamond, (-5.0, 0.0), (3.0, 0.0)),
+        (K::DiamondOpen, (-5.0, 5.0), (-5.0, 0.0)),
+        (K::TriangleOpen, (-10.0, 0.0), (-5.0, 0.0)),
+        (K::Open, (-5.0, -2.5), (-5.0, 0.0)),
+        (K::HalfArrowTop, (-6.0, -1.0), (-6.0, 1.0)),
+        (K::HalfArrowBottom, (-6.0, 1.0), (-6.0, -1.0)),
+        (K::StickArrowTop, (-5.0, -2.5), (-6.0, -0.5)),
+        (K::StickArrowBottom, (-5.0, 2.5), (-6.0, 0.5)),
+        (K::Lollipop, (6.0, 6.0), (6.0, 0.0)),
+        (K::LollipopStart, (-6.0, 6.0), (-6.0, 0.0)),
+    ] {
+        let marker = GpuArrowheadInstance {
+            position: [20.0, 20.0],
+            angle: 0.0,
+            size: 10.0,
+            edge_index: 0,
+            kind: kind as u32,
+            color: [0.1, 0.2, 0.3, 1.0],
+            fill: [1.0, 1.0, 1.0, 1.0],
+        };
+        let bytes = arrowhead_instance_bytes(&[marker]);
+        let draw = InstanceDraw {
+            bounds: &bounds,
+            instance_bytes: &bytes,
+            instance_count: 1,
+            atlas: None,
+        };
+        let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("render marker");
+        let sample = |point: (f32, f32)| {
+            let (x, y) = image.pixel_for(&bounds, 20.0 + point.0, 20.0 + point.1);
+            image.pixel(x, y).expect("marker sample inside texture")[3]
+        };
+        assert!(
+            sample(painted) > 100,
+            "{kind:?} omitted its authored shape at {painted:?}"
+        );
+        assert!(
+            sample(empty) < 20,
+            "{kind:?} filled an intentionally empty region at {empty:?}"
+        );
+    }
+}
+
 /// SAME-IR COMPARISON FOR EDGES: the GPU paints along each routed segment, and the SVG draws a path
 /// for that same edge id. Unblocked by the bd-s7ond shader fix.
 ///

@@ -48,8 +48,8 @@ pub use gpu_layout::{
 };
 pub use gpu_plan::{
     ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment,
-    GpuNodeInstance, GpuNodeShape, GpuPieWedge, GpuRenderPlan, GpuTextQuad, GpuTextRun,
-    GpuTextSource, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL, TEXT_ATLAS_WGSL,
+    GpuMarkerKind, GpuNodeInstance, GpuNodeShape, GpuPieWedge, GpuRenderPlan, GpuTextQuad,
+    GpuTextRun, GpuTextSource, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL, TEXT_ATLAS_WGSL,
     TRIANGLE_WGSL, parse_paint_rgba,
 };
 pub use interaction::{

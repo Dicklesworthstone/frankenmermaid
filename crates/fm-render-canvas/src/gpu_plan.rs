@@ -394,6 +394,13 @@ pub enum GpuMarkerKind {
     Diamond = 3,
     DiamondOpen = 4,
     TriangleOpen = 5,
+    Open = 6,
+    HalfArrowTop = 7,
+    HalfArrowBottom = 8,
+    StickArrowTop = 9,
+    StickArrowBottom = 10,
+    Lollipop = 11,
+    LollipopStart = 12,
 }
 
 impl From<MarkerKind> for GpuMarkerKind {
@@ -404,15 +411,17 @@ impl From<MarkerKind> for GpuMarkerKind {
             MarkerKind::Diamond => Self::Diamond,
             MarkerKind::DiamondOpen => Self::DiamondOpen,
             MarkerKind::TriangleOpen | MarkerKind::TriangleOpenStart => Self::TriangleOpen,
+            MarkerKind::Open => Self::Open,
+            MarkerKind::HalfArrowTop => Self::HalfArrowTop,
+            MarkerKind::HalfArrowBottom => Self::HalfArrowBottom,
+            MarkerKind::StickArrowTop => Self::StickArrowTop,
+            MarkerKind::StickArrowBottom => Self::StickArrowBottom,
+            MarkerKind::Lollipop => Self::Lollipop,
+            MarkerKind::LollipopStart => Self::LollipopStart,
             MarkerKind::None
             | MarkerKind::Arrow
-            | MarkerKind::HalfArrowTop
-            | MarkerKind::HalfArrowBottom
-            | MarkerKind::StickArrowTop
-            | MarkerKind::StickArrowBottom
             | MarkerKind::ThickArrow
-            | MarkerKind::DottedArrow
-            | MarkerKind::Open => Self::Arrow,
+            | MarkerKind::DottedArrow => Self::Arrow,
             // ⚠️ REACHED ONLY IF THE COLLECTOR'S FILTER IS REMOVED. `collect_scene_markers` drops ER
             // cardinality kinds before they get here, because there is no crow's-foot glyph in the
             // shader's marker set. The arm exists so that adding one is a deliberate edit rather
@@ -424,12 +433,7 @@ impl From<MarkerKind> for GpuMarkerKind {
             | MarkerKind::ErOneOrMoreStart
             | MarkerKind::ErOneOrMoreEnd
             | MarkerKind::ErZeroOrMoreStart
-            | MarkerKind::ErZeroOrMoreEnd
-            // Same contract for the lollipop pair (bd-lkm9i): `collect_scene_markers` drops them
-            // via `lacks_gpu_glyph`, and this arm exists so that giving the shader a socket glyph
-            // is a deliberate edit here rather than a silent fall-through to `Arrow`.
-            | MarkerKind::Lollipop
-            | MarkerKind::LollipopStart => Self::Arrow,
+            | MarkerKind::ErZeroOrMoreEnd => Self::Arrow,
         }
     }
 }
@@ -1428,17 +1432,6 @@ pub struct GpuRenderPlan {
     pub glyph_atlas: GlyphAtlasPlan,
 }
 
-/// Whether this arrow type terminates in a head at the TARGET end.
-///
-/// `Line`, `DottedLine` and `ThickLine` are undirected — giving them a head would assert a direction
-/// the author did not write, which is the ER-notation defect bd-m0a9 fixed in the SVG renderer.
-const fn arrow_has_end_head(arrow: fm_core::ArrowType) -> bool {
-    !matches!(
-        arrow,
-        fm_core::ArrowType::Line | fm_core::ArrowType::DottedLine | fm_core::ArrowType::ThickLine
-    )
-}
-
 impl GpuRenderPlan {
     /// Build GPU-uploadable primitives without changing layout or render ordering.
     ///
@@ -2147,35 +2140,41 @@ impl GpuRenderPlan {
                 }
             }
 
-            // Marker directions come from the exact emitted curves, not their tessellation chords.
-            const HEAD_SIZE: f32 = 10.0;
-            if let Some(endpoints) = endpoints
-                && arrow_has_end_head(arrow)
-            {
-                let end = endpoints.end;
-                arrowheads.push(GpuArrowheadInstance {
-                    position: [end.point.x, end.point.y],
-                    angle: end.tangent.y.atan2(end.tangent.x),
-                    size: HEAD_SIZE,
-                    edge_index,
-                    kind: GpuMarkerKind::Arrow as u32,
-                    color,
-                    fill: color,
-                });
-            }
-            if let Some(endpoints) = endpoints
-                && matches!(arrow, fm_core::ArrowType::DoubleArrow)
-            {
-                let start = endpoints.start;
-                arrowheads.push(GpuArrowheadInstance {
-                    position: [start.point.x, start.point.y],
-                    angle: (-start.tangent.y).atan2(-start.tangent.x),
-                    size: HEAD_SIZE,
-                    edge_index,
-                    kind: GpuMarkerKind::Arrow as u32,
-                    color,
-                    fill: color,
-                });
+            // Markers come from the same semantic mapping as SVG scenes and Canvas2D, even when
+            // the caller supplies only a layout. Their tangents come from the emitted curves.
+            if let Some(endpoints) = endpoints {
+                let (start, end) = ir
+                    .edges
+                    .get(edge.edge_index)
+                    .map_or((MarkerKind::None, MarkerKind::Arrow), |ir_edge| {
+                        fm_layout::edge_marker_kinds(ir_edge, edge.reversed)
+                    });
+                for (marker, endpoint, at_start) in
+                    [(start, endpoints.start, true), (end, endpoints.end, false)]
+                {
+                    if marker == MarkerKind::None || marker.lacks_gpu_glyph() {
+                        continue;
+                    }
+                    let mut angle = endpoint.tangent.y.atan2(endpoint.tangent.x);
+                    if marker == MarkerKind::TriangleOpenStart {
+                        angle += core::f32::consts::PI;
+                    } else if at_start {
+                        angle =
+                            crate::renderer::start_marker_angle(marker, f64::from(angle)) as f32;
+                    }
+                    let mut instance = scene_marker_instance(
+                        marker,
+                        [endpoint.point.x, endpoint.point.y],
+                        angle,
+                        color,
+                    );
+                    instance.edge_index = edge_index;
+                    if marker == MarkerKind::Circle {
+                        instance.fill =
+                            parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                    }
+                    arrowheads.push(instance);
+                }
             }
         }
 
@@ -3637,16 +3636,13 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
         match item {
             RenderItem::Group(child) => collect_scene_markers(child, markers),
             RenderItem::Path(path) => {
+                let first_marker = markers.len();
                 let color = path
                     .stroke
                     .as_ref()
                     .and_then(|stroke| parse_paint_rgba(&stroke.color))
                     .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
-                // ER crow's-foot shapes and UML lollipops are skipped, not mapped: the shader's
-                // marker set has no glyph for either, and `GpuMarkerKind`'s fallback is `Arrow` — an
-                // arrowhead in a crow's foot's place states a cardinality the source never declared
-                // (bd-dun16), and in a lollipop's place turns a provided interface into an
-                // association (bd-lkm9i). Both are false statements, not missing ones.
+                // ER cardinality is drawn by its own segment pass, never as ordinary arrows.
                 if path.marker_start != MarkerKind::None
                     && !path.marker_start.lacks_gpu_glyph()
                     && let Some((position, angle)) = path_marker_start(&path.commands)
@@ -3679,6 +3675,11 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                         angle,
                         color,
                     ));
+                }
+                if let fm_layout::RenderSource::Edge(index) = path.source {
+                    for marker in &mut markers[first_marker..] {
+                        marker.edge_index = u32::try_from(index).unwrap_or(NO_EDGE_INDEX);
+                    }
                 }
             }
             RenderItem::Text(_) => {}
@@ -4217,7 +4218,8 @@ var<private> QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexOut {
-    let local = QUAD[vertex_index] * head.size;
+    // Leave room for the outline and its antialias band at the back of an arrow.
+    let local = QUAD[vertex_index] * 1.35 * head.size;
     let c = cos(head.angle);
     let s = sin(head.angle);
     let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
@@ -4225,43 +4227,70 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexO
 
     var out: VertexOut;
     out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
-    out.local = QUAD[vertex_index];
+    out.local = QUAD[vertex_index] * 1.35;
     out.kind = head.kind;
     out.color = head.color;
     out.fill = head.fill;
     return out;
 }
 
+fn marker_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let delta = b - a;
+    return length(p - a - delta * clamp(dot(p - a, delta) / dot(delta, delta), 0.0, 1.0));
+}
+
+fn marker_cross(a: vec2<f32>, b: vec2<f32>) -> f32 {
+    return a.x * b.y - a.y * b.x;
+}
+
+fn marker_triangle_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let distance = min(marker_segment_distance(p, a, b),
+        min(marker_segment_distance(p, b, c), marker_segment_distance(p, c, a)));
+    let sides = vec3<f32>(marker_cross(b - a, p - a), marker_cross(c - b, p - b), marker_cross(a - c, p - c));
+    let inside = all(sides >= vec3<f32>(0.0)) || all(sides <= vec3<f32>(0.0));
+    return select(distance, -distance, inside);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let p = in.local;
-    let triangle = p.x <= 0.0 && p.x >= -1.0 && abs(p.y) <= -p.x * 0.5;
-    let diamond_distance = abs(p.x) + abs(p.y) * 2.5;
-    let circle_distance = length(p * vec2<f32>(1.0, 2.5));
-    let cross = (abs(p.x) <= 0.12 && abs(p.y) <= 0.5) || (abs(p.x) <= 0.5 && abs(p.y) <= 0.12);
+    let tip = vec2<f32>(0.0, 0.0);
+    let top = vec2<f32>(-1.0, -0.5);
+    let bottom = vec2<f32>(-1.0, 0.5);
+    let back = vec2<f32>(-1.0, 0.0);
+    let triangle = marker_triangle_distance(p, tip, top, bottom);
+    // All distances are in units of marker size. Derivatives keep the outline smooth at any zoom.
+    let aa = max(length(fwidth(p)), 0.0001);
+    var distance = triangle;
+    switch in.kind {
+        case 1u: { distance = length(p) - 0.4; }
+        case 2u: {
+            distance = min(
+                marker_segment_distance(p, vec2<f32>(-0.4, -0.4), vec2<f32>(0.4, 0.4)),
+                marker_segment_distance(p, vec2<f32>(-0.4, 0.4), vec2<f32>(0.4, -0.4))) - 0.1;
+        }
+        case 3u: { distance = (abs(p.x + 0.5) + abs(p.y) - 0.5) * 0.70710678; }
+        case 4u: { distance = abs((abs(p.x + 0.5) + abs(p.y) - 0.5) * 0.70710678) - 0.05; }
+        case 5u: { distance = abs(triangle) - 0.05; }
+        case 6u: { distance = min(marker_segment_distance(p, top, tip), marker_segment_distance(p, bottom, tip)) - 0.06; }
+        case 7u: { distance = marker_triangle_distance(p, tip, top, back); }
+        case 8u: { distance = marker_triangle_distance(p, tip, back, bottom); }
+        case 9u: { distance = marker_segment_distance(p, top, tip) - 0.06; }
+        case 10u: { distance = marker_segment_distance(p, bottom, tip) - 0.06; }
+        case 11u: { distance = abs(length(p - vec2<f32>(0.6, 0.0)) - 0.6) - 0.06; }
+        case 12u: { distance = abs(length(p + vec2<f32>(0.6, 0.0)) - 0.6) - 0.06; }
+        default: {}
+    }
+    let coverage = 1.0 - smoothstep(-aa, aa, distance);
+    var color = in.color;
     if in.kind == 1u {
-        if circle_distance > 0.4 { discard; }
-        return in.fill;
+        // The terminator is round with a visible outline, including on a white canvas.
+        let inner = 1.0 - smoothstep(-0.1 - aa, -0.1 + aa, distance);
+        color = mix(in.color, in.fill, inner);
     }
-    if in.kind == 2u {
-        if !cross { discard; }
-        return in.color;
-    }
-    if in.kind == 3u {
-        if diamond_distance > 0.5 { discard; }
-        return in.fill;
-    }
-    if in.kind == 4u {
-        if diamond_distance > 0.5 || diamond_distance < 0.34 { discard; }
-        return in.color;
-    }
-    if in.kind == 5u {
-        let edge_distance = abs(abs(p.y) + p.x * 0.5);
-        if !triangle || (p.x > -0.86 && edge_distance > 0.1) { discard; }
-        return in.color;
-    }
-    if !triangle { discard; }
-    return in.color;
+    color.a = color.a * coverage;
+    if color.a <= 0.0 { discard; }
+    return color;
 }
 "#;
 
@@ -4321,6 +4350,143 @@ pub(crate) fn rendered_label_gap(
 #[cfg(test)]
 mod tests {
     use super::{GpuNodeShape, GpuRenderPlan};
+
+    #[test]
+    fn gpu_parsed_edge_markers_preserve_shape_endpoint_and_stroke() {
+        use super::GpuMarkerKind as K;
+        let cases = [
+            ("flowchart LR\nA --- B", vec![], false, false),
+            ("flowchart LR\nA -.- B", vec![], true, false),
+            ("flowchart LR\nA === B", vec![], false, true),
+            (
+                "flowchart LR\nA <==> B",
+                vec![(K::Arrow, true), (K::Arrow, false)],
+                false,
+                true,
+            ),
+            (
+                "flowchart LR\nA <-.-> B",
+                vec![(K::Arrow, true), (K::Arrow, false)],
+                true,
+                false,
+            ),
+            (
+                "flowchart LR\nA o--o B",
+                vec![(K::Circle, true), (K::Circle, false)],
+                false,
+                false,
+            ),
+            (
+                "flowchart LR\nA x--x B",
+                vec![(K::Cross, true), (K::Cross, false)],
+                false,
+                false,
+            ),
+            (
+                "flowchart LR\nA o-.-o B",
+                vec![(K::Circle, true), (K::Circle, false)],
+                true,
+                false,
+            ),
+            (
+                "classDiagram\nA o-- B",
+                vec![(K::DiamondOpen, true)],
+                false,
+                false,
+            ),
+            (
+                "classDiagram\nA --|> B",
+                vec![(K::TriangleOpen, false)],
+                false,
+                false,
+            ),
+            (
+                "classDiagram\nA ()-- B",
+                vec![(K::LollipopStart, true)],
+                false,
+                false,
+            ),
+            (
+                "classDiagram\nA --() B",
+                vec![(K::Lollipop, false)],
+                false,
+                false,
+            ),
+            (
+                "sequenceDiagram\nA-)B: async",
+                vec![(K::Open, false)],
+                false,
+                false,
+            ),
+            (
+                "sequenceDiagram\nA-|\\B: half",
+                vec![(K::HalfArrowTop, false)],
+                false,
+                false,
+            ),
+            (
+                "sequenceDiagram\nA/|--B: reverse",
+                vec![(K::HalfArrowBottom, true)],
+                true,
+                false,
+            ),
+            (
+                "sequenceDiagram\nA--//B: stick",
+                vec![(K::StickArrowBottom, false)],
+                true,
+                false,
+            ),
+        ];
+        for (source, expected, dashed, thick) in cases {
+            let ir = fm_parser::parse(source).ir;
+            assert_eq!(ir.edges.len(), 1, "{source}");
+            let layout = fm_layout::layout_diagram(&ir);
+            let edge = &layout.edges[0];
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+            assert_eq!(plan.arrowheads.len(), expected.len(), "{source}");
+            for (marker, (kind, at_start)) in plan.arrowheads.iter().zip(&expected) {
+                assert_eq!(marker.kind, *kind as u32, "{source}");
+                assert_eq!(
+                    marker.edge_index, 0,
+                    "markers must retain their source edge"
+                );
+                let endpoint = if *at_start {
+                    edge.points.first()
+                } else {
+                    edge.points.last()
+                }
+                .unwrap();
+                assert_eq!(marker.position, [endpoint.x, endpoint.y], "{source}");
+            }
+            assert!(!plan.edge_segments.is_empty(), "{source}");
+            assert!(
+                plan.edge_segments
+                    .iter()
+                    .all(|segment| (segment.dash[0] > 0.0) == dashed),
+                "{source}"
+            );
+            assert!(
+                plan.edge_segments
+                    .iter()
+                    .all(|segment| (segment.width == 2.5) == thick),
+                "{source}"
+            );
+
+            let scene = fm_layout::build_render_scene(&ir, &layout);
+            let scene_plan = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.25);
+            let marker_identity = |plan: &GpuRenderPlan| {
+                plan.arrowheads
+                    .iter()
+                    .map(|head| (head.kind, head.position, head.edge_index))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                marker_identity(&scene_plan),
+                marker_identity(&plan),
+                "{source}"
+            );
+        }
+    }
 
     /// Midpoint of a run's ADVANCE SPAN — what "centred" means now that advances are proportional.
     ///
@@ -7327,7 +7493,7 @@ mod tests {
             .iter()
             .find(|marker| marker.kind == super::GpuMarkerKind::DiamondOpen as u32)
             .expect("GPU plan omitted the SVG aggregation marker");
-        assert_eq!(marker.edge_index, super::NO_EDGE_INDEX);
+        assert_eq!(marker.edge_index, 0);
         assert_eq!(marker.fill, super::DEFAULT_NODE_FILL_RGBA);
         assert!(marker.size > 0.0);
     }

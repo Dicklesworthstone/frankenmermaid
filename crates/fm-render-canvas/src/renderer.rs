@@ -2650,150 +2650,36 @@ impl Canvas2dRenderer {
                 ctx.stroke();
                 self.draw_calls += 1;
 
-                // ER crow's-foot cardinality (bd-hh0o7), BEFORE the UML marker path and not through it.
-                //
-                // ⚠️ `legacy_uml_markers` IS KEYED ON `ArrowType`, and ER cardinality is not an
-                // ArrowType — it lives in `edge.er_notation()`. Adding the eight glyphs to
-                // `draw_marker_primitive` alone therefore left them as DEAD CODE: nothing on this
-                // surface ever asked for an `Er*` variant, and a draw-call test still passed because an
-                // ER diagram has plenty of other things to draw. Caught by disarming the arm and
-                // watching nothing fail.
-                //
-                // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
-                // the same pair fm-render-svg and the GPU plan select with, not a second table.
-                if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
-                    && let Some(endpoints) = path_endpoints
-                {
-                    let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-                    let start = endpoints.start;
-                    let end = endpoints.end;
-                    let placements = [
-                        (
-                            left.map(|form| MarkerKind::er_pair(form).0),
-                            f64::from(start.point.x) + offset_x,
-                            f64::from(start.point.y) + offset_y,
-                            f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
-                        ),
-                        (
-                            right.map(|form| MarkerKind::er_pair(form).1),
-                            f64::from(end.point.x) + offset_x,
-                            f64::from(end.point.y) + offset_y,
-                            f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
-                        ),
-                    ];
-                    for (kind, mx, my, angle) in placements {
-                        let Some(kind) = kind else {
+                if let Some(endpoints) = path_endpoints {
+                    let (marker_start, marker_end) = ir_edge
+                        .map_or((MarkerKind::None, MarkerKind::Arrow), |edge| {
+                            fm_layout::edge_marker_kinds(edge, edge_path.reversed)
+                        });
+                    // A dashed connector still has solid endpoint glyphs. Retaining the path's
+                    // dash here can erase an entire short stick or cardinality bar.
+                    ctx.set_line_dash(&[]);
+                    for (marker, endpoint, at_start) in [
+                        (marker_start, endpoints.start, true),
+                        (marker_end, endpoints.end, false),
+                    ] {
+                        if marker == MarkerKind::None {
                             continue;
-                        };
-                        self.draw_calls += draw_er_cardinality_marker(
+                        }
+                        let angle =
+                            f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x));
+                        self.draw_calls += draw_marker_primitive(
                             ctx,
-                            kind,
-                            mx,
-                            my,
-                            angle,
+                            marker,
+                            f64::from(endpoint.point.x) + offset_x,
+                            f64::from(endpoint.point.y) + offset_y,
+                            if at_start {
+                                start_marker_angle(marker, angle)
+                            } else {
+                                angle
+                            },
                             &self.config.node_fill,
                             stroke,
                         );
-                    }
-                }
-
-                let uml_markers = if edge_path.reversed {
-                    None
-                } else {
-                    // A RELATION MARKED AT BOTH ENDS is two `ArrowType`s, not one (bd-f9t0r): the
-                    // primary carries the source-end marker and `co_arrow` the target-end one, each
-                    // named by the `ArrowType` that already draws it there. So the SAME derivation runs
-                    // twice and the results merge — no second marker table to drift out of sync with
-                    // this one.
-                    let primary = legacy_uml_markers(arrow);
-                    let co = ir_edge
-                        .and_then(fm_core::IrEdge::co_arrow)
-                        .and_then(legacy_uml_markers);
-                    merge_uml_markers(primary, co)
-                };
-                if let Some((marker_start, marker_end)) = uml_markers
-                    && let Some(endpoints) = path_endpoints
-                {
-                    let start = endpoints.start;
-                    let end = endpoints.end;
-
-                    if marker_start != MarkerKind::None {
-                        let sx = f64::from(start.point.x) + offset_x;
-                        let sy = f64::from(start.point.y) + offset_y;
-                        let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
-                        let marker_calls = draw_marker_primitive(
-                            ctx,
-                            marker_start,
-                            sx,
-                            sy,
-                            start_marker_angle(marker_start, angle),
-                            &self.config.node_fill,
-                            stroke,
-                        );
-                        self.draw_calls += marker_calls;
-                    }
-
-                    if marker_end != MarkerKind::None {
-                        let ex = f64::from(end.point.x) + offset_x;
-                        let ey = f64::from(end.point.y) + offset_y;
-                        let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
-                        let marker_calls = draw_marker_primitive(
-                            ctx,
-                            marker_end,
-                            ex,
-                            ey,
-                            angle,
-                            &self.config.node_fill,
-                            stroke,
-                        );
-                        self.draw_calls += marker_calls;
-                    }
-                } else if let Some(endpoints) = path_endpoints {
-                    let end = endpoints.end;
-                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
-
-                    let ex = f64::from(end.point.x) + offset_x;
-                    let ey = f64::from(end.point.y) + offset_y;
-
-                    match arrow {
-                        ArrowType::Line => {}
-                        ArrowType::Circle => {
-                            draw_circle_marker(
-                                ctx,
-                                ex,
-                                ey,
-                                4.0,
-                                Some(&self.config.node_fill),
-                                stroke,
-                            );
-                            self.draw_calls += 1;
-                        }
-                        ArrowType::Cross => {
-                            draw_cross_marker(ctx, ex, ey, 8.0, stroke);
-                            self.draw_calls += 1;
-                        }
-                        // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
-                        _ => {
-                            draw_arrowhead(ctx, ex, ey, angle, 10.0, stroke);
-                            self.draw_calls += 1;
-                        }
-                    }
-
-                    // Draw arrowhead at start for double arrows
-                    if matches!(
-                        arrow,
-                        ArrowType::DoubleArrow
-                            | ArrowType::DoubleThickArrow
-                            | ArrowType::DoubleDottedArrow
-                    ) {
-                        let start = endpoints.start;
-                        let start_angle =
-                            f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
-                        let sx = f64::from(start.point.x) + offset_x;
-                        let sy = f64::from(start.point.y) + offset_y;
-
-                        draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
-                        self.draw_calls += 1;
                     }
                 }
             }
@@ -3806,12 +3692,22 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_circle_marker(ctx, x, y, 4.0, Some(node_fill), stroke_color);
             1
         }
-        // The lollipop socket is HOLLOW and slightly larger than the filled `--o` terminator above,
-        // matching the r=6 circle mermaid declares against that marker's r=5 (bd-lkm9i). Both slots
-        // draw the same glyph: a circle is symmetric under rotation, so unlike the triangle pair
-        // below neither needs an angle flip.
+        // The socket sits beyond the path endpoint, so the shaft meets its circumference rather
+        // than crossing its hollow interior. SVG encodes the same offsets with refX 13/1.
         MarkerKind::Lollipop | MarkerKind::LollipopStart => {
-            draw_circle_marker(ctx, x, y, 6.0, None, stroke_color);
+            let offset = if marker == MarkerKind::LollipopStart {
+                -6.0
+            } else {
+                6.0
+            };
+            draw_circle_marker(
+                ctx,
+                x + offset * angle.cos(),
+                y + offset * angle.sin(),
+                6.0,
+                None,
+                stroke_color,
+            );
             1
         }
         MarkerKind::Cross => {
@@ -3834,15 +3730,47 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_open_triangle_marker(ctx, x, y, angle + std::f64::consts::PI, 10.0, stroke_color);
             1
         }
-        MarkerKind::Arrow
-        | MarkerKind::ThickArrow
-        | MarkerKind::DottedArrow
-        | MarkerKind::Open
+        MarkerKind::Arrow | MarkerKind::ThickArrow | MarkerKind::DottedArrow => {
+            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::Open
         | MarkerKind::HalfArrowTop
         | MarkerKind::HalfArrowBottom
         | MarkerKind::StickArrowTop
         | MarkerKind::StickArrowBottom => {
-            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            // Half arrows occupy only their authored side of the shaft. A stick or open arrow
+            // remains an unfilled stroke; filling it changes the sequence-message semantics.
+            let bottom = matches!(
+                marker,
+                MarkerKind::HalfArrowBottom | MarkerKind::StickArrowBottom
+            );
+            let filled = matches!(
+                marker,
+                MarkerKind::HalfArrowTop | MarkerKind::HalfArrowBottom
+            );
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            ctx.set_line_dash(&[]);
+            ctx.set_stroke_style(stroke_color);
+            ctx.set_fill_style(stroke_color);
+            ctx.set_line_width(1.2);
+            ctx.begin_path();
+            ctx.move_to(-10.0, if bottom { 5.0 } else { -5.0 });
+            ctx.line_to(0.0, 0.0);
+            if marker == MarkerKind::Open {
+                ctx.line_to(-10.0, 5.0);
+            } else if filled {
+                ctx.line_to(-10.0, 0.0);
+                ctx.close_path();
+            }
+            if filled {
+                ctx.fill();
+            } else {
+                ctx.stroke();
+            }
+            ctx.restore();
             1
         }
     }
@@ -3865,7 +3793,12 @@ pub(crate) fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
             | MarkerKind::StickArrowTop
             | MarkerKind::StickArrowBottom
     ) {
-        angle + std::f64::consts::PI
+        let reversed = angle + std::f64::consts::PI;
+        if reversed > std::f64::consts::PI {
+            reversed - std::f64::consts::TAU
+        } else {
+            reversed
+        }
     } else {
         angle
     }
@@ -4657,52 +4590,30 @@ pub(crate) fn resolve_node_stroke_width(ir: &MermaidDiagramIr, node_index: usize
 
 pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
     match arrow {
-        ArrowType::ThickArrow => (2.5, &[]),
-        ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),
+        ArrowType::ThickArrow
+        | ArrowType::ThickLine
+        | ArrowType::DoubleThickArrow
+        | ArrowType::ThickCircle
+        | ArrowType::ThickCross
+        | ArrowType::ThickCircleBoth
+        | ArrowType::ThickCrossBoth => (2.5, &[]),
+        ArrowType::DottedArrow
+        | ArrowType::DottedLine
+        | ArrowType::DottedOpenArrow
+        | ArrowType::DottedCross
+        | ArrowType::DoubleDottedArrow
+        | ArrowType::DottedCircle
+        | ArrowType::DottedCircleBoth
+        | ArrowType::DottedCrossBoth
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::HalfArrowTopReverseDotted
+        | ArrowType::HalfArrowBottomReverseDotted
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::StickArrowTopReverseDotted
+        | ArrowType::StickArrowBottomReverseDotted => (1.5, &LEGACY_DOTTED_EDGE_DASH),
         _ => (default_width, &[]),
-    }
-}
-
-/// Combine a primary marker pair with a co-arrow's, each contributing only the end it marks.
-///
-/// ⚠️ THE CO-ARROW FILLS AN EMPTY SLOT, IT NEVER OVERWRITES ONE. A co-arrow is the `*Reverse`
-/// (target-end) counterpart of a forward primary, so its start slot is always `None` and the
-/// primary's end slot always is too; taking the co-arrow's value unconditionally would work today
-/// and collapse both markers onto one end the moment that stopped holding. Preferring the
-/// already-set slot states the invariant instead of relying on it.
-const fn merge_uml_markers(
-    primary: Option<(MarkerKind, MarkerKind)>,
-    co: Option<(MarkerKind, MarkerKind)>,
-) -> Option<(MarkerKind, MarkerKind)> {
-    match (primary, co) {
-        (Some((ps, pe)), Some((cs, ce))) => Some((
-            if matches!(ps, MarkerKind::None) {
-                cs
-            } else {
-                ps
-            },
-            if matches!(pe, MarkerKind::None) {
-                ce
-            } else {
-                pe
-            },
-        )),
-        (Some(pair), None) | (None, Some(pair)) => Some(pair),
-        (None, None) => None,
-    }
-}
-
-const fn legacy_uml_markers(arrow: ArrowType) -> Option<(MarkerKind, MarkerKind)> {
-    match arrow {
-        ArrowType::Aggregation => Some((MarkerKind::DiamondOpen, MarkerKind::None)),
-        ArrowType::AggregationReverse => Some((MarkerKind::None, MarkerKind::DiamondOpen)),
-        ArrowType::Composition => Some((MarkerKind::Diamond, MarkerKind::None)),
-        ArrowType::CompositionReverse => Some((MarkerKind::None, MarkerKind::Diamond)),
-        ArrowType::Inheritance => Some((MarkerKind::TriangleOpenStart, MarkerKind::None)),
-        ArrowType::InheritanceReverse => Some((MarkerKind::None, MarkerKind::TriangleOpen)),
-        ArrowType::Lollipop => Some((MarkerKind::LollipopStart, MarkerKind::None)),
-        ArrowType::LollipopReverse => Some((MarkerKind::None, MarkerKind::Lollipop)),
-        _ => None,
     }
 }
 
@@ -4858,8 +4769,29 @@ mod tests {
         default_width: f64,
     ) -> (f64, Option<Vec<f64>>) {
         match arrow {
-            ArrowType::ThickArrow => (2.5, None),
-            ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
+            ArrowType::ThickArrow
+            | ArrowType::ThickLine
+            | ArrowType::DoubleThickArrow
+            | ArrowType::ThickCircle
+            | ArrowType::ThickCross
+            | ArrowType::ThickCircleBoth
+            | ArrowType::ThickCrossBoth => (2.5, None),
+            ArrowType::DottedArrow
+            | ArrowType::DottedLine
+            | ArrowType::DottedOpenArrow
+            | ArrowType::DottedCross
+            | ArrowType::DoubleDottedArrow
+            | ArrowType::DottedCircle
+            | ArrowType::DottedCircleBoth
+            | ArrowType::DottedCrossBoth
+            | ArrowType::HalfArrowTopDotted
+            | ArrowType::HalfArrowBottomDotted
+            | ArrowType::HalfArrowTopReverseDotted
+            | ArrowType::HalfArrowBottomReverseDotted
+            | ArrowType::StickArrowTopDotted
+            | ArrowType::StickArrowBottomDotted
+            | ArrowType::StickArrowTopReverseDotted
+            | ArrowType::StickArrowBottomReverseDotted => (1.5, Some(vec![5.0, 5.0])),
             _ => (default_width, None),
         }
     }
@@ -4894,6 +4826,123 @@ mod tests {
         );
         assert_eq!(hex_fill_with_opacity("red", 0.5), None);
         assert_eq!(hex_fill_with_opacity("#ggg", 0.5), None);
+    }
+
+    #[test]
+    fn canvas_half_and_open_markers_keep_their_authored_geometry() {
+        for (marker, filled, top, bottom) in [
+            (MarkerKind::HalfArrowTop, true, true, false),
+            (MarkerKind::HalfArrowBottom, true, false, true),
+            (MarkerKind::StickArrowTop, false, true, false),
+            (MarkerKind::StickArrowBottom, false, false, true),
+            (MarkerKind::Open, false, true, true),
+        ] {
+            let operations = marker_operations(marker);
+            let fills = operations
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Fill))
+                .count();
+            assert_eq!(
+                fills,
+                usize::from(filled),
+                "{marker:?} lost its fill semantics"
+            );
+            let strokes = operations
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Stroke))
+                .count();
+            assert_eq!(
+                strokes,
+                usize::from(!filled),
+                "{marker:?} lost its outline semantics"
+            );
+            let vertices: Vec<_> = operations
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                vertices.contains(&(0.0, 0.0)),
+                "the tip must meet the connector"
+            );
+            assert_eq!(vertices.iter().any(|(_, y)| *y < 0.0), top, "{marker:?}");
+            assert_eq!(vertices.iter().any(|(_, y)| *y > 0.0), bottom, "{marker:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_parsed_edge_markers_preserve_plain_lines_both_ends_and_stroke_weight() {
+        for (link, fills, arcs, dashed, thick) in [
+            ("---", 0, 0, false, false),
+            ("-.-", 0, 0, true, false),
+            ("===", 0, 0, false, true),
+            ("<-->", 2, 0, false, false),
+            ("<-.->", 2, 0, true, false),
+            ("<==>", 2, 0, false, true),
+            ("o--o", 2, 2, false, false),
+            ("o-.-o", 2, 2, true, false),
+            ("o==o", 2, 2, false, true),
+            ("x--x", 0, 0, false, false),
+        ] {
+            let source = format!("flowchart LR\nA {link} B");
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 1, "{source}");
+            let mut layout = layout_diagram(&ir);
+            layout.edges[0].points = [(10.0, 20.0), (110.0, 20.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(150.0, 60.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let operations = ctx.operations();
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Fill))
+                    .count(),
+                fills,
+                "{link}"
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                    .count(),
+                arcs,
+                "{link}"
+            );
+            assert_eq!(
+                operations.iter().any(
+                    |op| matches!(op, DrawOperation::SetLineDash(pattern) if !pattern.is_empty())
+                ),
+                dashed,
+                "{link}"
+            );
+            assert_eq!(operations.iter().any(|op| matches!(op, DrawOperation::SetLineWidth(width) if (*width - 2.5).abs() < 1e-6)), thick, "{link}");
+            if arcs > 0 {
+                let centers: Vec<_> = operations
+                    .iter()
+                    .filter_map(|op| match op {
+                        DrawOperation::Arc(x, y, ..) => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(centers, [(10.0, 20.0), (110.0, 20.0)], "{link}");
+            }
+            if link == "x--x" {
+                assert_eq!(
+                    operations
+                        .iter()
+                        .filter(|op| matches!(op, DrawOperation::Stroke))
+                        .count(),
+                    5,
+                    "both crosses need two arms in addition to the connector"
+                );
+            }
+        }
     }
 
     fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
