@@ -31,12 +31,14 @@ pub mod invariants;
 mod ishikawa;
 pub mod layout_lens;
 mod pie;
+mod radar;
 mod tree_view;
 mod venn;
 mod wardley;
 use event_model::layout_diagram_event_model_traced;
 use ishikawa::layout_diagram_ishikawa_traced;
 pub use pie::{PieChartLayout, PieLegendEntry, PieSliceLayout, PieTextBlock};
+pub use radar::{RadarChartLayout, RadarPath, RadarPathRole, RadarTextBlock, RadarTextRole};
 use tree_view::layout_diagram_tree_view_traced;
 use venn::layout_diagram_venn_traced;
 use wardley::layout_diagram_wardley_traced;
@@ -3684,6 +3686,13 @@ pub fn build_render_scene_with_metrics(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> RenderScene {
+    if ir.diagram_type == DiagramType::Radar
+        && let (Some(meta), Some(radar)) =
+            (ir.radar_meta.as_ref(), layout.extensions.radar.as_ref())
+    {
+        return RadarChartLayout::new(meta, radar, ir.declared_title_if_drawn(), metrics)
+            .to_scene("#1e293b", "#7c8da5");
+    }
     if ir.diagram_type == DiagramType::Pie && ir.pie_meta.is_some() {
         return pie::build_pie_render_scene(ir, metrics);
     }

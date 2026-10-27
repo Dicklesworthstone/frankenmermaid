@@ -34,11 +34,66 @@ fn render(source: &str) -> String {
 
 const BASIC: &str = "radar-beta\n  axis a, b, c\n  curve x{1,2,3}\n";
 
+#[test]
+fn radar_scene_retains_complete_content_and_uses_the_resolved_theme() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemePreset};
+    let ir = fm_parser::parse("radar-beta\n  title Capability review\n  axis a[\"Availability\"], b[\"Scale\"], c[\"Coverage\"]\n  curve x[\"Current  platform\"]{1,2,3}\n  curve y[\"Target platform\"]{3,3,3}\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            theme,
+            ..Default::default()
+        };
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+        for text in [
+            "Availability",
+            "Scale",
+            "Coverage",
+            "Current  platform",
+            "Target platform",
+        ] {
+            assert!(svg.contains(text), "scene lost {text}");
+        }
+        assert!(svg.contains("#8686ff"));
+        assert!(svg.contains("#ffff78"));
+        // The document's accessibility title may repeat the name, but only one drawable row may.
+        let visible = svg
+            .split("<text")
+            .skip(1)
+            .filter(|element| {
+                element
+                    .split("</text>")
+                    .next()
+                    .unwrap_or_default()
+                    .contains("Capability review")
+            })
+            .count();
+        assert_eq!(visible, 1);
+        let chart = svg
+            .split("<g")
+            .filter_map(|group| group.split('>').next())
+            .find(|group| group.contains("id=\"radar-chart\""))
+            .expect("the measured chart root must be present");
+        assert!(
+            chart.contains("xml:space=\"preserve\""),
+            "authored spaces must survive SVG text rendering"
+        );
+        if theme == ThemePreset::Dark {
+            assert!(
+                !svg.contains("fill=\"#1e293b\""),
+                "light-theme text leaked into the dark chart"
+            );
+        }
+    }
+}
+
 /// Our wheel centre, so measured upstream coordinates (which are relative to ITS centre) can be
 /// compared directly. Layout puts the wheel at 350,350 on a 700x700 canvas and the document adds
-/// the renderer's standard 40px padding.
-const CX: f64 = 390.0;
-const CY: f64 = 390.0;
+/// the renderer's configured padding, which is independent of the quantitative geometry.
+fn wheel_center() -> f64 {
+    350.0 + f64::from(fm_render_svg::SvgRenderConfig::default().padding)
+}
 
 fn numbers(svg: &str, key: &str) -> Vec<f64> {
     let mut out = Vec::new();
@@ -63,6 +118,7 @@ fn curve_points(svg: &str) -> Vec<(f64, f64)> {
     let d = &tail[d_at + 3..];
     let d = &d[..d.find('"').expect("unterminated d")];
     let mut out = Vec::new();
+    let center = wheel_center();
     for token in d
         .replace(['M', 'C', 'Z'], " ")
         .split_whitespace()
@@ -73,7 +129,7 @@ fn curve_points(svg: &str) -> Vec<(f64, f64)> {
             continue;
         };
         if let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>()) {
-            out.push((x - CX, y - CY));
+            out.push((x - center, y - center));
         }
     }
     out
@@ -147,10 +203,11 @@ fn axes_start_at_twelve_oclock_and_run_clockwise() {
     let xs = numbers(&svg, "x2");
     let ys = numbers(&svg, "y2");
     assert_eq!(xs.len(), 4, "expected four spokes");
+    let center = wheel_center();
     let relative: Vec<(f64, f64)> = xs
         .iter()
         .zip(&ys)
-        .map(|(x, y)| ((x - CX).round(), (y - CY).round()))
+        .map(|(x, y)| ((x - center).round(), (y - center).round()))
         .collect();
     assert_eq!(
         relative,

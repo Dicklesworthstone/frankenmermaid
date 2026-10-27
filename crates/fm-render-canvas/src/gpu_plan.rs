@@ -1240,6 +1240,9 @@ pub enum GpuTextSource {
     QuadrantLabel,
     /// A pie-slice percentage or legend row; `node_index` indexes `IrPieMeta::slices`.
     PieSlice,
+    /// An authored radar axis or series legend; indexes the corresponding radar metadata.
+    RadarAxis,
+    RadarLegend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1278,7 +1281,7 @@ pub struct GpuRenderPlan {
     pub xy_plot_instances: Vec<GpuNodeInstance>,
     /// XY axes, tick marks, and grid lines, before the series marks.
     pub xy_axis_segments: Vec<GpuEdgeSegment>,
-    /// XY area fills, behind the series lines, points, and bars.
+    /// Quantitative area fills, behind XY marks or radar outlines.
     pub xy_area_triangles: Vec<GpuTriangleInstance>,
     /// XY bar marks, below line series and their point markers.
     pub xy_bar_instances: Vec<GpuNodeInstance>,
@@ -1541,53 +1544,61 @@ impl GpuRenderPlan {
             });
         }
 
+        let radar_chart = ir
+            .radar_meta
+            .as_ref()
+            .zip(layout.extensions.radar.as_ref())
+            .map(|(meta, radar)| {
+                fm_layout::RadarChartLayout::new(
+                    meta,
+                    radar,
+                    ir.declared_title_if_drawn(),
+                    &metrics,
+                )
+            });
         let mut radar_segments = Vec::new();
-        if let Some(radar) = layout.extensions.radar.as_ref() {
-            let mut segment = |from: [f32; 2], to: [f32; 2]| {
-                radar_segments.push(GpuEdgeSegment {
-                    from,
-                    to,
-                    edge_index: NO_EDGE_INDEX,
-                    color: DEFAULT_NODE_STROKE_RGBA,
-                    dash_phase: 0.0,
-                    // Solid: a radar's rings, spokes and series are all continuous strokes, unlike
-                    // a sequence lifeline which is the dashed member of this family.
-                    dash: [0.0, 0.0],
-                    width: BAND_STROKE_WIDTH,
-                });
-            };
-            // Rings, sampled. 48 samples is the same count the terminal surface uses, so the two
-            // rasterisations of one wheel cannot disagree about how round it is.
-            const RING_SAMPLES: usize = 48;
-            for &ring in &radar.rings {
-                let mut previous: Option<[f32; 2]> = None;
-                let mut first: Option<[f32; 2]> = None;
-                for step in 0..RING_SAMPLES {
-                    #[allow(clippy::cast_precision_loss)]
-                    let angle = std::f32::consts::TAU * step as f32 / RING_SAMPLES as f32;
-                    let point = [
-                        ring.mul_add(angle.cos(), radar.center.x),
-                        ring.mul_add(angle.sin(), radar.center.y),
-                    ];
-                    if let Some(previous) = previous {
-                        segment(previous, point);
-                    } else {
-                        first = Some(point);
+        let mut radar_triangles = Vec::new();
+        if let Some(chart) = &radar_chart {
+            let scene = chart.to_scene(&config.label_color, &config.node_stroke);
+            for item in &scene.root.children {
+                let fm_layout::RenderItem::Path(path) = item else {
+                    continue;
+                };
+                let mut current = None;
+                let mut first = None;
+                let mut segments = Vec::new();
+                for command in &path.commands {
+                    if let PathCmd::MoveTo { x, y } = *command {
+                        first = Some(LayoutPoint { x, y });
                     }
-                    previous = Some(point);
+                    if *command == PathCmd::Close {
+                        if let (Some(from), Some(to)) = (current, first) {
+                            segments.push((from, to));
+                        }
+                    } else {
+                        flatten_connector_command(*command, &mut current, &mut |from, to| {
+                            segments.push((from, to));
+                        });
+                    }
                 }
-                if let (Some(previous), Some(first)) = (previous, first) {
-                    segment(previous, first);
+                if let Some(stroke) = &path.stroke {
+                    let mut color =
+                        parse_paint_rgba(&stroke.color).unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                    color[3] *= stroke.opacity;
+                    radar_segments.extend(segments.iter().map(|(from, to)| {
+                        xy_segment(
+                            [from.x, from.y],
+                            [to.x, to.y],
+                            color,
+                            stroke.width,
+                            [0.0, 0.0],
+                        )
+                    }));
                 }
-            }
-            for axis in &radar.axes {
-                segment([radar.center.x, radar.center.y], [axis.tip.x, axis.tip.y]);
-            }
-            for curve in &radar.curves {
-                for index in 0..curve.points.len() {
-                    let from = curve.points[index];
-                    let to = curve.points[(index + 1) % curve.points.len()];
-                    segment([from.x, from.y], [to.x, to.y]);
+                if let Some(fm_layout::FillStyle::Solid { color, opacity }) = &path.fill {
+                    let mut color = parse_paint_rgba(color).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                    color[3] *= opacity;
+                    tessellate_radar_fill(&segments, color, &mut radar_triangles);
                 }
             }
         }
@@ -2542,18 +2553,20 @@ impl GpuRenderPlan {
                 ));
                 continue;
             }
-            if let Some(ir_node) = ir.nodes.get(node.node_index)
-                && let Some(label_id) = ir_node.label
-                && let Some(label) = ir.labels.get(label_id.0)
-                && !label.text.is_empty()
-            {
+            if let Some(ir_node) = ir.nodes.get(node.node_index) {
+                // Share Canvas/SVG's display rule: implicit state names are visible,
+                // while state ornaments have no text even when their internal ID exists.
+                let label = ir.node_display_text(ir_node);
+                if label.is_empty() {
+                    continue;
+                }
                 labelled.push((
                     node.node_index.try_into().unwrap_or(u32::MAX),
                     [
                         node.bounds.x + (node.bounds.width * 0.5),
                         node.bounds.y + (node.bounds.height * 0.5),
                     ],
-                    label.text.as_str(),
+                    label,
                 ));
             }
         }
@@ -2666,6 +2679,11 @@ impl GpuRenderPlan {
                     .map(|size| size as f32)
             }))
             .chain(pie_text_blocks.iter().map(|(block, _, _)| block.font_size))
+            .chain(
+                radar_chart
+                    .iter()
+                    .flat_map(|chart| chart.text.iter().map(|block| block.font_size)),
+            )
             .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
@@ -2813,7 +2831,8 @@ impl GpuRenderPlan {
                     )
                     .chain(pie_text_blocks.iter().flat_map(|(block, _, _)| {
                         block.lines.iter().map(String::as_str)
-                    })),
+                    }))
+                    .chain(radar_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str)))),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -3325,13 +3344,45 @@ impl GpuRenderPlan {
             }
         }
 
-        let mut bounds = pie_layout.as_ref().map_or_else(
+        if let Some(chart) = &radar_chart {
+            let color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+            for block in &chart.text {
+                let (source, index) = match block.role {
+                    fm_layout::RadarTextRole::Axis(index) => (GpuTextSource::RadarAxis, index),
+                    fm_layout::RadarTextRole::Legend(index) => (GpuTextSource::RadarLegend, index),
+                    fm_layout::RadarTextRole::Title => (GpuTextSource::DiagramTitle, 0),
+                };
+                let align = match block.align {
+                    fm_layout::TextAlign::Start => crate::TextAlign::Left,
+                    fm_layout::TextAlign::Middle => crate::TextAlign::Center,
+                    fm_layout::TextAlign::End => crate::TextAlign::Right,
+                };
+                for (text, point) in block.rows() {
+                    sink.push_line(
+                        text,
+                        (point.x, point.y),
+                        block.font_size,
+                        color,
+                        source,
+                        index,
+                        align,
+                    );
+                }
+            }
+        }
+
+        let mut bounds = radar_chart.as_ref().map_or_else(
             || {
-                graph_label_placer
-                    .as_ref()
-                    .map_or(layout.bounds, |placer| placer.bounds())
+                pie_layout.as_ref().map_or_else(
+                    || {
+                        graph_label_placer
+                            .as_ref()
+                            .map_or(layout.bounds, |placer| placer.bounds())
+                    },
+                    |pie| pie.bounds,
+                )
             },
-            |pie| pie.bounds,
+            |radar| radar.bounds,
         );
         if !graph_label_plates.is_empty() {
             edge_segments = clip_segments_around_labels(&edge_segments, &graph_label_plates);
@@ -3344,7 +3395,7 @@ impl GpuRenderPlan {
             bounds,
             xy_plot_instances: Vec::new(),
             xy_axis_segments: Vec::new(),
-            xy_area_triangles: Vec::new(),
+            xy_area_triangles: radar_triangles,
             xy_bar_instances: Vec::new(),
             cluster_instances,
             band_lane_segments,
@@ -3780,6 +3831,129 @@ fn include_text_quad_bounds(bounds: &mut LayoutRect, quads: &[GpuTextQuad]) {
             width: right - left,
             height: bottom - top,
         };
+    }
+}
+
+/// Tessellate a closed, flattened radar path using the nonzero winding rule used by SVG
+/// and Canvas. A fan about the wheel center is incorrect for concave or self-crossing
+/// cardinal curves, especially when an authored value lies at the minimum of the scale.
+/// Horizontal slabs split at both vertices and crossings keep their interiors disjoint.
+fn tessellate_radar_fill(
+    segments: &[(LayoutPoint, LayoutPoint)],
+    color: [f32; 4],
+    out: &mut Vec<GpuTriangleInstance>,
+) {
+    let mut edges: Vec<_> = segments
+        .iter()
+        .copied()
+        .filter(|(a, b)| finite_point(a) && finite_point(b) && a.y != b.y)
+        .collect();
+    // Ordering by the start of each edge's vertical span avoids testing unrelated
+    // flattened curve pieces against one another on dense radar wheels.
+    edges.sort_by(|(a, b), (c, d)| a.y.min(b.y).total_cmp(&c.y.min(d.y)));
+    let mut levels: Vec<f64> = edges
+        .iter()
+        .flat_map(|(a, b)| [f64::from(a.y), f64::from(b.y)])
+        .collect();
+    for (index, &(a, b)) in edges.iter().enumerate() {
+        for &(c, d) in &edges[index + 1..] {
+            if c.y.min(d.y) >= a.y.max(b.y) {
+                break;
+            }
+            if a.x.min(b.x) > c.x.max(d.x) || c.x.min(d.x) > a.x.max(b.x) {
+                continue;
+            }
+            let (rx, ry) = (f64::from(b.x - a.x), f64::from(b.y - a.y));
+            let (sx, sy) = (f64::from(d.x - c.x), f64::from(d.y - c.y));
+            let denominator = rx * sy - ry * sx;
+            if denominator == 0.0 {
+                continue;
+            }
+            let (qx, qy) = (f64::from(c.x - a.x), f64::from(c.y - a.y));
+            let t = (qx * sy - qy * sx) / denominator;
+            let u = (qx * ry - qy * rx) / denominator;
+            if t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0 {
+                levels.push(f64::from(a.y) + t * ry);
+            }
+        }
+    }
+    levels.sort_by(f64::total_cmp);
+    levels.dedup();
+    let mut first_pending = 0;
+    let mut active = Vec::new();
+    let mut spans: Vec<[[f64; 2]; 4]> = Vec::new();
+    let mut last_span: std::collections::BTreeMap<(usize, usize), usize> =
+        std::collections::BTreeMap::new();
+    for pair in levels.windows(2) {
+        let (top, bottom) = (pair[0], pair[1]);
+        if bottom - top <= 1e-7 {
+            continue;
+        }
+        let middle = f64::midpoint(top, bottom);
+        while let Some(&(a, b)) = edges.get(first_pending) {
+            if f64::from(a.y.min(b.y)) >= middle {
+                break;
+            }
+            active.push((first_pending, a, b));
+            first_pending += 1;
+        }
+        active.retain(|(_, a, b)| f64::from(a.y.max(b.y)) > middle);
+        let mut crossings = Vec::new();
+        for &(index, a, b) in &active {
+            let x_at = |y: f64| {
+                f64::from(a.x) + (y - f64::from(a.y)) * f64::from(b.x - a.x) / f64::from(b.y - a.y)
+            };
+            crossings.push((
+                x_at(middle),
+                x_at(top),
+                x_at(bottom),
+                if b.y > a.y { 1_i64 } else { -1_i64 },
+                index,
+            ));
+        }
+        crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut winding = 0_i64;
+        let mut left = (0.0, 0.0, 0);
+        for (_, at_top, at_bottom, direction, index) in crossings {
+            if winding == 0 {
+                left = (at_top, at_bottom, index);
+            }
+            winding += direction;
+            if winding != 0 {
+                continue;
+            }
+            let points = [
+                [left.0, top],
+                [at_top, top],
+                [at_bottom, bottom],
+                [left.1, bottom],
+            ];
+            // A vertex elsewhere on the wheel splits the sweep but does not change
+            // this region. Keep one trapezoid while both boundary edges are unchanged;
+            // otherwise dense wheels amplify every unrelated height into more triangles.
+            let key = (left.2, index);
+            if let Some(&previous) = last_span.get(&key)
+                && spans[previous][2][1] == top
+            {
+                spans[previous][2] = points[2];
+                spans[previous][3] = points[3];
+            } else {
+                last_span.insert(key, spans.len());
+                spans.push(points);
+            }
+        }
+    }
+    for points in spans {
+        let points = points.map(|point| point.map(|value| value as f32));
+        for [a, b, c] in [
+            [points[0], points[1], points[2]],
+            [points[0], points[2], points[3]],
+        ] {
+            let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            if area.abs() > 1e-6 {
+                out.push(GpuTriangleInstance { a, b, c, color });
+            }
+        }
     }
 }
 
@@ -4767,6 +4941,79 @@ pub(crate) fn rendered_label_gap(
 #[cfg(test)]
 mod tests {
     use super::{GpuNodeShape, GpuRenderPlan};
+
+    #[test]
+    fn radar_fills_cover_concave_and_crossing_paths_without_overdraw() {
+        use fm_layout::LayoutPoint;
+        for (points, expected_area) in [
+            (
+                vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (2.0, 1.0), (0.0, 4.0)],
+                10.0,
+            ),
+            (vec![(0.0, 0.0), (4.0, 4.0), (0.0, 4.0), (4.0, 0.0)], 8.0),
+        ] {
+            let edges: Vec<_> = (0..points.len())
+                .map(|index| {
+                    let a = points[index];
+                    let b = points[(index + 1) % points.len()];
+                    (
+                        LayoutPoint { x: a.0, y: a.1 },
+                        LayoutPoint { x: b.0, y: b.1 },
+                    )
+                })
+                .collect();
+            let mut triangles = Vec::new();
+            super::tessellate_radar_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
+            let area: f32 = triangles
+                .iter()
+                .map(|triangle| {
+                    let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+                })
+                .sum();
+            assert!(
+                (area - expected_area).abs() < 0.001,
+                "{area} != {expected_area}"
+            );
+        }
+    }
+
+    #[test]
+    fn radar_fills_do_not_split_unchanged_regions_at_unrelated_vertices() {
+        use fm_layout::LayoutPoint;
+        let mut edges = Vec::new();
+        for points in [
+            vec![(0.0, 0.0), (4.0, 0.0), (4.0, 100.0), (0.0, 100.0)],
+            vec![(10.0, 25.0), (12.0, 50.0), (10.0, 75.0)],
+        ] {
+            for index in 0..points.len() {
+                let a = points[index];
+                let b = points[(index + 1) % points.len()];
+                edges.push((
+                    LayoutPoint { x: a.0, y: a.1 },
+                    LayoutPoint { x: b.0, y: b.1 },
+                ));
+            }
+        }
+        let mut triangles = Vec::new();
+        super::tessellate_radar_fill(&edges, [1.0, 0.0, 0.0, 0.5], &mut triangles);
+        assert_eq!(
+            triangles.len(),
+            4,
+            "the rectangle must remain two triangles"
+        );
+        let area: f32 = triangles
+            .iter()
+            .map(|triangle| {
+                let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+            })
+            .sum();
+        assert_eq!(
+            area, 450.0,
+            "merging must preserve the complete filled area"
+        );
+    }
 
     #[test]
     fn gpu_parsed_edge_markers_preserve_shape_endpoint_and_stroke() {

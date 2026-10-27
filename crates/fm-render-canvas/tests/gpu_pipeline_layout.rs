@@ -522,7 +522,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
         (
             "radar",
             "radar-beta\n axis a, b, c\n curve x{1,2,3}\n",
-            &[Family::Radar],
+            &[Family::XyArea, Family::Radar, Family::Text],
         ),
         (
             "ER cardinality",
@@ -593,7 +593,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
 
 #[test]
 fn pie_submission_has_sectors_and_percentage_labels_without_graph_node_artifacts() {
-    use fm_render_canvas::GpuTextSource;
+    use fm_render_canvas::{GpuNodeShape, GpuTextSource};
 
     let ir = fm_parser::parse("pie\n \"First\": 1\n \"Second\": 3\n").ir;
     let layout = fm_layout::layout_diagram(&ir);
@@ -604,7 +604,45 @@ fn pie_submission_has_sectors_and_percentage_labels_without_graph_node_artifacts
     );
     let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
     assert_eq!(plan.pie_wedges.len(), 2);
-    assert!(plan.node_instances.is_empty());
+    let metrics = CanvasRenderConfig::default().font_metrics();
+    let pie = fm_layout::PieChartLayout::new(
+        ir.pie_meta.as_ref().unwrap(),
+        None,
+        &metrics,
+        8.0,
+        metrics.avg_char_width(),
+    );
+    // Measured pies intentionally submit a legend panel and one rectangular swatch
+    // per slice. None of these may become the parser's unrelated graph-node circles.
+    assert_eq!(plan.node_instances.len(), pie.entries.len() + 1);
+    for (instance, bounds) in plan
+        .node_instances
+        .iter()
+        .zip(std::iter::once(pie.legend).chain(pie.entries.iter().map(|entry| entry.swatch)))
+    {
+        let center = bounds.center();
+        assert_eq!(instance.center, [center.x, center.y]);
+        assert_eq!(
+            instance.half_extent,
+            [bounds.width / 2.0, bounds.height / 2.0]
+        );
+        assert_eq!(instance.shape, GpuNodeShape::Rect as u32);
+    }
+    let leaders: Vec<_> = pie
+        .slices
+        .iter()
+        .filter_map(|slice| slice.leader.as_ref())
+        .flat_map(|points| points.windows(2))
+        .collect();
+    assert!(
+        !leaders.is_empty(),
+        "fixture must exercise measured label leaders"
+    );
+    assert_eq!(plan.edge_segments.len(), leaders.len());
+    for (segment, points) in plan.edge_segments.iter().zip(leaders) {
+        assert_eq!(segment.from, [points[0].x, points[0].y]);
+        assert_eq!(segment.to, [points[1].x, points[1].y]);
+    }
     assert!(plan.node_border_segments.is_empty());
     assert!(
         plan.text_runs
@@ -616,14 +654,36 @@ fn pie_submission_has_sectors_and_percentage_labels_without_graph_node_artifacts
         .iter()
         .filter(|run| run.source == GpuTextSource::PieSlice)
         .collect();
-    assert_eq!(labels.len(), 2);
+    assert_eq!(labels.len(), 4);
     assert!(labels.iter().all(|run| run.quad_count > 0));
+    let text: Vec<String> = labels
+        .iter()
+        .map(|run| {
+            plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                .iter()
+                .map(|quad| {
+                    plan.glyph_atlas
+                        .cells
+                        .iter()
+                        .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                        .expect("every percentage and legend glyph must be drawable")
+                        .glyph
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(text, ["25%", "First", "75%", "Second"]);
     assert_eq!(
         draw_batches(&plan)
             .iter()
             .map(|batch| batch.family)
             .collect::<Vec<_>>(),
-        vec![PrimitiveFamily::Pie, PrimitiveFamily::Text]
+        vec![
+            PrimitiveFamily::Edge,
+            PrimitiveFamily::Pie,
+            PrimitiveFamily::Node,
+            PrimitiveFamily::Text
+        ]
     );
 }
 

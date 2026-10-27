@@ -711,7 +711,20 @@ fn render_svg_with_layout_impl_reusing(
             )
         }
         SvgBackend::Scene => {
-            let scene = build_render_scene_with_metrics(ir, layout, &config.font_metrics());
+            let scene = if let (Some(meta), Some(radar)) =
+                (ir.radar_meta.as_ref(), layout.extensions.radar.as_ref())
+            {
+                let theme = resolve_theme(Some(ir), config);
+                fm_layout::RadarChartLayout::new(
+                    meta,
+                    radar,
+                    ir.declared_title_if_drawn(),
+                    &config.font_metrics(),
+                )
+                .to_scene(&theme.colors.text, &theme.colors.node_stroke)
+            } else {
+                build_render_scene_with_metrics(ir, layout, &config.font_metrics())
+            };
             (
                 render_scene_document_with_ir(&scene, config, Some(ir)),
                 None,
@@ -2064,7 +2077,7 @@ fn render_scene_document_with_ir(
 ) -> String {
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
-    let planned_title = scene.root.id.as_deref() == Some("pie-chart") || scene.root.children.iter().any(|item| {
+    let planned_title = matches!(scene.root.id.as_deref(), Some("pie-chart" | "radar-chart")) || scene.root.children.iter().any(|item| {
         matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
     });
     let visible_title = ir
@@ -2274,6 +2287,9 @@ fn render_scene_group(
 
     if let Some(id) = &group.id {
         elem = elem.id(id);
+        if id == "radar-chart" {
+            elem = elem.attr("xml:space", "preserve");
+        }
         if let Some(ir) = ir
             && let RenderSource::Node(index) = group.source
             && ir

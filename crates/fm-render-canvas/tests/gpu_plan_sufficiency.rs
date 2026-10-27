@@ -13,6 +13,348 @@ use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan, MockCanvas2dContext, r
 
 const DIAGRAM: &str = "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.-> a\n";
 
+const RADAR: &str = "radar-beta\n  axis a[\"Reliability\"], b[\"Scale\"], c[\"Coverage\"]\n  curve current[\"Current platform\"]{1,2,3}\n  curve target[\"Target platform\"]{3,3,3}\n";
+
+fn radar_gpu_rows(plan: &GpuRenderPlan) -> Vec<String> {
+    plan.text_runs
+        .iter()
+        .map(|run| {
+            plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                .iter()
+                .map(|quad| {
+                    plan.glyph_atlas
+                        .cells
+                        .iter()
+                        .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                        .expect("every planned glyph needs its atlas cell")
+                        .glyph
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn radar_canvas_scene_and_gpu_keep_axis_and_series_identity() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation, GpuTextSource};
+    let parsed = fm_parser::parse(RADAR);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let ir = parsed.ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let config = CanvasRenderConfig {
+        auto_fit: false,
+        padding: 0.0,
+        ..Default::default()
+    };
+    let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+    let mut canvas = MockCanvas2dContext::new(1800.0, 1200.0);
+    let result = Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut canvas);
+    let mut shared = MockCanvas2dContext::new(1800.0, 1200.0);
+    Canvas2dRenderer::new(config.clone()).render_scene(&scene, &mut shared);
+    let rows = |context: &MockCanvas2dContext| {
+        context
+            .operations()
+            .iter()
+            .filter_map(|op| {
+                if let DrawOperation::FillText(text, x, y) = op {
+                    Some((text.clone(), *x, *y))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let actual = rows(&canvas);
+    assert_eq!(actual, rows(&shared));
+    assert_eq!(actual.len(), result.labels_drawn);
+    let expected = [
+        "Reliability",
+        "Scale",
+        "Coverage",
+        "Current platform",
+        "Target platform",
+    ];
+    assert_eq!(
+        actual
+            .iter()
+            .map(|(text, _, _)| text.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    assert_eq!(radar_gpu_rows(&plan), expected);
+    assert_eq!(
+        plan.text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::RadarAxis)
+            .count(),
+        3
+    );
+    assert_eq!(
+        plan.text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::RadarLegend)
+            .count(),
+        2
+    );
+    for color in ["#8686ff", "#ffff78"] {
+        let rgba = fm_render_canvas::parse_paint_rgba(color).unwrap();
+        assert!(
+            plan.radar_segments
+                .iter()
+                .any(|segment| segment.color == rgba)
+        );
+        assert!(
+            plan.xy_area_triangles
+                .iter()
+                .any(|triangle| triangle.color[..3] == rgba[..3] && triangle.color[3] == 0.5)
+        );
+    }
+    assert!(
+        plan.node_instances.is_empty(),
+        "radar samples are not graph nodes"
+    );
+    assert!(plan.arrowheads.is_empty());
+}
+
+#[test]
+fn radar_polygon_mode_and_hidden_legend_reach_every_shared_surface() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation, GpuTextSource};
+    let ir = fm_parser::parse(&format!("{RADAR}  graticule polygon\n  showLegend false\n")).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let config = CanvasRenderConfig::default();
+    let mut canvas = MockCanvas2dContext::new(1400.0, 900.0);
+    Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut canvas);
+    assert!(
+        !canvas
+            .operations()
+            .iter()
+            .any(|op| matches!(op, DrawOperation::BezierCurveTo(..)))
+    );
+    assert!(
+        !canvas.operations().iter().any(
+            |op| matches!(op, DrawOperation::FillText(text, _, _) if text.contains("platform"))
+        )
+    );
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    assert!(
+        !plan
+            .text_runs
+            .iter()
+            .any(|run| run.source == GpuTextSource::RadarLegend)
+    );
+    // Five triangular rings, three spokes and two closed three-edge series.
+    assert_eq!(
+        plan.radar_segments
+            .iter()
+            .filter(|segment| segment.from != segment.to)
+            .count(),
+        24
+    );
+    let svg = fm_render_svg::render_svg_with_layout(
+        &ir,
+        &layout,
+        &fm_render_svg::SvgRenderConfig {
+            backend: fm_render_svg::SvgBackend::Scene,
+            ..Default::default()
+        },
+    );
+    for axis in ["Reliability", "Scale", "Coverage"] {
+        assert!(svg.contains(axis));
+    }
+    assert!(!svg.contains("Current platform"));
+    assert!(!svg.contains("Target platform"));
+}
+
+#[test]
+fn radar_large_unicode_captions_fit_without_changing_data_positions() {
+    let mut ir = fm_parser::parse(RADAR).ir;
+    let meta = ir.radar_meta.as_mut().unwrap();
+    meta.axes[1].label =
+        Some("地域別  可用性 👩‍💻 and reliable customer operations across all regions".to_owned());
+    meta.curves[1].label = Some(
+        "Target  service quality with complete coverage and operational resilience".to_owned(),
+    );
+    let layout = fm_layout::layout_diagram(&ir);
+    let original = layout.extensions.radar.clone();
+    for font_size in [15.0, 30.0, 48.0] {
+        let config = CanvasRenderConfig {
+            font_size,
+            ..Default::default()
+        };
+        let chart = fm_layout::RadarChartLayout::new(
+            ir.radar_meta.as_ref().unwrap(),
+            original.as_ref().unwrap(),
+            None,
+            &config.font_metrics(),
+        );
+        for block in &chart.text {
+            assert!(block.bounds.x >= chart.bounds.x);
+            assert!(block.bounds.y >= chart.bounds.y);
+            assert!(
+                block.bounds.x + block.bounds.width <= chart.bounds.x + chart.bounds.width + 0.001
+            );
+            assert!(
+                block.bounds.y + block.bounds.height
+                    <= chart.bounds.y + chart.bounds.height + 0.001
+            );
+        }
+        let name = chart
+            .text
+            .iter()
+            .find(|block| block.role == fm_layout::RadarTextRole::Axis(1))
+            .unwrap();
+        assert_eq!(
+            name.lines.concat(),
+            ir.radar_meta.as_ref().unwrap().axes[1].display()
+        );
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        assert!(radar_gpu_rows(&plan).concat().contains("地域別  可用性"));
+        for quad in &plan.text_quads {
+            assert!(quad.center[0] - quad.half_extent[0] >= plan.bounds.x - 0.001);
+            assert!(
+                quad.center[0] + quad.half_extent[0] <= plan.bounds.x + plan.bounds.width + 0.001
+            );
+            assert!(quad.center[1] - quad.half_extent[1] >= plan.bounds.y - 0.001);
+            assert!(
+                quad.center[1] + quad.half_extent[1] <= plan.bounds.y + plan.bounds.height + 0.001
+            );
+        }
+        assert_eq!(layout.extensions.radar, original);
+    }
+}
+
+#[test]
+fn radar_crowded_polar_captions_do_not_overlap_across_the_wheel() {
+    let axes = (0..20)
+        .map(|index| format!("a{index}[\"Axis {index} with complete operational coverage\"]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source =
+        format!("radar-beta\n title Dense capabilities\n axis {axes}\n curve current{{1}}\n");
+    let ir = fm_parser::parse(&source).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let radar = layout.extensions.radar.as_ref().unwrap();
+    for font_size in [15.0, 48.0] {
+        let config = CanvasRenderConfig {
+            font_size,
+            ..Default::default()
+        };
+        let chart = fm_layout::RadarChartLayout::new(
+            ir.radar_meta.as_ref().unwrap(),
+            radar,
+            ir.declared_title_if_drawn(),
+            &config.font_metrics(),
+        );
+        assert_eq!(
+            chart
+                .text
+                .iter()
+                .filter(|block| matches!(block.role, fm_layout::RadarTextRole::Axis(_)))
+                .count(),
+            20
+        );
+        assert!(
+            chart
+                .paths
+                .iter()
+                .any(|path| path.role == fm_layout::RadarPathRole::Leader)
+        );
+        for (index, first) in chart.text.iter().enumerate() {
+            for second in &chart.text[index + 1..] {
+                let (a, b) = (first.bounds, second.bounds);
+                assert!(
+                    a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y,
+                    "overlapping {:?} and {:?} at {font_size}px: {a:?}, {b:?}",
+                    first.role,
+                    second.role
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn radar_five_hundred_axis_cusps_keep_all_data_with_finite_bounded_primitives() {
+    use fm_render_canvas::GpuTextSource;
+
+    let axes = (0..500)
+        .map(|index| format!("a{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = (0..500)
+        .map(|index| if index % 2 == 0 { "0" } else { "10" })
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!(
+        "radar-beta\n axis {axes}\n curve cusps{{{values}}}\n curve zero{{0}}\n min 0\n max 10\n showLegend false\n"
+    );
+    let parsed = fm_parser::parse(&source);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    let radar = layout.extensions.radar.as_ref().unwrap();
+    assert_eq!(radar.axes.len(), 500);
+    assert!(radar.curves.iter().all(|curve| curve.points.len() == 500));
+    let plan =
+        GpuRenderPlan::from_layout_with_config(&parsed.ir, &layout, &CanvasRenderConfig::default());
+    assert_eq!(
+        plan.text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::RadarAxis)
+            .count(),
+        500
+    );
+    let curve_color = fm_render_canvas::parse_paint_rgba("#8686ff").unwrap();
+    let curve_segments: Vec<_> = plan
+        .radar_segments
+        .iter()
+        .filter(|segment| segment.color == curve_color)
+        .collect();
+    for point in &radar.curves[0].points {
+        assert!(
+            curve_segments.iter().any(|segment| {
+                segment.from == [point.x, point.y] || segment.to == [point.x, point.y]
+            }),
+            "a cusp's authored sample vanished from the GPU path: {point:?}"
+        );
+    }
+    // Dense cusps exercise subdivision and self-intersections; the collapsed series
+    // exercises degenerate fill edges. Neither may amplify into unbounded buffers.
+    assert!(!plan.xy_area_triangles.is_empty());
+    assert!(
+        plan.radar_segments.len() < 500 * 256,
+        "{} segments",
+        plan.radar_segments.len()
+    );
+    assert!(
+        plan.xy_area_triangles.len() < 500 * 512,
+        "{} triangles",
+        plan.xy_area_triangles.len()
+    );
+    for triangle in &plan.xy_area_triangles {
+        assert!(
+            triangle
+                .a
+                .into_iter()
+                .chain(triangle.b)
+                .chain(triangle.c)
+                .all(f32::is_finite)
+        );
+    }
+    for segment in &plan.radar_segments {
+        assert!(
+            segment
+                .from
+                .into_iter()
+                .chain(segment.to)
+                .all(f32::is_finite)
+        );
+    }
+}
+
 /// Count `FillText` operations in a recorded canvas run.
 fn fill_text_count(ops_debug: &str) -> usize {
     ops_debug.matches("FillText(").count()
