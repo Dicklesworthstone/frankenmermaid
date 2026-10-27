@@ -7397,12 +7397,16 @@ impl GanttTaskFlags {
 pub enum GanttDate {
     Absolute(String),
     AfterTask(String),
+    /// End at the earliest start among the named tasks, without inclusive-end adjustment.
+    UntilTasks(Vec<String>),
     DurationDays(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GanttExclude {
     Weekends,
+    /// A recurring excluded weekday, numbered Sunday = 0 through Saturday = 6.
+    Weekday(u8),
     Dates(Vec<String>),
 }
 
@@ -7457,12 +7461,33 @@ pub struct IrGanttMeta {
     pub inclusive_end_dates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekday_start: Option<u8>,
+    /// First of the two weekend days: Friday = 5 or Saturday = 6 (the default).
+    /// This is independent of `weekday_start`, which controls weekly axis ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekend_start: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<GanttExclude>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<IrGanttSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<IrGanttTask>,
+}
+
+impl IrGanttMeta {
+    /// The recurring nonworking days as a seven-bit mask, with Sunday in bit zero.
+    /// Invalid programmatic weekday values are ignored, and an invalid weekend start uses
+    /// the Saturday/Sunday default. Explicit date exclusions remain in `excludes`.
+    #[must_use]
+    pub fn excluded_weekday_mask(&self) -> u8 {
+        let weekend_start = if self.weekend_start == Some(5) { 5 } else { 6 };
+        self.excludes.iter().fold(0, |mask, exclusion| {
+            mask | match exclusion {
+                GanttExclude::Weekends => (1 << weekend_start) | (1 << ((weekend_start + 1) % 7)),
+                GanttExclude::Weekday(day) if *day < 7 => 1 << *day,
+                GanttExclude::Weekday(_) | GanttExclude::Dates(_) => 0,
+            }
+        })
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -15297,7 +15322,8 @@ mod tests {
             top_axis: true,
             inclusive_end_dates: true,
             weekday_start: Some(1),
-            excludes: vec![GanttExclude::Weekends],
+            weekend_start: Some(5),
+            excludes: vec![GanttExclude::Weekends, GanttExclude::Weekday(1)],
             sections: vec![IrGanttSection {
                 name: "Planning".to_string(),
             }],
@@ -15307,7 +15333,10 @@ mod tests {
                 meta: "done, plan_1, 2026-02-01, 2d".to_string(),
                 task_id: Some("plan_1".to_string()),
                 start: Some(GanttDate::Absolute("2026-02-01".to_string())),
-                end: Some(GanttDate::DurationDays(2)),
+                end: Some(GanttDate::UntilTasks(vec![
+                    "ship".to_string(),
+                    "review".to_string(),
+                ])),
                 depends_on: Vec::new(),
                 progress: Some(0.5),
                 flags: crate::GanttTaskFlags {
@@ -15320,6 +15349,21 @@ mod tests {
         let json = serde_json::to_string(&meta).expect("serialize");
         let deser: IrGanttMeta = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(meta, deser);
+    }
+
+    #[test]
+    fn gantt_recurring_calendar_keeps_weekend_and_tick_weekday_independent() {
+        let mut meta = IrGanttMeta {
+            weekday_start: Some(5),
+            excludes: vec![GanttExclude::Weekends, GanttExclude::Weekday(1)],
+            ..Default::default()
+        };
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 6) | 1 | (1 << 1));
+        meta.weekend_start = Some(5);
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 5) | (1 << 6) | (1 << 1));
+        meta.weekend_start = Some(255);
+        meta.excludes.push(GanttExclude::Weekday(255));
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 6) | 1 | (1 << 1));
     }
 
     #[test]

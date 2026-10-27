@@ -7383,6 +7383,16 @@ fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -
         Some(fm_core::GanttDate::DurationDays(days)) => {
             let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
         }
+        Some(fm_core::GanttDate::UntilTasks(targets)) if !targets.is_empty() => {
+            if targets.len() == 1 {
+                name.push_str(", ends when ");
+                name.push_str(&targets[0]);
+                name.push_str(" starts");
+            } else {
+                name.push_str(", ends at the earliest start of ");
+                name.push_str(&targets.join(", "));
+            }
+        }
         _ => {}
     }
     // The TYPE is carried only by the bar's fill colour, so a reader who cannot see the colour has

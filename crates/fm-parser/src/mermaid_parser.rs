@@ -11245,11 +11245,28 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(excludes) = trimmed.strip_prefix("excludes ") {
-            gantt_meta.excludes = parse_gantt_excludes(excludes, gantt_meta.date_format.as_deref());
-            if gantt_meta.excludes.is_empty() {
+            let (exclusions, invalid) =
+                parse_gantt_excludes(excludes, gantt_meta.date_format.as_deref());
+            if exclusions.is_empty() && invalid.is_empty() {
                 builder.add_warning(format!(
                     "Line {line_number}: gantt excludes directive is empty"
                 ));
+            }
+            for token in invalid {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported gantt exclusion '{token}'"
+                ));
+            }
+            gantt_meta.excludes.extend(exclusions);
+            continue;
+        }
+
+        if let Some(weekend) = trimmed.strip_prefix("weekend ") {
+            match parse_gantt_weekday(weekend) {
+                Some(day @ (5 | 6)) => gantt_meta.weekend_start = Some(day),
+                _ => builder.add_warning(format!(
+                    "Line {line_number}: gantt weekend must start on friday or saturday: {weekend}"
+                )),
             }
             continue;
         }
@@ -11398,6 +11415,32 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
     }
 
+    // An `until` reference constrains this task's end to the other task's START. Resolve after
+    // every declaration so forward references and case-sensitive ids behave like `after`.
+    for task in &gantt_meta.tasks {
+        let Some(GanttDate::UntilTasks(targets)) = task.end.as_ref() else {
+            continue;
+        };
+        if targets.is_empty() {
+            builder.add_warning("Gantt 'until' requires at least one task id".to_string());
+        }
+        let span = builder.ir().nodes[task.node.0].span_primary;
+        for target in targets {
+            if let Some(&node) = task_ids_to_nodes.get(target) {
+                builder.push_edge(task.node, node, ArrowType::Arrow, None, span);
+            } else {
+                builder.add_warning(format!("Unresolved gantt dependency 'until {target}'"));
+            }
+        }
+    }
+
+    if gantt_meta.excluded_weekday_mask() == 0x7f {
+        builder.add_warning(
+            "Gantt calendar excludes every weekday; recurring exclusions are ignored to keep scheduling finite"
+                .to_string(),
+        );
+    }
+
     for warning in click_warnings {
         builder.add_warning(warning);
     }
@@ -11444,6 +11487,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         || gantt_meta.date_format.is_some()
         || gantt_meta.axis_format.is_some()
         || gantt_meta.tick_interval.is_some()
+        || gantt_meta.weekend_start.is_some()
         || !gantt_meta.excludes.is_empty()
     {
         builder.set_gantt_meta(gantt_meta);
@@ -11512,7 +11556,25 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             && !scheduling_tokens[0]
                 .split_once(char::is_whitespace)
                 .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("after")));
-    for token in scheduling_tokens {
+    let scheduling_token_count = scheduling_tokens.len();
+    for (token_index, token) in scheduling_tokens.into_iter().enumerate() {
+        let (keyword, references) = token.split_once(char::is_whitespace).unwrap_or((token, ""));
+        if keyword.eq_ignore_ascii_case("until")
+            && (!references.is_empty() || token_index + 1 == scheduling_token_count)
+        {
+            let mut targets = Vec::new();
+            for target in references
+                .split_whitespace()
+                .map(normalize_compound_identifier)
+            {
+                if !target.is_empty() && !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            parsed.end.get_or_insert(GanttDate::UntilTasks(targets));
+            continue;
+        }
+
         if let Some((keyword, after)) = token.split_once(char::is_whitespace)
             && keyword.eq_ignore_ascii_case("after")
         {
@@ -11732,21 +11794,36 @@ fn parse_gantt_tick_interval(token: &str) -> Option<GanttTickInterval> {
     }
 }
 
-fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclude> {
+fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> (Vec<GanttExclude>, Vec<String>) {
     let mut excludes = Vec::new();
     let mut dates = Vec::new();
+    let mut invalid = Vec::new();
 
-    for token in raw
+    for item in raw
         .split(',')
         .map(trim_fast)
-        .filter(|token| !token.is_empty())
+        .filter(|item| !item.is_empty())
     {
-        if token.eq_ignore_ascii_case("weekends") {
-            excludes.push(GanttExclude::Weekends);
-        } else {
-            dates.push(
-                parse_gantt_absolute_date(token, date_format).unwrap_or_else(|| token.to_string()),
-            );
+        // A numeric date may itself contain spaces (`dateFormat DD MM YYYY`). Keep each
+        // complete comma-delimited date before splitting whitespace-separated keywords.
+        // The date normalizer accepts arbitrary separators, so never feed it a keyword list:
+        // `weekends monday 10/03/2026` would otherwise silently lose both exclusions.
+        if !item.chars().any(|ch| ch.is_ascii_alphabetic())
+            && let Some(date) = parse_gantt_absolute_date(item, date_format)
+        {
+            dates.push(date);
+            continue;
+        }
+        for token in item.split_whitespace() {
+            if token.eq_ignore_ascii_case("weekends") {
+                excludes.push(GanttExclude::Weekends);
+            } else if let Some(weekday) = parse_gantt_weekday(token) {
+                excludes.push(GanttExclude::Weekday(weekday));
+            } else if let Some(date) = parse_gantt_absolute_date(token, date_format) {
+                dates.push(date);
+            } else {
+                invalid.push(token.to_string());
+            }
         }
     }
 
@@ -11754,7 +11831,7 @@ fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclud
         excludes.push(GanttExclude::Dates(dates));
     }
 
-    excludes
+    (excludes, invalid)
 }
 
 fn parse_gantt_weekday(token: &str) -> Option<u8> {
@@ -26714,6 +26791,152 @@ Rel_Back(db, app, "Responds")"#,
             explicit.end,
             Some(GanttDate::Absolute("2026-02-09".to_string()))
         );
+    }
+
+    #[test]
+    fn gantt_until_preserves_all_case_sensitive_forward_targets() {
+        let parsed = parse_mermaid(
+            "gantt\nWait :Wait, 2026-03-01, until Release PATCH Release\n\
+             Release :Release, 2026-03-10, 1d\nPatch :PATCH, 2026-03-08, 1d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("Wait"));
+        assert_eq!(
+            meta.tasks[0].end,
+            Some(GanttDate::UntilTasks(vec![
+                "Release".into(),
+                "PATCH".into()
+            ]))
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+        for (edge, target) in parsed.ir.edges.iter().zip(&meta.tasks[1..]) {
+            assert_eq!(edge.from, fm_core::IrEndpoint::Node(meta.tasks[0].node));
+            assert_eq!(edge.to, fm_core::IrEndpoint::Node(target.node));
+        }
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_until_end_only_and_after_forms_keep_their_start_semantics() {
+        for metadata in ["until Release", "Wait, until Release"] {
+            let parsed = super::parse_gantt_task_metadata(metadata, None);
+            assert_eq!(parsed.start, None, "{metadata}");
+            assert_eq!(
+                parsed.end,
+                Some(GanttDate::UntilTasks(vec!["Release".into()])),
+                "{metadata}"
+            );
+        }
+        let parsed = super::parse_gantt_task_metadata("Wait, after Prep, until Release", None);
+        assert_eq!(parsed.start, Some(GanttDate::AfterTask("Prep".into())));
+        assert_eq!(parsed.depends_on, ["Prep"]);
+        assert_eq!(
+            parsed.end,
+            Some(GanttDate::UntilTasks(vec!["Release".into()]))
+        );
+    }
+
+    #[test]
+    fn gantt_until_can_be_a_declared_id_without_becoming_an_empty_end() {
+        let parsed =
+            parse_mermaid("gantt\nPrep :until, 2026-03-01, 2d\nFollow :Follow, after until, 1d\n");
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("until"));
+        assert_eq!(meta.tasks[0].end, Some(GanttDate::DurationDays(2)));
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_until_reports_missing_and_empty_references_without_phantom_tasks() {
+        let parsed = parse_mermaid(
+            "gantt\nWait :Wait, 2026-03-01, until Release release Missing\n\
+             Empty :Empty, 2026-03-01, until\nRelease :Release, 2026-03-10, 1d\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        for missing in ["release", "Missing"] {
+            assert!(
+                parsed.warnings.iter().any(|warning| {
+                    warning.contains(&format!("Unresolved gantt dependency 'until {missing}'"))
+                }),
+                "{:?}",
+                parsed.warnings
+            );
+        }
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("requires at least one task id"))
+        );
+    }
+
+    #[test]
+    fn gantt_exclusions_accept_weekdays_and_grouped_lines_with_custom_weekends() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat DD/MM/YYYY\nweekday monday\nweekend friday\n\
+             excludes weekends, Monday 10/03/2026\nexcludes wednesday\n\
+             Work :Work, 01/03/2026, 3d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.weekday_start, Some(1));
+        assert_eq!(meta.weekend_start, Some(5));
+        assert_eq!(
+            meta.excludes,
+            [
+                GanttExclude::Weekends,
+                GanttExclude::Weekday(1),
+                GanttExclude::Dates(vec!["2026-03-10".into()]),
+                GanttExclude::Weekday(3),
+            ]
+        );
+        assert_eq!(
+            meta.excluded_weekday_mask(),
+            (1 << 1) | (1 << 3) | (1 << 5) | (1 << 6)
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_exclusions_preserve_space_separated_date_formats() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat DD MM YYYY\nexcludes monday, 10 03 2026, weekends\n\
+             Work :Work, 09 03 2026, 2d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(
+            meta.excludes,
+            [
+                GanttExclude::Weekday(1),
+                GanttExclude::Weekends,
+                GanttExclude::Dates(vec!["2026-03-10".into()]),
+            ]
+        );
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::Absolute("2026-03-09".into()))
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_invalid_calendar_tokens_warn_without_erasing_valid_exclusions() {
+        let parsed = parse_mermaid(
+            "gantt\nweekend friday\nweekend sunday\nexcludes monday, weekdays, 2026-02-30\n\
+             Work :Work, 2026-03-01, 3d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.weekend_start, Some(5));
+        assert_eq!(meta.excludes, [GanttExclude::Weekday(1)]);
+        for token in ["sunday", "weekdays", "2026-02-30"] {
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(token))
+            );
+        }
     }
 
     #[test]

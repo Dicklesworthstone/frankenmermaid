@@ -72,6 +72,33 @@ fn every_gantt_mark_is_named_with_its_schedule() {
     );
 }
 
+#[test]
+fn until_names_describe_target_starts_and_the_earliest_of_multiple_targets() {
+    let source = "gantt\n\
+                  Single :Single, 2026-03-01, until Release\n\
+                  Multiple :Multiple, 2026-03-01, until Release AUDIT\n\
+                  Launch :Release, 2026-03-10, 1d\n\
+                  Review :AUDIT, 2026-03-08, 1d\n";
+    let ir = fm_parser::parse(source).ir;
+    let svg = render_svg_with_config(
+        &ir,
+        &SvgRenderConfig {
+            a11y: A11yConfig::full(),
+            ..SvgRenderConfig::default()
+        },
+    );
+    let names = mark_names(&svg);
+    assert_eq!(names.len(), 4);
+    assert_eq!(
+        names[0],
+        "Single, starts 2026-03-01, ends when Release starts"
+    );
+    assert_eq!(
+        names[1],
+        "Multiple, starts 2026-03-01, ends at the earliest start of Release, AUDIT"
+    );
+}
+
 /// THE FRACTION BUG: `50%` must be announced as 50, not 0.
 ///
 /// Its own test because it is the one failure here that produces a CONFIDENTLY WRONG number rather

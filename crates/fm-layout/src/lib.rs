@@ -9711,10 +9711,15 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut task_id_to_idx: FxHashMap<&str, usize> =
         FxHashMap::with_capacity_and_hasher(task_count, Default::default());
     let excluded_dates = expand_gantt_excluded_dates(gantt_meta);
-    let skip_weekends = gantt_meta
-        .excludes
-        .iter()
-        .any(|exclude| matches!(exclude, GanttExclude::Weekends));
+    let excluded_weekdays = match gantt_meta.excluded_weekday_mask() {
+        0x7f => {
+            // There is no finite working-day schedule if every day is excluded. Preserve
+            // explicit holidays, but recover from the impossible recurring calendar deterministically.
+            warn!("Gantt calendar excludes every weekday; ignoring recurring exclusions");
+            0
+        }
+        mask => mask,
+    };
     let inclusive_end_dates = gantt_meta.inclusive_end_dates;
 
     for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
@@ -9726,43 +9731,48 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
     let base_start_day = explicit_starts.iter().flatten().copied().min().unwrap_or(0);
     let section_count = gantt_meta.sections.len().max(1);
-    let mut start_days = vec![base_start_day; task_count];
-    let mut end_exclusive_days = vec![base_start_day; task_count];
-
-    // Dates must be resolved in dependency order, independently of the visual row order. A task
-    // can name several predecessors (including later declarations), and starts after the latest
-    // completion. An omitted start depends on the preceding task, even across section boundaries.
-    let dependencies: Vec<Vec<usize>> = gantt_meta
-        .tasks
-        .iter()
-        .enumerate()
-        .map(|(task_idx, task)| {
-            if explicit_starts[task_idx].is_some() {
-                return Vec::new();
-            }
+    // Start and end are separate scheduling events. `after` waits for predecessor ENDS,
+    // while `until` waits only for target STARTS. A whole-task dependency graph would report
+    // false cycles for two explicitly dated tasks that end at each other's starts, and could
+    // not resolve a start before its task's own end is known.
+    let event_count = task_count * 2;
+    let mut dependencies = vec![Vec::new(); event_count];
+    for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
+        let start_event = task_idx * 2;
+        let end_event = start_event + 1;
+        if explicit_starts[task_idx].is_none() {
             let primary = match task.start.as_ref() {
                 Some(GanttDate::AfterTask(id)) => Some(id.as_str()),
                 _ => None,
             };
             let has_dependencies = primary.is_some() || !task.depends_on.is_empty();
-            let mut dependencies: Vec<usize> = primary
+            dependencies[start_event] = primary
                 .into_iter()
                 .chain(task.depends_on.iter().map(String::as_str))
-                .filter_map(|id| task_id_to_idx.get(id).copied())
+                .filter_map(|id| task_id_to_idx.get(id).map(|index| index * 2 + 1))
                 .collect();
-            dependencies.sort_unstable();
-            dependencies.dedup();
             if !has_dependencies && task_idx > 0 {
-                dependencies.push(task_idx - 1);
+                dependencies[start_event].push(start_event - 1);
             }
-            dependencies
-        })
-        .collect();
-    let mut dependents = vec![Vec::new(); task_count];
+        }
+        dependencies[end_event].push(start_event);
+        if let Some(GanttDate::UntilTasks(targets)) = task.end.as_ref() {
+            dependencies[end_event].extend(
+                targets
+                    .iter()
+                    .filter_map(|id| task_id_to_idx.get(id.as_str()).map(|index| index * 2)),
+            );
+        }
+        for event in [start_event, end_event] {
+            dependencies[event].sort_unstable();
+            dependencies[event].dedup();
+        }
+    }
+    let mut dependents = vec![Vec::new(); event_count];
     let mut unresolved: Vec<usize> = dependencies.iter().map(Vec::len).collect();
-    for (task_idx, predecessors) in dependencies.iter().enumerate() {
+    for (event_idx, predecessors) in dependencies.iter().enumerate() {
         for &predecessor in predecessors {
-            dependents[predecessor].push(task_idx);
+            dependents[predecessor].push(event_idx);
         }
     }
     let mut ready: BTreeSet<usize> = unresolved
@@ -9770,48 +9780,68 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         .enumerate()
         .filter_map(|(index, &count)| (count == 0).then_some(index))
         .collect();
-    let mut scheduled = vec![false; task_count];
-    for _ in 0..task_count {
-        let task_idx = ready.pop_first().unwrap_or_else(|| {
-            // Cyclic input has no valid schedule. Anchor the first remaining task using only
-            // resolved predecessors, then continue normally. The old fixpoint moved every date
-            // forward on every pass, making even unrelated tasks change the cycle's dates.
-            let index = scheduled.iter().position(|&done| !done).unwrap_or(0);
+    let mut resolved_days: Vec<Option<i32>> = vec![None; event_count];
+    for _ in 0..event_count {
+        let event_idx = ready.pop_first().unwrap_or_else(|| {
+            // Anchor the first unresolved event using only resolved predecessors. The bound is
+            // the event count, so cyclic input cannot loop or drift with unrelated task counts.
+            let index = resolved_days.iter().position(Option::is_none).unwrap_or(0);
             warn!(
-                task_index = index,
-                "Cyclic Gantt dependencies; anchoring unresolved task"
+                task_index = index / 2,
+                end_event = index % 2 == 1,
+                "Cyclic Gantt dependencies; anchoring unresolved date"
             );
             index
         });
+        let task_idx = event_idx / 2;
         let task = &gantt_meta.tasks[task_idx];
-        let start = explicit_starts[task_idx].unwrap_or_else(|| {
-            dependencies[task_idx]
-                .iter()
-                .filter(|&&predecessor| scheduled[predecessor])
-                .map(|&predecessor| end_exclusive_days[predecessor])
-                .max()
-                .unwrap_or(base_start_day)
-        });
-        let start = advance_gantt_start_day(start, skip_weekends, &excluded_dates);
-        let end_exclusive = gantt_task_end_day(
-            task,
-            start,
-            inclusive_end_dates,
-            skip_weekends,
-            &excluded_dates,
-        );
-        start_days[task_idx] = start;
-        end_exclusive_days[task_idx] = end_exclusive;
-        milestones[task_idx] =
-            matches!(task.flags.primary_type(), GanttTaskType::Milestone) || end_exclusive == start;
-        scheduled[task_idx] = true;
-        for &dependent in &dependents[task_idx] {
+        let day = if event_idx % 2 == 0 {
+            let start = explicit_starts[task_idx].unwrap_or_else(|| {
+                dependencies[event_idx]
+                    .iter()
+                    .filter_map(|&predecessor| resolved_days[predecessor])
+                    .max()
+                    .unwrap_or(base_start_day)
+            });
+            advance_gantt_start_day(start, excluded_weekdays, &excluded_dates)
+        } else {
+            let start = resolved_days[task_idx * 2].unwrap_or(base_start_day);
+            let until_end = match task.end.as_ref() {
+                Some(GanttDate::UntilTasks(targets)) => targets
+                    .iter()
+                    .filter_map(|id| task_id_to_idx.get(id.as_str()))
+                    .filter_map(|&index| resolved_days[index * 2])
+                    .min(),
+                _ => None,
+            };
+            let end = gantt_task_end_day(
+                task,
+                start,
+                until_end,
+                inclusive_end_dates,
+                excluded_weekdays,
+                &excluded_dates,
+            );
+            milestones[task_idx] =
+                matches!(task.flags.primary_type(), GanttTaskType::Milestone) || end == start;
+            end
+        };
+        resolved_days[event_idx] = Some(day);
+        for &dependent in &dependents[event_idx] {
             unresolved[dependent] = unresolved[dependent].saturating_sub(1);
-            if unresolved[dependent] == 0 && !scheduled[dependent] {
+            if unresolved[dependent] == 0 && resolved_days[dependent].is_none() {
                 ready.insert(dependent);
             }
         }
     }
+    let start_days: Vec<i32> = resolved_days
+        .chunks_exact(2)
+        .map(|dates| dates[0].unwrap_or(base_start_day))
+        .collect();
+    let end_exclusive_days: Vec<i32> = resolved_days
+        .chunks_exact(2)
+        .map(|dates| dates[1].unwrap_or(base_start_day))
+        .collect();
 
     let min_start_day = start_days.iter().copied().min().unwrap_or(base_start_day);
     // Bars, dependency starts, and the date axis share the resolved calendar end. Exclusions
@@ -10675,8 +10705,9 @@ fn gantt_task_absolute_start(task: &fm_core::IrGanttTask) -> Option<i32> {
 fn gantt_task_end_day(
     task: &fm_core::IrGanttTask,
     start: i32,
+    until_end: Option<i32>,
     inclusive_end_dates: bool,
-    skip_weekends: bool,
+    excluded_weekdays: u8,
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
     let duration = match task.end.as_ref() {
@@ -10691,13 +10722,24 @@ fn gantt_task_end_day(
             }
             1
         }
+        Some(GanttDate::UntilTasks(_)) => {
+            if let Some(end) = until_end {
+                // `until` is an exact start boundary, not an inclusive calendar deadline or a
+                // working-day duration. Exclusions were already applied to the target's start.
+                return end.max(start);
+            }
+            i32::from(!matches!(
+                task.flags.primary_type(),
+                GanttTaskType::Milestone
+            ))
+        }
         Some(GanttDate::AfterTask(_)) => 1,
         None => i32::from(!matches!(
             task.flags.primary_type(),
             GanttTaskType::Milestone
         )),
     };
-    advance_gantt_end_day(start, duration, skip_weekends, excluded_dates)
+    advance_gantt_end_day(start, duration, excluded_weekdays, excluded_dates)
 }
 
 fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
@@ -10716,10 +10758,13 @@ fn expand_gantt_excluded_dates(gantt_meta: &IrGanttMeta) -> BTreeSet<i32> {
 
 fn advance_gantt_start_day(
     mut day: i32,
-    skip_weekends: bool,
+    excluded_weekdays: u8,
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
-    while day < i32::MAX && gantt_day_is_excluded(day, skip_weekends, excluded_dates) {
+    if excluded_weekdays == 0x7f {
+        return i32::MAX;
+    }
+    while day < i32::MAX && gantt_day_is_excluded(day, excluded_weekdays, excluded_dates) {
         day = day.saturating_add(1);
     }
     day
@@ -10728,46 +10773,53 @@ fn advance_gantt_start_day(
 fn advance_gantt_end_day(
     start: i32,
     duration_days: i32,
-    skip_weekends: bool,
+    excluded_weekdays: u8,
     excluded_dates: &BTreeSet<i32>,
 ) -> i32 {
     if duration_days <= 0 {
         return start;
     }
 
-    let mut end = advance_gantt_duration(start, duration_days, skip_weekends);
+    let mut end = advance_gantt_duration(start, duration_days, excluded_weekdays);
     // Each excluded working date adds one working day. Iteration follows the growing end, so
     // holidays encountered during an extension are counted too, while weekend holidays count once.
     for &excluded in excluded_dates.range(start..) {
         if excluded >= end {
             break;
         }
-        if !skip_weekends || !is_weekend_day_number(excluded) {
-            end = advance_gantt_duration(end, 1, skip_weekends);
+        if !gantt_weekday_is_excluded(excluded, excluded_weekdays) {
+            end = advance_gantt_duration(end, 1, excluded_weekdays);
         }
     }
     end
 }
 
 /// Advance a working-day duration without scanning every calendar day in a large input.
-fn advance_gantt_duration(mut day: i32, duration_days: i32, skip_weekends: bool) -> i32 {
-    if !skip_weekends {
+fn advance_gantt_duration(mut day: i32, duration_days: i32, excluded_weekdays: u8) -> i32 {
+    if duration_days <= 0 {
+        return day;
+    }
+    if excluded_weekdays == 0 {
         return day.saturating_add(duration_days);
     }
-    while day < i32::MAX && is_weekend_day_number(day) {
+    let working_days_per_week = 7 - (excluded_weekdays & 0x7f).count_ones() as i32;
+    if working_days_per_week == 0 {
+        return i32::MAX;
+    }
+    while day < i32::MAX && gantt_weekday_is_excluded(day, excluded_weekdays) {
         day += 1;
     }
-    // Leave at least one working day for the tail so a Friday completion retains its Saturday
-    // exclusive boundary. The next task's start is separately advanced to Monday.
-    let full_weeks = (duration_days - 1) / 5;
+    // Leave at least one working day for the tail so the end stays immediately after the final
+    // occupied day. Only the next task's START advances through an intervening nonworking run.
+    let full_weeks = (duration_days - 1) / working_days_per_week;
     let shifted = i64::from(day) + i64::from(full_weeks) * 7;
     if shifted >= i64::from(i32::MAX) {
         return i32::MAX;
     }
     day = shifted as i32;
-    let mut remaining = (duration_days - 1) % 5 + 1;
+    let mut remaining = (duration_days - 1) % working_days_per_week + 1;
     while remaining > 0 && day < i32::MAX {
-        if !is_weekend_day_number(day) {
+        if !gantt_weekday_is_excluded(day, excluded_weekdays) {
             remaining -= 1;
         }
         day += 1;
@@ -10775,12 +10827,12 @@ fn advance_gantt_duration(mut day: i32, duration_days: i32, skip_weekends: bool)
     day
 }
 
-fn gantt_day_is_excluded(day: i32, skip_weekends: bool, excluded_dates: &BTreeSet<i32>) -> bool {
-    excluded_dates.contains(&day) || (skip_weekends && is_weekend_day_number(day))
+fn gantt_day_is_excluded(day: i32, excluded_weekdays: u8, excluded_dates: &BTreeSet<i32>) -> bool {
+    excluded_dates.contains(&day) || gantt_weekday_is_excluded(day, excluded_weekdays)
 }
 
-fn is_weekend_day_number(day: i32) -> bool {
-    matches!(gantt_weekday(day), 0 | 6)
+fn gantt_weekday_is_excluded(day: i32, excluded_weekdays: u8) -> bool {
+    excluded_weekdays & (1 << gantt_weekday(day)) != 0
 }
 
 /// Civil `(year, month, day)` from a days-since-epoch count (Howard Hinnant's `civil_from_days`).
@@ -27962,7 +28014,7 @@ mod tests {
                 .collect();
             let start_day = super::parse_iso_day_number(start).unwrap();
             assert_eq!(
-                super::advance_gantt_end_day(start_day, duration, true, &excluded),
+                super::advance_gantt_end_day(start_day, duration, 0b100_0001, &excluded),
                 super::parse_iso_day_number(expected_end).unwrap(),
                 "{start}, {duration} working days, holidays {holidays:?}"
             );
@@ -27973,12 +28025,12 @@ mod tests {
     fn gantt_calendar_saturates_without_looping_or_overflowing() {
         let excluded = BTreeSet::from([i32::MAX]);
         assert_eq!(
-            super::advance_gantt_start_day(i32::MAX, true, &excluded),
+            super::advance_gantt_start_day(i32::MAX, 0b100_0001, &excluded),
             i32::MAX
         );
-        for skip_weekends in [false, true] {
+        for excluded_weekdays in [0, 0b100_0001, 0b111_1110, 0b111_1111] {
             assert_eq!(
-                super::advance_gantt_end_day(1, i32::MAX, skip_weekends, &excluded),
+                super::advance_gantt_end_day(1, i32::MAX, excluded_weekdays, &excluded),
                 i32::MAX
             );
         }
@@ -27986,6 +28038,55 @@ mod tests {
         assert_eq!(super::gantt_weekday(i32::MIN), 2);
         assert!(super::format_gantt_axis_label(i32::MAX, Some("%Y-%m-%d %j")).contains('-'));
         assert!(super::format_gantt_axis_label(i32::MIN, Some("%Y-%m-%d %j")).contains('-'));
+    }
+
+    #[test]
+    fn gantt_weekday_calendars_match_a_day_by_day_reference() {
+        // Exercise every possible nonempty workweek, including one-day weeks and discontinuous
+        // weekends. The oracle counts calendar days directly and shares no skip-week arithmetic.
+        for excluded_weekdays in 0_u8..0x7f {
+            for holidays in [BTreeSet::new(), BTreeSet::from([-4, 0, 2, 3, 9, 20])] {
+                let is_excluded = |day: i32| {
+                    let weekday = (day + 4).rem_euclid(7);
+                    holidays.contains(&day) || excluded_weekdays & (1 << weekday) != 0
+                };
+                for requested_start in -8..8 {
+                    let mut start = requested_start;
+                    while is_excluded(start) {
+                        start += 1;
+                    }
+                    assert_eq!(
+                        super::advance_gantt_start_day(
+                            requested_start,
+                            excluded_weekdays,
+                            &holidays
+                        ),
+                        start,
+                        "calendar {excluded_weekdays:#09b}, start {requested_start}"
+                    );
+                    for duration in 0..22 {
+                        let mut end = start;
+                        let mut remaining = duration;
+                        while remaining > 0 {
+                            if !is_excluded(end) {
+                                remaining -= 1;
+                            }
+                            end += 1;
+                        }
+                        assert_eq!(
+                            super::advance_gantt_end_day(
+                                start,
+                                duration,
+                                excluded_weekdays,
+                                &holidays
+                            ),
+                            end,
+                            "calendar {excluded_weekdays:#09b}, start {start}, duration {duration}, holidays {holidays:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
