@@ -426,6 +426,12 @@ impl TermRenderer {
             );
         }
 
+        if ir.diagram_type == fm_core::DiagramType::Pie
+            && let Some(meta) = &ir.pie_meta
+        {
+            return self.render_pie(ir, meta, layout, (cell_width, cell_height));
+        }
+
         // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
         // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The legacy
         // id-marker skeleton is retained only for direct unit-test coverage.
@@ -624,18 +630,7 @@ impl TermRenderer {
         }
 
         // Chart-specific terminal rendering.
-        if ir.diagram_type == fm_core::DiagramType::Pie
-            && let Some(pie_meta) = &ir.pie_meta
-            && !pie_meta.slices.is_empty()
-        {
-            self::render_pie_cell(
-                &mut buffer,
-                pie_meta,
-                cell_width,
-                cell_height,
-                self.config.show_labels,
-            );
-        } else if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
+        if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
             render_gantt_cell(
                 &mut buffer,
                 ir,
@@ -5190,98 +5185,39 @@ fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     ir.declared_title_if_drawn()
 }
 
-/// Render a pie chart as an ASCII ellipse with wedge detection and a side legend.
-fn render_pie_cell(
-    buffer: &mut CellBuffer,
-    pie_meta: &fm_core::IrPieMeta,
-    cell_width: usize,
-    cell_height: usize,
-    show_labels: bool,
-) {
-    use std::f32::consts::PI;
+const PIE_SLICE_CHARS: [char; 8] = ['#', '*', '@', '+', '=', '~', '%', '&'];
 
-    let slices = &pie_meta.slices;
-    let total: f32 = slices
-        .iter()
-        .map(|s| s.value.max(0.0))
-        .sum::<f32>()
-        .max(f32::EPSILON);
-
-    // Reserve space for legend on the right.
-    let legend_width = if show_labels {
-        slices
-            .iter()
-            .map(|s| s.label.len() + 8) // " X Label  "
-            .max()
-            .unwrap_or(10)
-            .min(cell_width / 3)
-    } else {
-        0
+/// Cumulative fractions in source order. f64 accumulation keeps finite f32 values from
+/// overflowing their total, and tiny positive values retain their actual proportions.
+fn pie_slice_boundaries(meta: &fm_core::IrPieMeta) -> Vec<f64> {
+    let value = |slice: &fm_core::IrPieSlice| {
+        if slice.value.is_finite() && slice.value > 0.0 {
+            f64::from(slice.value)
+        } else {
+            0.0
+        }
     };
-    let chart_width = cell_width.saturating_sub(legend_width + 2);
-    let chart_height = cell_height.saturating_sub(2);
+    let total = meta.slices.iter().map(value).sum::<f64>();
+    let mut cumulative = 0.0;
+    meta.slices
+        .iter()
+        .map(|slice| {
+            cumulative += value(slice);
+            if total > 0.0 { cumulative / total } else { 0.0 }
+        })
+        .collect()
+}
 
-    if chart_width < 4 || chart_height < 4 {
-        return;
+/// Screen coordinates grow downwards: start at noon and advance clockwise through [0, 1).
+/// Repeated boundaries are zero-area slices and must never acquire a fallback wedge.
+fn pie_slice_at(boundaries: &[f64], dx: f64, dy: f64) -> Option<usize> {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    if dx.mul_add(dx, dy * dy) > 1.0 {
+        return None;
     }
-
-    // Title
-    if show_labels && let Some(title) = &pie_meta.title {
-        let tx = chart_width.saturating_sub(title.len()) / 2;
-        buffer.set_string(tx, 0, title);
-    }
-
-    let cx = chart_width / 2;
-    let cy = chart_height / 2 + 1;
-    let rx = (chart_width / 2).saturating_sub(1).max(2);
-    let ry = (chart_height / 2).saturating_sub(1).max(2);
-
-    let slice_chars: &[char] = &['#', '*', '@', '+', '=', '~', '%', '&'];
-
-    // Build cumulative angle boundaries.
-    let mut boundaries = Vec::with_capacity(slices.len() + 1);
-    boundaries.push(-PI / 2.0);
-    let mut angle = -PI / 2.0;
-    for slice in slices {
-        angle += (slice.value.max(0.0) / total) * 2.0 * PI;
-        boundaries.push(angle);
-    }
-
-    // Render pie ellipse pixel-by-pixel.
-    for row in 0..chart_height {
-        for col in 0..chart_width {
-            let dx = (col as f32 - cx as f32) / rx as f32;
-            let dy = (row as f32 - cy as f32) / ry as f32;
-            if dx * dx + dy * dy > 1.0 {
-                continue;
-            }
-            let cell_angle = (-dy).atan2(dx);
-            // Find which slice this angle belongs to.
-            let slice_idx = boundaries
-                .windows(2)
-                .position(|w| cell_angle >= w[0] && cell_angle < w[1])
-                .unwrap_or(0);
-            let ch = slice_chars[slice_idx % slice_chars.len()];
-            buffer.set(col, row + 1, ch);
-        }
-    }
-
-    // Render legend on the right side.
-    let legend_x = chart_width + 2;
-    if show_labels {
-        for (i, slice) in slices.iter().enumerate() {
-            let row = i + 2;
-            if row >= cell_height {
-                break;
-            }
-            let ch = slice_chars[i % slice_chars.len()];
-            let pct = (slice.value.max(0.0) / total) * 100.0;
-            let entry = format!("{ch} {:.0}% {}", pct, slice.label);
-            // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
-            let truncated: String = entry.chars().take(legend_width).collect();
-            buffer.set_string(legend_x, row, &truncated);
-        }
-    }
+    let fraction = (dy.atan2(dx) + FRAC_PI_2).rem_euclid(TAU) / TAU;
+    let index = boundaries.partition_point(|&end| end <= fraction);
+    (index < boundaries.len()).then_some(index)
 }
 
 /// Render gantt task bars in the terminal as horizontal block characters.
@@ -5426,6 +5362,279 @@ fn render_gantt_cell(
 }
 
 impl TermRenderer {
+    /// Render pie sectors in every fidelity, with one shared angular partition for cell fills,
+    /// sub-cell hatching, and the legend. Generic graph nodes are only label anchors for a pie.
+    fn render_pie(
+        &self,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrPieMeta,
+        layout: &DiagramLayout,
+        (width, height): (usize, usize),
+    ) -> TermRenderResult {
+        use std::f64::consts::{FRAC_PI_2, TAU};
+
+        let width = width.min(self.config.cols);
+        let height = height.min(self.config.rows);
+        let mode = if self.config.tier == MermaidTier::Compact
+            || self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii
+        {
+            MermaidRenderMode::CellOnly
+        } else {
+            self.config.render_mode
+        };
+        let title = self
+            .config
+            .show_labels
+            .then(|| ir.declared_title_if_drawn())
+            .flatten();
+        let boundaries = pie_slice_boundaries(meta);
+        let selected = self
+            .config
+            .selected_node
+            .filter(|&index| self.config.show_selection && index < meta.slices.len());
+        let mut previous = 0.0;
+        let legends: Vec<_> = meta
+            .slices
+            .iter()
+            .zip(&boundaries)
+            .enumerate()
+            .map(|(index, (slice, &end))| {
+                let percentage = (end - previous) * 100.0;
+                previous = end;
+                let value = if meta.show_data {
+                    format!(" [{}]", slice.value)
+                } else {
+                    String::new()
+                };
+                let label = self
+                    .truncate_label(&slice.label)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "{}{} {percentage:.0}%{value} {label}",
+                    if selected == Some(index) { ">" } else { "" },
+                    PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()]
+                )
+            })
+            .collect();
+        let padding = self.config.padding.min(width / 2).min(height / 2);
+        let top = (padding + usize::from(title.is_some()) * 2).min(height);
+        let bottom = height.saturating_sub(padding).max(top);
+        let left = padding;
+        let mut right = width.saturating_sub(padding);
+        let mut chart_bottom = bottom;
+        let mut legend = None;
+        if self.config.show_labels && !legends.is_empty() {
+            if width >= 28 {
+                let legend_width = legends
+                    .iter()
+                    .map(|entry| entry.width())
+                    .max()
+                    .unwrap_or(0)
+                    .min(width / 2);
+                right = right.saturating_sub(legend_width + 2);
+                legend = Some((right + 2, top, legend_width, bottom - top));
+            } else if bottom.saturating_sub(top) >= 8 {
+                let legend_rows = legends.len().min((bottom - top) / 2);
+                chart_bottom = bottom.saturating_sub(legend_rows + 1);
+                legend = Some((left, chart_bottom + 1, right - left, legend_rows));
+            }
+        }
+        let chart_width = right.saturating_sub(left);
+        let chart_height = chart_bottom.saturating_sub(top);
+        let cx = left as f64 + chart_width as f64 / 2.0;
+        let cy = top as f64 + chart_height as f64 / 2.0;
+        // A terminal cell is roughly twice as tall as it is wide.
+        let rx = (chart_width as f64 / 2.0).min(chart_height as f64);
+        let ry = rx / 2.0;
+        let mut buffer = CellBuffer::new(width, height);
+        let mut painted = vec![false; meta.slices.len()];
+        if rx > 0.0 && ry > 0.0 {
+            if mode == MermaidRenderMode::CellOnly {
+                for row in top..chart_bottom {
+                    for col in left..right {
+                        let dx = (col as f64 + 0.5 - cx) / rx;
+                        let dy = (row as f64 + 0.5 - cy) / ry;
+                        if let Some(index) = pie_slice_at(&boundaries, dx, dy) {
+                            buffer.set(col, row, PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()]);
+                            painted[index] = true;
+                        }
+                    }
+                }
+            } else {
+                let (mx, my) = crate::canvas::subcell_multiplier(mode);
+                let mut canvas = Canvas::new(width, height, mode);
+                let outline = (1.0 - 1.0 / (rx * mx as f64).min(ry * my as f64).max(1.0)).powi(2);
+                for y in top * my..chart_bottom * my {
+                    for x in left * mx..right * mx {
+                        let dx = ((x as f64 + 0.5) / mx as f64 - cx) / rx;
+                        let dy = ((y as f64 + 0.5) / my as f64 - cy) / ry;
+                        let Some(index) = pie_slice_at(&boundaries, dx, dy) else {
+                            continue;
+                        };
+                        let hatch = match index % 8 {
+                            0 => (x + y).is_multiple_of(4),
+                            1 => (x + 4 - y % 4).is_multiple_of(4),
+                            2 => x.is_multiple_of(3),
+                            3 => y.is_multiple_of(3),
+                            4 => (x + y).is_multiple_of(2),
+                            5 => x.is_multiple_of(4) && y.is_multiple_of(4),
+                            6 => x.is_multiple_of(4) || y.is_multiple_of(4),
+                            _ => true,
+                        };
+                        if hatch || dx.mul_add(dx, dy * dy) >= outline {
+                            canvas.set_pixel(x, y);
+                            painted[index] = true;
+                        }
+                    }
+                }
+                let mut start = 0.0;
+                let positive_slices = boundaries
+                    .iter()
+                    .filter(|&&end| {
+                        let positive = end > start;
+                        start = end;
+                        positive
+                    })
+                    .count();
+                start = 0.0;
+                for &end in &boundaries {
+                    if end > start && positive_slices > 1 {
+                        let angle = start.mul_add(TAU, -FRAC_PI_2);
+                        canvas.draw_line(
+                            (cx * mx as f64) as isize,
+                            (cy * my as f64) as isize,
+                            ((cx + rx * angle.cos()) * mx as f64) as isize,
+                            ((cy + ry * angle.sin()) * my as f64) as isize,
+                        );
+                    }
+                    start = end;
+                }
+                buffer.cells = canvas
+                    .render_char_grid()
+                    .into_iter()
+                    .flatten()
+                    .map(|ch| if ch == '\u{2800}' { ' ' } else { ch })
+                    .collect();
+                if self.config.show_labels {
+                    let mut occupied = std::collections::BTreeSet::new();
+                    start = 0.0;
+                    for (index, &end) in boundaries.iter().enumerate() {
+                        if end > start {
+                            let angle = ((start + end) / 2.0).mul_add(TAU, -FRAC_PI_2);
+                            let col = (cx + rx * 0.65 * angle.cos()) as usize;
+                            let row = (cy + ry * 0.65 * angle.sin()) as usize;
+                            if occupied.insert((col, row)) {
+                                buffer.set(
+                                    col,
+                                    row,
+                                    PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()],
+                                );
+                            }
+                        }
+                        start = end;
+                    }
+                }
+            }
+        }
+        if let Some(index) = selected {
+            let start = index
+                .checked_sub(1)
+                .map_or(0.0, |previous| boundaries[previous]);
+            let end = boundaries[index];
+            if end > start && rx > 0.0 && ry > 0.0 {
+                let angle = ((start + end) / 2.0).mul_add(TAU, -FRAC_PI_2);
+                buffer.set(
+                    (cx + rx * 0.65 * angle.cos()) as usize,
+                    (cy + ry * 0.65 * angle.sin()) as usize,
+                    '>',
+                );
+            }
+        }
+        if let Some((column, row, budget, available)) = legend {
+            let shown = if legends.len() > available {
+                available.saturating_sub(1)
+            } else {
+                legends.len()
+            };
+            for (offset, entry) in legends.iter().take(shown).enumerate() {
+                buffer.set_string(column, row + offset, &self.pie_text_to_width(entry, budget));
+            }
+            if shown < legends.len() && available > 0 {
+                buffer.set_string(
+                    column,
+                    row + shown,
+                    &self.pie_text_to_width(
+                        &format!("+{} more slices", legends.len() - shown),
+                        budget,
+                    ),
+                );
+            }
+        }
+        if let Some(title) = title {
+            let title = self.pie_text_to_width(&self.truncate_label(title), width);
+            buffer.set_string(width.saturating_sub(title.width()) / 2, 0, &title);
+        }
+        let mut output = buffer.to_output_string();
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, width, height, metrics);
+        }
+        TermRenderResult {
+            output,
+            width,
+            height,
+            tier: self.config.tier,
+            render_mode: mode,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: meta
+                .slices
+                .iter()
+                .zip(painted)
+                .filter(|(slice, painted)| slice.value.is_finite() && slice.value > 0.0 && !painted)
+                .count(),
+            occluded_edge_label_count: 0,
+            debug_metrics,
+        }
+    }
+
+    /// Pie captions terminate their row; measure display columns so wide text stays in the
+    /// legend's reserved space without displacing chart pixels or exceeding the viewport.
+    fn pie_text_to_width(&self, text: &str, budget: usize) -> String {
+        use unicode_width::UnicodeWidthChar;
+        if budget == 0 {
+            return String::new();
+        }
+        let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+            text = text.replace('…', "~");
+        }
+        if text.width() <= budget {
+            return text;
+        }
+        let mut used = 0;
+        let mut clipped: String = text
+            .chars()
+            .take_while(|ch| {
+                used += ch.width().unwrap_or(0);
+                used < budget
+            })
+            .collect();
+        clipped.push(
+            if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                '~'
+            } else {
+                '…'
+            },
+        );
+        clipped
+    }
+
     /// Project XY marks onto a terminal raster without changing their common numeric scale.
     fn render_xychart(
         &self,
@@ -6132,6 +6341,232 @@ mod tests {
                 assert!(
                     out.contains("+go()"),
                     "the class member was lost when its generic heading was drawn:\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_cell_raster_preserves_clockwise_quadrants_and_proportions() {
+        let config = TermRenderConfig {
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            show_labels: false,
+            padding: 0,
+            max_width: 160,
+            max_height: 80,
+            ..TermRenderConfig::default()
+        };
+        let ir = fm_parser::parse("pie\n\"A\":1\n\"B\":1\n\"C\":1\n\"D\":1").ir;
+        let result = crate::render_term_with_config(&ir, &config, 160, 80);
+        let mut counts = [0_usize; 4];
+        let mut centers = [(0_usize, 0_usize); 4];
+        for (row, line) in result.output.lines().enumerate() {
+            for (column, ch) in line.chars().enumerate() {
+                if let Some(index) = ['#', '*', '@', '+'].iter().position(|&mark| mark == ch) {
+                    counts[index] += 1;
+                    centers[index].0 += column;
+                    centers[index].1 += row;
+                }
+            }
+        }
+        assert!(counts.iter().all(|&count| count > 100), "{counts:?}");
+        assert!(
+            counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 2,
+            "{counts:?}"
+        );
+        for (index, &(x, y)) in centers.iter().enumerate() {
+            let right = x / counts[index] >= result.width / 2;
+            let bottom = y / counts[index] >= result.height / 2;
+            assert_eq!(
+                (right, bottom),
+                [(true, false), (true, true), (false, true), (false, false)][index]
+            );
+        }
+
+        let ir = fm_parser::parse("pie\n\"A\":1\n\"B\":2\n\"C\":3").ir;
+        let result = crate::render_term_with_config(&ir, &config, 160, 80);
+        let counts = ['#', '*', '@'].map(|mark| result.output.matches(mark).count());
+        let total = counts.iter().sum::<usize>() as f64;
+        for (count, fraction) in counts.into_iter().zip([1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0]) {
+            assert!(
+                (count as f64 / total - fraction).abs() < 0.02,
+                "pie lost its authored ratios"
+            );
+        }
+    }
+
+    #[test]
+    fn pie_all_modes_draw_sectors_legend_values_and_one_title() {
+        let ir = fm_parser::parse(
+            "pie showData title Allocation\n\"Alpha\":2\n\"Beta\":2\n\"Gamma\":2\n\"Delta\":2",
+        )
+        .ir;
+        for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    tier,
+                    render_mode: mode,
+                    max_width: 160,
+                    max_height: 60,
+                    ..TermRenderConfig::rich()
+                };
+                let result = crate::render_term_with_config(&ir, &config, 160, 60);
+                assert_eq!(
+                    result.output.matches("Allocation").count(),
+                    1,
+                    "{tier:?}/{mode:?}"
+                );
+                for label in ["Alpha", "Beta", "Gamma", "Delta"] {
+                    assert!(
+                        result.output.contains(label),
+                        "{tier:?}/{mode:?}: {label}\n{}",
+                        result.output
+                    );
+                }
+                assert_eq!(result.output.matches("25% [2]").count(), 4);
+                for mark in ['#', '*', '@', '+'] {
+                    assert!(
+                        result.output.matches(mark).count() >= 2,
+                        "slice {mark} has a legend but no sector: {tier:?}/{mode:?}\n{}",
+                        result.output
+                    );
+                }
+                let effective = if tier == MermaidTier::Compact {
+                    MermaidRenderMode::CellOnly
+                } else {
+                    mode
+                };
+                assert_eq!(result.render_mode, effective);
+                if effective == MermaidRenderMode::Braille {
+                    assert!(
+                        result
+                            .output
+                            .chars()
+                            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                    );
+                }
+                assert_eq!(result.occluded_node_count, 0);
+                assert_eq!(
+                    result.output,
+                    crate::render_term_with_config(&ir, &config, 160, 60).output
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_zero_invalid_and_extreme_values_do_not_invent_or_lose_area() {
+        let mut ir = fm_parser::parse("pie\n\"A\":1\n\"B\":1\n\"C\":1\n\"D\":1").ir;
+        let layout = layout_diagram(&ir);
+        let config = TermRenderConfig {
+            show_labels: false,
+            padding: 0,
+            ..TermRenderConfig::compact()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        for values in [
+            [0.0, 1.0, 0.0, 0.0],
+            [f32::NAN, f32::INFINITY, -2.0, 0.0],
+            [f32::MAX, f32::MAX, f32::MAX, f32::MAX],
+            [1.0e-30, 1.0e-30, 1.0e-30, 1.0e-30],
+        ] {
+            let meta = ir.pie_meta.as_mut().unwrap();
+            for (slice, value) in meta.slices.iter_mut().zip(values) {
+                slice.value = value;
+            }
+            let result = renderer.render_pie(&ir, ir.pie_meta.as_ref().unwrap(), &layout, (80, 24));
+            let counts = ['#', '*', '@', '+'].map(|mark| result.output.matches(mark).count());
+            if values[0] == 0.0 {
+                assert_eq!((counts[0], counts[2], counts[3]), (0, 0, 0));
+                assert!(counts[1] > 0);
+            } else if values[0].is_nan() {
+                assert!(
+                    result.output.trim().is_empty(),
+                    "invalid values created a positive wedge"
+                );
+            } else {
+                assert!(counts.iter().all(|&count| count > 0));
+                assert!(
+                    counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 2,
+                    "{counts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_caps_unicode_captions_and_empty_charts_to_the_viewport() {
+        let ir =
+            fm_parser::parse("pie showData title 販売\u{1b}[31m\n\"国内🚀\":20\n\"国外\":30").ir;
+        let layout = layout_diagram(&ir);
+        for (width, height) in [(0, 0), (1, 1), (8, 4), (19, 10), (40, 12), (100, 40)] {
+            let result = crate::render_term_with_layout_and_config(
+                &ir,
+                &layout,
+                &TermRenderConfig::rich(),
+                width,
+                height,
+            );
+            assert!(result.width <= width && result.height <= height);
+            assert!(result.output.lines().count() <= height);
+            assert!(
+                result.output.lines().all(|line| line.width() <= width),
+                "{width}x{height}: {}",
+                result.output
+            );
+            assert!(!result.output.contains('\u{1b}'));
+        }
+        let empty = fm_parser::parse("pie title Empty").ir;
+        let result = crate::render_term_with_config(&empty, &TermRenderConfig::rich(), 80, 24);
+        assert_eq!(result.output.matches("Empty").count(), 1);
+        assert_eq!(result.occluded_node_count, 0);
+
+        let mut config = TermRenderConfig::rich();
+        config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
+        config.max_label_chars = 8;
+        let ir = fm_parser::parse("pie title LongTitleForClipping\n\"LongSliceLabel\":1").ir;
+        let result = crate::render_term_with_config(&ir, &config, 40, 12);
+        assert!(result.output.is_ascii(), "{}", result.output);
+        assert_eq!(result.render_mode, MermaidRenderMode::CellOnly);
+    }
+
+    #[test]
+    fn pie_selection_remains_visible_in_chart_and_legend() {
+        let ir = fm_parser::parse("pie\n\"Alpha\":1\n\"Beta\":1").ir;
+        for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+            for show_labels in [false, true] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    show_labels,
+                    ..TermRenderConfig::rich()
+                };
+                let plain = crate::render_term_with_config(&ir, &config, 100, 40);
+                let selected = crate::render_term_with_config(
+                    &ir,
+                    &TermRenderConfig {
+                        selected_node: Some(1),
+                        ..config
+                    },
+                    100,
+                    40,
+                );
+                assert_ne!(plain.output, selected.output);
+                assert_eq!(
+                    selected.output.matches('>').count(),
+                    if show_labels { 2 } else { 1 }
+                );
+                if show_labels {
+                    assert!(selected.output.contains(">* 50% Beta"));
+                }
+                assert_eq!(
+                    (plain.width, plain.height),
+                    (selected.width, selected.height)
                 );
             }
         }
