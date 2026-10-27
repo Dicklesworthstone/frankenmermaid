@@ -2638,10 +2638,10 @@ fn render_scene_text(
         if ir
             .nodes
             .get(index)
-            .is_some_and(|node| node.c4_meta.is_some())
+            .is_some_and(|node| node.c4_meta.is_some() || !node.members.is_empty())
             && ir.resolved_node_style(index).contains_key("font-size")
         {
-            style = Some(c4_measured_font_style(style.as_deref(), text.font_size));
+            style = Some(measured_card_font_style(style.as_deref(), text.font_size));
         }
         if let Some(style) = style {
             elem = elem.attr("style", &style);
@@ -9866,147 +9866,82 @@ fn write_class_compartments_into(
     }
 }
 
-/// Stream an ER entity's body (name header `<text>` + divider `<line>` + one `<text>` per attribute)
-/// byte-identical to what `render_node`'s ER branch builds via `Element`s under embedded CSS with no
-/// per-label style and no classdef class. Attrs replicate that branch's builder call order exactly:
-/// name/attr `<text>` carry `x, y, text-anchor, dominant-baseline, font-size, font-weight, fill, class`
-/// (font-family is embedded-CSS-driven, so absent); the divider `<line>` carries `x1, y1, x2, y2,
-/// stroke-width` (stroke is CSS-driven, so absent). The per-attribute content `{key_prefix}{data_type}
-/// {name}` streams in pieces instead of a `format!` temp — byte-identical because `write_escaped_text`
-/// escapes per char and `key_prefix`/the separating space hold no XML specials. Used only via the ER
-/// branch's fast path, mirroring [`write_class_compartments_into`]; replaces ~2 + N `Element`s per
-/// entity (~400 for a 40-entity diagram) with one raw fragment.
-#[allow(clippy::too_many_arguments)]
-/// Left offsets of an ER attribute's four column cells, relative to the row's left edge.
-///
-/// Computed ONCE per entity from the widest cell in each column, so every row's cells line up — the
-/// property that makes a column a column. An empty column contributes no width and no gutter, which
-/// is why an entity with no keys and no comments is exactly as wide as its type and name need.
-///
-/// ⚠️ MEASURED HERE, NOT IN LAYOUT, and that asymmetry is deliberate. fm-layout sizes the entity BOX
-/// and deliberately over-estimates (it assumes the render font floor it cannot see), so its width is
-/// an upper bound rather than the exact figure. Placing cells needs the exact figure, and the
-/// renderer is the only side that knows the real font size. The two agree in the only way that
-/// matters: layout's box is at least as wide as the cells drawn inside it.
-fn er_cell_columns(
-    node: &fm_core::IrNode,
-    attr_font_size: f32,
-    config: &SvgRenderConfig,
-) -> [f32; 4] {
-    let metrics = config.font_metrics();
-    let metrics_size = metrics.font_size();
-    let scale = if metrics_size > 0.0 {
-        attr_font_size / metrics_size
-    } else {
-        1.0
-    };
-    // ⚠️ ONE DEFINITION, SHARED WITH LAYOUT. `fm-layout` sizes the entity box from exactly this
-    // geometry; a second copy here is how a cell ends up drawn outside its own box. See
-    // `fm_core::er_cell_columns`.
-    let (offsets, _right_edge) = fm_core::er_cell_columns(
-        &node.members,
-        &metrics,
-        scale,
-        fm_core::er_cell_gutter(attr_font_size),
-    );
-    offsets
-}
-
-// `config` joined the signature so the cell columns can be measured with the same font metrics the
-// text is drawn at; the sibling streaming writers in this file carry the same allow.
+/// Draw the shared measured ER table from either SVG node path.
 #[allow(clippy::too_many_arguments)]
 fn write_er_entity_into(
     f: &mut String,
     node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    node_index: usize,
     label_text: &str,
-    cx: f32,
     x: f32,
     y: f32,
     w: f32,
     node_font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) {
-    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
-    let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
-    let header_height = node_font_size * 1.5;
-    let fill = colors.text.as_str();
-
-    // Entity name header.
-    f.push_str("<text x=\"");
-    let _ = write_number_into(f, cx);
-    f.push_str("\" y=\"");
-    let _ = write_number_into(f, y + header_height * 0.6);
-    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
-    let _ = write_number_into(f, node_font_size);
-    f.push_str("\" font-weight=\"bold\" fill=\"");
-    let _ = write_escaped_attr(f, fill);
-    f.push_str("\" class=\"fm-er-entity-name\">");
-    let _ = write_escaped_text(f, label_text);
-    f.push_str("</text>");
-
-    // Divider line.
-    f.push_str("<line x1=\"");
-    let _ = write_number_into(f, x + 2.0);
-    f.push_str("\" y1=\"");
-    let _ = write_number_into(f, y + header_height);
-    f.push_str("\" x2=\"");
-    let _ = write_number_into(f, x + w - 2.0);
-    f.push_str("\" y2=\"");
-    let _ = write_number_into(f, y + header_height);
-    // `stroke_width(0.8)` serializes via `write_number_into` -> two decimals ("0.80"), NOT "0.8".
-    f.push_str("\" stroke-width=\"0.80\"/>");
-
-    // Attribute list, drawn as COLUMN CELLS (bd-xxvch).
-    //
-    // ⚠️ mermaid EMITS ONE TEXT ELEMENT PER FIELD, not one per row. Measured in Chromium 151 against
-    // the pinned 11.15.0 bundle, `int id PK` renders as three elements at fixed column offsets:
-    //
-    // ```text
-    //   int    x=29     id     x=93    PK   x=158     y=68
-    //   string x=29     name   x=93                   y=111
-    //   string x=29     email  x=93    UK   x=158     y=154
-    // ```
-    //
-    // The key column stays put when an attribute has no key — the name does NOT slide into it — so
-    // the offsets are computed once for the whole entity from the widest cell in each column.
-    let cell_columns = er_cell_columns(node, attr_font_size, config);
-    let mut attr_y = y + header_height + attr_font_size * 0.9;
-    for attr in &node.members {
-        let font_weight = if attr.keys.is_empty() {
-            "normal"
-        } else {
-            "bold"
-        };
-        // ⚠️ THE KEY CELL COMES FROM `key_cell`, which is the only form that can build a composite
-        // `PK,FK`. Reading the borrowed `display_cells` key here would drop a junction table's key
-        // exactly as bd-nryyc did.
-        let key = attr.key_cell();
-        let cells: [&str; 4] = [
-            attr.data_type.as_str(),
-            attr.name.as_str(),
-            key.as_ref(),
-            attr.comment.as_deref().unwrap_or(""),
-        ];
-        for (index, cell) in cells.iter().enumerate() {
-            if cell.is_empty() {
-                continue;
-            }
-            f.push_str("<text x=\"");
-            let _ = write_number_into(f, x + 8.0 + cell_columns[index]);
-            f.push_str("\" y=\"");
-            let _ = write_number_into(f, attr_y);
-            f.push_str("\" text-anchor=\"start\" dominant-baseline=\"central\" font-size=\"");
-            let _ = write_number_into(f, attr_font_size);
-            f.push_str("\" font-weight=\"");
-            f.push_str(font_weight);
-            f.push_str("\" fill=\"");
-            let _ = write_escaped_attr(f, fill);
-            f.push_str("\" class=\"fm-er-attribute\">");
-            let _ = write_escaped_text(f, cell);
-            f.push_str("</text>");
+    let declared = ir.resolved_node_style(node_index);
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: node_font_size,
+        preset: fm_core::FontPreset::from_family(
+            declared
+                .get("font-family")
+                .map_or(&config.font_family, String::as_str),
+        ),
+        ..config.font_metrics().config().clone()
+    });
+    let card = fm_core::ErCardLayout::new(
+        &node.members,
+        label_text,
+        &metrics,
+        declared.get("font-size").map(String::as_str),
+        config.min_font_size,
+    );
+    Element::line()
+        .x1(x + 2.0)
+        .y1(y + card.header_height)
+        .x2(x + w - 2.0)
+        .y2(y + card.header_height)
+        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+        .stroke_width(0.8)
+        .write_to_string(f);
+    for run in card.text {
+        let mut text = TextBuilder::new(&run.text)
+            .x(x + run.column.map_or(w * 0.5, |column| {
+                fm_core::ErCardLayout::PADDING_X + card.column_offsets[column]
+            }))
+            .y(y + run.center_y)
+            .anchor(if run.column.is_some() {
+                TextAnchor::Start
+            } else {
+                TextAnchor::Middle
+            })
+            .baseline(text::DominantBaseline::Central)
+            .font_size(run.font_size)
+            .font_weight(if run.emphasized { "bold" } else { "normal" })
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .fill(&colors.text)
+            .class(if run.column.is_some() {
+                "fm-er-attribute"
+            } else {
+                "fm-er-entity-name"
+            })
+            .build();
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
         }
-        attr_y += attr_font_size * 1.3;
+        if declared.contains_key("font-size") {
+            text = text.attr(
+                "style",
+                &measured_card_font_style(label_style, run.font_size),
+            );
+        } else if let Some(style) = label_style {
+            text = text.attr("style", style);
+        }
+        text.write_to_string(f);
     }
 }
 
@@ -10213,11 +10148,11 @@ fn write_c4_icon_line_into(f: &mut String, x1: f32, y1: f32, x2: f32, y2: f32, s
 fn write_er_node_fragment_into<const A11Y: bool>(
     out: &mut String,
     node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
     node_id: &str,
     node_index: usize,
     raw_label: &str,
     label_text: &str,
-    cx: f32,
     x: f32,
     y: f32,
     w: f32,
@@ -10259,7 +10194,7 @@ fn write_er_node_fragment_into<const A11Y: bool>(
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
     write_er_entity_into(
-        out, node, label_text, cx, x, y, w, font_size, config, colors,
+        out, node, ir, node_index, label_text, x, y, w, font_size, config, colors, None, false,
     );
     if A11Y {
         // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
@@ -11410,11 +11345,11 @@ fn render_node_into(
         write_er_node_fragment_into::<true>(
             out,
             node,
+            ir,
             node_id,
             node_box.node_index,
             raw_label_text,
             label_text.as_ref(),
-            cx,
             x,
             y,
             w,
@@ -11457,11 +11392,11 @@ fn render_node_into(
         write_er_node_fragment_into::<false>(
             out,
             node,
+            ir,
             node_id,
             node_box.node_index,
             raw_label_text,
             label_text.as_ref(),
-            cx,
             x,
             y,
             w,
@@ -13414,106 +13349,23 @@ fn render_node(
             && !node.members.is_empty()
             && ir.diagram_type == fm_core::DiagramType::Er
         {
-            // ER entity: render name + attribute list.
-            // Streaming fast path: embedded CSS, no per-label style, no classdef class -> the header +
-            // divider + attribute rows are a fixed set of `<text>`/`<line>` bytes with no per-element
-            // conditional class/style, so stream them into ONE raw fragment instead of ~2 + N `Element`s
-            // per entity (~400 for a 40-entity diagram). Byte-identical to the Element path below (same
-            // attrs/order/positions/cursor advance); mirrors `render_class_compartments`' fast path.
-            // Every other case (per-label style, classdef, non-embedded CSS) falls through.
-            if text_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
-                let mut fragment = String::new();
-                write_er_entity_into(
-                    &mut fragment,
-                    node,
-                    label_text.as_ref(),
-                    cx,
-                    x,
-                    y,
-                    w,
-                    node_font_size,
-                    config,
-                    colors,
-                );
-                group = group.child(Element::raw_svg(fragment));
-            } else {
-                let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
-                let header_height = node_font_size * 1.5;
-
-                // Entity name header
-                let mut name_elem = Element::text()
-                    .x(cx)
-                    .y(y + header_height * 0.6)
-                    .content(label_text.as_ref())
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", node_font_size)
-                    .attr("font-weight", "bold")
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .fill(&colors.text)
-                    .class("fm-er-entity-name");
-                name_elem = apply_label_class(name_elem);
-                if let Some(style) = text_style.as_deref() {
-                    name_elem = name_elem.attr("style", style);
-                }
-                group = group.child(name_elem);
-
-                // Divider line
-                group = group.child(
-                    Element::line()
-                        .x1(x + 2.0)
-                        .y1(y + header_height)
-                        .x2(x + w - 2.0)
-                        .y2(y + header_height)
-                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-                        .stroke_width(0.8),
-                );
-
-                // Attribute list
-                let mut attr_y = y + header_height + attr_font_size * 0.9;
-                let cell_columns = er_cell_columns(node, attr_font_size, config);
-                for attr in &node.members {
-                    let font_weight = if attr.keys.is_empty() {
-                        "normal"
-                    } else {
-                        "bold"
-                    };
-                    // Column cells, in lockstep with the streaming writer — see `er_cell_columns`.
-                    // The key comes from `key_cell` so a composite `PK,FK` survives (bd-nryyc).
-                    let key = attr.key_cell();
-                    let cells: [&str; 4] = [
-                        attr.data_type.as_str(),
-                        attr.name.as_str(),
-                        key.as_ref(),
-                        attr.comment.as_deref().unwrap_or(""),
-                    ];
-                    for (index, cell) in cells.iter().enumerate() {
-                        if cell.is_empty() {
-                            continue;
-                        }
-                        let mut attr_elem = Element::text()
-                            .x(x + 8.0 + cell_columns[index])
-                            .y(attr_y)
-                            .content(*cell)
-                            .attr("text-anchor", "start")
-                            .attr("dominant-baseline", "central")
-                            .attr_num("font-size", attr_font_size)
-                            .attr("font-weight", font_weight)
-                            .font_family_unless_embedded_css(
-                                &config.font_family,
-                                config.embed_theme_css,
-                            )
-                            .fill(&colors.text)
-                            .class("fm-er-attribute");
-                        attr_elem = apply_label_class(attr_elem);
-                        if let Some(style) = text_style.as_deref() {
-                            attr_elem = attr_elem.attr("style", style);
-                        }
-                        group = group.child(attr_elem);
-                    }
-                    attr_y += attr_font_size * 1.3;
-                }
-            }
+            let mut fragment = String::new();
+            write_er_entity_into(
+                &mut fragment,
+                node,
+                ir,
+                node_box.node_index,
+                label_text.as_ref(),
+                x,
+                y,
+                w,
+                node_font_size,
+                config,
+                colors,
+                text_style.as_deref(),
+                emit_classdef_classes,
+            );
+            group = group.child(Element::raw_svg(fragment));
         } else if let Some(node) = ir_node
             && let Some(ref c4_meta) = node.c4_meta
         {
@@ -14008,7 +13860,7 @@ fn write_c4_node_content_into(
             (false, None) => None,
         };
         if declared.contains_key("font-size") {
-            style = Some(c4_measured_font_style(style.as_deref(), row.font_size));
+            style = Some(measured_card_font_style(style.as_deref(), row.font_size));
         }
         if let Some(style) = style {
             text = text.attr("style", &style);
@@ -14020,7 +13872,7 @@ fn write_c4_node_content_into(
 /// Keep the browser's font size equal to the size used for wrapping and card height. Unsupported
 /// units or out-of-range values fall back in the shared model, and must not reappear through a
 /// class definition or inline style after that measurement.
-fn c4_measured_font_style(style: Option<&str>, font_size: f32) -> String {
+fn measured_card_font_style(style: Option<&str>, font_size: f32) -> String {
     use std::fmt::Write as _;
 
     let mut style = style.unwrap_or_default().to_string();

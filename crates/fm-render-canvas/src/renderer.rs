@@ -3316,134 +3316,56 @@ impl Canvas2dRenderer {
                     }
                 }
             } else if let Some(node) = ir_node.filter(|n| !n.members.is_empty()) {
-                // ER entities get the SAME compartment treatment as classes (bd-rk14).
-                //
-                // Measured SVG vs canvas: `A { string name PK }` drew `name` and `PK` in the SVG and
-                // NEITHER on the canvas, while `class_member` passed in the same probe — so the
-                // canvas could already draw compartments and ER simply never got them. This is the
-                // canvas twin of bd-ekx2, which was the identical gap in the terminal.
-                //
-                // The row text mirrors fm-render-svg and the terminal: key prefix, type, name, then
-                // the comment when present, so all three renderers say the same thing.
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-
-                ctx.set_fill_style(label_fill);
-                ctx.set_text_baseline(TextBaseline::Middle);
-
                 let entity_name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-
-                let class_fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.0.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-                ctx.fill_text(entity_name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(
+                        declared_parts
+                            .family
+                            .as_deref()
+                            .unwrap_or(&self.config.font_family),
+                    ),
+                    ..self.config.font_metrics().config().clone()
+                });
+                let card = fm_core::ErCardLayout::new(
+                    &node.members,
+                    entity_name,
+                    &metrics,
+                    declared.get("font-size").map(String::as_str),
+                    fm_core::ErCardLayout::MIN_ATTRIBUTE_FONT_SIZE,
+                );
+                ctx.set_stroke_style(stroke.as_deref().unwrap_or(&self.config.node_stroke));
+                ctx.set_line_width(0.8);
                 ctx.begin_path();
-                ctx.move_to(x, cursor_y);
-                ctx.line_to(x + w, cursor_y);
+                ctx.move_to(x + 2.0, y + f64::from(card.header_height));
+                ctx.line_to(x + w - 2.0, y + f64::from(card.header_height));
                 ctx.stroke();
                 self.draw_calls += 1;
-                cursor_y += member_font * 0.5;
-
-                ctx.set_text_align(TextAlign::Left);
-                // ER attribute cells at shared COLUMN offsets (bd-jbrzc), not one fused run.
-                //
-                // ⚠️ THE BOX IS SIZED FROM THE COLUMN GEOMETRY. fm-layout measures an entity with
-                // `fm_core::er_cell_columns`, so a surface drawing fused rows is measured by a rule
-                // it does not follow: the reserved width goes unused and the fields do not line up,
-                // while the SVG surface — sized by the same rule — aligns them. Measured on the
-                // skew fixture `T { verylongtypename a / t verylongattributename PK }`: SVG puts
-                // both second cells at x=195.39, the canvas put them wherever the first cell
-                // happened to end.
-                //
-                // ⚠️ THE OFFSETS COME FROM `fm_core::er_cell_columns`, NOT FROM LOCAL ARITHMETIC.
-                // That helper exists precisely so layout and every renderer agree; a hand-rolled
-                // copy here is how a cell ends up drawn outside the box that was sized for it.
-                // ⚠️ THE ATTRIBUTE FONT IS `* 0.8`, NOT THIS SURFACE'S USUAL `* 0.9`, and the
-                // difference is not cosmetic. fm-layout sizes the entity box with
-                // `attr_font_size = node_font_size * 0.8` (floored at 8.0) and fm-render-svg draws
-                // at the same, so a canvas measuring its columns at 0.9 builds a table ~12% wider
-                // than the box it must fit in. Measured on the skew fixture the moment the columns
-                // went in: `PK` landed at x=297.9 against a box ending at 257.68 — the same
-                // sixty-pixel spill fm-layout's own comment records from the SVG side, reproduced
-                // here because the fused row had been hiding the font disagreement all along (a
-                // fused row is never wider than the columns, so it fits a box it does not match).
-                let metrics = self.config.font_metrics();
-                let metrics_size = metrics.font_size();
-                // ⚠️ DERIVED FROM `metrics.font_size()`, NOT FROM `self.config.font_size`. fm-layout
-                // sizes the box with `node_font_size = metrics.font_size()`, so measuring from a
-                // different base produces a different scale and therefore different columns — which
-                // is what put `PK` 13px outside the box on the first attempt at this fix.
-                let attr_font = (f64::from(metrics_size) * 0.8).max(f64::from(ER_ATTR_FONT_FLOOR));
-                let scale = if metrics_size > 0.0 {
-                    (attr_font / f64::from(metrics_size)) as f32
-                } else {
-                    1.0
-                };
-                let (cell_offsets, _right_edge) = fm_core::er_cell_columns(
-                    &node.members,
-                    &metrics,
-                    scale,
-                    fm_core::er_cell_gutter(attr_font as f32),
-                );
-                // ⚠️ THE TEXT IS DRAWN AT THE FONT THE COLUMNS WERE MEASURED AT. This block used to
-                // set the class-compartment member font (`config.font_size * 0.9` = 12.6) while the
-                // columns are built at the ER attribute font (`* 0.8` = 11.2) — so every glyph was
-                // ~12% wider than the column reserved for it and `verylongtypename` overran its own
-                // gutter into the name column. Invisible while the row was one fused run, because a
-                // fused run has no columns to overrun. A declared font override still wins, as it
-                // does everywhere else on this surface.
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(&format!("{attr_font}px {}", self.config.font_family)),
-                }
-                for attr in &node.members {
-                    if cursor_y > y + h - member_font * 0.5 {
-                        // Out of box: stop rather than draw rows past the entity.
-                        break;
-                    }
-                    // Same four cells, in the same order, as both SVG writers use.
-                    let key = attr.key_cell();
-                    let cells: [&str; 4] = [
-                        attr.data_type.as_str(),
-                        attr.name.as_str(),
-                        key.as_ref(),
-                        attr.comment.as_deref().unwrap_or(""),
-                    ];
-                    let mut drew_any = false;
-                    for (index, cell) in cells.iter().enumerate() {
-                        if cell.is_empty() {
-                            continue;
-                        }
-                        // ⚠️ ANCHORED AT `x + 8.0`, NOT `x + padding`. fm-layout reserves exactly
-                        // eight pixels on each side (`row_width + 16.0`) and both SVG writers draw
-                        // from `x + 8.0`; starting two pixels earlier would shift every column and
-                        // leave ten on the right, which is the kind of slack that hides a real
-                        // overflow until the widest entity comes along.
-                        ctx.fill_text(
-                            cell,
-                            x + ER_ROW_PADDING + f64::from(cell_offsets[index]),
-                            cursor_y,
-                        );
-                        self.draw_calls += 1;
-                        drew_any = true;
-                    }
-                    if drew_any {
-                        *labels_drawn += 1;
-                    }
-                    cursor_y += member_font * 1.2;
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                // Every run was measured into the box. A separate cursor/cutoff previously
+                // discarded the twelfth and subsequent attributes from ordinary default tables.
+                for run in card.text {
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(run.font_size),
+                        run.emphasized.then_some("bold"),
+                        &self.config.font_family,
+                    ));
+                    ctx.set_text_align(if run.column.is_some() {
+                        TextAlign::Left
+                    } else {
+                        TextAlign::Center
+                    });
+                    let text_x = run.column.map_or(w * 0.5, |column| {
+                        f64::from(fm_core::ErCardLayout::PADDING_X + card.column_offsets[column])
+                    });
+                    ctx.fill_text(&run.text, x + text_x, y + f64::from(run.center_y));
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
                 }
             } else if let Some((node, meta)) =
                 ir_node.and_then(|n| n.requirement_meta.as_deref().map(|m| (n, m)))
@@ -7742,6 +7664,261 @@ mod tests {
                                 "{backend:?}: CSS must use the measured row size"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn er_card_cells_share_svg_canvas_scene_and_gpu_geometry() {
+        for (count, font_size, line_height, declared_font_size) in [
+            (12, 15.0, 1.5, None),
+            (40, 15.0, 1.5, None),
+            (12, 24.0, 1.8, None),
+            (12, 15.0, 1.5, Some("30px")),
+            (12, 15.0, 1.5, Some("900px")),
+            (12, 15.0, 1.5, Some("24pt")),
+        ] {
+            let mut source =
+                "erDiagram\nACCOUNT {\n uuid account_id PK,FK \"Ledger key\"\n".to_owned();
+            for index in 1..count {
+                source.push_str(&format!(" string field_{index}"));
+                if index == count - 1 {
+                    source.push_str(" \"Final attribute must remain visible\"");
+                }
+                source.push('\n');
+            }
+            source.push_str("}\n");
+            let mut ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.nodes.len(), 1);
+            assert_eq!(ir.nodes[0].members.len(), count);
+            assert_eq!(ir.nodes[0].members[0].key_cell(), "PK,FK");
+            if count == 40 {
+                ir.nodes[0].members[5].comment =
+                    Some("First note line\n\nLast note line".to_owned());
+            }
+            if let Some(size) = declared_font_size {
+                ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                    "font-size".to_owned(),
+                    size.to_owned(),
+                )])));
+            }
+            let node = &ir.nodes[0];
+            // Derive the content oracle from parsed fields, independently of the shared card model.
+            let mut expected = vec!["ACCOUNT".to_owned()];
+            for attribute in &node.members {
+                let key = attribute.key_cell();
+                for cell in [
+                    attribute.data_type.as_str(),
+                    attribute.name.as_str(),
+                    key.as_ref(),
+                    attribute.comment.as_deref().unwrap_or(""),
+                ] {
+                    expected.extend(
+                        cell.lines()
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
+            expected.sort();
+            let config = CanvasRenderConfig {
+                font_size,
+                line_height,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let bounds = layout.nodes[0].bounds;
+            let card = fm_core::ErCardLayout::new(
+                &node.members,
+                "ACCOUNT",
+                &metrics,
+                declared_font_size,
+                fm_core::ErCardLayout::MIN_ATTRIBUTE_FONT_SIZE,
+            );
+            let mut measured: Vec<_> = card.text.iter().map(|run| run.text.clone()).collect();
+            measured.sort();
+            assert_eq!(
+                measured, expected,
+                "measurement omitted authored ER content"
+            );
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(3000.0, 3000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                let (offset_x, offset_y) = if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                    (-scene.bounds.x, -scene.bounds.y)
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                    (-layout.bounds.x, -layout.bounds.y)
+                };
+                let mut font = String::new();
+                let drawn: Vec<_> = ctx
+                    .operations()
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        DrawOperation::SetFont(value) => {
+                            font.clone_from(value);
+                            None
+                        }
+                        DrawOperation::FillText(text, x, y) => Some((text, *x, *y, font.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                let mut content: Vec<_> = drawn
+                    .iter()
+                    .map(|(text, _, _, _)| (*text).clone())
+                    .collect();
+                content.sort();
+                assert_eq!(
+                    content, expected,
+                    "scene={use_scene}, {count} attributes: lost table cells"
+                );
+                for ((text, x, y, font), run) in drawn.iter().zip(&card.text) {
+                    assert_eq!(*text, &run.text);
+                    let expected_x = bounds.x
+                        + run.column.map_or(bounds.width * 0.5, |column| {
+                            fm_core::ErCardLayout::PADDING_X + card.column_offsets[column]
+                        });
+                    assert!((*x - f64::from(expected_x + offset_x)).abs() < 0.01);
+                    assert!((*y - f64::from(bounds.y + run.center_y + offset_y)).abs() < 0.01);
+                    let size = font
+                        .split_whitespace()
+                        .find_map(|part| part.strip_suffix("px")?.parse::<f32>().ok())
+                        .unwrap();
+                    assert!((size - run.font_size).abs() < 0.01);
+                    let local_y = *y as f32 - bounds.y - offset_y;
+                    assert!(local_y - size * 0.5 > 0.0 && local_y + size * 0.5 < bounds.height);
+                    if run.column.is_some() {
+                        assert!(local_y - size * 0.5 > card.header_height);
+                    } else {
+                        assert!(local_y + size * 0.5 < card.header_height);
+                    }
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Node)
+                .collect();
+            assert_eq!(runs.len(), expected.len(), "GPU omitted ER cells");
+            for (run, cell) in runs.iter().zip(&card.text) {
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                let decoded: String = quads
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|glyph| {
+                                glyph.uv_min == quad.uv_min && glyph.uv_max == quad.uv_max
+                            })
+                            .expect("every emitted glyph must have an atlas entry")
+                            .glyph
+                    })
+                    .collect();
+                assert_eq!(
+                    decoded, cell.text,
+                    "GPU lost or substituted an attribute glyph"
+                );
+                assert!(quads.iter().all(|quad| {
+                    (quad.center[1] - bounds.y - cell.center_y).abs() < 0.01
+                        && (quad.half_extent[1] * 2.0 - cell.font_size).abs() < 0.01
+                }));
+            }
+            assert!(
+                plan.node_border_segments.iter().any(|segment| {
+                    (segment.from[1] - bounds.y - card.header_height).abs() < 0.01
+                        && (segment.to[1] - segment.from[1]).abs() < 0.01
+                }),
+                "GPU omitted the entity header separator"
+            );
+            for backend in [
+                fm_render_svg::SvgBackend::LegacyLayout,
+                fm_render_svg::SvgBackend::Scene,
+            ] {
+                let svg_config = fm_render_svg::SvgRenderConfig {
+                    backend,
+                    font_size: font_size as f32,
+                    line_height: line_height as f32,
+                    ..Default::default()
+                };
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
+                // Legacy SVG translates into a padded zero-origin document. Scene SVG keeps
+                // layout coordinates and expresses the same padding in its viewBox instead.
+                let (svg_offset_x, svg_offset_y) = match backend {
+                    fm_render_svg::SvgBackend::LegacyLayout => (
+                        svg_config.padding - layout.bounds.x,
+                        svg_config.padding - layout.bounds.y,
+                    ),
+                    fm_render_svg::SvgBackend::Scene => (0.0, 0.0),
+                };
+                let drawn: Vec<_> = svg
+                    .split("<text ")
+                    .skip(1)
+                    .map(|chunk| {
+                        let (attributes, tail) = chunk.split_once('>').unwrap();
+                        let text = tail.split_once("</text>").unwrap().0;
+                        (attributes, text)
+                    })
+                    .collect();
+                let mut content: Vec<_> =
+                    drawn.iter().map(|(_, text)| (*text).to_owned()).collect();
+                content.sort();
+                assert_eq!(content, expected, "{backend:?}: SVG lost ER cells");
+                let number = |attributes: &str, name: &str| -> f32 {
+                    attributes
+                        .split(&format!("{name}=\""))
+                        .nth(1)
+                        .and_then(|value| value.split('"').next())
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                };
+                for ((attributes, text), run) in drawn.iter().zip(&card.text) {
+                    assert_eq!(*text, run.text);
+                    let expected_x = bounds.x
+                        + svg_offset_x
+                        + run.column.map_or(bounds.width * 0.5, |column| {
+                            fm_core::ErCardLayout::PADDING_X + card.column_offsets[column]
+                        });
+                    let expected_y = bounds.y + run.center_y + svg_offset_y;
+                    let actual_x = number(attributes, "x");
+                    let actual_y = number(attributes, "y");
+                    let actual_size = number(attributes, "font-size");
+                    assert!(
+                        (actual_x - expected_x).abs() < 0.1,
+                        "{backend:?}, {count} rows, font={font_size}, declared={declared_font_size:?}, {text:?}: x={actual_x}, expected {expected_x}"
+                    );
+                    assert!(
+                        (actual_y - expected_y).abs() < 0.1,
+                        "{backend:?}, {count} rows, font={font_size}, declared={declared_font_size:?}, {text:?}: y={actual_y}, expected {expected_y}"
+                    );
+                    assert!(
+                        (actual_size - run.font_size).abs() < 0.01,
+                        "{backend:?}, {count} rows, {text:?}: font-size={actual_size}, expected {}",
+                        run.font_size
+                    );
+                    if declared_font_size.is_some() {
+                        assert!(
+                            attributes
+                                .contains(&format!("font-size:{}px!important", run.font_size)),
+                            "{backend:?}: CSS must retain the measured font size"
+                        );
                     }
                 }
             }

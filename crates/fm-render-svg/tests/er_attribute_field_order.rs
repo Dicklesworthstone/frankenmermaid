@@ -184,13 +184,19 @@ fn cells_stay_inside_the_entity_box_when_the_columns_skew() {
 #[test]
 fn a_row_is_separate_runs_at_strictly_increasing_x() {
     let (cells, _) = cells_and_box(ENTITY);
-    // A row is one baseline; key it as text so the grouping does not depend on float ordering.
-    let mut by_row: std::collections::BTreeMap<String, Vec<f32>> =
-        std::collections::BTreeMap::new();
+    let mut by_row: Vec<(f32, Vec<f32>)> = Vec::new();
     for (x, y, _) in &cells {
-        by_row.entry(format!("{y:.2}")).or_default().push(*x);
+        assert!(y.is_finite(), "cell baseline must be finite: {y}");
+        if let Some((_, xs)) = by_row.iter_mut().find(|(baseline, _)| baseline == y) {
+            xs.push(*x);
+        } else {
+            by_row.push((*y, vec![*x]));
+        }
     }
-    let counts: Vec<usize> = by_row.values().map(Vec::len).collect();
+    // Numeric order is 92.80, 110.80, 128.80; text sorting puts 92.80 last and falsely reports
+    // [2, 3, 3]. Preserve each row's emission order so the x assertion still detects misplaced cells.
+    by_row.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+    let counts: Vec<usize> = by_row.iter().map(|(_, xs)| xs.len()).collect();
     assert_eq!(
         counts,
         vec![3, 2, 3],

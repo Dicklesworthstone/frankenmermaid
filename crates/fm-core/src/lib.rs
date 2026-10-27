@@ -2810,8 +2810,17 @@ pub fn er_cell_columns(
         ];
         for (index, cell) in cells.iter().enumerate() {
             if !cell.is_empty() {
-                widths[index] =
-                    widths[index].max(metrics.estimate_width(cell) * scale * width_allowance);
+                let measured = metrics.estimate_multiline_width(cell) * scale * width_allowance;
+                let preserved = if metrics.config().preset == FontPreset::Monospace {
+                    measured
+                } else {
+                    metrics.estimate_preserved_width(
+                        cell,
+                        metrics.font_size() * scale,
+                        metrics.avg_char_width(),
+                    ) * if attr.keys.is_empty() { 1.0 } else { 1.18 }
+                };
+                widths[index] = widths[index].max(measured.max(preserved));
             }
         }
     }
@@ -2826,6 +2835,109 @@ pub fn er_cell_columns(
         }
     }
     (offsets, right_edge)
+}
+
+/// One visible text run in an ER table. A missing column identifies a centered entity title;
+/// attribute cells use the table's shared column offsets and retain their authored row breaks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErCardText {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub column: Option<usize>,
+    pub emphasized: bool,
+}
+
+/// Complete measured ER table geometry shared by layout and every graphical backend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErCardLayout {
+    pub text: Vec<ErCardText>,
+    pub column_offsets: [f32; 4],
+    pub header_height: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl ErCardLayout {
+    pub const PADDING_X: f32 = 8.0;
+    pub const MIN_ATTRIBUTE_FONT_SIZE: f32 = 8.0;
+
+    #[must_use]
+    pub fn new(
+        members: &[IrEntityAttribute],
+        name: &str,
+        metrics: &FontMetrics,
+        declared_font_size: Option<&str>,
+        min_attribute_font_size: f32,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(metrics.font_size());
+        let attribute_font_size =
+            declared_font_size.unwrap_or((font_size * 0.8).max(min_attribute_font_size));
+        let line_height = metrics.config().line_height.max(1.3);
+        let title_pitch = font_size * line_height;
+        let row_pitch = attribute_font_size * line_height;
+        let name_lines: Vec<_> = name.split('\n').collect();
+        // Give the heading equal breathing room above and below, independently of body rows.
+        let header_height = title_pitch * name_lines.len() as f32 + font_size * 0.5;
+        let mut text: Vec<_> = name_lines
+            .into_iter()
+            .enumerate()
+            .map(|(line, value)| ErCardText {
+                text: value.trim_end_matches('\r').to_owned(),
+                center_y: font_size * 0.25 + title_pitch * (line as f32 + 0.5),
+                font_size,
+                column: None,
+                emphasized: true,
+            })
+            .collect();
+        let scale = attribute_font_size / metrics.font_size().max(1.0);
+        let (column_offsets, body_width) =
+            er_cell_columns(members, metrics, scale, er_cell_gutter(attribute_font_size));
+        let mut center_y = header_height + attribute_font_size * 0.9;
+        for member in members {
+            let key = member.key_cell();
+            let cells = [
+                member.data_type.as_str(),
+                member.name.as_str(),
+                key.as_ref(),
+                member.comment.as_deref().unwrap_or(""),
+            ];
+            let lines = cells.map(|cell| cell.split('\n').collect::<Vec<_>>());
+            let row_count = lines.iter().map(Vec::len).max().unwrap_or(1);
+            for row in 0..row_count {
+                for (column, cell_lines) in lines.iter().enumerate() {
+                    let Some(value) = cell_lines.get(row).filter(|value| !value.is_empty()) else {
+                        continue;
+                    };
+                    text.push(ErCardText {
+                        text: value.trim_end_matches('\r').to_owned(),
+                        center_y,
+                        font_size: attribute_font_size,
+                        column: Some(column),
+                        emphasized: !member.keys.is_empty(),
+                    });
+                }
+                center_y += row_pitch;
+            }
+        }
+        let heading_width =
+            metrics.estimate_preserved_width(name, font_size, metrics.avg_char_width()) * 1.18;
+        Self {
+            text,
+            column_offsets,
+            header_height,
+            width: (body_width.max(heading_width) + 2.0 * Self::PADDING_X).max(100.0),
+            height: center_y.max(header_height + font_size * 0.5),
+        }
+    }
 }
 
 // ── Class-diagram member types ─────────────────────────────────────────
@@ -14999,6 +15111,134 @@ mod tests {
             keyed[3] > keyed[2],
             "composite keys reserve one complete cell"
         );
+    }
+
+    #[test]
+    fn er_card_preserves_complete_columns_and_authored_rows() {
+        let members = vec![
+            IrEntityAttribute {
+                data_type: "m".repeat(23),
+                name: "customer_reference".to_owned(),
+                keys: vec![IrAttributeKey::Pk, IrAttributeKey::Fk],
+                comment: Some("Ledger key\n\nLast note".to_owned()),
+            },
+            IrEntityAttribute {
+                data_type: "string".to_owned(),
+                name: "account_status".to_owned(),
+                comment: Some("Final attribute must remain visible".to_owned()),
+                ..Default::default()
+            },
+        ];
+        for preset in [
+            super::FontPreset::SystemUi,
+            super::FontPreset::Monospace,
+            super::FontPreset::Condensed,
+        ] {
+            let metrics = super::FontMetrics::new(super::FontMetricsConfig {
+                preset,
+                ..Default::default()
+            });
+            let card = super::ErCardLayout::new(&members, "Customer\nrecords", &metrics, None, 8.0);
+            for value in [
+                "Customer",
+                "records",
+                "customer_reference",
+                "PK,FK",
+                "Ledger key",
+                "Last note",
+                "account_status",
+                "Final attribute must remain visible",
+            ] {
+                assert!(
+                    card.text.iter().any(|run| run.text == value),
+                    "{preset:?}: lost {value}"
+                );
+            }
+            let first_note = card
+                .text
+                .iter()
+                .find(|run| run.text == "Ledger key")
+                .unwrap();
+            let last_note = card
+                .text
+                .iter()
+                .find(|run| run.text == "Last note")
+                .unwrap();
+            assert!(
+                last_note.center_y - first_note.center_y >= first_note.font_size * 3.0 - 0.01,
+                "an authored blank line must retain its vertical space"
+            );
+            for run in &card.text {
+                assert!(!run.text.contains('\n'));
+                assert!(run.center_y - run.font_size * 0.5 > 0.0);
+                assert!(run.center_y + run.font_size * 0.5 < card.height);
+                let Some(column) = run.column else {
+                    assert!(run.center_y + run.font_size * 0.5 < card.header_height);
+                    continue;
+                };
+                assert!(run.center_y - run.font_size * 0.5 > card.header_height);
+                let width = if preset == super::FontPreset::Monospace {
+                    metrics.estimate_width(&run.text) * run.font_size / metrics.font_size()
+                } else {
+                    metrics.estimate_preserved_width(
+                        &run.text,
+                        run.font_size,
+                        metrics.avg_char_width(),
+                    ) * if run.emphasized { 1.18 } else { 1.0 }
+                };
+                let left = super::ErCardLayout::PADDING_X + card.column_offsets[column];
+                let right = if column == 3 {
+                    card.width - super::ErCardLayout::PADDING_X
+                } else {
+                    super::ErCardLayout::PADDING_X + card.column_offsets[column + 1]
+                        - super::er_cell_gutter(run.font_size)
+                };
+                assert!(
+                    left + width <= right + 0.01,
+                    "{preset:?}: column {column} collides or escapes the card: {}",
+                    run.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn er_card_font_overrides_scale_complete_rows_and_reject_invalid_sizes() {
+        let members: Vec<_> = (0..12)
+            .map(|index| IrEntityAttribute {
+                data_type: "string".to_owned(),
+                name: format!("field_{index}"),
+                ..Default::default()
+            })
+            .collect();
+        let metrics = super::FontMetrics::default_metrics();
+        let base = super::ErCardLayout::new(&members, "Account", &metrics, None, 8.0);
+        let enlarged = super::ErCardLayout::new(&members, "Account", &metrics, Some("30px"), 8.0);
+        assert!(enlarged.width > base.width);
+        assert!(enlarged.height > base.height);
+        assert_eq!(enlarged.text.len(), base.text.len());
+        assert!(enlarged.text.iter().all(|run| run.font_size == 30.0));
+        for invalid in ["0", "-1", "NaN", "900px", "24pt"] {
+            assert_eq!(
+                super::ErCardLayout::new(&members, "Account", &metrics, Some(invalid), 8.0),
+                base,
+                "unsupported size {invalid} must agree with the renderer fallback"
+            );
+        }
+        let spacious = super::FontMetrics::new(super::FontMetricsConfig {
+            line_height: 1.8,
+            ..metrics.config().clone()
+        });
+        let spaced = super::ErCardLayout::new(&members, "Account", &spacious, None, 8.0);
+        assert!(spaced.height > base.height);
+        assert_eq!(spaced.text.len(), base.text.len());
+        let centers: Vec<_> = spaced
+            .text
+            .iter()
+            .filter(|run| run.column == Some(1))
+            .map(|run| run.center_y)
+            .collect();
+        assert!(centers.windows(2).all(|rows| rows[1] - rows[0] > 20.0));
     }
 
     #[test]

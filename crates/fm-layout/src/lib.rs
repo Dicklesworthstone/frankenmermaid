@@ -5288,6 +5288,73 @@ fn build_label_layer(
             }
             continue;
         }
+        if !node.members.is_empty() {
+            let name = display_node_label_ref(ir, node);
+            let declared = ir.resolved_node_style(node_box.node_index);
+            let card_metrics = declared.get("font-family").map(|family| {
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(family),
+                    ..metrics.config().clone()
+                })
+            });
+            let card = fm_core::ErCardLayout::new(
+                &node.members,
+                name,
+                card_metrics.as_ref().unwrap_or(metrics),
+                declared.get("font-size").map(String::as_str),
+                fm_core::ErCardLayout::MIN_ATTRIBUTE_FONT_SIZE,
+            );
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#1e293b".to_owned());
+            let border = declared
+                .get("stroke")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#7c8da5".to_owned());
+            let source = RenderSource::Node(node_box.node_index);
+            let bounds = node_box.bounds;
+            layer.children.push(RenderItem::Path(RenderPath {
+                source,
+                commands: vec![
+                    PathCmd::MoveTo {
+                        x: bounds.x + 2.0,
+                        y: bounds.y + card.header_height,
+                    },
+                    PathCmd::LineTo {
+                        x: bounds.x + bounds.width - 2.0,
+                        y: bounds.y + card.header_height,
+                    },
+                ],
+                fill: None,
+                stroke: Some(StrokeStyle::solid(&border, 0.8)),
+                marker_start: MarkerKind::None,
+                marker_end: MarkerKind::None,
+            }));
+            for run in card.text {
+                layer.children.push(RenderItem::Text(RenderText {
+                    source,
+                    text: run.text,
+                    x: bounds.x
+                        + run.column.map_or(bounds.width * 0.5, |column| {
+                            fm_core::ErCardLayout::PADDING_X + card.column_offsets[column]
+                        }),
+                    y: bounds.y + run.center_y,
+                    font_size: run.font_size,
+                    align: if run.column.is_some() {
+                        TextAlign::Start
+                    } else {
+                        TextAlign::Middle
+                    },
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity: 1.0,
+                    },
+                }));
+            }
+            continue;
+        }
         if let Some(meta) = node.c4_meta.as_deref() {
             let name = display_node_label_ref(ir, node);
             let declared = ir.resolved_node_style(node_box.node_index);
@@ -16943,7 +17010,25 @@ fn compute_node_size(
             // An ER entity's box must likewise hold its attribute rows. Unlike the class renderer,
             // the ER renderer does not stop at the box edge — it keeps emitting rows — so a box
             // sized from the entity name alone spills attributes outside it (bd-090g).
-            let (width, height) = match er_compartment_dimensions(node, metrics) {
+            let entity_style =
+                (!node.members.is_empty()).then(|| ir.resolved_node_style(node_index));
+            let entity_metrics = entity_style.as_ref().and_then(|style| {
+                style.get("font-family").map(|family| {
+                    fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                        preset: fm_core::FontPreset::from_family(family),
+                        ..metrics.config().clone()
+                    })
+                })
+            });
+            let (width, height) = match er_compartment_dimensions(
+                node,
+                entity_metrics.as_ref().unwrap_or(metrics),
+                text,
+                entity_style
+                    .as_ref()
+                    .and_then(|style| style.get("font-size"))
+                    .map(String::as_str),
+            ) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
@@ -17154,71 +17239,25 @@ fn class_compartment_dimensions(
     ))
 }
 
-/// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
-///
-/// The ER sibling of [`class_compartment_dimensions`], and it was missing: entity boxes were sized
-/// from the entity name alone, so the box stayed a constant height however many attributes were
-/// declared and rows from the fourth onward rendered OUTSIDE their own rectangle (bd-090g).
-///
-/// This mirrors `fm-render-svg`'s `write_er_entity_into` cursor advance, with one important
-/// difference from the class case: that renderer DROPS a row falling outside the box, whereas the ER
-/// renderer keeps emitting rows at a fixed pitch. So under-sizing here does not delete content, it
-/// spills attributes into the diagram — and past enough rows, into whatever is laid out below.
-/// Over-sizing renders as padding, so every term is rounded up.
-fn er_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+/// Space for every ER table cell, measured from the same row geometry that the renderers draw.
+fn er_compartment_dimensions(
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+    name: &str,
+    declared_font_size: Option<&str>,
+) -> Option<(f32, f32)> {
     if node.members.is_empty() {
         return None;
     }
-
-    // Renderer: `node_font_size = detail.node_font_size` and
-    // `attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size)`.
-    //
-    // `metrics.font_size()` is layout's stand-in for `node_font_size`. Two ways the renderer's row
-    // pitch can come out LARGER than a naive `font_size * 0.8` here, and under-sizing spills rows:
-    //   * `min_font_size` (default 8.0) clamps `attr_font_size` UP whenever `node_font_size < 10`;
-    //   * layout's metrics and the render config's `font_size` need not agree at all.
-    // So take the clamp floor into account rather than assuming the nominal factor wins.
-    let node_font_size = metrics.font_size();
-    let attr_font_size = (node_font_size * 0.8).max(ER_ATTR_FONT_FLOOR);
-    let header_height = node_font_size * 1.5;
-    let row_pitch = attr_font_size * 1.3;
-
-    // Cursor offsets from the top of the box, in renderer order: header, then the first row's
-    // baseline at `header_height + attr_font_size * 0.9`, then one pitch per subsequent row.
-    let rows = node.members.len() as f32;
-    let mut height = header_height + attr_font_size * 0.9 + row_pitch * (rows - 1.0);
-    // Past the LAST baseline the glyph still descends, and the box must not end on that baseline.
-    // Half a row of slack keeps the decision off the knife edge when the render font size does not
-    // match `metrics` — the same margin `class_compartment_dimensions` takes, for the same reason.
-    height += row_pitch;
-
-    // Rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row stays
-    // inside the box.
-    // ⚠️ THE BOX IS SIZED FROM THE COLUMN GEOMETRY, NOT FROM THE WIDEST FUSED ROW. The renderers draw
-    // one cell per field at columns built from the widest cell in each column ACROSS EVERY
-    // ATTRIBUTE, so an entity whose widest type and widest name belong to different attributes lays
-    // out wider than any single row measures. Measured on
-    // `T { verylongtypename a / t verylongattributename PK }` while this still folded row widths: the
-    // box ended at x=250.56 and `PK` was drawn at x=310.20 — sixty pixels outside its own entity.
-    let scale = if node_font_size > 0.0 {
-        attr_font_size / node_font_size
-    } else {
-        1.0
-    };
-    let (_offsets, row_width) = fm_core::er_cell_columns(
+    let card = fm_core::ErCardLayout::new(
         &node.members,
+        name,
         metrics,
-        scale,
-        fm_core::er_cell_gutter(attr_font_size),
+        declared_font_size,
+        fm_core::ErCardLayout::MIN_ATTRIBUTE_FONT_SIZE,
     );
-
-    Some((row_width + 16.0, height))
+    Some((card.width, card.height))
 }
-
-/// Lower bound on the renderer's ER attribute font size — `SvgRenderConfig::min_font_size`'s default.
-/// Layout cannot see the render config, and the clamp only ever raises the size (raising the row
-/// pitch), so assuming the floor applies is the direction that over-sizes rather than spills.
-const ER_ATTR_FONT_FLOOR: f32 = 8.0;
 
 /// Width of the complete member row shared with the graphical renderers.
 fn class_member_row_width(
@@ -17280,6 +17319,14 @@ fn node_size_cache_key(
     // reason class members do, so they belong in the key too: adding an attribute without touching
     // the entity name would otherwise serve the size from before the edit, and the new rows would
     // render outside the stale box (bd-090g).
+    if !node.members.is_empty() {
+        let style = ir.resolved_node_style(node_index);
+        hash_str(&mut hash, style.get("font-size").map_or("", String::as_str));
+        hash_str(
+            &mut hash,
+            style.get("font-family").map_or("", String::as_str),
+        );
+    }
     hash_u64(&mut hash, node.members.len() as u64);
     for attr in &node.members {
         hash_str(&mut hash, &attr.data_type);
@@ -44491,7 +44538,7 @@ mod tests {
             compute_node_size(&plain, &plain.nodes[0], &metrics, 0),
             "an entity with no attributes must size exactly like the same node without members"
         );
-        assert!(er_compartment_dimensions(&bare.nodes[0], &metrics).is_none());
+        assert!(er_compartment_dimensions(&bare.nodes[0], &metrics, "Bare", None).is_none());
     }
 
     fn requirement_ir(
@@ -44930,6 +44977,55 @@ mod tests {
              the comment would collide them",
             sizes[0].0,
             sizes[1].0
+        );
+    }
+
+    #[test]
+    fn er_card_authored_fonts_invalidate_cached_sizes() {
+        let mut ir = er_entity_ir(12);
+        ir.nodes[0].members[11].name = "i".repeat(40);
+        let config = LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+        let mut engine = IncrementalLayoutEngine::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let before_size = before.layout.nodes[0].bounds;
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+            "font-family".to_owned(),
+            "monospace".to_owned(),
+        )])));
+        let wider = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let wider_size = wider.layout.nodes[0].bounds;
+        assert!(wider_size.width > before_size.width);
+        assert_eq!(
+            *wider.layout,
+            super::layout_diagram_with_config(&ir, config.clone())
+        );
+
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([
+            ("font-family".to_owned(), "monospace".to_owned()),
+            ("font-size".to_owned(), "30px".to_owned()),
+        ])));
+        let enlarged = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        assert!(enlarged.layout.nodes[0].bounds.width > wider_size.width);
+        assert!(enlarged.layout.nodes[0].bounds.height > wider_size.height);
+        assert_eq!(
+            *enlarged.layout,
+            super::layout_diagram_with_config(&ir, config)
         );
     }
 
