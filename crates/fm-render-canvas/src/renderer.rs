@@ -3511,56 +3511,45 @@ impl Canvas2dRenderer {
             } else if let Some((node, meta)) =
                 ir_node.and_then(|n| n.c4_meta.as_deref().map(|m| (n, m)))
             {
-                // C4 type / technology / description (bd-rk14) — canvas twin of the bd-039t fix.
-                // Measured: `Person(a, "Alice", "A user")` drew `A user` in the SVG and not on the
-                // canvas. Decorations match fm-render-svg.
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
-
+                // Layout and SVG consume these same wrapped rows. Reconstructing a separate
+                // cursor here previously made descriptions single, unbounded lines and dropped
+                // metadata when its independently guessed height did not fit.
                 ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.set_text_align(TextAlign::Center);
                 let name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.0.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-                ctx.fill_text(name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.1.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Left);
-                let mut rows: Vec<String> = Vec::with_capacity(3);
-                if !meta.element_type.is_empty() {
-                    rows.push(format!("<<{}>>", meta.element_type));
-                }
-                if let Some(technology) = meta.technology.as_deref().filter(|t| !t.is_empty()) {
-                    rows.push(format!("[{technology}]"));
-                }
-                if let Some(description) = meta.description.as_deref().filter(|d| !d.is_empty()) {
-                    rows.push(description.to_string());
-                }
-                for text in rows {
-                    if cursor_y > y + h - member_font * 0.5 {
-                        break;
-                    }
-                    ctx.fill_text(&text, x + padding, cursor_y);
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(
+                        declared_parts
+                            .family
+                            .as_deref()
+                            .unwrap_or(&self.config.font_family),
+                    ),
+                    ..self.config.font_metrics().config().clone()
+                });
+                let card = fm_core::C4CardLayout::new(
+                    meta,
+                    name,
+                    node.shape,
+                    &metrics,
+                    Some(w as f32),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let top = y + ((h - f64::from(card.height)) * 0.5).max(0.0);
+                for row in card.rows {
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::C4CardRowKind::Name).then_some("600"),
+                        &self.config.font_family,
+                    ));
+                    ctx.fill_text(&row.text, x + w / 2.0, top + f64::from(row.center_y));
                     self.draw_calls += 1;
                     *labels_drawn += 1;
-                    cursor_y += member_font * 1.2;
                 }
             } else {
                 // Standard single-label rendering.
@@ -7590,6 +7579,171 @@ mod tests {
                     svg,
                     fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn c4_card_rows_share_svg_canvas_scene_and_gpu_geometry() {
+        let description = "Stores customer profiles, billing preferences, and a complete audit trail for every account change.";
+        for constructor in ["Container", "ContainerDb", "ContainerQueue"] {
+            for (font_size, declared_font_size) in [
+                (15.0, None),
+                (26.0, None),
+                (15.0, Some("30px")),
+                (15.0, Some("900px")),
+                (15.0, Some("24pt")),
+            ] {
+                let source = format!(
+                    "C4Container\n{constructor}(db, \"Customer records\", \"Rust and PostgreSQL\", \"{description}\")"
+                );
+                let mut ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.nodes.len(), 1);
+                if let Some(size) = declared_font_size {
+                    ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs(
+                        [("font-size".to_owned(), size.to_owned())],
+                    )));
+                }
+                let node = &ir.nodes[0];
+                let config = CanvasRenderConfig {
+                    font_size,
+                    padding: 0.0,
+                    auto_fit: false,
+                    ..Default::default()
+                };
+                let metrics = config.font_metrics();
+                let layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                );
+                let bounds = layout.nodes[0].bounds;
+                let card = fm_core::C4CardLayout::new(
+                    node.c4_meta.as_deref().unwrap(),
+                    "Customer records",
+                    node.shape,
+                    &metrics,
+                    Some(bounds.width),
+                    declared_font_size,
+                );
+                let name_font = card
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == fm_core::C4CardRowKind::Name)
+                    .unwrap()
+                    .font_size;
+                assert!(bounds.width <= name_font * 21.0);
+                assert!(card.rows.len() >= 6, "a real wrapped paragraph is required");
+                let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+                for use_scene in [false, true] {
+                    let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+                    let mut renderer = Canvas2dRenderer::new(config.clone());
+                    let (offset_x, offset_y) = if use_scene {
+                        renderer.render_scene(&scene, &mut ctx);
+                        (-scene.bounds.x, -scene.bounds.y)
+                    } else {
+                        renderer.render(&layout, &ir, &mut ctx);
+                        (-layout.bounds.x, -layout.bounds.y)
+                    };
+                    let mut font = String::new();
+                    let drawn: Vec<_> = ctx
+                        .operations()
+                        .iter()
+                        .filter_map(|op| match op {
+                            DrawOperation::SetFont(value) => {
+                                font.clone_from(value);
+                                None
+                            }
+                            DrawOperation::FillText(text, x, y) => {
+                                Some((text.as_str(), *x, *y, font.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        drawn.len(),
+                        card.rows.len(),
+                        "scene={use_scene}: dropped C4 metadata"
+                    );
+                    for ((text, x, y, font), row) in drawn.iter().zip(&card.rows) {
+                        assert_eq!(*text, row.text);
+                        assert!(
+                            (*x - f64::from(bounds.x + bounds.width * 0.5 + offset_x)).abs() < 0.01
+                        );
+                        assert!((*y - f64::from(bounds.y + row.center_y + offset_y)).abs() < 0.01);
+                        let size = font
+                            .split_whitespace()
+                            .find_map(|part| part.strip_suffix("px")?.parse::<f32>().ok())
+                            .unwrap();
+                        assert!((size - row.font_size).abs() < 0.01);
+                        let local_y = *y as f32 - bounds.y - offset_y;
+                        let (top, bottom) = if constructor == "ContainerDb" {
+                            (bounds.height * 0.2, bounds.height * 0.9)
+                        } else {
+                            (0.0, bounds.height)
+                        };
+                        assert!(local_y - size * 0.5 > top && local_y + size * 0.5 < bottom);
+                    }
+                    let paragraph = drawn
+                        .iter()
+                        .zip(&card.rows)
+                        .filter(|(_, row)| row.kind == fm_core::C4CardRowKind::Description)
+                        .map(|(drawn, _)| drawn.0)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert_eq!(paragraph, description, "every authored word must survive");
+                }
+                let plan =
+                    crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+                let runs: Vec<_> = plan
+                    .text_runs
+                    .iter()
+                    .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Node)
+                    .collect();
+                assert_eq!(runs.len(), card.rows.len(), "GPU omitted C4 metadata");
+                for (run, row) in runs.iter().zip(&card.rows) {
+                    let quads = &plan.text_quads
+                        [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                    assert_eq!(
+                        quads.len(),
+                        row.text.chars().filter(|ch| !ch.is_control()).count()
+                    );
+                    assert!(
+                        quads
+                            .iter()
+                            .all(|quad| (quad.center[1] - bounds.y - row.center_y).abs() < 0.01)
+                    );
+                }
+                for backend in [
+                    fm_render_svg::SvgBackend::LegacyLayout,
+                    fm_render_svg::SvgBackend::Scene,
+                ] {
+                    let svg = fm_render_svg::render_svg_with_layout(
+                        &ir,
+                        &layout,
+                        &fm_render_svg::SvgRenderConfig {
+                            font_size: font_size as f32,
+                            backend,
+                            ..Default::default()
+                        },
+                    );
+                    for row in &card.rows {
+                        let escaped = row.text.replace('&', "&amp;").replace('<', "&lt;");
+                        assert!(
+                            svg.contains(&format!(">{escaped}<")),
+                            "{backend:?}: missing C4 row {}",
+                            row.text
+                        );
+                        if declared_font_size.is_some() {
+                            assert!(
+                                svg.contains(&format!("font-size:{}px!important", row.font_size)),
+                                "{backend:?}: CSS must use the measured row size"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

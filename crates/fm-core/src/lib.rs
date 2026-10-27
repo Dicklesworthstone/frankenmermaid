@@ -3295,6 +3295,169 @@ pub struct IrC4NodeMeta {
     pub description: Option<String>,
 }
 
+/// The typographic role of a row in a C4 card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum C4CardRowKind {
+    Stereotype,
+    Name,
+    Technology,
+    Description,
+}
+
+/// A complete, wrapped C4 text row, positioned relative to the card's top edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct C4CardRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: C4CardRowKind,
+}
+
+/// Shared text geometry for C4 cards in layout, SVG, Canvas, and GPU plans.
+///
+/// Descriptions grow the card vertically instead of turning it into a page-wide strip. Every
+/// authored word survives wrapping, and the measured rows are the rows both renderers draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct C4CardLayout {
+    pub rows: Vec<C4CardRow>,
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+}
+
+impl C4CardLayout {
+    /// Measure a card, or reflow its content into an already positioned card's width.
+    /// An authored CSS font size applies to all rows, matching the text style cascade.
+    #[must_use]
+    pub fn new(
+        meta: &IrC4NodeMeta,
+        name: &str,
+        shape: NodeShape,
+        metrics: &FontMetrics,
+        width: Option<f32>,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(metrics.font_size());
+        let padding = font_size * 1.2;
+        let small_font = declared_font_size.unwrap_or((font_size * 0.78).max(8.0));
+        let body_font = declared_font_size.unwrap_or((font_size * 0.85).max(8.0));
+        let mut sections = Vec::with_capacity(4);
+        if !meta.element_type.trim().is_empty() {
+            sections.push((
+                format!("<<{}>>", meta.element_type),
+                small_font,
+                C4CardRowKind::Stereotype,
+            ));
+        }
+        sections.push((name.to_string(), font_size, C4CardRowKind::Name));
+        if let Some(technology) = meta.technology.as_deref().filter(|s| !s.trim().is_empty()) {
+            sections.push((
+                format!("[{technology}]"),
+                small_font,
+                C4CardRowKind::Technology,
+            ));
+        }
+        if let Some(description) = meta.description.as_deref().filter(|s| !s.trim().is_empty()) {
+            sections.push((
+                description.to_string(),
+                body_font,
+                C4CardRowKind::Description,
+            ));
+        }
+
+        let body_width_ratio = match shape {
+            NodeShape::Parallelogram | NodeShape::InvParallelogram => {
+                1.0 - 2.0 * SLANTED_SHAPE_INSET_RATIO
+            }
+            _ => 1.0,
+        };
+        // The content cap scales with the chosen face, so a larger requested font remains
+        // readable. A short card retains a useful minimum width beside its longer siblings.
+        let natural_width = sections
+            .iter()
+            .map(|(text, size, _)| {
+                (metrics.estimate_preserved_width(text, *size, metrics.avg_char_width())
+                    + 2.0 * padding)
+                    / body_width_ratio
+            })
+            .fold(font_size * 12.0, f32::max)
+            .min(font_size * 21.0);
+        let width = width
+            .filter(|width| width.is_finite() && *width > 2.0 * padding)
+            .unwrap_or(natural_width);
+        // Queue cards use a parallelogram: keep every row inside both slanted sides, including
+        // rows near the top and bottom where a full bounding-box width would cross the outline.
+        let available = (width * body_width_ratio - 2.0 * padding).max(font_size);
+        let mut rows = Vec::new();
+        let mut cursor = padding;
+        for (text, size, kind) in sections {
+            if !rows.is_empty() {
+                cursor += if kind == C4CardRowKind::Description {
+                    font_size * 0.5
+                } else {
+                    font_size * 0.2
+                };
+            }
+            let row_metrics = FontMetrics::new(FontMetricsConfig {
+                font_size: size,
+                ..metrics.config().clone()
+            });
+            // Leave room for actual system-font advances and the emphasized name. The width
+            // estimator intentionally remains deterministic rather than depending on a browser.
+            let mut wrap_width = available / 1.4;
+            let mut lines = row_metrics.wrap_to_width(&text, wrap_width);
+            // A fixed allowance alone cannot cover runs of wide glyphs or a condensed preset.
+            // Reflow against the same conservative measurement used to size the card itself.
+            for _ in 0..6 {
+                let widest = lines
+                    .iter()
+                    .map(|line| {
+                        metrics.estimate_preserved_width(line, size, metrics.avg_char_width())
+                    })
+                    .fold(0.0, f32::max);
+                if widest <= available {
+                    break;
+                }
+                wrap_width *= (available / widest).min(0.95);
+                lines = row_metrics.wrap_to_width(&text, wrap_width);
+            }
+            let line_height = size * metrics.config().line_height.max(1.2);
+            for text in lines {
+                rows.push(C4CardRow {
+                    text,
+                    center_y: cursor + line_height * 0.5,
+                    font_size: size,
+                    kind,
+                });
+                cursor += line_height;
+            }
+        }
+        let mut height = cursor + padding;
+        if shape == NodeShape::Cylinder {
+            // Database caps occupy the upper 20% and lower 10% in both graphical renderers.
+            // Solve for a body that holds the complete text stack, then place it below the rim.
+            height /= 0.7;
+            for row in &mut rows {
+                row.center_y += height * 0.2;
+            }
+        }
+        Self {
+            rows,
+            width,
+            height,
+            padding,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrMenuLink {
     pub label: String,
@@ -14561,6 +14724,216 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize large ir");
         assert_eq!(decoded.nodes.len(), 1_000);
         assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn c4_card_wraps_complete_content_in_readable_bounded_rows() {
+        let description = "Authenticates incoming requests, validates payloads, and coordinates customer workflows across the platform.";
+        let meta = super::IrC4NodeMeta {
+            element_type: "container".to_string(),
+            technology: Some("Rust / Axum / OpenTelemetry".to_string()),
+            description: Some(description.to_string()),
+        };
+        let metrics = super::FontMetrics::default_metrics();
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Public API",
+            NodeShape::Rounded,
+            &metrics,
+            None,
+            None,
+        );
+        assert!(card.width >= 180.0 && card.width <= 315.0);
+        let body: Vec<_> = card
+            .rows
+            .iter()
+            .filter(|row| row.kind == super::C4CardRowKind::Description)
+            .collect();
+        assert!(
+            body.len() >= 3,
+            "a paragraph must wrap rather than stretch the card"
+        );
+        assert_eq!(
+            body.iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            description
+        );
+        for row in &card.rows {
+            assert!(row.font_size >= 11.0, "default card text must stay legible");
+            assert!(row.center_y - row.font_size * 0.5 >= card.padding);
+            assert!(row.center_y + row.font_size * 0.5 <= card.height - card.padding);
+            assert!(
+                metrics.estimate_preserved_width(
+                    &row.text,
+                    row.font_size,
+                    metrics.avg_char_width()
+                ) <= card.width - card.padding * 2.0
+            );
+        }
+        for pair in card.rows.windows(2) {
+            assert!(
+                pair[0].center_y + pair[0].font_size * 0.5
+                    < pair[1].center_y - pair[1].font_size * 0.5
+            );
+        }
+    }
+
+    #[test]
+    fn c4_card_preserves_authored_blank_lines_and_unicode_words() {
+        let description = "First line\n\n世界世界世界世界世界世界世界世界世界世界世界世界\nCafe\u{301} 👨\u{200d}👩\u{200d}👧";
+        let meta = super::IrC4NodeMeta {
+            description: Some(description.to_string()),
+            ..Default::default()
+        };
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Name",
+            NodeShape::Rounded,
+            &super::FontMetrics::default(),
+            Some(180.0),
+            None,
+        );
+        let body: Vec<_> = card
+            .rows
+            .iter()
+            .filter(|row| row.kind == super::C4CardRowKind::Description)
+            .map(|row| row.text.as_str())
+            .collect();
+        assert!(
+            body.contains(&""),
+            "the authored paragraph break must survive"
+        );
+        assert_eq!(
+            body.join("").split_whitespace().collect::<String>(),
+            description.split_whitespace().collect::<String>()
+        );
+        assert!(body.iter().any(|line| line.contains("Cafe\u{301}")));
+        assert!(
+            body.iter()
+                .any(|line| line.contains("👨\u{200d}👩\u{200d}👧"))
+        );
+    }
+
+    #[test]
+    fn c4_database_text_stays_between_the_cylinder_caps() {
+        let meta = super::IrC4NodeMeta {
+            element_type: "container_db".to_string(),
+            technology: Some("PostgreSQL".to_string()),
+            description: Some(
+                "Stores customer profiles and a complete audit trail for every account change."
+                    .to_string(),
+            ),
+        };
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Customer records",
+            NodeShape::Cylinder,
+            &super::FontMetrics::default(),
+            None,
+            None,
+        );
+        assert!(card.rows.len() >= 6);
+        for row in card.rows {
+            assert!(row.center_y - row.font_size * 0.5 > card.height * 0.2);
+            assert!(row.center_y + row.font_size * 0.5 < card.height * 0.9);
+        }
+    }
+
+    #[test]
+    fn c4_card_wide_glyphs_fit_inside_queue_slants_for_every_font_preset() {
+        let description = "m".repeat(72) + " " + &"W".repeat(72);
+        let meta = super::IrC4NodeMeta {
+            element_type: "container_queue".to_string(),
+            technology: Some("A message transport with wide metadata".to_string()),
+            description: Some(description.clone()),
+        };
+        for preset in [
+            super::FontPreset::SystemUi,
+            super::FontPreset::SansSerif,
+            super::FontPreset::Serif,
+            super::FontPreset::Monospace,
+            super::FontPreset::Condensed,
+        ] {
+            let metrics = super::FontMetrics::new(super::FontMetricsConfig {
+                preset,
+                ..Default::default()
+            });
+            for shape in [NodeShape::Rounded, NodeShape::Parallelogram] {
+                let card = super::C4CardLayout::new(
+                    &meta,
+                    "Message dispatch",
+                    shape,
+                    &metrics,
+                    None,
+                    None,
+                );
+                let inset = if shape == NodeShape::Parallelogram {
+                    card.width * super::SLANTED_SHAPE_INSET_RATIO
+                } else {
+                    0.0
+                };
+                let available = card.width - 2.0 * (card.padding + inset);
+                for row in &card.rows {
+                    let measured = metrics.estimate_preserved_width(
+                        &row.text,
+                        row.font_size,
+                        metrics.avg_char_width(),
+                    );
+                    assert!(
+                        measured <= available,
+                        "{preset:?}/{shape:?}: row {:?} exceeds its silhouette: {measured} > {available}",
+                        row.text
+                    );
+                }
+                let body = card
+                    .rows
+                    .iter()
+                    .filter(|row| row.kind == super::C4CardRowKind::Description)
+                    .map(|row| row.text.as_str())
+                    .collect::<String>();
+                assert_eq!(
+                    body.split_whitespace().collect::<String>(),
+                    description.split_whitespace().collect::<String>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c4_card_font_override_scales_every_row_and_invalid_values_fall_back() {
+        let meta = super::IrC4NodeMeta {
+            element_type: "container".to_string(),
+            technology: Some("Rust".to_string()),
+            description: Some("A small service".to_string()),
+        };
+        let metrics = super::FontMetrics::monospace(15.0);
+        let ordinary =
+            super::C4CardLayout::new(&meta, "API", NodeShape::Rounded, &metrics, None, None);
+        let large = super::C4CardLayout::new(
+            &meta,
+            "API",
+            NodeShape::Rounded,
+            &metrics,
+            None,
+            Some("30px"),
+        );
+        assert!(large.width > ordinary.width && large.height > ordinary.height);
+        assert!(large.rows.iter().all(|row| row.font_size == 30.0));
+        for invalid in ["0", "-4", "NaN", "inf", "900", "url(bad)"] {
+            assert_eq!(
+                super::C4CardLayout::new(
+                    &meta,
+                    "API",
+                    NodeShape::Rounded,
+                    &metrics,
+                    Some(f32::NAN),
+                    Some(invalid)
+                ),
+                ordinary
+            );
+        }
     }
 
     #[test]

@@ -1684,15 +1684,6 @@ fn c4_card_text_color(person_card: bool, colors: &ThemeColors) -> &str {
     }
 }
 
-/// The inline restatement of the Person card's white, which `.fm-node text` would otherwise beat.
-fn write_c4_card_text_style(out: &mut String, person_card: bool) {
-    if person_card {
-        out.push_str(" style=\"fill:");
-        out.push_str(MERMAID_DEFAULT_C4_STEREOTYPE_COLOR);
-        out.push('"');
-    }
-}
-
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
 /// both render backends add via `DefsBuilder::marker`. Ordinary markers remain byte-identical;
@@ -2642,9 +2633,19 @@ fn render_scene_text(
     }
     if let Some(ir) = ir
         && let RenderSource::Node(index) = text.source
-        && let Some(style) = resolve_scene_node_inline_styles(ir, index).1
     {
-        elem = elem.attr("style", &style);
+        let mut style = resolve_scene_node_inline_styles(ir, index).1;
+        if ir
+            .nodes
+            .get(index)
+            .is_some_and(|node| node.c4_meta.is_some())
+            && ir.resolved_node_style(index).contains_key("font-size")
+        {
+            style = Some(c4_measured_font_style(style.as_deref(), text.font_size));
+        }
+        if let Some(style) = style {
+            elem = elem.attr("style", &style);
+        }
     }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
 }
@@ -9773,7 +9774,7 @@ fn write_class_node_fragment_into<const A11Y: bool>(
 /// Stream a complete C4 node (`<g>` + solid-fill rounded `<rect>` + stereotype/[person icon]/name/description +
 /// `<title>`) directly into `out`, **byte-identical** to what `render_node` builds via `Element`s (the C4
 /// analogue of [`write_class_node_fragment_into`]). Used only via `render_node_into`'s C4 gate, which guarantees
-/// a `Rounded` node with `c4_meta`, no `technology`, and an absent-or-single-line description — so none of
+/// a `Rounded` node with `c4_meta` and no `technology` — so none of
 /// `render_node`'s conditional classes/children/post-processing apply. The wrapper mirrors the class fragment's
 /// (proven) `<g>`/title bytes; the rect uses the Rounded shape's SOLID `node_fill` (NOT the gradient the class/ER
 /// fragments use, matching `render_node`'s `NodeShape::Rounded => rect.fill(node_fill).rx(rounded_corners)`); the
@@ -9839,87 +9840,9 @@ fn write_c4_node_fragment_into(
     // C4 style. Keep that exact order so the streaming and Element renderers stay byte-identical.
     out.push_str(" fill=\"url(#fm-node-gradient)\"/>");
 
-    // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
-    let label_text = node
-        .label
-        .and_then(|lid| ir.labels.get(lid.0))
-        .map(|label| label.text.as_str())
-        .unwrap_or(node.id.as_str());
-    let line_h = font_size * config.line_height;
-    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
-    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
-    let mut cursor_y = y + (small_font * 1.25);
-
-    // Stereotype `<<type>>` — `write_escaped_text("<<…>>")` = `&lt;&lt;…>>` (`<` escaped, `>` literal), in pieces.
-    out.push_str("<text x=\"");
-    let _ = write_number_into(out, x + w / 2.0);
-    out.push_str("\" y=\"");
-    let _ = write_number_into(out, cursor_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = write_number_into(out, small_font);
-    out.push_str("\" font-weight=\"600\" fill=\"");
-    let card_text = c4_card_text_color(c4_person_colors.is_some(), colors);
-    let _ = write_escaped_attr(out, card_text);
-    // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
-    // attribute, so the white on the navy Person card is restated inline on each of its texts.
-    out.push_str("\" class=\"fm-c4-type-label\"");
-    write_c4_card_text_style(out, c4_person_colors.is_some());
-    out.push_str(">&lt;&lt;");
-    let _ = write_escaped_text(out, &c4_meta.element_type);
-    out.push_str(">></text>");
-
-    // Optional person icon.
-    if node
-        .classes
-        .iter()
-        .any(|class_name| class_name == "c4-person")
-    {
-        write_c4_person_icon_into(out, x + 18.0, y + 18.0, &colors.node_stroke);
-    }
-
-    // Name.
-    cursor_y += line_h * 0.95;
-    out.push_str("<text x=\"");
-    let _ = write_number_into(out, x + w / 2.0);
-    out.push_str("\" y=\"");
-    let _ = write_number_into(out, cursor_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = write_number_into(out, font_size);
-    out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, card_text);
-    out.push_str("\" class=\"fm-c4-name\"");
-    write_c4_card_text_style(out, c4_person_colors.is_some());
-    out.push('>');
-    let _ = write_escaped_text(out, label_text);
-    out.push_str("</text>");
-
-    // Description (gate guarantees single-line, so no tspans / no `line-height` attr and `description_height` = 0).
-    if let Some(description) = &c4_meta.description {
-        cursor_y += line_h * 0.9;
-        let available_width = (w - 20.0).max(32.0);
-        let description_lines =
-            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
-        if !description_lines.is_empty() {
-            let description_height = (description_lines.len().saturating_sub(1) as f32)
-                * description_font
-                * config.line_height;
-            let baseline_y =
-                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            out.push_str("<text x=\"");
-            let _ = write_number_into(out, x + w / 2.0);
-            out.push_str("\" y=\"");
-            let _ = write_number_into(out, baseline_y);
-            out.push_str("\" text-anchor=\"middle\" font-size=\"");
-            let _ = write_number_into(out, description_font);
-            out.push_str("\" fill=\"");
-            let _ = write_escaped_attr(out, card_text);
-            out.push_str("\" class=\"fm-c4-description\"");
-            write_c4_card_text_style(out, c4_person_colors.is_some());
-            out.push('>');
-            let _ = write_escaped_text(out, &description_lines.join("\n"));
-            out.push_str("</text>");
-        }
-    }
+    write_c4_node_content_into(
+        out, node, c4_meta, ir, node_index, x, y, w, h, font_size, config, colors, None, false,
+    );
 
     // <title>Node: {raw_label}, rounded rectangle</title></g>
     out.push_str("<title>Node: ");
@@ -10089,7 +10012,7 @@ fn write_polygon_shape_into(
 }
 
 /// Stream the cylinder/database node path. This reproduces the slow `PathBuilder` bytes exactly:
-/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 0 x y+h-ry Z M x y+ry
+/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 1 x y+h-ry Z M x y+ry
 /// A w/2 ry 0 0 0 x+w y+ry`.
 fn write_cylinder_shape_into(
     f: &mut String,
@@ -10126,7 +10049,8 @@ fn write_cylinder_shape_into(
     let _ = crate::attributes::write_number_into(f, rx);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, ry);
-    f.push_str(" 0 0 0 ");
+    // The right-to-left bottom arc bulges down; sweeping upward cuts into the text body.
+    f.push_str(" 0 0 1 ");
     let _ = crate::attributes::write_number_into(f, x);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, bottom_y);
@@ -11076,8 +11000,8 @@ fn render_node_into(
         return;
     }
 
-    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`
-    // and an absent/single-line description, whose config carries no conditional render — the C4 twin of the
+    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`,
+    // whose config carries no conditional render — the C4 twin of the
     // class/ER fast paths. `render_node`'s slow path builds a group `Element` + solid-fill rect `Element` +
     // `render_c4_node_content`'s child subtree + a title, serializes the whole group, then COPIES it into `out`;
     // stream the `<g>…</g>` in place instead. Reuses `simple_class_node_user_suffix` (byte-identical
@@ -11107,9 +11031,6 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
-        && c4_meta.description.as_ref().is_none_or(|d| {
-            wrap_text_to_lines(d, (w - 20.0).max(32.0), config.avg_char_width * 0.92).len() <= 1
-        })
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_c4_node_fragment_into(
@@ -12013,7 +11934,7 @@ fn render_node(
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
                 .line_to(x + w, y + h - ry)
-                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, true, x, y + h - ry)
                 .close()
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
@@ -12769,7 +12690,7 @@ fn render_node(
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
                 .line_to(x + w, y + h - ry)
-                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, true, x, y + h - ry)
                 .close()
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
@@ -13286,6 +13207,7 @@ fn render_node(
                 node,
                 c4_meta,
                 ir,
+                node_box.node_index,
                 x,
                 y,
                 w,
@@ -13651,10 +13573,11 @@ fn render_class_compartments(
 
 #[allow(clippy::too_many_arguments)]
 fn render_c4_node_content(
-    mut group: Element,
+    group: Element,
     node: &fm_core::IrNode,
     c4_meta: &fm_core::IrC4NodeMeta,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -13665,121 +13588,132 @@ fn render_c4_node_content(
     label_style: Option<&str>,
     emit_classdef_classes: bool,
 ) -> Element {
-    let apply_label_style = |mut elem: Element| {
-        if let Some(style) = label_style {
-            elem = elem.attr("style", style);
-        }
-        elem
-    };
-    let apply_label_class =
-        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
+    let mut fragment = String::new();
+    write_c4_node_content_into(
+        &mut fragment,
+        node,
+        c4_meta,
+        ir,
+        node_index,
+        x,
+        y,
+        w,
+        h,
+        font_size,
+        config,
+        colors,
+        label_style,
+        emit_classdef_classes,
+    );
+    group.child(Element::raw_svg(fragment))
+}
 
+/// Draw the same measured card rows from both SVG node writers.
+#[allow(clippy::too_many_arguments)]
+fn write_c4_node_content_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    c4_meta: &fm_core::IrC4NodeMeta,
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
+) {
     let label_text = node
         .label
         .and_then(|lid| ir.labels.get(lid.0))
         .map(|label| label.text.as_str())
         .unwrap_or(node.id.as_str());
 
-    let line_h = font_size * config.line_height;
-    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
-    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
-    let mut cursor_y = y + (small_font * 1.25);
-
+    let declared = ir.resolved_node_style(node_index);
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size,
+        preset: fm_core::FontPreset::from_family(
+            declared
+                .get("font-family")
+                .map_or(&config.font_family, String::as_str),
+        ),
+        ..config.font_metrics().config().clone()
+    });
+    let card = fm_core::C4CardLayout::new(
+        c4_meta,
+        label_text,
+        node.shape,
+        &metrics,
+        Some(w),
+        declared.get("font-size").map(String::as_str),
+    );
+    let top = y + ((h - card.height) * 0.5).max(0.0);
     let person_card = mermaid_default_c4_person_colors(config, c4_meta).is_some();
     let card_text = c4_card_text_color(person_card, colors);
-    let person_text_style = |elem: Element| {
-        if person_card {
-            elem.attr("style", "fill:#FFFFFF")
-        } else {
-            elem
-        }
-    };
-    let c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
-        .x(x + w / 2.0)
-        .y(cursor_y)
-        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-        .font_size(small_font)
-        .font_weight("600")
-        .anchor(TextAnchor::Middle)
-        // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
-        // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
-        // given diagram happens to take.
-        .fill(card_text)
-        .class("fm-c4-type-label")
-        .build();
-    group = group.child(apply_label_style(apply_label_class(person_text_style(
-        c4_type_label,
-    ))));
-
     if node
         .classes
         .iter()
         .any(|class_name| class_name == "c4-person")
     {
-        group = group.child(render_c4_person_icon(
-            x + 18.0,
-            y + 18.0,
-            colors.node_stroke.as_str(),
-        ));
+        write_c4_person_icon_into(out, x + 18.0, top + 18.0, card_text);
     }
 
-    cursor_y += line_h * 0.95;
-    group = group.child(apply_label_style(apply_label_class(person_text_style(
-        TextBuilder::new(label_text)
+    for row in card.rows {
+        let class = match row.kind {
+            fm_core::C4CardRowKind::Stereotype => "fm-c4-type-label",
+            fm_core::C4CardRowKind::Name => "fm-c4-name",
+            fm_core::C4CardRowKind::Technology => "fm-c4-technology",
+            fm_core::C4CardRowKind::Description => "fm-c4-description",
+        };
+        let mut text = TextBuilder::new(&row.text)
             .x(x + w / 2.0)
-            .y(cursor_y)
+            .y(top + row.center_y)
+            .baseline(text::DominantBaseline::Central)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(font_size)
-            .font_weight("600")
+            .font_size(row.font_size)
             .anchor(TextAnchor::Middle)
             .fill(card_text)
-            .class("fm-c4-name")
-            .build(),
-    ))));
-
-    if let Some(technology) = &c4_meta.technology {
-        cursor_y += line_h * 0.9;
-        group = group.child(apply_label_style(apply_label_class(
-            TextBuilder::new(&format!("[{technology}]"))
-                .x(x + w / 2.0)
-                .y(cursor_y)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(small_font)
-                .anchor(TextAnchor::Middle)
-                .fill(&colors.edge)
-                .class("fm-c4-technology")
-                .build(),
-        )));
-    }
-
-    if let Some(description) = &c4_meta.description {
-        cursor_y += line_h * 0.9;
-        let available_width = (w - 20.0).max(32.0);
-        let description_lines =
-            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
-        if !description_lines.is_empty() {
-            let description_text = description_lines.join("\n");
-            let description_height = (description_lines.len().saturating_sub(1) as f32)
-                * description_font
-                * config.line_height;
-            let baseline_y =
-                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            group = group.child(apply_label_style(apply_label_class(person_text_style(
-                TextBuilder::new(&description_text)
-                    .x(x + w / 2.0)
-                    .y(baseline_y)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(description_font)
-                    .line_height(config.line_height)
-                    .anchor(TextAnchor::Middle)
-                    .fill(card_text)
-                    .class("fm-c4-description")
-                    .build(),
-            ))));
+            .class(class);
+        if row.kind == fm_core::C4CardRowKind::Name {
+            text = text.font_weight("600");
         }
+        let mut text = text.build();
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        // The palette's Person card uses white text on navy. A declared label style still
+        // wins, and its other properties must not accidentally discard the readable default.
+        let mut style = match (person_card, label_style) {
+            (true, Some(style)) => Some(format!("fill:#FFFFFF;{style}")),
+            (true, None) => Some("fill:#FFFFFF".to_string()),
+            (false, Some(style)) => Some(style.to_string()),
+            (false, None) => None,
+        };
+        if declared.contains_key("font-size") {
+            style = Some(c4_measured_font_style(style.as_deref(), row.font_size));
+        }
+        if let Some(style) = style {
+            text = text.attr("style", &style);
+        }
+        text.write_to_string(out);
     }
+}
 
-    group
+/// Keep the browser's font size equal to the size used for wrapping and card height. Unsupported
+/// units or out-of-range values fall back in the shared model, and must not reappear through a
+/// class definition or inline style after that measurement.
+fn c4_measured_font_style(style: Option<&str>, font_size: f32) -> String {
+    use std::fmt::Write as _;
+
+    let mut style = style.unwrap_or_default().to_string();
+    if !style.is_empty() {
+        style.push(';');
+    }
+    let _ = write!(style, "font-size:{font_size}px!important");
+    style
 }
 
 fn render_c4_person_icon(x: f32, y: f32, stroke: &str) -> Element {
@@ -14334,38 +14268,6 @@ fn render_custom_svg_icon(
                 .stroke(stroke)
                 .stroke_width(stroke_width),
         )
-}
-
-fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<String> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let max_chars = ((max_width / avg_char_width).floor() as usize).max(8);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        let next_len = if current.is_empty() {
-            word.chars().count()
-        } else {
-            current.chars().count() + 1 + word.chars().count()
-        };
-        if next_len > max_chars && !current.is_empty() {
-            lines.push(current);
-            current = word.to_string();
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    lines
 }
 
 /// Conservative proportional measurement for text that must remain visible. Keep a caller's
@@ -19348,6 +19250,88 @@ mod tests {
         assert!(streamed.contains("fm-c4-person-icon"));
         assert!(streamed.contains("&lt;&lt;Person>>"));
         assert!(streamed.contains("url(#fm-node-gradient)"));
+    }
+
+    #[test]
+    fn c4_database_and_lined_cylinder_bottom_caps_curve_outward() {
+        let mut ir = fm_parser::parse(
+            "C4Container\nContainerDb(db, \"Records\", \"PostgreSQL\", \"Stores customer records\")",
+        )
+        .ir;
+        let bounds = LayoutRect {
+            x: 12.0,
+            y: 24.0,
+            width: 200.0,
+            height: 240.0,
+        };
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "db".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds,
+        };
+        let config = SvgRenderConfig::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let colors = ThemeColors::default();
+        let centrality = HashMap::new();
+        let mut fragments = Vec::new();
+        for shape in [NodeShape::Cylinder, NodeShape::LinedCylinder] {
+            ir.nodes[0].shape = shape;
+            let mut fragment = String::new();
+            render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+                false,
+            )
+            .write_to_string(&mut fragment);
+            fragments.push(fragment);
+        }
+        let mut streamed = String::new();
+        write_cylinder_shape_into(
+            &mut streamed,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            "white",
+            None,
+        );
+        fragments.push(streamed);
+        for fragment in fragments {
+            let path = fragment
+                .split(" d=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let arc: Vec<f32> = path
+                .split(" A")
+                .nth(2)
+                .unwrap()
+                .split_whitespace()
+                .take(7)
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert_eq!(arc.len(), 7);
+            assert_eq!(arc[5], bounds.x, "bottom cap travels from right to left");
+            // A right-to-left half ellipse with sweep 1 reaches below its endpoints. Sweep 0
+            // instead cut up into the description and left the cylinder looking open-ended.
+            let bottom_at_center = arc[6] + if arc[4] == 1.0 { arc[1] } else { -arc[1] };
+            assert!(
+                (bottom_at_center - bounds.y - bounds.height).abs() < 0.01,
+                "the visible cylinder base must reach the bottom of its box: {path}"
+            );
+        }
     }
 
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
@@ -24688,16 +24672,8 @@ marker#arrow-open path {
         );
     }
 
-    /// Every line of a wrapped C4 description must land inside its node box (bd-9xjy).
-    ///
-    /// The trap this test exists to close: the description is ONE `<text>` whose `y` IS inside the
-    /// box, and its lines are `<tspan dy="…">` children stacking downward from there. A guard that
-    /// reads only the text element's `y` sees no overflow — which is how a 17-line description drew
-    /// 220px below its own rectangle while looking fine to a naive check. So the position asserted
-    /// here is the ACCUMULATED dy, per line.
-    ///
-    /// Also pins that a single-line description does not grow the box: the renderer's own baseline
-    /// clamp already contains that case, and growing it would move committed goldens for nothing.
+    /// Every wrapped description row must be drawn, separated, and contained by its card.
+    /// Count actual text elements as well as their content so a missing row cannot pass.
     #[test]
     fn c4_description_lines_render_inside_the_node_box() {
         let words = [
@@ -24725,6 +24701,7 @@ marker#arrow-open path {
         ];
 
         let mut single_line_height: Option<f32> = None;
+        let mut saw_wrapping = false;
         for take in 1..=words.len() {
             let description = words[..take].join(" ");
             let src =
@@ -24755,40 +24732,32 @@ marker#arrow-open path {
                 "{take}: node box is missing y/height"
             );
 
-            let Some(after) = svg.split("class=\"fm-c4-description\"").nth(1) else {
-                continue;
-            };
-            let element = svg
+            let rows: Vec<_> = svg
                 .split("<text ")
-                .find(|chunk| chunk.contains("class=\"fm-c4-description\""))
-                .unwrap_or_default();
-            let first = number(element, "y");
-            let font = number(element, "font-size");
-            assert!(
-                first.is_finite() && font.is_finite(),
-                "{take}: description is missing y/font-size"
+                .skip(1)
+                .filter_map(|chunk| {
+                    let (head, rest) = chunk.split_once('>')?;
+                    if !head.contains("class=\"fm-c4-description\"") {
+                        return None;
+                    }
+                    let text = rest.split_once("</text>")?.0;
+                    Some((number(head, "y"), number(head, "font-size"), text))
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{take}: the description disappeared");
+            assert_eq!(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>().join(" "),
+                description
             );
-
-            // Walk the tspan stack, accumulating dy exactly as a renderer would.
-            let body = after.split("</text>").next().unwrap_or_default();
-            let mut baseline = first;
-            let mut lines = 1_usize;
-            for tspan in body.split("<tspan ").skip(1) {
-                let dy = number(tspan, "dy");
-                if !dy.is_finite() {
-                    continue;
-                }
-                baseline += dy;
-                lines += 1;
-                assert!(
-                    baseline + font * 0.5 <= bottom && baseline - font * 0.5 >= top,
-                    "{take} words / {lines} lines: description line at {baseline} escapes the node \
-                     box {top}..{bottom}"
-                );
+            for &(center, font, _) in &rows {
+                assert!(center.is_finite() && font >= 11.0);
+                assert!(center + font * 0.5 < bottom && center - font * 0.5 > top);
             }
-
-            // The first `<tspan dy="0">` counts as line one, so a single-line description reports 2.
-            if lines <= 2 {
+            for pair in rows.windows(2) {
+                assert!(pair[0].0 + pair[0].1 * 0.5 < pair[1].0 - pair[1].1 * 0.5);
+            }
+            saw_wrapping |= rows.len() > 1;
+            if rows.len() == 1 {
                 let height = bottom - top;
                 let previous = *single_line_height.get_or_insert(height);
                 assert_eq!(
@@ -24797,6 +24766,10 @@ marker#arrow-open path {
                 );
             }
         }
+        assert!(
+            saw_wrapping,
+            "the paragraph must exercise multiple rendered lines"
+        );
     }
 
     /// `<defs>` hygiene, both directions, across every diagram-render path (bd-a6uk, bd-w5f7).

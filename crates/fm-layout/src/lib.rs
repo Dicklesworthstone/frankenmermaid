@@ -5288,6 +5288,45 @@ fn build_label_layer(
             }
             continue;
         }
+        if let Some(meta) = node.c4_meta.as_deref() {
+            let name = display_node_label_ref(ir, node);
+            let declared = ir.resolved_node_style(node_box.node_index);
+            let card_metrics = declared.get("font-family").map(|family| {
+                fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(family),
+                    ..metrics.config().clone()
+                })
+            });
+            let card = fm_core::C4CardLayout::new(
+                meta,
+                name,
+                node.shape,
+                card_metrics.as_ref().unwrap_or(metrics),
+                Some(node_box.bounds.width),
+                declared.get("font-size").map(String::as_str),
+            );
+            let color = declared
+                .get("color")
+                .and_then(|paint| scene_paint(paint))
+                .unwrap_or_else(|| "#1e293b".to_owned());
+            let top = node_box.bounds.y + ((node_box.bounds.height - card.height) * 0.5).max(0.0);
+            for row in card.rows {
+                layer.children.push(RenderItem::Text(RenderText {
+                    source: RenderSource::Node(node_box.node_index),
+                    text: row.text,
+                    x: node_box.bounds.x + node_box.bounds.width * 0.5,
+                    y: top + row.center_y,
+                    font_size: row.font_size,
+                    align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: color.clone(),
+                        opacity: 1.0,
+                    },
+                }));
+            }
+            continue;
+        }
         let label_text = display_node_label(ir, node);
         if label_text.is_empty() {
             continue;
@@ -16784,6 +16823,25 @@ fn compute_node_size(
 ) -> (f32, f32) {
     let text = display_node_label_ref(ir, node);
 
+    if let Some(meta) = node.c4_meta.as_deref() {
+        let style = ir.resolved_node_style(node_index);
+        let card_metrics = style.get("font-family").map(|family| {
+            fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                preset: fm_core::FontPreset::from_family(family),
+                ..metrics.config().clone()
+            })
+        });
+        let card = fm_core::C4CardLayout::new(
+            meta,
+            text,
+            node.shape,
+            card_metrics.as_ref().unwrap_or(metrics),
+            None,
+            style.get("font-size").map(String::as_str),
+        );
+        return (card.width, card.height);
+    }
+
     match node.shape {
         fm_core::NodeShape::FilledCircle if text.is_empty() => (20.0, 20.0),
         fm_core::NodeShape::DoubleCircle if text.is_empty() => (24.0, 24.0),
@@ -16875,27 +16933,6 @@ fn compute_node_size(
             // the ER renderer does not stop at the box edge — it keeps emitting rows — so a box
             // sized from the entity name alone spills attributes outside it (bd-090g).
             let (width, height) = match er_compartment_dimensions(node, metrics) {
-                Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
-                None => (width, height),
-            };
-            // A C4 node's box must hold its WRAPPED description. The renderer clamps the
-            // description's first baseline into the box but the `<tspan>` stack then descends from
-            // there, so clamping the anchor does not bound the block — a 16-line description drew
-            // 220px below its own rectangle (bd-9xjy).
-            let (width, height) = match c4_description_height(node, metrics, width) {
-                Some(description_height) => (width, height.max(description_height)),
-                None => (width, height),
-            };
-            // ...and it must hold the ROW STACK drawn under the name — `<<type>>`, `[technology]`,
-            // description. `c4_description_height` above sizes only for a description that WRAPS,
-            // on the reasoning that a single-line one is contained by the SVG renderer's baseline
-            // clamp. That reasoning does not reach the canvas, which does not clamp: it walks the
-            // rows against the box and `break`s on the first that would fall outside, exactly as the
-            // class renderer does. Measured on `Person(alice, "Alice", "A user")`: a 39.6 box, name
-            // at 46.2, `<<Person>>` at 55.3, and the description's baseline at 70.42 against a
-            // 61.3 limit — so the declared description was DROPPED from the canvas that fm-wasm
-            // ships, while the SVG drew it clamped on top of the row above.
-            let (width, height) = match c4_row_stack_dimensions(node, metrics) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
@@ -17033,165 +17070,6 @@ const REQUIREMENT_FONT_FLOOR: f32 = 8.0;
 
 /// Total content padding around a requirement stack, split evenly between opposite sides.
 const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
-
-/// Height a C4 node needs so its wrapped description stays inside the box. `None` when the node has
-/// no C4 description, or when the description fits on one line — the single-line case is already
-/// contained by the renderer's own baseline clamp, so growing it would move committed goldens for no
-/// correctness gain.
-///
-/// Mirrors `fm-render-svg`'s `write_c4_node_into` cursor advance: a type-label row at
-/// `small_font * 1.25`, a name row `line_h * 0.95` below it, then `line_h * 0.9` to the description,
-/// whose first baseline is pushed down a further `min(block_height, h * 0.35)` and whose lines then
-/// stack one `description_font * line_height` apart.
-///
-/// The `min(block_height, h * 0.35)` shift depends on `h`, which is what we are solving for. Rather
-/// than iterate to a fixed point, this uses `block_height` as the bound — always valid because
-/// `min(a, b) <= a` — so the result is an over-estimate for tall boxes. Over-sizing renders as
-/// padding, and it keeps the arithmetic auditable.
-/// Size a C4 node's box needs so the metadata rows drawn UNDER its name stay inside it.
-///
-/// `None` when the node is not a C4 node, or when it declares no metadata row at all — then only
-/// the name is drawn and the base sizing already covers it.
-///
-/// Mirrors `fm-render-canvas`'s C4 branch, which is the stricter of the two renderers and therefore
-/// the one that must fit: a name baseline at `font_size * 1.3`, a `* 0.65` step to the first row,
-/// then one row per declared `<<type>>` / `[technology]` / description at `font_size * 0.9`,
-/// advancing `member_font * 1.2` and kept only while the baseline stays within
-/// `y + h - member_font * 0.5`. fm-render-svg lays the same three strings out differently but
-/// clamps rather than drops, so a box that satisfies the canvas satisfies it too.
-///
-/// This is the same defect the class, ER and requirement siblings above were each filed for: sizing
-/// read the node's LABEL and the renderer drew more than the label. The C4 entry existed but
-/// measured only the wrapped description, so the row stack that sits above the description was
-/// never counted.
-fn c4_row_stack_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
-    let meta = node.c4_meta.as_deref()?;
-
-    // Renderer order, and only the rows it actually pushes.
-    let mut rows: Vec<&str> = Vec::with_capacity(3);
-    if !meta.element_type.is_empty() {
-        rows.push(meta.element_type.as_str());
-    }
-    if let Some(technology) = meta.technology.as_deref().filter(|t| !t.trim().is_empty()) {
-        rows.push(technology);
-    }
-    if let Some(description) = meta.description.as_deref().filter(|d| !d.trim().is_empty()) {
-        rows.push(description);
-    }
-    let last = rows.len().checked_sub(1)?;
-
-    let font_size = metrics.font_size();
-    let line_h = font_size * 1.3;
-    let member_font = font_size * 0.9;
-
-    // Cursor offsets from the top of the box, in renderer order.
-    let mut height = line_h; // `cursor_y = y + line_h` (name baseline)
-    height += line_h * 0.5; // name -> first metadata row
-    height += member_font * 1.2 * last as f32; // advance to the LAST row's baseline
-    height += member_font * 0.5; // the slack the renderer's own keep-test demands
-    // Mirroring the cursor arithmetic exactly leaves the last row sitting ON the boundary, where f32
-    // rounding — or a render font size that does not match `metrics` — drops it again. Half a row of
-    // margin costs a few pixels of padding and takes the decision off the knife edge. Same reasoning,
-    // same constant, as `class_compartment_dimensions`.
-    height += member_font * 0.6;
-
-    // Rows are left-anchored at `x + 6.0`; mirror that padding on the right so the widest row stays
-    // inside the box. `metrics` measures at full size and the rows are drawn at `* 0.9`. The
-    // `<<…>>` and `[…]` decorations are drawn too, so they are measured — a bare `element_type`
-    // would under-count by four characters.
-    let widest = rows
-        .iter()
-        .enumerate()
-        .map(|(index, text)| {
-            let decorated = match (index, meta.element_type.is_empty()) {
-                (0, false) => format!("<<{text}>>"),
-                _ if Some(*text) == meta.technology.as_deref() => format!("[{text}]"),
-                _ => (*text).to_string(),
-            };
-            metrics.estimate_dimensions(&decorated).0 * 0.9
-        })
-        .fold(0.0_f32, f32::max);
-
-    Some((widest + 12.0, height))
-}
-
-fn c4_description_height(node: &IrNode, metrics: &fm_core::FontMetrics, width: f32) -> Option<f32> {
-    let description = node.c4_meta.as_deref()?.description.as_deref()?;
-    if description.trim().is_empty() {
-        return None;
-    }
-
-    let font_size = metrics.font_size();
-    let line_h = metrics.line_height_px();
-    let small_font = (font_size * 0.78).max(C4_FONT_FLOOR);
-    let description_font = (font_size * 0.72).max(C4_FONT_FLOOR);
-
-    // Renderer: `available_width = (w - 20.0).max(32.0)` wrapped at `config.avg_char_width * 0.92`.
-    // The 0.92 is mirrored rather than dropped. Assuming a wider character would over-count lines,
-    // which is the safe direction for containment but grows boxes for descriptions that actually fit
-    // on one line — `c4_basic`'s "A customer" counted as two, moving a golden for no correctness
-    // gain. Matching the renderer keeps the counts equal whenever layout's metrics and the render
-    // config agree, and the disagreement case is absorbed by a line of margin below instead.
-    let available_width = (width - 20.0).max(32.0);
-    let lines = wrapped_line_count(
-        description,
-        available_width,
-        metrics.avg_char_width() * 0.92,
-    );
-    if lines <= 1 {
-        return None;
-    }
-
-    // `description_height` in the renderer: the stack's total descent below its first baseline. One
-    // extra line of margin covers layout's metrics disagreeing with the render config's
-    // `avg_char_width` by enough to add a wrap — under-counting is what spills rows.
-    let per_line = description_font * (line_h / font_size).max(1.0);
-    let block_height = lines as f32 * per_line;
-    let header = small_font.mul_add(1.25, line_h * 0.95) + line_h * 0.9;
-    // header + shift(<= block) + stack + half a glyph below the last baseline.
-    Some(header + block_height * 2.0 + description_font * 0.5)
-}
-
-/// Lower bound on the renderer's clamped C4 font sizes — `SvgRenderConfig::min_font_size`'s default.
-/// The clamp only raises a size, and a raised size means a taller block, so assuming the floor
-/// applies errs toward over-sizing.
-const C4_FONT_FLOOR: f32 = 8.0;
-
-/// Number of lines `text` wraps to, mirroring `fm-render-svg`'s `wrap_text_to_lines` without
-/// building the lines: greedy whitespace wrapping at `floor(max_width / avg_char_width).max(8)`
-/// characters, counting a word longer than the limit as occupying its own single line exactly as
-/// that function does.
-fn wrapped_line_count(text: &str, max_width: f32, avg_char_width: f32) -> usize {
-    if text.trim().is_empty() {
-        return 0;
-    }
-    let max_chars = if avg_char_width > 0.0 {
-        ((max_width / avg_char_width).floor() as usize).max(8)
-    } else {
-        8
-    };
-
-    let mut lines = 0_usize;
-    let mut current = 0_usize;
-    for word in text.split_whitespace() {
-        let word_chars = word.chars().count();
-        let next = if current == 0 {
-            word_chars
-        } else {
-            current + 1 + word_chars
-        };
-        if next > max_chars && current > 0 {
-            lines += 1;
-            current = word_chars;
-        } else {
-            current = next;
-        }
-    }
-    if current > 0 {
-        lines += 1;
-    }
-    lines
-}
 
 /// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
 /// attribute and method). `None` for any node that is not a class node or that declares no members.
@@ -17408,11 +17286,24 @@ fn node_size_cache_key(
         // second renders in the first's box.
         hash_str(&mut hash, attr.comment.as_deref().unwrap_or_default());
     }
-    // A C4 description feeds `compute_node_size` through `c4_description_height`, so editing it
-    // without touching the node's label must not serve the pre-edit size (bd-9xjy) — the same
-    // coupling `class_meta` and `node.members` above have, for the same reason.
+    // Every C4 field contributes wrapped rows. Changing metadata or its authored size must
+    // invalidate the card even when the node name stays the same.
     if let Some(meta) = node.c4_meta.as_deref() {
+        hash_str(&mut hash, &meta.element_type);
+        hash_str(&mut hash, meta.technology.as_deref().unwrap_or_default());
         hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
+        hash_str(
+            &mut hash,
+            ir.resolved_node_style(node_index)
+                .get("font-size")
+                .map_or("", String::as_str),
+        );
+        hash_str(
+            &mut hash,
+            ir.resolved_node_style(node_index)
+                .get("font-family")
+                .map_or("", String::as_str),
+        );
     }
     // Every requirement field sizes a drawn row. Include presence as well as contents: a declared
     // empty value still has a prefix in SVG and therefore occupies a row.
@@ -24972,12 +24863,21 @@ fn cluster_bounds_for_content(
     content: LayoutRect,
     children: impl Iterator<Item = LayoutRect>,
     title: Option<&str>,
+    c4_boundary_type: Option<&str>,
     spacing: LayoutSpacing,
     metrics: &fm_core::FontMetrics,
 ) -> LayoutRect {
     const HEADER_CLEARANCE: f32 = 28.0;
     const NESTING_INSET: f32 = 16.0;
 
+    // C4's extra caption height below is measured relative to the configured padding. A nested
+    // frame must reserve that same base before the extra is applied, or increasing padding can
+    // cancel the caption clearance and move the child back over the second text row.
+    let nested_header_padding = if c4_boundary_type.is_some_and(|kind| !kind.is_empty()) {
+        spacing.cluster_padding.max(HEADER_CLEARANCE)
+    } else {
+        HEADER_CLEARANCE
+    };
     let mut min_x = content.x;
     let mut min_y = content.y;
     let mut max_x = content.x + content.width;
@@ -24985,13 +24885,20 @@ fn cluster_bounds_for_content(
     for child in children {
         min_x = min_x.min(child.x - NESTING_INSET + spacing.cluster_padding);
         max_x = max_x.max(child.x + child.width + NESTING_INSET - spacing.cluster_padding);
-        min_y = min_y.min(child.y - HEADER_CLEARANCE - NESTING_INSET + spacing.cluster_padding);
+        min_y =
+            min_y.min(child.y - nested_header_padding - NESTING_INSET + spacing.cluster_padding);
         max_y = max_y.max(child.y + child.height + NESTING_INSET - spacing.cluster_padding);
     }
 
+    // C4 draws the bracketed boundary type below its title. It must occupy header space in
+    // both the compound slot and final frame; otherwise the first opaque card covers that row.
+    let c4_caption = c4_boundary_type
+        .filter(|kind| !kind.is_empty())
+        .map(|kind| format!("{}\n[{kind}]", title.unwrap_or_default()));
+    let caption = c4_caption.as_deref().or(title);
     let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-    let title_width = title.map_or(0.0, |text| cluster_title_width(text, metrics));
-    let extra_header = title.map_or(0.0, |text| {
+    let title_width = caption.map_or(0.0, |text| cluster_title_width(text, metrics));
+    let extra_header = caption.map_or(0.0, |text| {
         cluster_title_extra_header(text, spacing.cluster_padding, metrics)
     });
     let width = contents_width.max(title_width);
@@ -25117,6 +25024,7 @@ fn build_cluster_boxes(
             },
             children,
             title.as_deref(),
+            cluster.c4_boundary_type.as_deref(),
             spacing,
             metrics,
         );
@@ -44159,26 +44067,13 @@ mod tests {
         );
     }
 
-    /// A C4 node's box must hold the ROW STACK drawn under its name, not just a wrapped
-    /// description (bd-rk14 follow-on).
-    ///
-    /// Asserted against the CANVAS renderer's own cursor arithmetic rather than pinned numbers,
-    /// because the canvas is the renderer that DROPS a row that would fall outside the box — it
-    /// walks the rows against the node height and `break`s, so an undersized box loses declared
-    /// text silently rather than overflowing where a reader would see it. Measured before the fix,
-    /// with `Person(alice, "Alice", "A user")` at font 14: box height 39.6, name baseline 46.2,
-    /// `<<Person>>` at 55.3, and the description's baseline at 70.42 against the renderer's 61.3
-    /// limit — one row past the end, so `A user` never reached the canvas that fm-wasm ships.
-    ///
-    /// A single-line description is the case that was missed: `c4_description_height` grows the box
-    /// only when the description WRAPS, on the reasoning that the SVG renderer's baseline clamp
-    /// contains a single line. It does — by drawing it on top of the row above — and the canvas does
-    /// not clamp at all.
+    /// Retain the historical minimum for a short C4 card (bd-rk14). The former Canvas cursor
+    /// silently dropped a single-line description when layout sized only the name and wrapped
+    /// text. The shared card model must continue to fit at least that complete three-row stack.
     #[test]
     fn a_c4_box_holds_every_metadata_row_the_canvas_draws() {
         let mut engine = IncrementalLayoutEngine::default();
-        // A SINGLE-LINE description, deliberately: the wrapping case was already covered, and a
-        // long one would let `c4_description_height` carry the assertion and hide the row stack.
+        // A short description catches omission even when no wrapping contributes extra height.
         let ir = c4_person_ir("A user");
         let laid_out = engine.layout_diagram_traced_with_config_and_guardrails(
             &ir,
@@ -44188,9 +44083,8 @@ mod tests {
         );
         let node = &laid_out.layout.nodes[0];
 
-        // fm-render-canvas' C4 branch, verbatim: name baseline at `line_h`, a `line_h * 0.5` step to
-        // the first row, then one `member_font * 1.2` per row, each kept only while its baseline
-        // stays within `h - member_font * 0.5`.
+        // The pre-shared-model Canvas minimum: name baseline, a half-line section gap, and two
+        // metadata rows. Actual current renderer agreement is covered by the cross-backend test.
         let font_size = fm_core::FontMetrics::default().font_size();
         let line_h = font_size * 1.3;
         let member_font = font_size * 0.9;
@@ -44204,6 +44098,147 @@ mod tests {
              (height {})",
             node.bounds.height
         );
+    }
+
+    #[test]
+    fn c4_card_metadata_and_font_family_edits_invalidate_cached_sizes() {
+        let mut ir = c4_person_ir("Short");
+        ir.labels[0].text = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii".to_owned();
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+        let before = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let before_size = before.layout.nodes[0].bounds;
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+            "font-family".to_owned(),
+            "monospace".to_owned(),
+        )])));
+        let after = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        assert!(
+            after.layout.nodes[0].bounds.height > before_size.height,
+            "a wider declared font must add wrapped name rows"
+        );
+        let previous_height = after.layout.nodes[0].bounds.height;
+        ir.nodes[0].c4_meta.as_deref_mut().unwrap().technology = Some(
+            "A considerably longer technology stack that must contribute several extra rows"
+                .to_owned(),
+        );
+        let with_technology = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert!(
+            with_technology.layout.nodes[0].bounds.height > previous_height,
+            "technology edits must not reuse the old card height"
+        );
+    }
+
+    #[test]
+    fn c4_boundary_captions_reserve_space_in_nested_compound_frames() {
+        let source = "C4Container\n\
+            Person(viewer, \"Operator\", \"Reviews production services\")\n\
+            System_Boundary(platform, \"Commerce platform\") {\n\
+              Container_Boundary(services, \"Application services\") {\n\
+                Container(api, \"Public API\", \"Rust\", \"Handles incoming requests\")\n\
+              }\n\
+            }\n\
+            Rel(viewer, api, \"Uses\")\n";
+        for (font_size, cluster_padding) in [(15.0, 28.0), (30.0, 28.0), (30.0, 60.0)] {
+            for direction in [
+                GraphDirection::TB,
+                GraphDirection::BT,
+                GraphDirection::LR,
+                GraphDirection::RL,
+            ] {
+                let mut ir = fm_parser::parse(source).ir;
+                ir.direction = direction;
+                ir.meta.direction = direction;
+                assert_eq!(ir.clusters.len(), 2);
+                for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                    let traced = super::layout_diagram_traced_with_config(
+                        &ir,
+                        algorithm,
+                        super::LayoutConfig {
+                            spacing: LayoutSpacing {
+                                cluster_padding,
+                                ..Default::default()
+                            },
+                            font_metrics: Some(fm_core::FontMetrics::new(
+                                fm_core::FontMetricsConfig {
+                                    font_size,
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    );
+                    let layout = &traced.layout;
+                    let outer = layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.title.as_deref() == Some("Commerce platform"))
+                        .unwrap();
+                    let inner = layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.title.as_deref() == Some("Application services"))
+                        .unwrap();
+                    let api = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == "api")
+                        .unwrap();
+                    let viewer = layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id == "viewer")
+                        .unwrap();
+                    // SVG's title baseline followed by its bracketed type and descenders, plus
+                    // a real gap before the first opaque child. The old 28px padding failed.
+                    let caption_font = font_size * 0.9;
+                    let caption_bottom =
+                        (caption_font + 2.0).max(16.0) + caption_font * 1.25 + caption_font * 0.3;
+                    for (frame, contents) in
+                        [(outer.bounds, inner.bounds), (inner.bounds, api.bounds)]
+                    {
+                        assert!(
+                            contents.y - frame.y >= caption_bottom + 8.0 - 0.05,
+                            "{algorithm:?}/{direction:?}/{font_size}/{cluster_padding}: C4 caption overlaps its contents"
+                        );
+                        assert!(!rects_overlap(frame, viewer.bounds));
+                    }
+                    let outside_gap = match direction {
+                        GraphDirection::TB => {
+                            outer.bounds.y - viewer.bounds.y - viewer.bounds.height
+                        }
+                        GraphDirection::BT => {
+                            viewer.bounds.y - outer.bounds.y - outer.bounds.height
+                        }
+                        GraphDirection::LR => {
+                            outer.bounds.x - viewer.bounds.x - viewer.bounds.width
+                        }
+                        GraphDirection::RL => viewer.bounds.x - outer.bounds.x - outer.bounds.width,
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        outside_gap >= LayoutSpacing::default().rank_spacing - 0.05,
+                        "{algorithm:?}/{direction:?}/{font_size}/{cluster_padding}: caption growth escaped its compound slot"
+                    );
+                }
+            }
+        }
     }
 
     /// One C4 person node carrying `description`.
