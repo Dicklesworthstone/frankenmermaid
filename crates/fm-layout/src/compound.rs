@@ -19,8 +19,8 @@ use fm_core::{
 
 use crate::{
     LayoutConfig, LayoutNodeBox, LayoutRect, LayoutSpacing, LayoutTrace, build_cluster_boxes,
-    cluster_bounds_for_content, cycle_preparation, endpoint_node_index, flat_placement,
-    tree_node_boxes,
+    cluster_bounds_for_content, cycle_preparation, endpoint_node_index, first_framed_descendants,
+    flat_placement, tree_node_boxes,
 };
 
 #[derive(Clone, Copy)]
@@ -174,12 +174,16 @@ fn place(
             let boxes = place(&sub, &sub_sizes, config, spacing, metrics, layout);
             let content = bounding_box(boxes.iter().map(|node| node.bounds));
             let nested = build_cluster_boxes(&sub, &boxes, spacing, metrics);
-            let children = sub
-                .graph
-                .subgraphs
-                .iter()
-                .filter(|child| child.parent.is_none())
-                .filter_map(|child| child.cluster)
+            let child_clusters = first_framed_descendants(
+                &sub,
+                sub.graph
+                    .subgraphs
+                    .iter()
+                    .filter(|child| child.parent.is_none())
+                    .map(|child| child.id),
+            );
+            let children = child_clusters
+                .into_iter()
                 .filter_map(|id| nested.iter().find(|cluster| cluster.cluster_index == id.0))
                 .map(|cluster| cluster.bounds);
             let cluster = subgraph.cluster.and_then(|id| ir.clusters.get(id.0));
@@ -294,8 +298,8 @@ fn flat_boxes(
     nodes
 }
 
-/// The node a composite state's cluster belongs to: the state declared with the cluster's title,
-/// when it is not itself inside the cluster.
+/// The node a composite state's cluster belongs to, when it is not itself inside the cluster.
+/// Display titles may differ from the authored state ID kept in the subgraph key.
 fn composite_state_node(
     ir: &MermaidDiagramIr,
     subgraph: &IrSubgraph,
@@ -304,15 +308,14 @@ fn composite_state_node(
     if ir.diagram_type != DiagramType::State {
         return None;
     }
-    let title = subgraph
-        .cluster
-        .and_then(|cluster| ir.clusters.get(cluster.0))
-        .and_then(|cluster| cluster.title)
-        .and_then(|label| ir.labels.get(label.0))?;
+    let cluster_id = subgraph.cluster?;
     ir.nodes
         .iter()
-        .position(|node| node.id == title.text)
-        .filter(|&node| owner[node].is_none())
+        .position(|node| node.id == subgraph.key)
+        .filter(|&node| {
+            owner[node].is_none()
+                && crate::composite_state_cluster(ir, &ir.nodes[node].id) == Some(cluster_id)
+        })
 }
 
 /// A copy of `ir` restricted to one top-level cluster's members, with that cluster's nested
@@ -584,6 +587,178 @@ mod tests {
     };
     use crate::{LayoutAlgorithm, LayoutConfig, LayoutRect, LayoutSpacing, build_cluster_boxes};
     use fm_core::{FontMetrics, FontMetricsConfig};
+
+    #[test]
+    fn state_composite_directions_preserve_outer_and_nested_flow() {
+        let ir = fm_parser::parse(concat!(
+            "stateDiagram-v2\ndirection TB\nBefore --> Outer\nOuter --> After\n",
+            "state Outer {\ndirection LR\nA --> Inner\nInner --> B\n",
+            "state Inner {\ndirection BT\nC --> D\n}\n}\n",
+        ))
+        .ir;
+        for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+            let layout = crate::layout_diagram_traced_with_config(
+                &ir,
+                algorithm,
+                LayoutConfig {
+                    fnx_enabled: false,
+                    ..Default::default()
+                },
+            )
+            .layout;
+            let center = |id| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == id)
+                    .unwrap()
+                    .bounds
+                    .center()
+            };
+            let before = center("Before");
+            let after = center("After");
+            assert!(
+                after.y > before.y,
+                "outer machine keeps TB direction: {algorithm:?}"
+            );
+            let a = center("A");
+            let b = center("B");
+            assert!(
+                b.x > a.x,
+                "Outer's children follow its LR direction: {algorithm:?}"
+            );
+            assert!((a.y - b.y).abs() < 0.01);
+            let c = center("C");
+            let d = center("D");
+            assert!(
+                c.y > d.y,
+                "Inner's children follow its BT direction: {algorithm:?}"
+            );
+            assert!((c.x - d.x).abs() < 0.01);
+            assert!(
+                layout
+                    .nodes
+                    .iter()
+                    .all(|node| { node.bounds.x.is_finite() && node.bounds.y.is_finite() })
+            );
+        }
+    }
+
+    #[test]
+    fn state_concurrent_regions_keep_independent_directions_and_geometry() {
+        let ir = fm_parser::parse(concat!(
+            "stateDiagram-v2\ndirection TB\nstate Active {\n",
+            "direction LR\n[*] --> A\nA --> B\nB --> [*]\n",
+            "--\ndirection RL\n[*] --> C\nC --> D\nD --> [*]\n}\n",
+        ))
+        .ir;
+        for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+            let layout = crate::layout_diagram_traced_with_config(
+                &ir,
+                algorithm,
+                LayoutConfig {
+                    fnx_enabled: false,
+                    ..Default::default()
+                },
+            )
+            .layout;
+            let center = |id| {
+                layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == id)
+                    .unwrap()
+                    .bounds
+                    .center()
+            };
+            assert!(center("A").x < center("B").x);
+            assert!(center("C").x > center("D").x);
+            let region_bounds = |key| {
+                let region = ir.graph.first_subgraph_by_key(key).unwrap();
+                super::bounding_box(region.members.iter().map(|member| {
+                    layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == member.0)
+                        .unwrap()
+                        .bounds
+                }))
+            };
+            let left = region_bounds("__state_region_1");
+            let right = region_bounds("__state_region_2");
+            assert!(
+                left.x + left.width <= right.x
+                    || right.x + right.width <= left.x
+                    || left.y + left.height <= right.y
+                    || right.y + right.height <= left.y,
+                "concurrent regions need disjoint content boxes: {left:?}, {right:?} ({algorithm:?})"
+            );
+            assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+        }
+    }
+
+    #[test]
+    fn state_concurrent_regions_reserve_nested_composite_frames() {
+        let nested_title =
+            "A very long nested composite title that must remain inside its parent frame";
+        for direction in ["TB", "BT", "LR", "RL"] {
+            let ir = fm_parser::parse(&format!(
+                "stateDiagram-v2\ndirection {direction}\nstate Outer {{\n\
+                 state \"{nested_title}\" as Nested {{\nA --> B\n}}\n\
+                 --\nC --> D\n}}\nOuter --> Done\n"
+            ))
+            .ir;
+            // Nested's routing node is anchored to its final frame only after cluster bounds
+            // have been built. Its initial node box cannot substitute for reserving the whole
+            // nested frame through the clusterless region parent.
+            for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                let layout = crate::layout_diagram_traced_with_config(
+                    &ir,
+                    algorithm,
+                    LayoutConfig {
+                        fnx_enabled: false,
+                        ..Default::default()
+                    },
+                )
+                .layout;
+                let frame = |title| {
+                    layout
+                        .clusters
+                        .iter()
+                        .find(|cluster| cluster.title.as_deref() == Some(title))
+                        .unwrap()
+                        .bounds
+                };
+                let outer = frame("Outer");
+                let nested = frame(nested_title);
+                assert!(
+                    nested.x >= outer.x + 15.99
+                        && nested.y >= outer.y + 43.99
+                        && nested.x + nested.width <= outer.x + outer.width - 15.99
+                        && nested.y + nested.height <= outer.y + outer.height - 15.99,
+                    "nested frame must fit below its parent's title: {outer:?}, {nested:?} \
+                     ({algorithm:?}, {direction})"
+                );
+                let disjoint = |left: LayoutRect, right: LayoutRect| {
+                    left.x + left.width <= right.x + 0.01
+                        || right.x + right.width <= left.x + 0.01
+                        || left.y + left.height <= right.y + 0.01
+                        || right.y + right.height <= left.y + 0.01
+                };
+                for id in ["C", "D", "Done"] {
+                    let node = layout.nodes.iter().find(|node| node.node_id == id).unwrap();
+                    let container = if id == "Done" { outer } else { nested };
+                    assert!(
+                        disjoint(container, node.bounds),
+                        "frame must not cover sibling {id}: {container:?}, {:?} \
+                         ({algorithm:?}, {direction})",
+                        node.bounds
+                    );
+                }
+                assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+            }
+        }
+    }
 
     #[test]
     fn cluster_titles_reserve_scaled_header_and_semibold_width() {

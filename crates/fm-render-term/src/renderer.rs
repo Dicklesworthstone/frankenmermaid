@@ -3572,10 +3572,7 @@ impl TermRenderer {
                 .filter(|node| fm_layout::is_composite_state_node(ir, node))
             {
                 let contains_endpoint = ir.clusters.iter().any(|cluster| {
-                    cluster
-                        .title
-                        .and_then(|id| ir.labels.get(id.0))
-                        .is_some_and(|title| title.text == node.node_id)
+                    fm_layout::composite_state_cluster(ir, &node.node_id) == Some(cluster.id)
                         && ir.edges.get(path.edge_index).is_some_and(|edge| {
                             [edge.from, edge.to].iter().any(|endpoint| {
                                 ir.resolve_endpoint_node(*endpoint)

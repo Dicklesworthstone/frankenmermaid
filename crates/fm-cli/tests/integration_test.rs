@@ -2905,6 +2905,154 @@ fn e2e_pipeline_state_composite_regions_render_divider() {
 }
 
 #[test]
+fn aliased_composite_states_keep_their_identity_through_layout_and_rendering() {
+    let parsed = parse(
+        r#"stateDiagram-v2
+    [*] --> Idle
+    state "Processing" as Active {
+        [*] --> Validate
+        Validate --> Persist
+        Persist --> [*]
+    }
+    state "Processing" as Backup {
+        [*] --> Recover
+        Recover --> [*]
+    }
+    Idle --> Active: begin
+    Active --> Done: finish
+    Done --> Backup: recover
+    Backup --> Finished
+    Idle --> Processing: ordinary
+    Processing --> Outside
+"#,
+    );
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let ir = &parsed.ir;
+    let index = |id: &str| ir.nodes.iter().position(|node| node.id == id).expect(id);
+    let on_border = |bounds: fm_layout::LayoutRect, point: fm_layout::LayoutPoint| {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+        let within = |value: f32, start: f32, length: f32| {
+            value >= start - 0.5 && value <= start + length + 0.5
+        };
+        ((near(point.x, bounds.x) || near(point.x, bounds.x + bounds.width))
+            && within(point.y, bounds.y, bounds.height))
+            || ((near(point.y, bounds.y) || near(point.y, bounds.y + bounds.height))
+                && within(point.x, bounds.x, bounds.width))
+    };
+
+    for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+        let layout = fm_layout::layout_diagram_traced_with_algorithm(ir, algorithm).layout;
+        let node_box = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == index(id))
+                .expect(id)
+        };
+        for (id, children) in [
+            ("Active", &["Validate", "Persist"][..]),
+            ("Backup", &["Recover"][..]),
+        ] {
+            let cluster_id =
+                fm_layout::composite_state_cluster(ir, id).expect("composite identity");
+            let cluster = layout
+                .clusters
+                .iter()
+                .find(|cluster| cluster.cluster_index == cluster_id.0)
+                .expect("composite container");
+            assert_eq!(cluster.title.as_deref(), Some("Processing"));
+            assert_eq!(node_box(id).bounds, cluster.bounds, "{algorithm:?}: {id}");
+            assert!(fm_layout::is_composite_state_node(ir, node_box(id)));
+            for child in children {
+                let bounds = node_box(child).bounds;
+                assert!(
+                    bounds.x >= cluster.bounds.x
+                        && bounds.y >= cluster.bounds.y
+                        && bounds.x + bounds.width <= cluster.bounds.x + cluster.bounds.width
+                        && bounds.y + bounds.height <= cluster.bounds.y + cluster.bounds.height,
+                    "{algorithm:?}: {child} must remain inside {id}"
+                );
+            }
+            for path in &layout.edges {
+                let edge = &ir.edges[path.edge_index];
+                if ir
+                    .resolve_endpoint_node(edge.from)
+                    .is_some_and(|node| node.0 == index(id))
+                {
+                    assert!(
+                        on_border(cluster.bounds, path.points[0]),
+                        "{algorithm:?}: {id} departure"
+                    );
+                }
+                if ir
+                    .resolve_endpoint_node(edge.to)
+                    .is_some_and(|node| node.0 == index(id))
+                {
+                    assert!(
+                        on_border(cluster.bounds, *path.points.last().expect("edge endpoint")),
+                        "{algorithm:?}: {id} arrival"
+                    );
+                }
+            }
+        }
+
+        // A normal state can share a composite's visible title without becoming its container.
+        assert_eq!(fm_layout::composite_state_cluster(ir, "Processing"), None);
+        assert!(!fm_layout::is_composite_state_node(
+            ir,
+            node_box("Processing")
+        ));
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let config = SvgRenderConfig {
+                backend,
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_layout(ir, &layout, &config);
+            let has_node_body = |id: &str| match backend {
+                SvgBackend::LegacyLayout => {
+                    let element_id = fm_core::mermaid_node_element_id(id, index(id));
+                    svg.contains(&format!("id=\"{element_id}\""))
+                }
+                SvgBackend::Scene => {
+                    let source_index = format!("data-fm-source-index=\"{}\"", index(id));
+                    svg.split('<').any(|tag| {
+                        tag.starts_with("path ")
+                            && tag.split('>').next().is_some_and(|attributes| {
+                                attributes.contains("data-fm-source-kind=\"node\"")
+                                    && attributes.contains(&source_index)
+                            })
+                    })
+                }
+            };
+            assert!(
+                has_node_body("Processing"),
+                "{algorithm:?}/{backend:?}: lost ordinary state"
+            );
+            for id in ["Active", "Backup"] {
+                assert!(
+                    !has_node_body(id),
+                    "{algorithm:?}/{backend:?}: composite must have one visible container"
+                );
+            }
+            assert_eq!(svg, render_svg_with_layout(ir, &layout, &config));
+        }
+    }
+}
+
+#[test]
+fn flowchart_node_and_subgraph_names_do_not_create_composite_states() {
+    let ir = parse("flowchart TB\nsubgraph Box[Box title]\n A --> B\nend\nBox --> C").ir;
+    let layout = layout_diagram(&ir);
+    assert_eq!(fm_layout::composite_state_cluster(&ir, "Box"), None);
+    assert!(
+        layout
+            .nodes
+            .iter()
+            .all(|node| !fm_layout::is_composite_state_node(&ir, node))
+    );
+}
+
+#[test]
 fn e2e_pipeline_er() {
     assert_pipeline_roundtrip(
         "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE-ITEM : contains",

@@ -21015,6 +21015,69 @@ mod tests {
     }
 
     #[test]
+    fn state_scene_svg_preserves_notes_and_avoids_opaque_composite_nodes() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n\
+             state Inner {\nA --> B : ready\n--\nC --> D : parallel\n}\n\
+             Inner --> Finished\n}\nOuter --> [*]\n\
+             note right of Outer\nFirst <row> & safe\nSecond row\nend note\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert_eq!(layout.extensions.state_notes.len(), 1);
+        assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+        let composites: Vec<_> = layout
+            .nodes
+            .iter()
+            .filter(|node| is_composite_state_node(&ir, node))
+            .map(|node| node.node_index)
+            .collect();
+        assert_eq!(composites.len(), 2);
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+            for text in [
+                "Outer",
+                "Inner",
+                "A",
+                "B",
+                "C",
+                "D",
+                "ready",
+                "parallel",
+                "First &lt;row> &amp; safe",
+                "Second row",
+            ] {
+                assert!(
+                    svg.contains(&format!(">{text}<")),
+                    "lost visible text {text}"
+                );
+            }
+            assert!(!svg.contains("First <row>"), "notes are escaped text");
+            assert!(svg.contains("id=\"state-notes\""));
+            assert!(svg.contains("stroke-dasharray=\"4,3\""));
+            assert!(svg.contains("stroke-dasharray=\"6,4\""));
+            for index in &composites {
+                let source = format!("data-fm-source-index=\"{index}\"");
+                assert!(
+                    !svg.split('<').any(|tag| {
+                        tag.split('>').next().is_some_and(|attributes| {
+                            attributes.contains("data-fm-source-kind=\"node\"")
+                                && attributes.contains(&source)
+                        })
+                    }),
+                    "composite {index} must only have its cluster representation"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cyclic_edges_preserve_authored_markers_in_both_svg_backends() {
         for (link, start_count, end_count) in [
             ("---", 0, 0),

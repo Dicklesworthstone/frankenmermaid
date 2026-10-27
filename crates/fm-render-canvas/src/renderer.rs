@@ -9334,6 +9334,83 @@ mod tests {
     }
 
     #[test]
+    fn state_scene_canvas_keeps_composite_contents_notes_and_dividers() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n\
+             state Inner {\nA --> B : ready\n--\nC --> D : parallel\n}\n\
+             Inner --> Finished\n}\nOuter --> [*]\n\
+             note right of Outer\nFirst note row\nSecond note row\nend note\n",
+        )
+        .ir;
+        let config = CanvasRenderConfig {
+            font_size: 20.0,
+            line_height: 1.75,
+            ..Default::default()
+        };
+        let metrics = config.font_metrics();
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(metrics.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(layout.extensions.state_notes.len(), 1);
+        assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+        let composite_count = layout
+            .nodes
+            .iter()
+            .filter(|node| fm_layout::is_composite_state_node(&ir, node))
+            .count();
+        assert_eq!(composite_count, 2);
+        let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+        let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+        assert_eq!(result.nodes_drawn, layout.nodes.len() - composite_count);
+        for label in [
+            "Outer",
+            "Inner",
+            "A",
+            "B",
+            "C",
+            "D",
+            "ready",
+            "parallel",
+            "First note row",
+            "Second note row",
+        ] {
+            assert_eq!(
+                ctx.operations()
+                    .iter()
+                    .filter(|op| {
+                        matches!(op, DrawOperation::FillText(text, _, _) if text == label)
+                    })
+                    .count(),
+                1,
+                "missing or duplicated {label}"
+            );
+        }
+        for pattern in [vec![6.0, 4.0], vec![4.0, 3.0]] {
+            assert!(
+                ctx.operations().iter().any(|op| {
+                    matches!(op, DrawOperation::SetLineDash(dash) if *dash == pattern)
+                }),
+                "missing concurrency divider or annotation leader"
+            );
+        }
+        let row_positions: Vec<_> = ctx
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                DrawOperation::FillText(text, _, y) if text.ends_with("note row") => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(row_positions.len(), 2);
+        assert!((row_positions[1] - row_positions[0] - 28.0).abs() < 0.001);
+    }
+
+    #[test]
     fn render_draws_activation_bar_rectangles() {
         let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
         let layout = DiagramLayout {

@@ -68,9 +68,9 @@ use web_time::Instant;
 
 use fm_core::{
     ArchitectureSide, DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType,
-    GanttTickInterval, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta,
-    IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
-    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    GanttTickInterval, GraphDirection, IrClusterId, IrEndpoint, IrGanttMeta, IrNode, IrSubgraph,
+    IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig,
+    MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
     MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
     MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
@@ -3738,6 +3738,10 @@ pub fn build_render_scene_with_metrics(
     if ir.diagram_type == DiagramType::Sequence {
         append_sequence_scene_layers(&mut root, ir, layout, metrics);
     }
+    let notes = build_state_note_layer(layout, metrics);
+    if !notes.children.is_empty() {
+        root.children.push(RenderItem::Group(notes));
+    }
     root.children
         .push(RenderItem::Group(build_edge_layer(ir, layout)));
     root.children
@@ -4982,6 +4986,54 @@ pub use cache_oblivious::BlockedEdgeGroups;
 pub use fnx_cache::{AnalysisCache, CacheConfig, CacheKey, CacheStats};
 use shapes::{node_path, rounded_rect_path};
 
+/// State and class notes have no graph node of their own. Keep their resolved boxes, leaders and
+/// all text rows in the scene, without turning annotations into selectable graph nodes. The
+/// layout has already reserved the padding and expanded its bounds to include these notes.
+fn build_state_note_layer(layout: &DiagramLayout, metrics: &fm_core::FontMetrics) -> RenderGroup {
+    let mut layer = RenderGroup::new(Some(String::from("state-notes")));
+    let font_size = metrics.font_size() * STATE_NOTE_FONT_SCALE;
+    let line_height = metrics.line_height_px() * STATE_NOTE_FONT_SCALE;
+    for (index, note) in layout.extensions.state_notes.iter().enumerate() {
+        if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
+            continue;
+        }
+        let mut group = RenderGroup::new(Some(format!("state-note-{index}")));
+        if note.leader_start != note.leader_end {
+            let mut stroke = StrokeStyle::solid("#475569", 1.0);
+            stroke.dash_array = vec![4.0, 3.0];
+            group
+                .children
+                .push(scene_line(note.leader_start, note.leader_end, stroke));
+        }
+        group.children.push(scene_path(
+            RenderSource::Diagram,
+            rounded_rect_path(note.bounds, 4.0),
+            Some(FillStyle::Solid {
+                color: String::from("#ffffff"),
+                opacity: 1.0,
+            }),
+            Some(StrokeStyle::solid("#a78bfa", 1.0)),
+        ));
+        for (row, text) in note.text.lines().enumerate() {
+            group.children.push(RenderItem::Text(RenderText {
+                source: RenderSource::Diagram,
+                text: text.to_owned(),
+                x: note.bounds.x + STATE_NOTE_PAD_X,
+                y: note.bounds.y + STATE_NOTE_PAD_Y + row as f32 * line_height,
+                font_size,
+                align: TextAlign::Start,
+                baseline: TextBaseline::Top,
+                fill: FillStyle::Solid {
+                    color: String::from("#0f172a"),
+                    opacity: 1.0,
+                },
+            }));
+        }
+        layer.children.push(RenderItem::Group(group));
+    }
+    layer
+}
+
 fn build_cluster_layer(layout: &DiagramLayout) -> RenderGroup {
     let mut layer =
         RenderGroup::new(Some(String::from("clusters"))).with_source(RenderSource::Diagram);
@@ -5120,6 +5172,11 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         RenderGroup::new(Some(String::from("nodes"))).with_source(RenderSource::Diagram);
 
     for node_box in &layout.nodes {
+        // The cluster already paints the composite boundary. Its routing node shares that
+        // boundary, so painting it again would cover all child states and concurrency dividers.
+        if is_composite_state_node(ir, node_box) {
+            continue;
+        }
         let shape = ir
             .nodes
             .get(node_box.node_index)
@@ -5160,6 +5217,15 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                             .map(str::to_owned)
                     })
                     .or_else(|| journey_score_fill(ir, node_box.node_index).map(str::to_owned))
+                    .or_else(|| {
+                        (ir.diagram_type == DiagramType::State
+                            && matches!(
+                                shape,
+                                fm_core::NodeShape::FilledCircle
+                                    | fm_core::NodeShape::HorizontalBar
+                            ))
+                        .then(|| String::from("#475569"))
+                    })
                     .unwrap_or_else(|| "#ffffff".to_owned()),
                 opacity,
             }),
@@ -5167,6 +5233,30 @@ fn build_node_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
             marker_start: MarkerKind::None,
             marker_end: MarkerKind::None,
         }));
+        if ir.diagram_type == DiagramType::State && shape == fm_core::NodeShape::DoubleCircle {
+            // A final state is a ring around a solid disc. The generic shape path describes only
+            // its outer boundary, so the disc must be a separate primitive inside that boundary.
+            let center = node_box.bounds.center();
+            let radius = node_box.bounds.width.min(node_box.bounds.height) / 2.0;
+            let inner_radius = (radius - 4.0).max(radius * 0.5);
+            layer.children.push(scene_path(
+                RenderSource::Node(node_box.node_index),
+                node_path(
+                    LayoutRect {
+                        x: center.x - inner_radius,
+                        y: center.y - inner_radius,
+                        width: 2.0 * inner_radius,
+                        height: 2.0 * inner_radius,
+                    },
+                    fm_core::NodeShape::Circle,
+                ),
+                Some(FillStyle::Solid {
+                    color: String::from("#475569"),
+                    opacity: 1.0,
+                }),
+                Some(StrokeStyle::solid("#94a3b8", 1.5)),
+            ));
+        }
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
@@ -5210,6 +5300,9 @@ fn build_label_layer(
         );
     }
     for node_box in &layout.nodes {
+        if is_composite_state_node(ir, node_box) {
+            continue;
+        }
         if let Some(step) = layout
             .extensions
             .journey
@@ -8798,6 +8891,11 @@ fn layout_diagram_tree_traced_with_metrics(
     metrics: &fm_core::FontMetrics,
 ) -> TracedLayout {
     let mut traced = layout_diagram_tree_traced_impl(ir, metrics);
+    let cluster_dividers =
+        build_state_cluster_dividers(ir, &traced.layout.nodes, &traced.layout.clusters);
+    Arc::make_mut(&mut traced.layout)
+        .extensions
+        .cluster_dividers = cluster_dividers;
     attach_journey_content(ir, &mut traced, metrics);
     traced
 }
@@ -24860,24 +24958,37 @@ fn separate_shared_channels(
     }
 }
 
+/// Find a composite state's authored subgraph, independently of its display title.
+fn composite_state_subgraph<'a>(ir: &'a MermaidDiagramIr, node_id: &str) -> Option<&'a IrSubgraph> {
+    if ir.diagram_type != DiagramType::State {
+        return None;
+    }
+    ir.graph.subgraphs.iter().find(|subgraph| {
+        subgraph.key == node_id
+            && subgraph
+                .cluster
+                .is_some_and(|cluster| ir.clusters.get(cluster.0).is_some())
+    })
+}
+
+/// The container belonging to a composite state, identified by its authored state ID.
+///
+/// A display title is not an identity: `state "Active Mode" as Active` still receives
+/// transitions addressed to `Active`, and another state may legitimately be named `Active Mode`.
+#[must_use]
+pub fn composite_state_cluster(ir: &MermaidDiagramIr, node_id: &str) -> Option<IrClusterId> {
+    composite_state_subgraph(ir, node_id).and_then(|subgraph| subgraph.cluster)
+}
+
 /// For each node, the composite-state nodes whose clusters enclose it (empty outside state
-/// diagrams). A composite node is matched to its cluster exactly as in
-/// [`anchor_composite_state_nodes`]: the cluster's title is the state's id.
+/// diagrams). Membership uses the same authored identity as [`anchor_composite_state_nodes`].
 fn composite_containers(ir: &MermaidDiagramIr, node_count: usize) -> Vec<Vec<usize>> {
     if ir.diagram_type != DiagramType::State || ir.clusters.is_empty() {
         return Vec::new();
     }
     let mut containers = vec![Vec::new(); node_count];
-    for subgraph in &ir.graph.subgraphs {
-        let Some(title) = subgraph
-            .cluster
-            .and_then(|cluster| ir.clusters.get(cluster.0))
-            .and_then(|cluster| cluster.title)
-            .and_then(|label| ir.labels.get(label.0))
-        else {
-            continue;
-        };
-        let Some(composite) = ir.nodes.iter().position(|node| node.id == title.text) else {
+    for (composite, node) in ir.nodes.iter().enumerate() {
+        let Some(subgraph) = composite_state_subgraph(ir, &node.id) else {
             continue;
         };
         for member in ir.graph.subgraph_members_recursive(subgraph.id) {
@@ -24895,19 +25006,11 @@ fn composite_containers(ir: &MermaidDiagramIr, node_count: usize) -> Vec<Vec<usi
 /// Its node bounds remain available for routing transitions to the container boundary.
 #[must_use]
 pub fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
-    if ir.diagram_type != DiagramType::State {
-        return false;
-    }
     let node_id = ir
         .nodes
         .get(node_box.node_index)
         .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
-    ir.clusters.iter().any(|cluster| {
-        cluster
-            .title
-            .and_then(|label_id| ir.labels.get(label_id.0))
-            .is_some_and(|label| label.text == node_id)
-    })
+    composite_state_cluster(ir, node_id).is_some()
 }
 
 /// Make a composite state's node BE its container.
@@ -24923,9 +25026,8 @@ pub fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) 
 /// boxes, so transitions now attach to the container's boundary, and the renderer skips drawing a
 /// node that has become its own cluster — the cluster already draws that box and its title.
 ///
-/// Matched on cluster TITLE == node id, which is exactly what `begin_state_cluster` writes
-/// (`title.or(Some(name))`), and restricted to state diagrams so a flowchart `subgraph` that happens
-/// to share a node's name is left alone.
+/// The subgraph's key preserves the authored state ID even when its title is an alias. Restricted
+/// to state diagrams so a flowchart `subgraph` that shares a node's name is left alone.
 fn anchor_composite_state_nodes(
     ir: &MermaidDiagramIr,
     nodes: &mut [LayoutNodeBox],
@@ -24934,14 +25036,15 @@ fn anchor_composite_state_nodes(
     if !matches!(ir.diagram_type, DiagramType::State) {
         return;
     }
-    for cluster in clusters {
-        let Some(title) = cluster.title.as_deref() else {
+    for node in nodes {
+        let Some(cluster_id) = composite_state_cluster(ir, &node.node_id) else {
             continue;
         };
-        for node in nodes.iter_mut() {
-            if node.node_id == title {
-                node.bounds = cluster.bounds;
-            }
+        if let Some(cluster) = clusters
+            .iter()
+            .find(|cluster| cluster.cluster_index == cluster_id.0)
+        {
+            node.bounds = cluster.bounds;
         }
     }
 }
@@ -25234,6 +25337,33 @@ fn cluster_bounds_for_content(
     }
 }
 
+/// Find the first rendered frames beneath a set of subgraphs. Concurrent state regions are
+/// grouping subgraphs without a cluster of their own, so ancestor frames must see through them
+/// when reserving space for nested composite states. A framed descendant already encloses its
+/// own children and ends this walk.
+fn first_framed_descendants(
+    ir: &MermaidDiagramIr,
+    roots: impl IntoIterator<Item = fm_core::IrSubgraphId>,
+) -> Vec<IrClusterId> {
+    let mut pending: Vec<_> = roots.into_iter().collect();
+    let mut visited = BTreeSet::new();
+    let mut clusters = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id.0) {
+            continue;
+        }
+        let Some(subgraph) = ir.graph.subgraph(id) else {
+            continue;
+        };
+        if let Some(cluster) = subgraph.cluster {
+            clusters.push(cluster);
+        } else {
+            pending.extend(subgraph.children.iter().copied());
+        }
+    }
+    clusters
+}
+
 fn build_cluster_boxes(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -25329,12 +25459,15 @@ fn build_cluster_boxes(
             .and_then(|label_id| ir.labels.get(label_id.0))
             .map(|label| label.text.clone());
 
-        let children = cluster_to_subgraph[cluster_index]
-            .and_then(|id| ir.graph.subgraph(id))
+        let child_clusters = first_framed_descendants(
+            ir,
+            cluster_to_subgraph[cluster_index]
+                .and_then(|id| ir.graph.subgraph(id))
+                .into_iter()
+                .flat_map(|subgraph| subgraph.children.iter().copied()),
+        );
+        let children = child_clusters
             .into_iter()
-            .flat_map(|subgraph| subgraph.children.iter())
-            .filter_map(|id| ir.graph.subgraph(*id))
-            .filter_map(|subgraph| subgraph.cluster)
             .filter_map(|id| final_boxes.get(id.0).and_then(Option::as_ref))
             .map(|cluster| cluster.bounds);
         let bounds = cluster_bounds_for_content(
@@ -25434,6 +25567,22 @@ fn build_state_cluster_dividers(
 ) -> Vec<LayoutClusterDivider> {
     const STATE_REGION_PREFIX: &str = "__state_region_";
 
+    if ir.diagram_type != DiagramType::State
+        || !ir
+            .graph
+            .subgraphs
+            .iter()
+            .any(|subgraph| subgraph.grid_span > 1)
+    {
+        return Vec::new();
+    }
+    let mut node_bounds_by_index = BTreeMap::new();
+    for node in nodes {
+        node_bounds_by_index
+            .entry(node.node_index)
+            .or_insert(node.bounds);
+    }
+
     ir.graph
         .subgraphs
         .iter()
@@ -25448,52 +25597,103 @@ fn build_state_cluster_dividers(
                 .find(|cluster| cluster.cluster_index == cluster_index)
                 .map(|cluster| cluster.bounds)?;
 
-            let mut region_vertical_extents = subgraph
+            let region_bounds = subgraph
                 .children
                 .iter()
                 .filter_map(|child_id| ir.graph.subgraph(*child_id))
                 .filter(|child| child.key.starts_with(STATE_REGION_PREFIX))
                 .filter_map(|child| {
-                    let mut min_y = f32::INFINITY;
-                    let mut max_y = f32::NEG_INFINITY;
-
-                    for member in ir.graph.subgraph_members_recursive(child.id) {
-                        let Some(node_box) = nodes.get(member.0) else {
+                    let mut bounds = None;
+                    let mut pending = vec![child.id];
+                    let mut visited = BTreeSet::new();
+                    while let Some(id) = pending.pop() {
+                        if !visited.insert(id.0) {
+                            continue;
+                        }
+                        let Some(region) = ir.graph.subgraph(id) else {
                             continue;
                         };
-                        min_y = min_y.min(node_box.bounds.y);
-                        max_y = max_y.max(node_box.bounds.y + node_box.bounds.height);
+                        for member in &region.members {
+                            if let Some(bounds_for_node) = node_bounds_by_index.get(&member.0) {
+                                include_packing_bounds(&mut bounds, *bounds_for_node);
+                            }
+                        }
+                        // A nested composite's frame extends beyond its children's boxes. Keep
+                        // the divider outside the entire frame even when it has no routing node.
+                        if let Some(cluster_id) = region.cluster
+                            && let Some(cluster) = clusters
+                                .iter()
+                                .find(|cluster| cluster.cluster_index == cluster_id.0)
+                        {
+                            include_packing_bounds(&mut bounds, cluster.bounds);
+                        }
+                        pending.extend(&region.children);
                     }
-
-                    (min_y.is_finite() && max_y.is_finite()).then_some((min_y, max_y))
+                    bounds
                 })
                 .collect::<Vec<_>>();
 
-            if region_vertical_extents.len() < 2 {
+            if region_bounds.len() < 2 {
                 return None;
             }
 
-            region_vertical_extents.sort_by(|left, right| {
-                left.0
-                    .total_cmp(&right.0)
-                    .then_with(|| left.1.total_cmp(&right.1))
+            let mut by_y = region_bounds.clone();
+            by_y.sort_by(|left, right| {
+                left.y
+                    .total_cmp(&right.y)
+                    .then_with(|| left.x.total_cmp(&right.x))
             });
+            let mut by_x = region_bounds;
+            by_x.sort_by(|left, right| {
+                left.x
+                    .total_cmp(&right.x)
+                    .then_with(|| left.y.total_cmp(&right.y))
+            });
+            let vertical_gap = by_y
+                .windows(2)
+                .all(|pair| pair[0].y + pair[0].height <= pair[1].y);
+            let horizontal_gap = by_x
+                .windows(2)
+                .all(|pair| pair[0].x + pair[0].width <= pair[1].x);
+            // Compound placement can arrange independent regions side by side or stack them.
+            // Splitting their overlapping y ranges unconditionally would draw through states.
+            let horizontal_divider = vertical_gap || !horizontal_gap;
+            let regions = if horizontal_divider { by_y } else { by_x };
+            // A vertical split starts below the parent's caption, at the contents themselves.
+            // Extending it up to the top border would strike through a long composite title.
+            let region_top = regions
+                .iter()
+                .map(|region| region.y)
+                .fold(f32::INFINITY, f32::min)
+                .max(cluster_bounds.y + 12.0);
 
             Some(
-                region_vertical_extents
+                regions
                     .windows(2)
                     .map(|pair| {
-                        let divider_y = (pair[0].1 + pair[1].0) * 0.5;
-                        LayoutClusterDivider {
-                            cluster_index,
-                            start: LayoutPoint {
-                                x: cluster_bounds.x + 12.0,
-                                y: divider_y,
-                            },
-                            end: LayoutPoint {
-                                x: cluster_bounds.x + cluster_bounds.width - 12.0,
-                                y: divider_y,
-                            },
+                        if horizontal_divider {
+                            let y = (pair[0].y + pair[0].height + pair[1].y) * 0.5;
+                            LayoutClusterDivider {
+                                cluster_index,
+                                start: LayoutPoint {
+                                    x: cluster_bounds.x + 12.0,
+                                    y,
+                                },
+                                end: LayoutPoint {
+                                    x: cluster_bounds.x + cluster_bounds.width - 12.0,
+                                    y,
+                                },
+                            }
+                        } else {
+                            let x = (pair[0].x + pair[0].width + pair[1].x) * 0.5;
+                            LayoutClusterDivider {
+                                cluster_index,
+                                start: LayoutPoint { x, y: region_top },
+                                end: LayoutPoint {
+                                    x,
+                                    y: cluster_bounds.y + cluster_bounds.height - 12.0,
+                                },
+                            }
                         }
                     })
                     .collect::<Vec<_>>(),
@@ -31770,6 +31970,250 @@ mod tests {
         let first = build_render_scene(&ir, &layout);
         let second = build_render_scene(&ir, &layout);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn render_scene_state_composites_preserve_children_and_concurrency() {
+        let ir = parse(
+            "stateDiagram-v2\n[*] --> Outer\nstate Outer {\n\
+             [*] --> Inner\nstate Inner {\nA --> B : ready\n--\nC --> D : parallel\n}\n\
+             Inner --> Finished : complete\n}\nOuter --> [*]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let composites: Vec<_> = layout
+            .nodes
+            .iter()
+            .filter(|node| super::is_composite_state_node(&ir, node))
+            .map(|node| node.node_index)
+            .collect();
+        assert_eq!(composites.len(), 2);
+        assert_eq!(layout.extensions.cluster_dividers.len(), 1);
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        let nodes = gantt_scene_group(&scene, "nodes");
+        let labels = gantt_scene_group(&scene, "labels");
+        assert_eq!(
+            gantt_scene_paths(nodes)
+                .iter()
+                .filter_map(|path| match path.source {
+                    RenderSource::Node(index) => Some(index),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .len(),
+            layout.nodes.len() - composites.len(),
+            "only the cluster may paint the composite's full bounds",
+        );
+        for source in &composites {
+            assert!(!nodes.children.iter().any(|item| {
+                matches!(item, RenderItem::Path(path) if path.source == RenderSource::Node(*source))
+            }));
+            assert!(!labels.children.iter().any(|item| {
+                matches!(item, RenderItem::Text(text) if text.source == RenderSource::Node(*source))
+            }));
+        }
+        for name in [
+            "Outer", "Inner", "A", "B", "C", "D", "Finished", "ready", "parallel",
+        ] {
+            assert_eq!(
+                labels
+                    .children
+                    .iter()
+                    .filter(|item| { matches!(item, RenderItem::Text(text) if text.text == name) })
+                    .count(),
+                1,
+                "the visible label {name} must survive exactly once",
+            );
+        }
+        let divider = &layout.extensions.cluster_dividers[0];
+        let cluster_paths = gantt_scene_paths(gantt_scene_group(&scene, "clusters"));
+        assert!(cluster_paths.iter().any(|path| {
+            path.fill.is_none()
+                && path
+                    .stroke
+                    .as_ref()
+                    .is_some_and(|stroke| stroke.dash_array == [6.0, 4.0])
+                && path.commands
+                    == [
+                        super::PathCmd::MoveTo {
+                            x: divider.start.x,
+                            y: divider.start.y,
+                        },
+                        super::PathCmd::LineTo {
+                            x: divider.end.x,
+                            y: divider.end.y,
+                        },
+                    ]
+        }));
+
+        let flow = parse("flowchart TD\nsubgraph Outer\nA --> B\nend\nOuter --> A").ir;
+        let flow_layout = layout_diagram(&flow);
+        let flow_scene = build_render_scene(&flow, &flow_layout);
+        assert_eq!(
+            gantt_scene_paths(gantt_scene_group(&flow_scene, "nodes")).len(),
+            flow_layout.nodes.len(),
+            "a flowchart node sharing a subgraph name remains a distinct node",
+        );
+    }
+
+    #[test]
+    fn render_scene_state_and_class_notes_keep_measured_rows_and_leaders() {
+        use super::{MarkerKind, PathCmd, TextAlign, TextBaseline};
+
+        for source in [
+            "stateDiagram-v2\nA --> B\nnote left of A\nFirst row\n\nThird row\nend note\n",
+            "classDiagram\nAnimal <|-- Duck\nnote for Duck \"can fly\"\nnote \"whole model\"\n",
+        ] {
+            let ir = parse(source).ir;
+            let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size: 21.0,
+                line_height: 1.75,
+                ..Default::default()
+            });
+            let layout = super::layout_diagram_with_config(
+                &ir,
+                super::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            assert!(!layout.extensions.state_notes.is_empty());
+            let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            let notes = gantt_scene_group(&scene, "state-notes");
+            assert_eq!(notes.children.len(), layout.extensions.state_notes.len());
+            for (item, note) in notes.children.iter().zip(&layout.extensions.state_notes) {
+                let RenderItem::Group(group) = item else {
+                    panic!("note group")
+                };
+                let paths = gantt_scene_paths(group);
+                let attached = note.leader_start != note.leader_end;
+                assert_eq!(paths.len(), if attached { 2 } else { 1 });
+                assert!(paths.iter().all(|path| {
+                    path.source == RenderSource::Diagram
+                        && path.marker_start == MarkerKind::None
+                        && path.marker_end == MarkerKind::None
+                }));
+                if attached {
+                    let leader = paths[0];
+                    assert!(leader.fill.is_none());
+                    assert_eq!(leader.stroke.as_ref().unwrap().dash_array, [4.0, 3.0]);
+                    assert_eq!(
+                        leader.commands,
+                        [
+                            PathCmd::MoveTo {
+                                x: note.leader_start.x,
+                                y: note.leader_start.y
+                            },
+                            PathCmd::LineTo {
+                                x: note.leader_end.x,
+                                y: note.leader_end.y
+                            },
+                        ]
+                    );
+                }
+                let body = paths.last().unwrap();
+                let extents = gantt_scene_path_extents(body);
+                for (actual, expected) in [
+                    (extents.x, note.bounds.x),
+                    (extents.y, note.bounds.y),
+                    (extents.width, note.bounds.width),
+                    (extents.height, note.bounds.height),
+                ] {
+                    assert!((actual - expected).abs() < 0.001);
+                }
+                let texts: Vec<_> = group
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Text(text) => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    texts
+                        .iter()
+                        .map(|text| text.text.as_str())
+                        .collect::<Vec<_>>(),
+                    note.text.lines().collect::<Vec<_>>(),
+                );
+                for (row, text) in texts.iter().enumerate() {
+                    assert_eq!(text.source, RenderSource::Diagram);
+                    assert_eq!(text.align, TextAlign::Start);
+                    assert_eq!(text.baseline, TextBaseline::Top);
+                    assert!((text.font_size - 16.8).abs() < 0.001);
+                    assert!((text.x - (note.bounds.x + 10.0)).abs() < 0.001);
+                    assert!((text.y - (note.bounds.y + 8.0 + row as f32 * 29.4)).abs() < 0.001);
+                    assert!(text.y + text.font_size <= note.bounds.y + note.bounds.height);
+                }
+                assert!(note.bounds.x + 0.001 >= scene.bounds.x);
+                assert!(note.bounds.y + 0.001 >= scene.bounds.y);
+                assert!(
+                    note.bounds.x + note.bounds.width
+                        <= scene.bounds.x + scene.bounds.width + 0.001
+                );
+                assert!(
+                    note.bounds.y + note.bounds.height
+                        <= scene.bounds.y + scene.bounds.height + 0.001
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_scene_does_not_invent_notes_for_unresolved_targets() {
+        let ir = state_ir_with_note("right", "missing", "must not attach to another state");
+        let layout = layout_diagram(&ir);
+        assert!(layout.extensions.state_notes.is_empty());
+        let scene = build_render_scene(&ir, &layout);
+        assert!(!scene.root.children.iter().any(|item| {
+            matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("state-notes"))
+        }));
+    }
+
+    #[test]
+    fn render_scene_state_start_fork_join_and_final_keep_their_distinct_marks() {
+        use super::FillStyle;
+
+        let ir = parse(
+            "stateDiagram-v2\n[*] --> Fork\nstate Fork <<fork>>\nFork --> A\nFork --> B\n\
+             A --> Join\nB --> Join\nstate Join <<join>>\nJoin --> [*]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let scene = build_render_scene(&ir, &layout);
+        let paths = gantt_scene_paths(gantt_scene_group(&scene, "nodes"));
+        let mut filled_count = 0;
+        let mut final_count = 0;
+        for (index, node) in ir.nodes.iter().enumerate() {
+            let marks: Vec<_> = paths
+                .iter()
+                .filter(|path| path.source == RenderSource::Node(index))
+                .collect();
+            if matches!(
+                node.shape,
+                NodeShape::FilledCircle | NodeShape::HorizontalBar
+            ) {
+                filled_count += 1;
+                assert_eq!(marks.len(), 1);
+                assert!(matches!(&marks[0].fill,
+                    Some(FillStyle::Solid { color, opacity }) if color == "#475569" && *opacity == 1.0));
+            } else if node.shape == NodeShape::DoubleCircle {
+                final_count += 1;
+                assert_eq!(marks.len(), 2, "a final state needs both its ring and disc");
+                let outer = gantt_scene_path_extents(marks[0]);
+                let inner = gantt_scene_path_extents(marks[1]);
+                assert!(inner.width < outer.width && inner.height < outer.height);
+                assert!((outer.center().x - inner.center().x).abs() < 0.001);
+                assert!((outer.center().y - inner.center().y).abs() < 0.001);
+                assert!(matches!(&marks[0].fill,
+                    Some(FillStyle::Solid { color, .. }) if color == "#ffffff"));
+                assert!(matches!(&marks[1].fill,
+                    Some(FillStyle::Solid { color, .. }) if color == "#475569"));
+            }
+        }
+        assert_eq!(filled_count, 3, "one initial state, a fork, and a join");
+        assert_eq!(final_count, 1);
     }
 
     const GANTT_SCENE_SOURCE: &str = "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
@@ -40433,8 +40877,28 @@ mod tests {
         assert_eq!(layout.extensions.cluster_dividers.len(), 1);
         let divider = &layout.extensions.cluster_dividers[0];
         assert_eq!(divider.cluster_index, 0);
-        assert!(divider.start.x < divider.end.x);
-        assert_eq!(divider.start.y, divider.end.y);
+        let left = &layout.nodes[0].bounds;
+        let right = &layout.nodes[1].bounds;
+        if divider.start.x == divider.end.x {
+            let (left, right) = if left.x <= right.x {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            assert!(divider.start.y < divider.end.y);
+            assert!(divider.start.x >= left.x + left.width);
+            assert!(divider.start.x <= right.x);
+        } else {
+            let (left, right) = if left.y <= right.y {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            assert_eq!(divider.start.y, divider.end.y);
+            assert!(divider.start.x < divider.end.x);
+            assert!(divider.start.y >= left.y + left.height);
+            assert!(divider.start.y <= right.y);
+        }
 
         let scene = build_render_scene(&ir, &layout);
         let divider_paths = scene
@@ -40460,6 +40924,64 @@ mod tests {
             })
             .count();
         assert_eq!(divider_paths, 1);
+    }
+
+    #[test]
+    fn state_concurrency_dividers_stay_between_regions_and_nested_frames() {
+        for direction in ["TB", "LR", "BT", "RL"] {
+            let ir = parse(&format!(
+                "stateDiagram-v2\ndirection {direction}\nstate Active {{\n\
+                 [*] --> A\nA --> B\nB --> [*]\n--\n\
+                 state Nested {{\n[*] --> C\nC --> D\nD --> [*]\n}}\n}}\n\
+                 Active --> Done\n",
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            assert_eq!(layout.extensions.cluster_dividers.len(), 1, "{direction}");
+            let divider = &layout.extensions.cluster_dividers[0];
+            let crosses = |bounds: LayoutRect| {
+                if divider.start.x == divider.end.x {
+                    divider.start.x > bounds.x + 0.001
+                        && divider.start.x < bounds.x + bounds.width - 0.001
+                        && divider.start.y < bounds.y + bounds.height
+                        && divider.end.y > bounds.y
+                } else {
+                    assert_eq!(divider.start.y, divider.end.y);
+                    divider.start.y > bounds.y + 0.001
+                        && divider.start.y < bounds.y + bounds.height - 0.001
+                        && divider.start.x < bounds.x + bounds.width
+                        && divider.end.x > bounds.x
+                }
+            };
+            for node in &layout.nodes {
+                if node.node_id == "Active" {
+                    continue;
+                }
+                assert!(
+                    !crosses(node.bounds),
+                    "{direction} divider cuts through {}: {divider:?}, {:?}",
+                    node.node_id,
+                    node.bounds
+                );
+            }
+            let nested = layout
+                .clusters
+                .iter()
+                .find(|cluster| cluster.title.as_deref() == Some("Nested"))
+                .unwrap();
+            assert!(
+                !crosses(nested.bounds),
+                "{direction} divider cuts through nested frame: {divider:?}, {:?}",
+                nested.bounds
+            );
+            let mut shuffled = layout.nodes.clone();
+            shuffled.reverse();
+            assert_eq!(
+                super::build_state_cluster_dividers(&ir, &shuffled, &layout.clusters),
+                layout.extensions.cluster_dividers,
+                "region membership resolves by node_index, not by vector position",
+            );
+        }
     }
 
     // ── Auto algorithm selection tests (bd-vb9.7) ──────────────────────
