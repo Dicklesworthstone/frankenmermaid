@@ -765,7 +765,7 @@ fn c4_hide_legend_keeps_terminal_output_legend_free() {
 #[test]
 fn c4_dynamic_relationships_keep_declaration_order_in_terminal() {
     let ir = fm_parser::parse(
-        "C4Dynamic\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n  Rel(customer, store, \"Place order\")\n  Rel(store, customer, \"Confirm order\")\n",
+        "C4Dynamic\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n  Rel(customer, store, \"Place order\", \"HTTPS\")\n  Rel(store, customer, \"Confirm order\", \"JSON\")\n",
     )
     .ir;
     assert_eq!(
@@ -779,12 +779,30 @@ fn c4_dynamic_relationships_keep_declaration_order_in_terminal() {
         "CONTROL FAILED: expected two relationships"
     );
 
-    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
-    for label in ["1: Place order", "2: Confirm order"] {
-        assert!(
-            out.contains(label),
-            "the ordered C4Dynamic relationship label {label:?} is missing:\n{out}"
+    for render_mode in [
+        fm_core::MermaidRenderMode::Braille,
+        fm_core::MermaidRenderMode::HalfBlock,
+        fm_core::MermaidRenderMode::Block,
+        fm_core::MermaidRenderMode::CellOnly,
+    ] {
+        let config = TermRenderConfig {
+            render_mode,
+            ..TermRenderConfig::rich()
+        };
+        let result = render_term_with_config(&ir, &config, 200, 60);
+        let out = &result.output;
+        assert_eq!(
+            result.occluded_edge_label_count, 0,
+            "{render_mode:?}:\n{out}"
         );
+        for label in ["1: Place order", "2: Confirm order", "[HTTPS]", "[JSON]"] {
+            assert_eq!(
+                out.matches(label).count(),
+                1,
+                "the complete C4Dynamic relationship caption {label:?} is missing or repeated in {render_mode:?}:\n{out}"
+            );
+        }
+        assert_eq!(out, &render_term_with_config(&ir, &config, 200, 60).output);
     }
 }
 
@@ -813,6 +831,47 @@ fn c4_context_relationships_remain_unnumbered_in_terminal() {
         !out.contains("1: Place order"),
         "C4Context relationship was incorrectly numbered:\n{out}"
     );
+}
+
+#[test]
+fn c4_technology_only_captions_survive_terminal_modes() {
+    for family in [
+        "C4Context",
+        "C4Container",
+        "C4Component",
+        "C4Dynamic",
+        "C4Deployment",
+    ] {
+        let mut ir = fm_parser::parse(&format!(
+            "{family}\nSystem(a, \"Producer\")\nSystem(b, \"Consumer\")\nRel(a, b, \"\", \"AMQP\")"
+        ))
+        .ir;
+        assert_eq!(ir.edges.len(), 1);
+        assert!(ir.edges[0].label.is_none());
+        for render_mode in [
+            fm_core::MermaidRenderMode::Braille,
+            fm_core::MermaidRenderMode::HalfBlock,
+            fm_core::MermaidRenderMode::Block,
+            fm_core::MermaidRenderMode::CellOnly,
+        ] {
+            let config = TermRenderConfig {
+                render_mode,
+                ..TermRenderConfig::rich()
+            };
+            let result = render_term_with_config(&ir, &config, 200, 60);
+            assert_eq!(
+                result.output.matches("[AMQP]").count(),
+                1,
+                "{family} {render_mode:?}:\n{}",
+                result.output
+            );
+            assert_eq!(result.occluded_edge_label_count, 0);
+        }
+        ir.edges[0].arrow = ArrowType::Invisible;
+        let result = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60);
+        assert!(!result.output.contains("[AMQP]"));
+        assert_eq!(result.occluded_edge_label_count, 0);
+    }
 }
 
 /// CONTROL: the neighbours in the same node loop still render.

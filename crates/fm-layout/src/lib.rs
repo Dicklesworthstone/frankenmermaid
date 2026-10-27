@@ -5711,7 +5711,7 @@ fn build_label_layer(
         {
             continue;
         }
-        let Some(label) = edge_ir.label.and_then(|label_id| ir.labels.get(label_id.0)) else {
+        let Some(caption) = ir.graph_edge_caption(edge.edge_index) else {
             continue;
         };
 
@@ -5763,14 +5763,19 @@ fn build_label_layer(
                 .get("font-size")
                 .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
                 .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
-                .unwrap_or(12.75);
-            let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                .unwrap_or(metrics.font_size() * 0.85);
+            let label_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
                 font_size,
                 line_height: 1.2,
-                ..Default::default()
+                ..metrics.config().clone()
             });
-            let width = metrics.estimate_multiline_width(&label.text) * 1.15 + 8.0;
-            let line_count = label.text.lines().count().max(1);
+            let width = caption
+                .lines()
+                .map(|line| label_metrics.estimate_width(line))
+                .fold(0.0_f32, f32::max)
+                * 1.15
+                + 8.0;
+            let line_count = caption.line_count();
             let line_height = font_size * 1.2;
             let height = line_count as f32 * line_height + 4.0;
             let center = placer.place(edge, width, height);
@@ -5797,7 +5802,7 @@ fn build_label_layer(
                 .get("color")
                 .cloned()
                 .unwrap_or_else(|| String::from("#334155"));
-            for (row, text) in label.text.lines().enumerate() {
+            for (row, text) in caption.lines().enumerate() {
                 layer.children.push(RenderItem::Text(RenderText {
                     source: RenderSource::Edge(edge.edge_index),
                     text: text.to_owned(),
@@ -5816,7 +5821,7 @@ fn build_label_layer(
             let midpoint = edge_label_position(edge);
             layer.children.push(RenderItem::Text(RenderText {
                 source: RenderSource::Edge(edge.edge_index),
-                text: label.text.clone(),
+                text: caption.label.into_owned(),
                 x: midpoint.x,
                 y: midpoint.y,
                 font_size: 12.0,
@@ -6227,7 +6232,14 @@ fn compute_traced_layout_with_config_and_guardrails(
         DiagramType::Class | DiagramType::Er => {
             spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), false);
         }
-        DiagramType::Flowchart | DiagramType::State | DiagramType::Requirement => {
+        DiagramType::Flowchart
+        | DiagramType::State
+        | DiagramType::Requirement
+        | DiagramType::C4Context
+        | DiagramType::C4Container
+        | DiagramType::C4Component
+        | DiagramType::C4Dynamic
+        | DiagramType::C4Deployment => {
             spread_shared_edge_ends(ir, Arc::make_mut(&mut traced.layout), true);
         }
         _ => {}
@@ -6329,7 +6341,14 @@ fn refine_graph_label_spacing(
                 layout,
                 matches!(
                     ir.diagram_type,
-                    DiagramType::Flowchart | DiagramType::State | DiagramType::Requirement
+                    DiagramType::Flowchart
+                        | DiagramType::State
+                        | DiagramType::Requirement
+                        | DiagramType::C4Context
+                        | DiagramType::C4Container
+                        | DiagramType::C4Component
+                        | DiagramType::C4Dynamic
+                        | DiagramType::C4Deployment
                 ),
             );
             let quality = edge_labels::graph_label_attachment_quality(ir, layout, &metrics);
@@ -6531,7 +6550,7 @@ fn pack_disconnected_components(
         if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
             continue;
         }
-        if let Some(label) = edge.label.and_then(|label| ir.labels.get(label.0)) {
+        if let Some(caption) = ir.graph_edge_caption(path.edge_index) {
             let style = edge_labels::edge_label_style(ir, path.edge_index);
             let font_size = style
                 .get("font-size")
@@ -6543,8 +6562,13 @@ fn pack_disconnected_components(
                 line_height: 1.2,
                 ..metrics.config().clone()
             });
-            let width = label_metrics.estimate_multiline_width(&label.text) * 1.15 + 8.0;
-            let height = label.text.lines().count().max(1) as f32 * font_size * 1.2 + 4.0;
+            let width = caption
+                .lines()
+                .map(|line| label_metrics.estimate_width(line))
+                .fold(0.0_f32, f32::max)
+                * 1.15
+                + 8.0;
+            let height = caption.line_count() as f32 * font_size * 1.2 + 4.0;
             label_sizes[path.edge_index] = Some((width, height));
             has_labels[group] = true;
         }
@@ -9350,7 +9374,9 @@ pub fn try_relayout_directed_path_suffix(
         let source = target.saturating_sub(1);
         // This reuse path advances by a fixed rank gap. A new edge label may enlarge the
         // preceding gap, so let the full tree layout reserve space before changing the cache.
-        if edge.label.is_some()
+        if ir
+            .graph_edge_caption(prefix.edge_count + suffix_offset)
+            .is_some()
             || endpoint_node_index(ir, edge.from) != Some(source)
             || endpoint_node_index(ir, edge.to) != Some(target)
         {
@@ -11264,9 +11290,8 @@ fn spread_shared_edge_ends(ir: &MermaidDiagramIr, layout: &mut DiagramLayout, by
         // A label sits at its path's midpoint, so two labelled relationships between the same pair
         // need their paths a label's height apart or the labels print over each other.
         let labelled = members.iter().any(|&(path, _)| {
-            ir.edges
-                .get(layout.edges[path].edge_index)
-                .is_some_and(|edge| edge.label.is_some())
+            ir.graph_edge_caption(layout.edges[path].edge_index)
+                .is_some()
         });
         let wanted = if labelled { LABELLED_GAP } else { GAP };
         let gap = wanted.min(side_length * 0.8 / span.max(1.0));
@@ -15930,7 +15955,7 @@ fn depth_level_centers(
 ) -> Vec<f32> {
     // Tree ranks need the same label clearance as Sugiyama. Avoid additional allocations for
     // unlabelled trees, and enlarge only the logical gap containing a label.
-    let label_gaps = if ir.edges.iter().any(|edge| edge.label.is_some()) {
+    let label_gaps = if (0..ir.edges.len()).any(|index| ir.graph_edge_caption(index).is_some()) {
         let ranks: BTreeMap<usize, usize> = node_depths.iter().copied().enumerate().collect();
         let rank_to_index: BTreeMap<usize, usize> =
             (0..level_sizes.len()).map(|rank| (rank, rank)).collect();
@@ -20164,6 +20189,28 @@ fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) 
     spacing
 }
 
+/// Preserve the established spacing estimate unless the author declares a valid edge font size.
+/// The override uses the same link-default, link-index, and inline cascade as the renderers.
+fn edge_label_font_metrics_override(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    metrics: &fm_core::FontMetrics,
+) -> Option<fm_core::FontMetrics> {
+    let style = edge_labels::edge_label_style(ir, edge_index);
+    let font_size = style
+        .get("font-size")?
+        .trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)?;
+    Some(fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size,
+        ..metrics.config().clone()
+    }))
+}
+
 /// The gap each pair of adjacent ranks needs for the edge labels drawn between them, keyed by the
 /// lower rank index.
 ///
@@ -20182,8 +20229,8 @@ fn edge_label_rank_gaps(
 ) -> BTreeMap<usize, f32> {
     const END_ROOM: f32 = 40.0;
     let mut gaps = BTreeMap::new();
-    for edge in &ir.edges {
-        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        let Some(caption) = ir.graph_edge_caption(edge_index) else {
             continue;
         };
         let index = |endpoint| {
@@ -20196,7 +20243,13 @@ fn edge_label_rank_gaps(
         if a.abs_diff(b) != 1 {
             continue;
         }
-        let (width, height) = metrics.estimate_dimensions(&label.text);
+        let declared_metrics = edge_label_font_metrics_override(ir, edge_index, metrics);
+        let label_metrics = declared_metrics.as_ref().unwrap_or(metrics);
+        let width = caption
+            .lines()
+            .map(|line| label_metrics.estimate_width(line))
+            .fold(0.0_f32, f32::max);
+        let height = caption.line_count() as f32 * label_metrics.line_height_px();
         // The renderer sizes the label's box from its own per-character estimate, which runs about
         // a third wider than this measure (a 268-wide box for a label this measures at 199).
         let needed = if horizontal_ranks {
@@ -22897,6 +22950,7 @@ fn build_edge_paths_with_orientation(
     struct ParallelPair {
         count: usize,
         label_width: Option<f32>,
+        label_height: f32,
     }
     let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), ParallelPair>, Vec<usize>) =
         if any_parallel {
@@ -22904,16 +22958,28 @@ fn build_edge_paths_with_orientation(
             count.reserve(ir.edges.len());
             let mut index = Vec::with_capacity(ir.edges.len());
             let metrics = fm_core::FontMetrics::default_metrics();
-            for edge in &ir.edges {
+            for (edge_index, edge) in ir.edges.iter().enumerate() {
                 let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
                 let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
                 let key = (source.min(target), source.max(target));
                 let pair = count.entry(key).or_default();
                 index.push(pair.count);
                 pair.count += 1;
-                if let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) {
-                    let width = metrics.estimate_dimensions(&label.text).0;
+                if let Some(caption) = ir.graph_edge_caption(edge_index) {
+                    let declared_metrics =
+                        edge_label_font_metrics_override(ir, edge_index, &metrics);
+                    let label_metrics = declared_metrics.as_ref().unwrap_or(&metrics);
+                    let width = caption
+                        .lines()
+                        .map(|line| label_metrics.estimate_width(line))
+                        .fold(0.0_f32, f32::max);
                     pair.label_width = Some(pair.label_width.map_or(width, |old| old.max(width)));
+                    let font_size = declared_metrics
+                        .as_ref()
+                        .map_or(metrics.font_size() * 0.85, fm_core::FontMetrics::font_size);
+                    pair.label_height = pair
+                        .label_height
+                        .max(caption.line_count() as f32 * font_size * 1.2 + 4.0);
                 }
             }
             (count, index)
@@ -23002,16 +23068,17 @@ fn build_edge_paths_with_orientation(
             };
 
             let is_self_loop = source == target;
-            let (pair_total, pair_idx, pair_label_width) = if any_parallel {
+            let (pair_total, pair_idx, pair_label_width, pair_label_height) = if any_parallel {
                 let key = (source.min(target), source.max(target));
                 let pair = edge_pair_count.get(&key);
                 (
                     pair.map_or(1, |pair| pair.count),
                     edge_pair_index.get(edge_index).copied().unwrap_or(0),
                     pair.and_then(|pair| pair.label_width),
+                    pair.map_or(0.0, |pair| pair.label_height),
                 )
             } else {
-                (1, 0, None)
+                (1, 0, None, 0.0)
             };
             let parallel_offset = if pair_total > 1 {
                 // A labelled edge's label sits on its midpoint, so two edges of one pair a few
@@ -23020,7 +23087,7 @@ fn build_edge_paths_with_orientation(
                 // nodes leave room) where they run top to bottom.
                 let requested_step = match pair_label_width {
                     None => 12.0_f32,
-                    Some(_) if horizontal_ranks => 26.0,
+                    Some(_) if horizontal_ranks => (pair_label_height + 6.0).max(26.0),
                     // The rendered box: the renderer's wider per-character measure plus padding.
                     Some(width) => width.mul_add(1.4, 30.0).max(26.0),
                 };
@@ -23288,8 +23355,19 @@ fn build_self_loop_paths(
         };
         let (label_width, label_height) = indexes
             .iter()
-            .filter_map(|&index| ir.edges[index].label.and_then(|id| ir.labels.get(id.0)))
-            .map(|label| metrics.estimate_dimensions(&label.text))
+            .filter_map(|&index| ir.graph_edge_caption(index).map(|caption| (index, caption)))
+            .map(|(index, caption)| {
+                let declared_metrics = edge_label_font_metrics_override(ir, index, &metrics);
+                let label_metrics = declared_metrics.as_ref().unwrap_or(&metrics);
+                let width = caption
+                    .lines()
+                    .map(|line| label_metrics.estimate_width(line))
+                    .fold(0.0_f32, f32::max);
+                (
+                    width,
+                    caption.line_count() as f32 * label_metrics.line_height_px(),
+                )
+            })
             .fold((0.0_f32, 0.0_f32), |(width, height), (w, h)| {
                 (width.max(w), height.max(h))
             });
@@ -25784,7 +25862,7 @@ fn bundle_parallel_edges(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
         // Bundling stays for the case it was built for — several IDENTICAL unlabelled connections
         // between the same pair, where collapsing them declutters and discards nothing. The moment
         // any edge in the group carries a label, the group is not redundant and must not be merged.
-        if edge.label.is_some() {
+        if ir.graph_edge_caption(path.edge_index).is_some() {
             continue;
         }
         let Some(source) = endpoint_node_index(ir, edge.from) else {
@@ -34786,6 +34864,268 @@ mod tests {
     }
 
     #[test]
+    fn c4_rank_gaps_measure_technology_rows_in_every_direction() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let technology = if horizontal {
+                "HTTP/2 with encrypted end-to-end certificate authentication"
+            } else {
+                "Encrypted HTTP/2\nCertificate authentication\nRegional failover"
+            };
+            for label_present in [false, true] {
+                let mut ir = graph_ir(DiagramType::C4Container, 3, &[(0, 1), (1, 2)]);
+                ir.direction = direction;
+                ir.edges[0].extras = Some(Box::new(fm_core::IrEdgeExtras {
+                    technology: Some(technology.into()),
+                    ..Default::default()
+                }));
+                if label_present {
+                    let id = ir.labels.len();
+                    ir.labels.push(IrLabel {
+                        text: String::from("Uses"),
+                        ..Default::default()
+                    });
+                    ir.edges[0].label = Some(IrLabelId(id));
+                }
+                let (text_width, text_height) =
+                    metrics.estimate_dimensions(&format!("[{technology}]"));
+                let needed_gap = if horizontal {
+                    text_width.mul_add(1.4, 40.0)
+                } else {
+                    text_height
+                        + if label_present {
+                            metrics.line_height_px()
+                        } else {
+                            0.0
+                        }
+                        + 40.0
+                };
+                for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                    let traced = super::layout_diagram_traced_with_config(
+                        &ir,
+                        algorithm,
+                        LayoutConfig::default(),
+                    );
+                    let layout = &traced.layout;
+                    let clearance = |from: usize, to: usize| {
+                        let a = layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_index == from)
+                            .unwrap()
+                            .bounds;
+                        let b = layout
+                            .nodes
+                            .iter()
+                            .find(|node| node.node_index == to)
+                            .unwrap()
+                            .bounds;
+                        match direction {
+                            GraphDirection::TB | GraphDirection::TD => b.y - a.y - a.height,
+                            GraphDirection::BT => a.y - b.y - b.height,
+                            GraphDirection::LR => b.x - a.x - a.width,
+                            GraphDirection::RL => a.x - b.x - b.width,
+                        }
+                    };
+                    assert!(
+                        clearance(0, 1) + 0.01 >= needed_gap,
+                        "{algorithm:?}/{direction:?}: technology caption needs {needed_gap}px, got {}",
+                        clearance(0, 1)
+                    );
+                    assert!(
+                        (clearance(1, 2) - LayoutSpacing::default().rank_spacing).abs() < 0.01,
+                        "an unlabelled relationship must retain the default gap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_large_relationship_caption_fits_its_first_rank_gap() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let large_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 64.0,
+            ..metrics.config().clone()
+        });
+        for (diagram_type, label_present) in [
+            (DiagramType::Flowchart, true),
+            (DiagramType::C4Container, true),
+            (DiagramType::C4Container, false),
+        ] {
+            let mut ir = graph_ir(diagram_type, 2, &[(0, 1)]);
+            ir.direction = GraphDirection::LR;
+            if label_present {
+                ir.labels.push(IrLabel {
+                    text: String::from("Requests approval"),
+                    ..Default::default()
+                });
+                ir.edges[0].label = Some(IrLabelId(0));
+            }
+            if diagram_type == DiagramType::C4Container {
+                ir.edges[0].extras = Some(Box::new(fm_core::IrEdgeExtras {
+                    technology: Some("HTTPS\nMutual authentication".into()),
+                    ..Default::default()
+                }));
+            }
+            // The inline declaration wins over both default and index-specific link styles.
+            for (target, size) in [
+                (fm_core::IrStyleTarget::LinkDefault, 18),
+                (fm_core::IrStyleTarget::Link(0), 32),
+            ] {
+                ir.style_refs.push(fm_core::IrStyleRef {
+                    target,
+                    style: format!("font-size:{size}px"),
+                    span: Span::default(),
+                });
+            }
+            ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                String::from("font-size"),
+                String::from("64px"),
+            )])));
+            assert!(
+                !super::edge_labels::can_refine_graph_label_spacing(&ir),
+                "one caption must fit without the multi-label refinement pass"
+            );
+            let caption = ir.graph_edge_caption(0).unwrap();
+            let required_width = caption
+                .lines()
+                .map(|line| large_metrics.estimate_width(line))
+                .fold(0.0_f32, f32::max)
+                .mul_add(1.4, 40.0);
+            for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Tree] {
+                let traced = super::layout_diagram_traced_with_config(
+                    &ir,
+                    algorithm,
+                    LayoutConfig {
+                        fnx_enabled: false,
+                        constraint_solver: ConstraintSolverMode::Disabled,
+                        ..Default::default()
+                    },
+                );
+                let layout = &traced.layout;
+                let bounds = |index| {
+                    layout
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_index == index)
+                        .unwrap()
+                        .bounds
+                };
+                let gap = bounds(1).x - bounds(0).x - bounds(0).width;
+                assert!(
+                    gap + 0.01 >= required_width,
+                    "{diagram_type:?}/{algorithm:?}: a 64px caption needs {required_width}px, got {gap}"
+                );
+                let (detached, distance, _) =
+                    super::edge_labels::graph_label_attachment_quality(&ir, layout, &metrics);
+                assert_eq!(
+                    detached, 0,
+                    "the complete caption must remain attached: {diagram_type:?}/{algorithm:?}, distance={distance}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn large_relationship_fonts_expand_parallel_and_self_loop_lanes() {
+        let mut ir = graph_ir(DiagramType::C4Container, 2, &[(0, 1), (0, 1)]);
+        ir.direction = GraphDirection::LR;
+        for edge in &mut ir.edges {
+            edge.extras = Some(Box::new(fm_core::IrEdgeExtras {
+                technology: Some("HTTPS\nMutual authentication".into()),
+                ..Default::default()
+            }));
+            edge.inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                String::from("font-size"),
+                String::from("64px"),
+            )])));
+        }
+        // Tall faces leave enough port room to test caption spacing rather than port clamping.
+        let nodes: Vec<_> = (0..2)
+            .map(|index| LayoutNodeBox {
+                node_index: index,
+                node_id: format!("N{index}"),
+                rank: index,
+                order: 0,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: index as f32 * 2000.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 1000.0,
+                },
+            })
+            .collect();
+        let parallel =
+            super::build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+        let painted_height =
+            ir.graph_edge_caption(0).unwrap().line_count() as f32 * 64.0 * 1.2 + 4.0;
+        let first = super::edge_label_position(&parallel[0]);
+        let second = super::edge_label_position(&parallel[1]);
+        assert!(
+            (first.y - second.y).abs() >= painted_height + 4.0,
+            "large multiline captions need separate parallel corridors"
+        );
+
+        for edge in &mut ir.edges {
+            edge.to = IrEndpoint::Node(IrNodeId(0));
+        }
+        let loops = super::build_self_loop_paths(&ir, &nodes[..1], &[], true);
+        let outer_y = |index| {
+            loops[&index]
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            nodes[0].bounds.y - outer_y(0) >= painted_height / 2.0 + 8.0,
+            "the first loop must leave room for half of its caption beside its own node"
+        );
+        assert!(
+            (outer_y(0) - outer_y(1)).abs() >= painted_height + 4.0,
+            "nested self-loop captions need separate corridors"
+        );
+    }
+
+    #[test]
+    fn technology_only_relationships_are_not_collapsed_into_unlabelled_bundles() {
+        let mut ir = graph_ir(
+            DiagramType::C4Container,
+            2,
+            &[(0, 1), (0, 1), (0, 1), (0, 1)],
+        );
+        for (index, technology) in ["HTTPS", "gRPC"].into_iter().enumerate() {
+            ir.edges[index].extras = Some(Box::new(fm_core::IrEdgeExtras {
+                technology: Some(technology.into()),
+                ..Default::default()
+            }));
+        }
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.edges.len(), 4);
+        assert!(
+            layout
+                .edges
+                .iter()
+                .filter(|path| path.edge_index < 2)
+                .all(|path| !path.bundled && path.bundle_count == 1)
+        );
+        assert_eq!(layout.edges.iter().filter(|path| path.bundled).count(), 1);
+        assert!(
+            layout
+                .edges
+                .iter()
+                .any(|path| path.edge_index >= 2 && path.bundle_count == 2)
+        );
+    }
+
+    #[test]
     fn tree_layout_top_down_places_children_below_parents() {
         let layout = layout_diagram_tree(&sample_tree_ir(GraphDirection::TB));
         let mut centers = BTreeMap::new();
@@ -43048,6 +43388,44 @@ mod tests {
                 gap + 0.01 >= needed_gap,
                 "the full fallback must reserve space for the appended label"
             );
+        }
+    }
+
+    #[test]
+    fn directed_path_suffix_with_only_relationship_technology_requires_full_layout() {
+        let mut base = graph_ir(DiagramType::C4Container, 3, &[(0, 1), (1, 2)]);
+        base.direction = GraphDirection::LR;
+        let before = layout_diagram_tree(&base);
+        let prefix = certify_directed_path_layout_prefix(&base, &before, 3, 2).unwrap();
+        let technology = "Encrypted certificate-authenticated event delivery";
+        let needed = fm_core::FontMetrics::default_metrics()
+            .estimate_width(&format!("[{technology}]"))
+            .mul_add(1.4, 40.0);
+        for edge_index in [2, 3] {
+            let mut next = graph_ir(
+                DiagramType::C4Container,
+                5,
+                &[(0, 1), (1, 2), (2, 3), (3, 4)],
+            );
+            next.direction = GraphDirection::LR;
+            next.edges[edge_index].extras = Some(Box::new(fm_core::IrEdgeExtras {
+                technology: Some(technology.into()),
+                ..Default::default()
+            }));
+            let mut cached = before.clone();
+            assert!(!try_relayout_directed_path_suffix(
+                &next,
+                &mut cached,
+                &prefix
+            ));
+            assert_eq!(
+                cached, before,
+                "rejected caption reuse must not mutate the cache"
+            );
+            let full = layout_diagram_tree(&next);
+            let source = full.nodes[edge_index].bounds;
+            let target = full.nodes[edge_index + 1].bounds;
+            assert!(target.x - source.x - source.width + 0.01 >= needed);
         }
     }
 

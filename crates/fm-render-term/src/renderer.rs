@@ -3487,15 +3487,12 @@ impl TermRenderer {
                         && path.points.len() >= 2
                         && !is_invisible_edge(ir, path)
                         && ir
-                            .edges
-                            .get(path.edge_index)
-                            .and_then(|edge| edge.label)
-                            .and_then(|id| ir.labels.get(id.0))
-                            .is_some_and(|label| {
-                                label
-                                    .text
-                                    .chars()
-                                    .any(|ch| !ch.is_control() && !ch.is_whitespace())
+                            .graph_edge_caption(path.edge_index)
+                            .is_some_and(|caption| {
+                                caption.lines().any(|line| {
+                                    line.chars()
+                                        .any(|ch| !ch.is_control() && !ch.is_whitespace())
+                                })
                             })
                 })
                 .count();
@@ -3530,19 +3527,19 @@ impl TermRenderer {
             if path.bundled || path.points.len() < 2 || is_invisible_edge(ir, path) {
                 continue;
             }
-            let Some(label) = ir
-                .edges
-                .get(path.edge_index)
-                .and_then(|edge| edge.label)
-                .and_then(|id| ir.labels.get(id.0))
-            else {
+            let Some(caption) = ir.graph_edge_caption(path.edge_index) else {
                 continue;
+            };
+            let text = if caption.technology.is_some() {
+                std::borrow::Cow::Owned(caption.lines().collect::<Vec<_>>().join("\n"))
+            } else {
+                caption.label
             };
             // Preserve the configured total text budget, while fitting line lengths to the
             // available columns. The default 24-character soft wrap must not cut a 25-column
             // caption (or identifier) that fits intact in this terminal.
             let text = edge_caption_text(
-                &label.text,
+                &text,
                 self.config
                     .max_label_chars
                     .max(1)
@@ -7266,6 +7263,30 @@ mod tests {
             occluded, 1,
             "an impossible grid must report the missing caption"
         );
+    }
+
+    #[test]
+    fn technology_only_caption_reports_occlusion_but_hidden_edges_do_not() {
+        let mut ir = fm_parser::parse(
+            "C4Context\nSystem(a, \"Producer\")\nSystem(b, \"Consumer\")\nRel(a, b, \"\", \"AMQP\")",
+        ).ir;
+        let mut layout = layout_diagram(&ir);
+        let renderer =
+            TermRenderer::new(ResolvedConfig::resolve(&TermRenderConfig::rich(), 80, 24));
+        let mut grid = vec![vec![' '; 2]; 1];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, 1.0, 1.0, &[]);
+        assert!(labels.is_empty());
+        assert_eq!(occluded, 1);
+        layout.edges[0].bundled = true;
+        let (_, occluded) =
+            renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 0);
+        layout.edges[0].bundled = false;
+        ir.edges[0].arrow = ArrowType::Invisible;
+        let (_, occluded) =
+            renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 0);
     }
 
     #[test]

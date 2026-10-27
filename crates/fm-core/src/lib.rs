@@ -3824,6 +3824,32 @@ pub struct IrEdge {
     pub inline_style: Option<Box<IrInlineStyle>>,
 }
 
+/// The complete text attached to a graph relationship, before surface-specific measurement.
+///
+/// C4 interactions keep their ordinal and technology in this shared presentation contract so
+/// layout measures the same content that SVG, Canvas, and GPU render. The technology remains a
+/// separate section so a renderer can give it its own italic treatment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphEdgeCaption<'a> {
+    pub label: Cow<'a, str>,
+    pub technology: Option<String>,
+}
+
+impl GraphEdgeCaption<'_> {
+    /// Authored rows in display order, including the bracketed technology section.
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.label
+            .lines()
+            .chain(self.technology.iter().flat_map(|text| text.lines()))
+    }
+
+    /// The number of rows whose complete footprint must fit the relationship's backing plate.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.lines().count().max(1)
+    }
+}
+
 /// Rarely-populated, diagram-specific fields split off `IrEdge` (see [`IrEdge::extras`]) so the
 /// common flowchart/sequence edge pays only a null pointer for all of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -9200,6 +9226,33 @@ pub struct MermaidDiagramIr {
 }
 
 impl MermaidDiagramIr {
+    /// Resolve the exact graph-caption text without changing the author's IR label.
+    ///
+    /// Technology is normalized by the parser along with ordinary labels. Brackets and C4
+    /// dynamic numbering belong to presentation and are applied once here. A technology-only
+    /// relationship still has a caption even when the author left its primary label empty.
+    #[must_use]
+    pub fn graph_edge_caption(&self, edge_index: usize) -> Option<GraphEdgeCaption<'_>> {
+        let edge = self.edges.get(edge_index)?;
+        let label = edge.label.and_then(|id| self.labels.get(id.0));
+        let technology = edge
+            .extras
+            .as_deref()
+            .and_then(|extras| extras.technology.as_deref())
+            .filter(|technology| !technology.trim().is_empty())
+            .map(|technology| format!("[{technology}]"));
+        if label.is_none() && technology.is_none() {
+            return None;
+        }
+        let text = label.map_or("", |label| label.text.as_str());
+        let label = if self.diagram_type == DiagramType::C4Dynamic {
+            Cow::Owned(format!("{}: {text}", edge_index + 1))
+        } else {
+            Cow::Borrowed(text)
+        };
+        Some(GraphEdgeCaption { label, technology })
+    }
+
     /// The declared title if this diagram's family draws it, in the spelling the author used.
     ///
     /// ⚠️ ONE TABLE FOR EVERY BACKEND, BECAUSE THERE WERE THREE COPIES OF THIS RULE AND ALL THREE
@@ -10958,6 +11011,69 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn graph_captions_measure_the_same_numbered_and_technology_rows_they_draw() {
+        use super::*;
+        let mut ir = MermaidDiagramIr::empty(DiagramType::C4Dynamic);
+        ir.labels.push(IrLabel {
+            text: "Sends an order\nwith confirmation".into(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            label: Some(IrLabelId(0)),
+            extras: Some(Box::new(IrEdgeExtras {
+                technology: Some("HTTPS\nJSON & Unicode 世界".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let caption = ir.graph_edge_caption(0).unwrap();
+        assert_eq!(caption.label, "1: Sends an order\nwith confirmation");
+        assert_eq!(
+            caption.technology.as_deref(),
+            Some("[HTTPS\nJSON & Unicode 世界]")
+        );
+        assert_eq!(
+            caption.lines().collect::<Vec<_>>(),
+            [
+                "1: Sends an order",
+                "with confirmation",
+                "[HTTPS",
+                "JSON & Unicode 世界]"
+            ]
+        );
+        assert_eq!(caption.line_count(), 4);
+        assert_eq!(ir.labels[0].text, "Sends an order\nwith confirmation");
+        ir.diagram_type = DiagramType::C4Context;
+        assert!(matches!(
+            ir.graph_edge_caption(0).unwrap().label,
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(ir.graph_edge_caption(0).unwrap().label, ir.labels[0].text);
+    }
+
+    #[test]
+    fn graph_captions_keep_technology_only_relationships_and_reject_missing_text() {
+        use super::*;
+        let mut ir = MermaidDiagramIr::empty(DiagramType::C4Container);
+        ir.edges.push(IrEdge {
+            extras: Some(Box::new(IrEdgeExtras {
+                technology: Some("AMQP".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let caption = ir.graph_edge_caption(0).unwrap();
+        assert!(caption.label.is_empty());
+        assert_eq!(caption.lines().collect::<Vec<_>>(), ["[AMQP]"]);
+        assert_eq!(caption.line_count(), 1);
+        ir.edges[0].extras_mut().technology = Some(" \n ".into());
+        assert!(ir.graph_edge_caption(0).is_none());
+        ir.edges[0].label = Some(IrLabelId(999));
+        assert!(ir.graph_edge_caption(0).is_none());
+        assert!(ir.graph_edge_caption(999).is_none());
+    }
 
     #[test]
     fn class_cards_keep_every_member_inside_distinct_compartments() {

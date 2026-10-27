@@ -2180,7 +2180,7 @@ fn render_scene_document_with_ir(
     if config.embed_theme_css {
         let mut theme_css = theme.to_svg_style(
             config.shadows,
-            ir.is_some_and(|ir| ir.edges.iter().any(|edge| edge.label.is_some())),
+            ir.is_some_and(|ir| ir.edges.iter().any(has_edge_caption)),
         );
         strip_unused_theme_css(&mut theme_css, ir);
         css.push_str(&theme_css);
@@ -4627,12 +4627,17 @@ fn svg_geometry(
         let (mut right, mut bottom) = (frame.viewbox_width, frame.viewbox_height);
         for (index, position) in positions.iter().enumerate() {
             let Some(position) = position else { continue };
-            let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+            let Some(caption) = rendered_edge_caption(ir, index, detail) else {
                 continue;
             };
-            let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
             let font_size = edge_label_font_size(ir, index, detail.edge_font_size);
-            let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
+            let (width, height, _) = edge_caption_dimensions(
+                &caption.label,
+                caption.technology.as_deref(),
+                font_size,
+                config,
+                true,
+            );
             let x = position.x + frame.offset_x;
             let y = position.y + frame.offset_y;
             left = left.min(x - width / 2.0 - 2.0);
@@ -4921,10 +4926,8 @@ fn render_layout_to_svg(
 
     // Embed theme CSS if enabled
     if config.embed_theme_css {
-        let mut css = theme.to_svg_style(
-            detail.enable_shadows,
-            ir.edges.iter().any(|edge| edge.label.is_some()),
-        );
+        let mut css =
+            theme.to_svg_style(detail.enable_shadows, ir.edges.iter().any(has_edge_caption));
         strip_unused_theme_css(&mut css, Some(ir));
         if config.preserve_labels {
             // Keep glyph metrics in SVG units while zooming. optimizeLegibility can quantize
@@ -15096,43 +15099,10 @@ fn compute_edge_label<'a>(
     if ir.diagram_type == DiagramType::Sankey {
         return None;
     }
-    let ir_edge = ir.edges.get(edge_index);
     if detail.show_edge_labels
         && edge_path.points.len() >= 2
-        && let Some(label_id) = ir_edge.and_then(|e| e.label)
-        && let Some(label) = ir.labels.get(label_id.0)
+        && let Some(caption) = rendered_edge_caption(ir, edge_index, detail)
     {
-        // The autonumber is NO LONGER PREFIXED here (bd-o02wn). mermaid 11.15.0's `drawMessage`
-        // emits it as its OWN element — `.attr("class","sequenceNumber").text(f)`, the number and
-        // nothing else — beside the message, not glued to the front of the label. Two repo tests
-        // had contradicted each other about the prefix spelling (`10 Ping` vs `10. numbered once`)
-        // and neither matched the incumbent, because a prefix is not what the incumbent produces.
-        // The number is now written by `write_sequence_number_into`.
-        let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
-
-        // A C4Dynamic relationship is NUMBERED, 1-based, in declaration order.
-        //
-        // ⚠️ THIS IS A RENDERER CONCERN, and mermaid agrees — the prefix is applied in `drawRels`,
-        // not in its parser, so the stored label stays the author's text:
-        //
-        // ```text
-        //   let a = 0;
-        //   for (let s of t) { a = a + 1;
-        //     i.db.getC4Type() === "C4Dynamic" && (s.label.text = a + ": " + s.label.text); … }
-        // ```
-        //
-        // The whole point of a dynamic diagram is the ORDER of the interactions, and we drew them
-        // unnumbered — the one piece of information the diagram type exists to convey. Found by
-        // `scripts/headtohead/chromium_text_diff.mjs`, which reported mermaid drawing
-        // `1: Submits credentials to` where we drew `Submits credentials to`.
-        //
-        // `edge_index` is the position in `ir.edges`, which is declaration order — the same order
-        // mermaid iterates its rels array in.
-        let label_text: Cow<'a, str> = if ir.diagram_type == fm_core::DiagramType::C4Dynamic {
-            Cow::Owned(format!("{}: {label_text}", edge_index + 1))
-        } else {
-            label_text
-        };
         // The anchor rule is fm-layout's, shared with the canvas and the render scene.
         let anchor = preserved_label_positions
             .and_then(|positions| positions.get(edge_index).copied().flatten())
@@ -15143,10 +15113,59 @@ fn compute_edge_label<'a>(
             // Retain the legacy operation order as well as its offset.
             anchor.y + offset_y - 8.0
         };
-        Some((label_text, anchor.x + offset_x, y))
+        Some((caption.label, anchor.x + offset_x, y))
     } else {
         None
     }
+}
+
+fn has_edge_caption(edge: &fm_core::IrEdge) -> bool {
+    edge.label.is_some()
+        || edge
+            .extras
+            .as_deref()
+            .and_then(|extras| extras.technology.as_deref())
+            .is_some_and(|technology| !technology.trim().is_empty())
+}
+
+/// Apply overview truncation once, after the shared semantic caption has resolved numbering.
+/// Measurement, masks, document bounds, and the actual text all consume this same spelling.
+fn rendered_edge_caption(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    detail: RenderDetailProfile,
+) -> Option<fm_core::GraphEdgeCaption<'_>> {
+    let mut caption = ir.graph_edge_caption(edge_index)?;
+    if let Cow::Owned(text) = truncate_label(&caption.label, detail.edge_label_max_chars) {
+        caption.label = Cow::Owned(text);
+    }
+    Some(caption)
+}
+
+fn edge_caption_dimensions(
+    label: &str,
+    technology: Option<&str>,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    collision_aware: bool,
+) -> (f32, f32, f32) {
+    let dimensions = edge_label_dimensions(label, font_size, config, collision_aware);
+    let Some(technology) = technology else {
+        return dimensions;
+    };
+    let technology_dimensions =
+        edge_label_dimensions(technology, font_size, config, collision_aware);
+    let rows = (label.lines().count() + technology.lines().count()).max(1);
+    let span = (rows - 1) as f32 * font_size * config.line_height;
+    (
+        dimensions.0.max(technology_dimensions.0),
+        span + if collision_aware {
+            font_size * 1.2 + 4.0
+        } else {
+            font_size + 14.0
+        },
+        span,
+    )
 }
 
 fn edge_label_dimensions(
@@ -15224,12 +15243,17 @@ fn resolve_graph_edge_label_positions(
         if edge.arrow == fm_core::ArrowType::Invisible {
             continue;
         }
-        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+        let Some(caption) = rendered_edge_caption(ir, path.edge_index, detail) else {
             continue;
         };
-        let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
         let font_size = edge_label_font_size(ir, path.edge_index, detail.edge_font_size);
-        let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
+        let (width, height, _) = edge_caption_dimensions(
+            &caption.label,
+            caption.technology.as_deref(),
+            font_size,
+            config,
+            true,
+        );
         let position = placer.place(path, width, height);
         positions[path.edge_index] = Some(position);
     }
@@ -15254,12 +15278,17 @@ fn graph_edge_label_mask(
     frame.viewbox_height.to_bits().hash(&mut hash);
     for (index, position) in positions.iter().enumerate() {
         let Some(position) = position else { continue };
-        let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+        let Some(caption) = rendered_edge_caption(ir, index, detail) else {
             continue;
         };
-        let text = truncate_label(&label.text, detail.edge_label_max_chars);
         let font = edge_label_font_size(ir, index, detail.edge_font_size);
-        let (width, height, _) = edge_label_dimensions(&text, font, config, true);
+        let (width, height, _) = edge_caption_dimensions(
+            &caption.label,
+            caption.technology.as_deref(),
+            font,
+            config,
+            true,
+        );
         let x = position.x + frame.offset_x - width / 2.0;
         let y = position.y + frame.offset_y - height / 2.0;
         for value in [x, y, width, height] {
@@ -15744,7 +15773,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         && config.a11y.keyboard_nav
         && marker_start.is_none()
         && base_dasharray.is_none()
-        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && !(detail.show_edge_labels && ir_edge.is_some_and(has_edge_caption))
         && let Some(edge) = ir_edge
         && let Some(marker_end_val) = marker_end
         && resolve_edge_inline_style(ir, edge_index).is_none()
@@ -15857,7 +15886,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         && marker_start.is_none()
         && base_dasharray.is_none()
         && resolve_edge_inline_style(ir, edge_index).is_none()
-        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && !(detail.show_edge_labels && ir_edge.is_some_and(has_edge_caption))
         && let Some(marker_end_val) = marker_end
     {
         Element::raw_svg(build_common_edge_fragment(
@@ -15944,6 +15973,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
+        let technology = ir
+            .graph_edge_caption(edge_index)
+            .and_then(|caption| caption.technology);
         let centered = preserved_label_positions.is_some() || sequence_message.is_some();
         let label_font_size = if let Some(message) = sequence_message {
             message.font_size
@@ -15953,7 +15985,15 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             detail.edge_font_size
         };
         let (label_width, label_height, total_text_height) = sequence_message.map_or_else(
-            || edge_label_dimensions(label_text, label_font_size, config, centered),
+            || {
+                edge_caption_dimensions(
+                    label_text,
+                    technology.as_deref(),
+                    label_font_size,
+                    config,
+                    centered,
+                )
+            },
             |message| {
                 (
                     message.bounds.width,
@@ -15998,9 +16038,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             .fill(&colors.text)
             .class("edge-label")
             .build();
-        if centered {
-            // The theme's relative .edge-label font-size otherwise overrides the SVG attribute,
-            // so the drawn glyphs would disagree with the dimensions used for collision checks.
+        let label_style = if centered {
+            // Both sections inherit the same authored face and color used for measurement.
             let mut style = String::from("font-size:");
             let _ = attributes::write_number_into(&mut style, label_font_size);
             style.push_str("px");
@@ -16011,34 +16050,41 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 style.push_str(";fill:");
                 style.push_str(&color);
             }
-            text = text.attr("style", &style);
+            Some(style)
+        } else {
+            None
+        };
+        if let Some(style) = &label_style {
+            text = text.attr("style", style);
         }
-        group = group.child(text);
+        if !label_text.is_empty() {
+            group = group.child(text);
+        }
 
-        // A C4 relationship's TECHNOLOGY, drawn as its own italic row beneath the label.
-        //
-        // mermaid's `drawRels` emits two text elements, not one string: the label, then
-        // `"[" + s.techn.text + "]"` at `… + messageFontSize + 5`, with `{"font-style":"italic"}`.
-        // We used to fold it into the label as `Uses [HTTPS]`, a run neither engine ever draws, and
-        // the technology inherited the label's upright weight and position. The offset and the
-        // italic here mirror the incumbent; the brackets are added at draw time so the IR keeps the
-        // author's bare string (see `IrEdgeExtras::technology`).
-        if let Some(technology) = ir_edge
-            .and_then(|edge| edge.extras.as_ref())
-            .and_then(|extras| extras.technology.as_deref())
-        {
-            group = group.child(
-                TextBuilder::new(&format!("[{technology}]"))
-                    .x(lx)
-                    .y(start_y + label_font_size + 5.0)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(label_font_size)
-                    .anchor(TextAnchor::Middle)
-                    .fill(&colors.text)
-                    .class("edge-label")
-                    .build()
-                    .attr("font-style", "italic"),
-            );
+        // Technology is a separate italic section inside the same measured plate. Its first
+        // row follows every primary-label row; multiline labels must never paint over it.
+        if let Some(technology) = &technology {
+            let mut text = TextBuilder::new(technology)
+                .x(lx)
+                .y(start_y
+                    + label_text.lines().count() as f32 * label_font_size * config.line_height)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(label_font_size)
+                .line_height(config.line_height)
+                .anchor(TextAnchor::Middle)
+                .baseline(if centered {
+                    text::DominantBaseline::Central
+                } else {
+                    text::DominantBaseline::Auto
+                })
+                .fill(&colors.text)
+                .class("edge-label")
+                .build()
+                .attr("font-style", "italic");
+            if let Some(style) = &label_style {
+                text = text.attr("style", style);
+            }
+            group = group.child(text);
         }
 
         // Add title element for text alternatives
@@ -16047,12 +16093,22 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         {
             let (from_label, to_label) =
                 edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            let caption = technology.as_ref().map_or_else(
+                || Cow::Borrowed(label_text),
+                |technology| {
+                    Cow::Owned(if label_text.is_empty() {
+                        technology.clone()
+                    } else {
+                        format!("{label_text} {technology}")
+                    })
+                },
+            );
             let edge_desc = crate::a11y::describe_edge_labels(
                 from_label,
                 to_label,
                 arrow,
                 edge.co_arrow(),
-                Some(label_text),
+                Some(&caption),
             );
             group = group.child(Element::title(&edge_desc));
         }
@@ -16745,7 +16801,7 @@ fn render_edge_body_into(
         && animation_class.is_none()
         && !config.include_source_spans
         && let Some(a11y) = uniform_a11y(&config.a11y)
-        && !(detail.show_edge_labels && ir_edge.and_then(|edge| edge.label).is_some())
+        && !(detail.show_edge_labels && ir_edge.is_some_and(has_edge_caption))
         && let Some(edge) = ir_edge
         && resolve_edge_inline_style(ir, edge_index).is_none()
         // ⚠️ A RELATION MARKED AT BOTH ENDS FALLS TO THE SLOW PATH (bd-f9t0r). The tuple above is
@@ -17839,6 +17895,165 @@ mod tests {
                 center.y + geometry.frame.offset_y + height / 2.0 <= geometry.frame.viewbox_height
             );
         }
+    }
+
+    #[test]
+    fn c4_caption_plates_masks_and_frames_cover_every_styled_row() {
+        fn number(element: &str, name: &str) -> f32 {
+            element
+                .split_once(&format!("{name}=\""))
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0
+                .parse()
+                .unwrap()
+        }
+        for family in [
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+        ] {
+            let mut ir = fm_parser::parse(&format!(
+                "{family}\nPerson(a, \"Client\")\nSystem(b, \"Service\")\nRel(a, b, \"Calls<br/>and confirms\", \"HTTPS and JSON<br/>Mutual TLS authentication\")"
+            ))
+            .ir;
+            ir.edges[0].inline_style = Some(Box::new(fm_core::parse_style_string(
+                "font-size:32px;color:#123456",
+            )));
+            let layout = fm_layout::layout_diagram(&ir);
+            for embed_theme_css in [false, true] {
+                let config = SvgRenderConfig {
+                    embed_theme_css,
+                    ..Default::default()
+                };
+                let geometry = svg_geometry(&ir, &layout, &config);
+                let center = geometry.label_positions.as_ref().unwrap()[0].unwrap();
+                let caption = rendered_edge_caption(&ir, 0, geometry.detail).unwrap();
+                let (width, height, span) = edge_caption_dimensions(
+                    &caption.label,
+                    caption.technology.as_deref(),
+                    32.0,
+                    &config,
+                    true,
+                );
+                assert_eq!(caption.line_count(), 4);
+                assert!(width > edge_label_dimensions(&caption.label, 32.0, &config, true).0);
+                for node in &layout.nodes {
+                    assert!(
+                        center.x + width / 2.0 <= node.bounds.x
+                            || center.x - width / 2.0 >= node.bounds.x + node.bounds.width
+                            || center.y + height / 2.0 <= node.bounds.y
+                            || center.y - height / 2.0 >= node.bounds.y + node.bounds.height,
+                        "{family}: the complete caption must clear nodes"
+                    );
+                }
+                let svg = render_svg_with_layout(&ir, &layout, &config);
+                assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+                let group = svg
+                    .split_once("id=\"fm-edge-0\"")
+                    .unwrap()
+                    .1
+                    .split_once("</g>")
+                    .unwrap()
+                    .0;
+                let plate = group
+                    .split_once("<rect ")
+                    .unwrap()
+                    .1
+                    .split_once("/>")
+                    .unwrap()
+                    .0;
+                assert!((number(plate, "width") - width).abs() < 0.02);
+                assert!((number(plate, "height") - height).abs() < 0.02);
+                let x = number(plate, "x");
+                let y = number(plate, "y");
+                assert!(x >= 0.0 && y >= 0.0);
+                assert!(x + width <= geometry.frame.viewbox_width + 0.02);
+                assert!(y + height <= geometry.frame.viewbox_height + 0.02);
+                let texts: Vec<_> = group.split("<text ").skip(1).collect();
+                assert_eq!(texts.len(), 2, "primary and technology stay distinct");
+                assert!(
+                    !texts[0]
+                        .split_once('>')
+                        .unwrap()
+                        .0
+                        .contains("font-style=\"italic\"")
+                );
+                assert!(
+                    texts[1]
+                        .split_once('>')
+                        .unwrap()
+                        .0
+                        .contains("font-style=\"italic\"")
+                );
+                for text in &texts {
+                    assert!(text.contains("font-size:32px;fill:#123456"));
+                    assert!(text.contains("dominant-baseline=\"central\""));
+                }
+                assert!((number(texts[1], "y") - number(texts[0], "y") - 96.0).abs() < 0.02);
+                let first_y = center.y + geometry.frame.offset_y - span / 2.0;
+                assert!(first_y - 16.0 > y);
+                assert!(first_y + span + 16.0 < y + height);
+                if family == "C4Dynamic" {
+                    assert!(texts[0].contains("1: Calls"));
+                }
+                let mask = svg
+                    .split_once("<mask ")
+                    .unwrap()
+                    .1
+                    .split_once("</mask>")
+                    .unwrap()
+                    .0;
+                let hole = mask
+                    .split("<rect ")
+                    .nth(2)
+                    .unwrap()
+                    .split_once("/>")
+                    .unwrap()
+                    .0;
+                for attribute in ["x", "y", "width", "height"] {
+                    assert_eq!(number(plate, attribute), number(hole, attribute));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c4_technology_only_captions_survive_every_svg_fast_path() {
+        let mut ir = fm_parser::parse(
+            "C4Container\nSystem(a, \"Producer\")\nSystem(b, \"Consumer\")\nRel(a, b, \"\", \"AMQP\")",
+        ).ir;
+        assert!(ir.edges[0].label.is_none());
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram(&ir);
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let group = svg
+                .split_once("id=\"fm-edge-0\"")
+                .unwrap()
+                .1
+                .split_once("</g>")
+                .unwrap()
+                .0;
+            assert_eq!(group.matches("<text ").count(), 1);
+            assert!(group.contains(">[AMQP]</text>"));
+            assert!(group.contains("font-style=\"italic\""));
+            assert!(svg.contains("fm-edge-label-mask-"));
+            if embed_theme_css {
+                assert!(svg.contains("--fm-edge-label-bg"));
+            }
+        }
+        ir.edges[0].arrow = fm_core::ArrowType::Invisible;
+        let svg = render_svg(&ir);
+        assert!(!svg.contains("id=\"fm-edge-0\""));
+        assert!(!svg.contains("[AMQP]"));
     }
 
     #[test]

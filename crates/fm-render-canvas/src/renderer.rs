@@ -14,7 +14,7 @@ use fm_layout::{
     RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
     RenderTransform, StrokeStyle, TextAlign as IrTextAlign, TextBaseline as IrTextBaseline,
 };
-use std::{borrow::Cow, collections::BTreeSet};
+use std::collections::BTreeSet;
 
 /// Configuration for Canvas2D rendering.
 #[derive(Debug, Clone)]
@@ -221,7 +221,7 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
                 && path.points.len() >= 2
                 && ir.edges.get(path.edge_index).is_some_and(|edge| {
                     edge.arrow != ArrowType::Invisible
-                        && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
+                        && ir.graph_edge_caption(path.edge_index).is_some()
                 })
         })
     {
@@ -247,25 +247,16 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
         if path.bundled || path.points.len() < 2 || edge.arrow == ArrowType::Invisible {
             continue;
         }
-        let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+        let Some(caption) = ir.graph_edge_caption(path.edge_index) else {
             continue;
         };
         let declared_font = resolve_edge_label_font(ir, path.edge_index, config);
-        ctx.set_font(declared_font.as_deref().unwrap_or(&default_font));
-        let mut text_width = 0.0_f64;
-        let mut text_height = config.font_size * 0.85;
-        let mut line_count = 0;
-        for line in label.text.lines() {
-            let metrics = ctx.measure_text(line);
-            text_width = text_width.max(metrics.width);
-            text_height = text_height.max(metrics.height);
-            line_count += 1;
-        }
-        // Keep the usual secondary-label rhythm; an authored large face needs a taller plate
-        // and wider line spacing so its own next line cannot paint over it.
-        let line_height = (config.font_size * 1.2).max(text_height * 1.2);
-        let width = text_width + 8.0;
-        let height = line_count.max(1) as f64 * line_height + 4.0;
+        let (width, height, line_height) = measure_graph_edge_caption(
+            &caption,
+            ctx,
+            config,
+            declared_font.as_deref().unwrap_or(&default_font),
+        );
         if !width.is_finite() || !height.is_finite() {
             continue;
         }
@@ -280,6 +271,39 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
     result.bounds = placer.bounds();
     ctx.restore();
     Some(result)
+}
+
+/// Measure every row under the same font used for painting. C4 technology can be wider than
+/// the relationship text, and dynamic ordinals belong to the measured label too.
+fn measure_graph_edge_caption<C: Canvas2dContext>(
+    caption: &fm_core::GraphEdgeCaption<'_>,
+    ctx: &mut C,
+    config: &CanvasRenderConfig,
+    font: &str,
+) -> (f64, f64, f64) {
+    let mut width = 0.0_f64;
+    // A browser adapter may expose only ink bounds or a conservative fallback. Keep at
+    // least the resolved font size even for a caption containing only italic technology.
+    let mut text_height =
+        parse_declared_font_size(font.split_whitespace().next()).unwrap_or(config.font_size * 0.85);
+    ctx.set_font(font);
+    for line in caption.label.lines() {
+        let metrics = ctx.measure_text(line);
+        width = width.max(metrics.width);
+        text_height = text_height.max(metrics.height);
+    }
+    if let Some(technology) = &caption.technology {
+        ctx.set_font(&format!("italic {font}"));
+        for line in technology.lines() {
+            let metrics = ctx.measure_text(line);
+            width = width.max(metrics.width);
+            text_height = text_height.max(metrics.height);
+        }
+    }
+    // Authored large fonts need both a taller plate and enough separation between rows.
+    let line_height = (config.font_size * 1.2).max(text_height * 1.2);
+    let height = caption.line_count().max(1) as f64 * line_height + 4.0;
+    (width + 8.0, height, line_height)
 }
 
 const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
@@ -2936,18 +2960,10 @@ impl Canvas2dRenderer {
                     *labels_drawn += 1;
                 }
             } else if ir.diagram_type != DiagramType::Sankey
-                && let Some(label_id) = ir_edge.and_then(|e| e.label)
-                && let Some(label) = ir.labels.get(label_id.0)
+                && let Some(caption) = ir.graph_edge_caption(edge_path.edge_index)
                 && points.len() >= 2
             {
-                // C4Dynamic relationship labels are numbered at render time, matching Mermaid's
-                // `drawRels` behavior and the SVG renderer. The IR keeps the author's label
-                // untouched, so the same graph can still render unnumbered in C4Context.
-                let label_text: Cow<'_, str> = if ir.diagram_type == DiagramType::C4Dynamic {
-                    Cow::Owned(format!("{}: {}", edge_path.edge_index + 1, label.text))
-                } else {
-                    Cow::Borrowed(&label.text)
-                };
+                let label_text = &caption.label;
                 let label_offset = self.config.font_size * 0.8;
                 let planned = self
                     .edge_label_layout
@@ -2992,9 +3008,40 @@ impl Canvas2dRenderer {
                 // multi-line label (`\n`) needs the split (it's re-read for max-width + count + per-line
                 // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
                 // `total_height == line_height`, and `start_y == ly`.
-                if !label_text.contains('\n') {
+                if let Some(technology) = &caption.technology {
+                    let font = match declared_label_font.as_deref() {
+                        Some(font) => font,
+                        None => edge_label_font
+                            .get_or_insert_with(|| secondary_label_font_css(&self.config))
+                            .as_str(),
+                    };
+                    let (width, height, line_height) = planned.map_or_else(
+                        || measure_graph_edge_caption(&caption, ctx, &self.config, font),
+                        |label| (label.width, label.height, label.line_height),
+                    );
+                    ctx.set_fill_style(&self.config.node_fill);
+                    ctx.fill_rect(lx - width / 2.0, ly - height / 2.0, width, height);
+                    self.draw_calls += 1;
+                    ctx.set_fill_style(edge_label_fill);
+                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_baseline(TextBaseline::Middle);
+                    let start_y = ly - (caption.line_count().max(1) - 1) as f64 * line_height / 2.0;
+                    ctx.set_font(font);
+                    for (row, line) in caption.label.lines().enumerate() {
+                        ctx.fill_text(line, lx, start_y + row as f64 * line_height);
+                        self.draw_calls += 1;
+                        *labels_drawn += 1;
+                    }
+                    ctx.set_font(&format!("italic {font}"));
+                    let label_rows = caption.label.lines().count();
+                    for (row, line) in technology.lines().enumerate() {
+                        ctx.fill_text(line, lx, start_y + (label_rows + row) as f64 * line_height);
+                        self.draw_calls += 1;
+                        *labels_drawn += 1;
+                    }
+                } else if !label_text.contains('\n') {
                     let label_width = planned.map_or_else(
-                        || ctx.measure_text(&label_text).width + 8.0,
+                        || ctx.measure_text(label_text).width + 8.0,
                         |label| label.width,
                     );
                     let label_height = planned.map_or(line_height + 4.0, |label| label.height);
@@ -3021,7 +3068,7 @@ impl Canvas2dRenderer {
                     }
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
-                    ctx.fill_text(&label_text, lx, ly);
+                    ctx.fill_text(label_text, lx, ly);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
                 } else {
@@ -8699,7 +8746,12 @@ mod tests {
             2,
             "fixture parse failed for {diagram_type:?}"
         );
-        let mut layout = layout_diagram(&ir);
+        let layout = crossing_label_layout(&ir);
+        (ir, layout)
+    }
+
+    fn crossing_label_layout(ir: &MermaidDiagramIr) -> DiagramLayout {
+        let mut layout = layout_diagram(ir);
         for node in &mut layout.nodes {
             let (x, y, width, height) = match ir.nodes[node.node_index].id.as_str() {
                 "A" => (20.0, 120.0, 60.0, 40.0),
@@ -8733,7 +8785,7 @@ mod tests {
             width: 400.0,
             height: 300.0,
         };
-        (ir, layout)
+        layout
     }
 
     fn drawn_edge_plate(ctx: &MockCanvas2dContext, label: &str) -> (f64, f64, f64, f64) {
@@ -9272,6 +9324,184 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[1] - rows[0] >= 36.0 * 1.2 - 0.001);
+    }
+
+    #[test]
+    fn c4_relationships_keep_every_row_in_one_clear_measured_plate() {
+        for header in [
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+        ] {
+            let source = format!(
+                "{header}\nPerson(A, \"Alpha\")\nSystem(B, \"Beta\")\n\
+                 System(C, \"Blocker\")\nSystem(D, \"Top\")\nSystem(E, \"Bottom\")\n\
+                 Rel(A, B, \"short<br/>confirmation\", \"HTTPS<br/>TLS with certificate pinning\")\n\
+                 Rel(D, E, \"other\", \"gRPC\")"
+            );
+            let mut ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 2, "{header}");
+            ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                "font-size".to_owned(),
+                "32px".to_owned(),
+            )])));
+            let layout = crossing_label_layout(&ir);
+            let mut ctx = MockCanvas2dContext::new(400.0, 300.0);
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            });
+            renderer.render(&layout, &ir, &mut ctx);
+            let plan = renderer.edge_label_layout.as_ref().unwrap();
+            let mut plates = Vec::new();
+            for edge_index in 0..2 {
+                let first = if edge_index == 0 { "short" } else { "other" };
+                let first = if header == "C4Dynamic" {
+                    format!("{}: {first}", edge_index + 1)
+                } else {
+                    first.to_owned()
+                };
+                let rows = if edge_index == 0 {
+                    vec![
+                        first.as_str(),
+                        "confirmation",
+                        "[HTTPS",
+                        "TLS with certificate pinning]",
+                    ]
+                } else {
+                    vec![first.as_str(), "[gRPC]"]
+                };
+                let plate = drawn_edge_plate(&ctx, &first);
+                let font_size = if edge_index == 0 {
+                    32.0
+                } else {
+                    renderer.config.font_size * 0.85
+                };
+                let line_height = (renderer.config.font_size * 1.2).max(font_size * 1.2);
+                let expected_width =
+                    rows.iter().map(|line| line.len()).max().unwrap() as f64 * font_size * 0.57
+                        + 8.0;
+                assert!(
+                    (plate.2 - expected_width).abs() < 0.001,
+                    "{header}: complete caption width"
+                );
+                assert!((plate.3 - rows.len() as f64 * line_height - 4.0).abs() < 0.001);
+                let mut font = String::new();
+                let drawn: Vec<_> = ctx
+                    .operations()
+                    .iter()
+                    .filter_map(|op| match op {
+                        DrawOperation::SetFont(value) => {
+                            font.clone_from(value);
+                            None
+                        }
+                        DrawOperation::FillText(text, x, y) if rows.contains(&text.as_str()) => {
+                            Some((text.as_str(), *x, *y, font.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    drawn.len(),
+                    rows.len(),
+                    "{header}: every caption row survives"
+                );
+                let label_rows = if edge_index == 0 { 2 } else { 1 };
+                for (row, ((text, x, y, font), expected)) in drawn.iter().zip(&rows).enumerate() {
+                    assert_eq!(text, expected);
+                    assert_eq!(
+                        drawn_edge_plate(&ctx, text),
+                        plate,
+                        "one backing plate for all rows"
+                    );
+                    assert!((*x - plate.0 - plate.2 * 0.5).abs() < 0.001);
+                    let expected_y = plate.1
+                        + plate.3 * 0.5
+                        + (row as f64 - (rows.len() - 1) as f64 * 0.5) * line_height;
+                    assert!((*y - expected_y).abs() < 0.001);
+                    assert_eq!(
+                        font.starts_with("italic "),
+                        row >= label_rows,
+                        "{header}: technology style"
+                    );
+                    assert!(*y - font_size * 0.5 >= plate.1);
+                    assert!(*y + font_size * 0.5 <= plate.1 + plate.3);
+                }
+                let left = plate.0 + f64::from(plan.bounds.x);
+                let top = plate.1 + f64::from(plan.bounds.y);
+                let right = left + plate.2;
+                let bottom = top + plate.3;
+                assert!(left >= f64::from(plan.bounds.x) - 0.001);
+                assert!(top >= f64::from(plan.bounds.y) - 0.001);
+                assert!(right <= f64::from(plan.bounds.x + plan.bounds.width) + 0.001);
+                assert!(bottom <= f64::from(plan.bounds.y + plan.bounds.height) + 0.001);
+                for node in &layout.nodes {
+                    let bounds = node.bounds;
+                    assert!(
+                        right <= f64::from(bounds.x)
+                            || left >= f64::from(bounds.x + bounds.width)
+                            || bottom <= f64::from(bounds.y)
+                            || top >= f64::from(bounds.y + bounds.height),
+                        "{header}: full caption overlaps {}",
+                        node.node_id,
+                    );
+                }
+                let foreign_path = &layout.edges[1 - edge_index];
+                for step in 0..=32 {
+                    let a = foreign_path.points[0];
+                    let b = foreign_path.points[1];
+                    let t = f64::from(step) / 32.0;
+                    let x = f64::from(a.x) + f64::from(b.x - a.x) * t;
+                    let y = f64::from(a.y) + f64::from(b.y - a.y) * t;
+                    assert!(
+                        x <= left || x >= right || y <= top || y >= bottom,
+                        "{header}: technology covers a foreign route"
+                    );
+                }
+                plates.push(plate);
+            }
+            let (a, b) = (plates[0], plates[1]);
+            assert!(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1);
+        }
+    }
+
+    #[test]
+    fn c4_technology_only_relationship_is_measured_and_hidden_edges_stay_hidden() {
+        let mut ir = fm_parser::parse(
+            "C4Context\nPerson(a, \"A\")\nSystem(b, \"B\")\nRel(a, b, \"\", \"gRPC\")",
+        )
+        .ir;
+        ir.edges[0].label = None;
+        ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+            "font-size".to_owned(),
+            "64px".to_owned(),
+        )])));
+        let mut layout = layout_diagram(&ir);
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        renderer.render(&layout, &ir, &mut ctx);
+        assert!(renderer.edge_label_layout.as_ref().unwrap().labels[0].is_some());
+        let (_, _, width, height) = drawn_edge_plate(&ctx, "[gRPC]");
+        assert!((width - 6.0 * 64.0 * 0.57 - 8.0).abs() < 0.001);
+        assert!(height >= 64.0 * 1.2 + 4.0);
+
+        for bundled in [true, false] {
+            layout.edges[0].bundled = bundled;
+            ir.edges[0].arrow = if bundled {
+                ArrowType::Arrow
+            } else {
+                ArrowType::Invisible
+            };
+            ctx.clear();
+            renderer.render(&layout, &ir, &mut ctx);
+            assert!(renderer.edge_label_layout.is_none());
+            assert!(!ctx.operations().iter().any(|op| matches!(
+                op, DrawOperation::FillText(text, _, _) if text == "[gRPC]"
+            )));
+        }
     }
 
     #[test]

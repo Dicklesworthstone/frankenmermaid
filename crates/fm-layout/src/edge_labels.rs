@@ -21,6 +21,11 @@ pub fn uses_graph_edge_labels(diagram_type: DiagramType) -> bool {
             | DiagramType::Class
             | DiagramType::Er
             | DiagramType::Requirement
+            | DiagramType::C4Context
+            | DiagramType::C4Container
+            | DiagramType::C4Component
+            | DiagramType::C4Dynamic
+            | DiagramType::C4Deployment
     )
 }
 
@@ -1163,7 +1168,9 @@ fn clear_edge_label_position_ignoring_nodes(
 }
 
 pub(crate) fn can_refine_graph_label_spacing(ir: &MermaidDiagramIr) -> bool {
-    let label_count = ir.edges.iter().filter(|edge| edge.label.is_some()).count();
+    let label_count = (0..ir.edges.len())
+        .filter(|&index| ir.graph_edge_caption(index).is_some())
+        .count();
     uses_graph_edge_labels(ir.diagram_type)
         && ir.nodes.len() <= 64
         && ir.edges.len() <= 128
@@ -1222,7 +1229,7 @@ pub(crate) fn graph_label_attachment_quality(
             if path.bundled || path.points.len() < 2 || edge.arrow == ArrowType::Invisible {
                 continue;
             }
-            let Some(label) = edge.label.and_then(|id| ir.labels.get(id.0)) else {
+            let Some(caption) = ir.graph_edge_caption(path.edge_index) else {
                 continue;
             };
             let style = edge_label_style(ir, path.edge_index);
@@ -1240,8 +1247,7 @@ pub(crate) fn graph_label_attachment_quality(
             let advance = if overhang_em > 0.0 {
                 // Match the GPU atlas, which positions separate glyph cells even when
                 // native text shaping would fuse a joined emoji into one glyph.
-                label
-                    .text
+                caption
                     .lines()
                     .map(|line| {
                         line.chars()
@@ -1254,12 +1260,14 @@ pub(crate) fn graph_label_attachment_quality(
                     })
                     .fold(0.0_f32, f32::max)
             } else {
-                metrics.estimate_multiline_width(&label.text)
+                caption
+                    .lines()
+                    .map(|line| metrics.estimate_width(line))
+                    .fold(0.0_f32, f32::max)
             };
             let width = advance * allowance + font_size * overhang_em + 8.0;
-            let height = label.text.lines().count().max(1) as f32
-                * (font_size * 1.2).max(minimum_line_height)
-                + 4.0;
+            let height =
+                caption.line_count() as f32 * (font_size * 1.2).max(minimum_line_height) + 4.0;
             let center = placer.place(path, width, height);
             let gap = edge_label_route_distance_squared(
                 path,
@@ -1780,6 +1788,143 @@ mod tests {
                 ))
             })
             .collect()
+    }
+
+    fn scene_edge_rows(scene: &crate::RenderScene, index: usize) -> Vec<&crate::RenderText> {
+        scene
+            .root
+            .children
+            .iter()
+            .flat_map(|item| match item {
+                crate::RenderItem::Group(group) if group.id.as_deref() == Some("labels") => {
+                    group.children.as_slice()
+                }
+                _ => &[],
+            })
+            .filter_map(|item| match item {
+                crate::RenderItem::Text(text)
+                    if text.source == crate::RenderSource::Edge(index) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_c4_family_places_complete_relationship_captions_without_collisions() {
+        for family in [
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+        ] {
+            let source = format!(
+                "{family}\nPerson(operator, \"Operator\")\nSystem(api, \"API\")\nSystem(ledger, \"Ledger\")\nRel(operator, api, \"Signs in\", \"OpenID Connect and OAuth 2.0\")\nRel(api, ledger, \"Records\", \"HTTPS\")\nRel(ledger, api, \"Acknowledges\", \"JSON\")\n"
+            );
+            for direction in [fm_core::GraphDirection::TB, fm_core::GraphDirection::LR] {
+                let mut ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.edges.len(), 3, "{family} fixture lost relationships");
+                ir.direction = direction;
+                ir.meta.direction = direction;
+                // A relationship with only technology still has visible content to preserve.
+                ir.edges[2].label = None;
+                let layout = crate::layout_diagram(&ir);
+                let scene = crate::build_render_scene(&ir, &layout);
+                let plates = scene_plates(&scene);
+                assert_eq!(
+                    plates.len(),
+                    3,
+                    "{family} bypassed shared caption placement"
+                );
+                let first = scene_edge_rows(&scene, 0);
+                assert_eq!(first.len(), 2);
+                assert_eq!(
+                    first[0].text,
+                    if family == "C4Dynamic" {
+                        "1: Signs in"
+                    } else {
+                        "Signs in"
+                    }
+                );
+                assert_eq!(first[1].text, "[OpenID Connect and OAuth 2.0]");
+                assert!(first[1].y > first[0].y + first[0].font_size);
+                assert!(
+                    scene_edge_rows(&scene, 2)
+                        .iter()
+                        .any(|row| row.text == "[JSON]")
+                );
+                for (position, (edge_index, plate)) in plates.iter().enumerate() {
+                    assert!(
+                        layout
+                            .nodes
+                            .iter()
+                            .all(|node| !overlap(*plate, node.bounds))
+                    );
+                    assert!(
+                        plates[position + 1..]
+                            .iter()
+                            .all(|(_, other)| !overlap(*plate, *other))
+                    );
+                    for row in scene_edge_rows(&scene, *edge_index) {
+                        assert!(row.y - row.font_size / 2.0 >= plate.y - 0.01);
+                        assert!(row.y + row.font_size / 2.0 <= plate.y + plate.height + 0.01);
+                    }
+                    assert!(plate.x >= scene.bounds.x - 0.01 && plate.y >= scene.bounds.y - 0.01);
+                    assert!(plate.x + plate.width <= scene.bounds.x + scene.bounds.width + 0.01);
+                    assert!(plate.y + plate.height <= scene.bounds.y + scene.bounds.height + 0.01);
+                }
+                assert_eq!(
+                    scene,
+                    crate::build_render_scene(&ir, &crate::layout_diagram(&ir))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packing_reserves_technology_only_captions_before_arranging_components() {
+        let mut source = String::from("C4Container\n");
+        for index in 0..8 {
+            source.push_str(&format!(
+                "System(A{index}, \"Producer {index}\")\nSystem(B{index}, \"Consumer {index}\")\nRel(A{index}, B{index}, \"Publishes\", \"Encrypted customer event synchronization transport\")\n"
+            ));
+        }
+        let mut ir = fm_parser::parse(&source).ir;
+        assert_eq!(ir.edges.len(), 8);
+        for edge in &mut ir.edges {
+            edge.label = None;
+        }
+        let traced = crate::layout_diagram_traced(&ir);
+        assert!(
+            traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        let layout = &traced.layout;
+        let scene = crate::build_render_scene(&ir, layout);
+        let plates = scene_plates(&scene);
+        assert_eq!(plates.len(), 8);
+        for (position, (_, plate)) in plates.iter().enumerate() {
+            assert!(
+                layout
+                    .nodes
+                    .iter()
+                    .all(|node| !overlap(*plate, node.bounds))
+            );
+            assert!(
+                plates[position + 1..]
+                    .iter()
+                    .all(|(_, other)| !overlap(*plate, *other))
+            );
+            assert!(plate.x >= layout.bounds.x - 0.01 && plate.y >= layout.bounds.y - 0.01);
+            assert!(plate.x + plate.width <= layout.bounds.x + layout.bounds.width + 0.01);
+            assert!(plate.y + plate.height <= layout.bounds.y + layout.bounds.height + 0.01);
+        }
     }
 
     #[test]

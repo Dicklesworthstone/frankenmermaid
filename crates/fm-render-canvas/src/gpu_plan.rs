@@ -871,6 +871,33 @@ impl TextSink<'_> {
         }
     }
 
+    /// Keep every C4 relationship row in one centred block. Technology uses the same atlas as
+    /// other text, so it is upright on this backend; its content and geometry remain complete.
+    #[allow(clippy::too_many_arguments)]
+    fn push_edge_caption(
+        &mut self,
+        caption: &fm_core::GraphEdgeCaption<'_>,
+        center: (f32, f32),
+        font_px: f32,
+        line_height: f32,
+        color: [f32; 4],
+        edge_index: usize,
+    ) {
+        let rows = caption.line_count().max(1);
+        let first_y = center.1 - (rows - 1) as f32 * line_height * 0.5;
+        for (row, line) in caption.lines().enumerate() {
+            self.push_line(
+                line,
+                (center.0, first_y + row as f32 * line_height),
+                font_px,
+                color,
+                GpuTextSource::Edge,
+                edge_index,
+                crate::TextAlign::Center,
+            );
+        }
+    }
+
     /// Emit one left-aligned text run at the raster pass's anchor point.
     fn push_left(
         &mut self,
@@ -1079,25 +1106,23 @@ fn edge_cardinality_texts<'a>(
     (source, target)
 }
 
-/// An edge's label text, or `None` when it has none (bd-qj46q).
+/// An edge's complete caption, or `None` when it has none.
 ///
 /// ONE lookup used by BOTH the atlas fill and the quad pass. Two copies of "which edges have text"
 /// is precisely how a glyph ends up missing from the atlas and its label silently emits zero quads,
 /// which is the trap already flagged where the atlas is built.
-fn edge_label_text<'a>(
+fn edge_label_caption<'a>(
     ir: &'a MermaidDiagramIr,
     edge: &fm_layout::LayoutEdgePath,
-) -> Option<&'a str> {
+) -> Option<fm_core::GraphEdgeCaption<'a>> {
     // Sankey edge labels are numeric input data, represented by ribbon widths and node totals.
-    if ir.diagram_type == fm_core::DiagramType::Sankey {
+    if ir.diagram_type == fm_core::DiagramType::Sankey || edge.bundled || edge.points.len() < 2 {
         return None;
     }
     ir.edges
         .get(edge.edge_index)
         .filter(|ir_edge| ir_edge.arrow != fm_core::ArrowType::Invisible)
-        .and_then(|ir_edge| ir_edge.label)
-        .and_then(|id| ir.labels.get(id.0))
-        .map(|label| label.text.as_str())
+        .and_then(|_| ir.graph_edge_caption(edge.edge_index))
 }
 
 /// Anchor for specialized diagram families without generic graph-label placement.
@@ -2723,6 +2748,14 @@ impl GpuRenderPlan {
             }
         }
 
+        // Resolve captions once for measurement, atlas population, and drawing. A C4Dynamic
+        // ordinal or technology-only glyph must not disappear because the atlas saw raw labels.
+        let edge_captions: Vec<_> = layout
+            .edges
+            .iter()
+            .map(|edge| edge_label_caption(ir, edge))
+            .collect();
+
         // ⚠️ THE ATLAS MUST GROW WITH THE LARGEST LABEL, or this renders BLURRY rather than wrong --
         // a failure that survives review because the geometry is right and only the raster is soft.
         // The default cell is 32px for a 14px glyph, so the headroom ratio is what scales; smaller
@@ -2759,11 +2792,17 @@ impl GpuRenderPlan {
                     .iter()
                     .map(|message| message.font_size),
             )
-            .chain(layout.edges.iter().filter_map(|edge| {
-                edge_label_text(ir, edge)?;
-                crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
-                    .map(|size| size as f32)
-            }))
+            .chain(
+                layout
+                    .edges
+                    .iter()
+                    .zip(&edge_captions)
+                    .filter_map(|(edge, caption)| {
+                        caption.as_ref()?;
+                        crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
+                            .map(|size| size as f32)
+                    }),
+            )
             .chain(pie_text_blocks.iter().map(|(block, _, _)| block.font_size))
             .chain(
                 radar_chart
@@ -2818,13 +2857,7 @@ impl GpuRenderPlan {
                     .chain(journey_rows.iter().map(|(row, _, _, _)| row.text.as_str()))
                     .chain(layout.extensions.sequence_messages.iter().map(|message| message.text.as_str()))
                     .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
-                    .chain(
-                        layout
-                            .edges
-                            .iter()
-                            .filter(|edge| !edge.bundled)
-                            .filter_map(|edge| edge_label_text(ir, edge)),
-                    )
+                    .chain(edge_captions.iter().flatten().flat_map(fm_core::GraphEdgeCaption::lines))
                     // CARDINALITIES GO IN THE ATLAS TOO. Same trap: a `1` that never reached the
                     // atlas emits no quad and the run vanishes without an error anywhere.
                     .chain(
@@ -3072,7 +3105,10 @@ impl GpuRenderPlan {
                 )
             });
         let mut graph_label_plates = Vec::new();
-        for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
+        for (edge, caption) in layout.edges.iter().zip(&edge_captions) {
+            if edge.bundled {
+                continue;
+            }
             let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
@@ -3091,8 +3127,7 @@ impl GpuRenderPlan {
                         edge.edge_index,
                     );
                 }
-            } else if let Some(text) = edge_label_text(ir, edge).filter(|_| edge.points.len() >= 2)
-            {
+            } else if let Some(caption) = caption {
                 if let Some(placer) = &mut graph_label_placer {
                     let font = crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
                         .map_or(font_px * 0.85, |size| size as f32);
@@ -3100,10 +3135,10 @@ impl GpuRenderPlan {
                     let mut label_metrics_config = metrics.config().clone();
                     label_metrics_config.font_size = font;
                     let label_metrics = fm_core::FontMetrics::new(label_metrics_config);
-                    let lines = text.lines().count().max(1);
+                    let lines = caption.line_count().max(1);
                     // Match TextSink's per-glyph advances: whole-string metrics can fuse joined
                     // emoji, but the atlas emits each glyph separately. Square cells also overhang.
-                    let width = text
+                    let width = caption
                         .lines()
                         .map(|line| {
                             line.chars()
@@ -3125,23 +3160,21 @@ impl GpuRenderPlan {
                         width,
                         height,
                     });
-                    sink.push_centred_multiline(
-                        text,
+                    sink.push_edge_caption(
+                        caption,
                         (center.x, center.y),
                         font,
                         line_height,
                         colour,
-                        GpuTextSource::Edge,
                         edge.edge_index,
                     );
                 } else if let Some(anchor) = edge_label_anchor(&edge.points, font_px * 0.8) {
-                    sink.push_centred_multiline(
-                        text,
+                    sink.push_edge_caption(
+                        caption,
                         anchor,
                         font_px * 0.85,
                         font_px * 1.2,
                         colour,
-                        GpuTextSource::Edge,
                         edge.edge_index,
                     );
                 }
@@ -5969,6 +6002,167 @@ mod tests {
                 boxes.len(),
                 4,
                 "both rows and both other captions must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_c4_captions_keep_ordinals_technology_and_every_row_inside_the_frame() {
+        for header in [
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+        ] {
+            let source = format!(
+                "{header}\nPerson(a, \"A\")\nSystem(b, \"B\")\n\
+                 Rel(a, b, \"sends<br/>confirmation\", \"HTTPS<br/>TLS with certificate pinning\")\n\
+                 Rel(b, a, \"returns\", \"gRPC\")"
+            );
+            let mut ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 2, "{header}");
+            ir.edges[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+                "font-size".to_owned(),
+                "32px".to_owned(),
+            )])));
+            let layout = fm_layout::layout_diagram(&ir);
+            let config = crate::CanvasRenderConfig::default();
+            let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(
+                plan,
+                GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == GpuTextSource::Edge)
+                .collect();
+            let expected = if header == "C4Dynamic" {
+                [
+                    "1: sends",
+                    "confirmation",
+                    "[HTTPS",
+                    "TLS with certificate pinning]",
+                    "2: returns",
+                    "[gRPC]",
+                ]
+            } else {
+                [
+                    "sends",
+                    "confirmation",
+                    "[HTTPS",
+                    "TLS with certificate pinning]",
+                    "returns",
+                    "[gRPC]",
+                ]
+            };
+            assert_eq!(runs.len(), expected.len(), "{header}: missing caption rows");
+            let mut boxes: Vec<LayoutRect> = Vec::new();
+            for (run, expected) in runs.iter().zip(expected) {
+                let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+                let text: String = quads
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("every caption glyph must be in the atlas")
+                            .glyph
+                    })
+                    .collect();
+                assert_eq!(text, expected, "{header}");
+                let font = if run.node_index == 0 {
+                    32.0
+                } else {
+                    config.font_size as f32 * 0.85
+                };
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.half_extent[1] * 2.0 - font).abs() < 0.001)
+                );
+                let left = quads
+                    .iter()
+                    .map(|q| q.center[0] - q.half_extent[0])
+                    .fold(f32::INFINITY, f32::min);
+                let right = quads
+                    .iter()
+                    .map(|q| q.center[0] + q.half_extent[0])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let top = quads
+                    .iter()
+                    .map(|q| q.center[1] - q.half_extent[1])
+                    .fold(f32::INFINITY, f32::min);
+                let bottom = quads
+                    .iter()
+                    .map(|q| q.center[1] + q.half_extent[1])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(left >= plan.bounds.x && right <= plan.bounds.x + plan.bounds.width);
+                assert!(top >= plan.bounds.y && bottom <= plan.bounds.y + plan.bounds.height);
+                for bounds in boxes
+                    .iter()
+                    .chain(layout.nodes.iter().map(|node| &node.bounds))
+                {
+                    assert!(
+                        right <= bounds.x
+                            || left >= bounds.x + bounds.width
+                            || bottom <= bounds.y
+                            || top >= bounds.y + bounds.height,
+                        "{header}: caption row overlaps a node or another caption"
+                    );
+                }
+                for segment in &plan.edge_segments {
+                    for step in 0..=16 {
+                        let t = step as f32 / 16.0;
+                        let x = segment.from[0] + (segment.to[0] - segment.from[0]) * t;
+                        let y = segment.from[1] + (segment.to[1] - segment.from[1]) * t;
+                        assert!(
+                            x <= left || x >= right || y <= top || y >= bottom,
+                            "{header}: connector passes through a caption row"
+                        );
+                    }
+                }
+                boxes.push(LayoutRect {
+                    x: left,
+                    y: top,
+                    width: right - left,
+                    height: bottom - top,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_c4_technology_only_captions_survive_without_showing_hidden_edges() {
+        let mut ir = fm_parser::parse(
+            "C4Context\nPerson(a, \"A\")\nSystem(b, \"B\")\nRel(a, b, \"\", \"gRPC\")",
+        )
+        .ir;
+        ir.edges[0].label = None;
+        let mut layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Edge)
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].quad_count, "[gRPC]".len() as u32);
+        for bundled in [true, false] {
+            layout.edges[0].bundled = bundled;
+            ir.edges[0].arrow = if bundled {
+                fm_core::ArrowType::Arrow
+            } else {
+                fm_core::ArrowType::Invisible
+            };
+            let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            assert!(
+                !plan
+                    .text_runs
+                    .iter()
+                    .any(|run| run.source == GpuTextSource::Edge)
             );
         }
     }

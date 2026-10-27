@@ -1488,7 +1488,17 @@ fn resolve_renderer(
 #[cfg(any(target_arch = "wasm32", test))]
 fn canvas_font_size_px(font: &str) -> f64 {
     font.split_whitespace()
-        .next()
+        // Font style and weight precede the size in CSS shorthand. Stop at the first
+        // other token so a number inside a quoted family name cannot become the size.
+        .find(|token| {
+            !matches!(
+                *token,
+                "normal" | "italic" | "oblique" | "small-caps" | "bold" | "bolder" | "lighter"
+            ) && !token
+                .parse::<f64>()
+                .is_ok_and(|weight| weight.is_finite() && (1.0..=1000.0).contains(&weight))
+        })
+        .and_then(|token| token.split('/').next())
         .and_then(|token| token.strip_suffix("px"))
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
@@ -4355,7 +4365,16 @@ mod tests {
     fn canvas_font_size_px_parses_css_font_prefix() {
         assert_eq!(canvas_font_size_px("18px Inter, sans-serif"), 18.0);
         assert_eq!(canvas_font_size_px("12.5px serif"), 12.5);
+        assert_eq!(canvas_font_size_px("italic 64px Inter, sans-serif"), 64.0);
+        assert_eq!(canvas_font_size_px("italic 600 32px/1.5 serif"), 32.0);
+        assert_eq!(
+            canvas_font_size_px("normal small-caps bold 24px serif"),
+            24.0
+        );
         assert_eq!(canvas_font_size_px("bad-font-value"), 14.0);
+        assert_eq!(canvas_font_size_px("italic 2em \"Family 96px Name\""), 14.0);
+        assert_eq!(canvas_font_size_px("italic 0px sans-serif"), 14.0);
+        assert_eq!(canvas_font_size_px("italic NaNpx sans-serif"), 14.0);
     }
 
     #[test]

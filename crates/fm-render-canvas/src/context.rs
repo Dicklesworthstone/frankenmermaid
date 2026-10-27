@@ -458,9 +458,18 @@ impl MockCanvas2dContext {
             .current_state
             .font
             .split_whitespace()
-            .next()
+            .find(|token| {
+                !matches!(
+                    *token,
+                    "normal" | "italic" | "oblique" | "small-caps" | "bold" | "bolder" | "lighter"
+                ) && !token
+                    .parse::<f64>()
+                    .is_ok_and(|weight| weight.is_finite() && (1.0..=1000.0).contains(&weight))
+            })
+            .and_then(|token| token.split('/').next())
             .and_then(|token| token.strip_suffix("px"))
             .and_then(|px| px.parse::<f64>().ok())
+            .filter(|size| size.is_finite() && *size > 0.0)
             .unwrap_or(14.0);
         size.max(1.0)
     }
@@ -689,6 +698,25 @@ mod tests {
         assert!(large.width > small.width);
         assert_eq!(large.height, 20.0);
         assert_eq!(small.height, 10.0);
+    }
+
+    #[test]
+    fn mock_context_measure_text_preserves_styled_font_size() {
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        ctx.set_font("24px sans-serif");
+        let regular = ctx.measure_text("Technology");
+        for font in [
+            "italic 24px sans-serif",
+            "italic 600 24px sans-serif",
+            "600 24px/1.5 sans-serif",
+        ] {
+            ctx.set_font(font);
+            let styled = ctx.measure_text("Technology");
+            assert_eq!(styled.width, regular.width, "{font}");
+            assert_eq!(styled.height, regular.height, "{font}");
+        }
+        ctx.set_font("italic 2em \"Family 96px Name\"");
+        assert_eq!(ctx.measure_text("Technology").height, 14.0);
     }
 
     #[test]
