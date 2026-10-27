@@ -102,23 +102,21 @@ pub enum IrConstraint {
 
 ## Timeline
 
-- Baseline + constraint parsing verification: TBD
-- Solver selection and prototype: TBD (estimate: 2-3 sessions)
-- Full integration and testing: TBD (estimate: 2-3 sessions)
-- Evaluation: TBD
-- Decision: TBD
+- Baseline + constraint parsing verification: Completed (`f0bd5a50`, `71132259`)
+- Solver selection and prototype: Completed (`crates/fm-layout/src/lib.rs`, `crates/fm-layout/src/infeasible.rs`)
+- Full integration and testing: Completed (`0cbe6c99`, `c7860d5d`, `c1fce930`, `fbbbe823`)
+- Evaluation: Completed (2026-10-14)
+- Decision: **RATIFIED — Hybrid Adoption** (2026-10-14)
+
+## Ratified Decision Contract
+
+1. **Architecture (Hybrid Sugiyama + Constraint Repair + Native LP/MIP):**
+   - **Primary Layout:** Deterministic Sugiyama layered pipeline remains the zero-overhead baseline when `ir.constraints` is empty (0% regression on unconstrained graphs).
+   - **Rank & Ordering Constraints (`SameRank`, `MinLength`, `OrderInRank`, `Align`):** Enforced during rank assignment and crossing minimization with bounded LP layer relaxation (`c1fce930`).
+   - **Coordinate & Non-Overlap Constraints (`Pin`, `NonOverlap`):** Solved via `good_lp` (HiGHS MIP backend on native targets, `#[cfg(not(target_arch = "wasm32"))]`, `c7860d5d`) and deterministic iterative relaxation on `wasm32-unknown-unknown` so WASM builds remain pure Rust with zero C/C++ FFI dependencies.
+   - **Infeasibility & Conflict Diagnosis (`crates/fm-layout/src/infeasible.rs`, `0cbe6c99`):** Mutually conflicting constraints (`SameRank` vs `MinLength`, cyclic `OrderInRank`) are detected via minimal unsatisfiable subset analysis, emitting structured diagnostics naming the conflicting constraints and degrading gracefully without panicking (`fbbbe823`).
 
 ## Reviewers
 
 Project maintainer (ubuntu)
 
-## Notes
-
-- The constraint infrastructure already exists in fm-core (parsed, stored in IR)
-- The gap is purely in fm-layout: no code reads `ir.constraints`
-- Recommend starting with Option A (lightweight custom solver) for SameRank and OrderInRank
-- Pin constraints may conflict with rank-based layout; may need to relax rank assignment
-- MinLength can be expressed as rank difference inequality during longest-path computation
-- MermaidConfig.layout_iterations (default: 200) provides existing iteration budget
-- Conflicting constraints should produce a warning + best-effort layout, not a crash
-- Reference: Gansner et al. "A Technique for Drawing Directed Graphs" (1993) - constraint extensions

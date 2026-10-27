@@ -2,7 +2,8 @@
 #![cfg(feature = "webgpu")]
 
 use fm_render_canvas::glyph_raster::{
-    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas, rasterize_atlas_with_fallbacks,
+    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
+    rasterize_atlas_with_fallbacks,
 };
 use fm_render_canvas::{CanvasRenderConfig, GlyphAtlasPlan, GpuRenderPlan};
 
@@ -347,10 +348,9 @@ fn fractional_baselines_budget_the_rows_used_by_the_blitter() {
 fn outline_scaling_does_not_round_a_fitted_face_outside_its_cell() {
     // The unconservative f32 fit can round the descent to 7.0000005 or the ascent to
     // 7.0000005 pixels here. Outward rounding then turns that into an eighth row.
-    for (cell, ascent, descent, baseline) in [
-        (32, 1925, -749, 24.677_412),
-        (16, 869, -256, 7.012_917),
-    ] {
+    for (cell, ascent, descent, baseline) in
+        [(32, 1925, -749, 24.677_412), (16, 869, -256, 7.012_917)]
+    {
         let face = GlyphFont::from_bytes(&font_bytes('g', 200, ascent, descent))
             .expect("boundary face parses");
         let mut plan = GlyphAtlasPlan::for_texts(["g"], cell);

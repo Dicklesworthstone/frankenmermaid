@@ -1,6 +1,10 @@
 //! Terminal renderer configuration types.
 
-use fm_core::{MermaidGlyphMode, MermaidRenderMode, MermaidTier};
+use fm_core::{
+    IrEndpoint, MermaidDiagramIr, MermaidFidelity, MermaidGlyphMode, MermaidLinkMode,
+    MermaidRenderMode, MermaidTier,
+};
+use fm_layout::DiagramLayout;
 
 /// Configuration for terminal diagram rendering.
 #[derive(Debug, Clone)]
@@ -22,6 +26,8 @@ use fm_core::{MermaidGlyphMode, MermaidRenderMode, MermaidTier};
 pub struct TermRenderConfig {
     /// Rendering fidelity tier (Compact/Normal/Rich/Auto).
     pub tier: MermaidTier,
+    /// Optional explicit 4-tier fidelity override (`Outline`/`Compact`/`Normal`/`Rich`).
+    pub fidelity_override: Option<MermaidFidelity>,
     /// Sub-cell rendering mode (CellOnly/Braille/Block/HalfBlock/Auto).
     pub render_mode: MermaidRenderMode,
     /// Glyph mode (Unicode box-drawing vs ASCII fallback).
@@ -41,6 +47,12 @@ pub struct TermRenderConfig {
     pub show_labels: bool,
     /// Show selection highlighting.
     pub show_selection: bool,
+    /// Currently selected node index (into `ir.nodes`) for interactive highlighting.
+    pub selected_node: Option<usize>,
+    /// Secondary highlighted node indices (e.g., neighbors of `selected_node`).
+    pub highlighted_nodes: Vec<usize>,
+    /// Link rendering mode (`Off`, `Inline`, `Footnote`). When `Off`, falls back to `ir.meta.init.config.link_mode`.
+    pub link_mode: MermaidLinkMode,
     /// Show cluster decorations.
     pub show_clusters: bool,
     /// Enable diagonal edge optimization.
@@ -69,6 +81,7 @@ impl Default for TermRenderConfig {
     fn default() -> Self {
         Self {
             tier: MermaidTier::Auto,
+            fidelity_override: None,
             render_mode: MermaidRenderMode::Braille,
             glyph_mode: MermaidGlyphMode::Unicode,
             max_width: 120,
@@ -77,6 +90,9 @@ impl Default for TermRenderConfig {
             max_label_lines: 2,
             show_labels: true,
             show_selection: false,
+            selected_node: None,
+            highlighted_nodes: Vec::new(),
+            link_mode: MermaidLinkMode::Off,
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,
@@ -104,6 +120,23 @@ impl TermRenderConfig {
         }
     }
 
+    /// Create an outline configuration for ultra-constrained viewports (`<16x6` or skeleton mode).
+    #[must_use]
+    pub fn outline() -> Self {
+        Self {
+            tier: MermaidTier::Compact,
+            fidelity_override: Some(MermaidFidelity::Outline),
+            render_mode: MermaidRenderMode::CellOnly,
+            max_width: 40,
+            max_height: 12,
+            max_label_chars: 8,
+            max_label_lines: 1,
+            show_clusters: false,
+            diagonal_edges: false,
+            ..Self::default()
+        }
+    }
+
     /// Create a rich configuration for large high-resolution terminals.
     #[must_use]
     pub fn rich() -> Self {
@@ -116,6 +149,14 @@ impl TermRenderConfig {
             max_label_lines: 3,
             ..Self::default()
         }
+    }
+
+    /// Synchronize selection highlighting from an interactive [`SelectionState`].
+    pub fn with_selection(mut self, selection: &SelectionState) -> Self {
+        self.show_selection = selection.selected_node.is_some();
+        self.selected_node = selection.selected_node;
+        self.highlighted_nodes = selection.highlighted_nodes.clone();
+        self
     }
 
     /// Apply a degradation plan to this config, adjusting fidelity and glyph mode.
@@ -132,10 +173,12 @@ impl TermRenderConfig {
         match plan.target_fidelity {
             fm_core::MermaidFidelity::Compact => {
                 self.tier = MermaidTier::Compact;
+                self.fidelity_override = Some(MermaidFidelity::Compact);
                 self.render_mode = MermaidRenderMode::CellOnly;
             }
             fm_core::MermaidFidelity::Outline => {
                 self.tier = MermaidTier::Compact;
+                self.fidelity_override = Some(MermaidFidelity::Outline);
                 self.render_mode = MermaidRenderMode::CellOnly;
                 self.show_clusters = false;
                 self.diagonal_edges = false;
@@ -163,6 +206,32 @@ impl TermRenderConfig {
         }
     }
 
+    /// Resolve the 4-tier [`MermaidFidelity`] (`Outline`/`Compact`/`Normal`/`Rich`)
+    /// using layout scale, density, node count, and viewport size.
+    #[must_use]
+    pub fn effective_fidelity(
+        &self,
+        scale_x: f32,
+        scale_y: f32,
+        density: f32,
+        node_count: usize,
+        available_cols: usize,
+        available_rows: usize,
+    ) -> MermaidFidelity {
+        if let Some(override_fidelity) = self.fidelity_override {
+            return override_fidelity;
+        }
+        select_fidelity(
+            scale_x,
+            scale_y,
+            density,
+            node_count,
+            available_cols,
+            available_rows,
+            self.tier,
+        )
+    }
+
     /// Resolve the effective render mode based on tier.
     #[must_use]
     pub fn effective_render_mode(&self, tier: MermaidTier) -> MermaidRenderMode {
@@ -177,10 +246,202 @@ impl TermRenderConfig {
     }
 }
 
+/// Select the effective terminal rendering fidelity tier from layout scale, density,
+/// node count, viewport dimensions, and optional explicit tier override.
+///
+/// Matches FrankenTUI's `select_fidelity` contract:
+/// - `cols < 16 || rows < 6` always degrades to [`MermaidFidelity::Outline`].
+/// - `cols < 35 || rows < 10` degrades to [`MermaidFidelity::Compact`].
+/// - Explicit `Compact`/`Normal`/`Rich` overrides are respected (clamped by viewport).
+/// - `Auto` inspects `min(scale_x, scale_y)` and `density`.
+#[must_use]
+pub fn select_fidelity(
+    scale_x: f32,
+    scale_y: f32,
+    density: f32,
+    node_count: usize,
+    cols: usize,
+    rows: usize,
+    override_tier: MermaidTier,
+) -> MermaidFidelity {
+    if cols < 16 || rows < 6 {
+        return MermaidFidelity::Outline;
+    }
+    match override_tier {
+        MermaidTier::Compact => return MermaidFidelity::Compact,
+        MermaidTier::Normal => return MermaidFidelity::Normal,
+        MermaidTier::Rich => {
+            if cols < 30 || rows < 10 {
+                return MermaidFidelity::Compact;
+            }
+            return MermaidFidelity::Rich;
+        }
+        MermaidTier::Auto => {}
+    }
+    if cols < 35 || rows < 10 {
+        return MermaidFidelity::Compact;
+    }
+    let min_scale = scale_x.min(scale_y);
+    if min_scale < 0.28 || density > 0.55 || (node_count > 30 && cols < 60) {
+        MermaidFidelity::Outline
+    } else if min_scale < 0.45 || density > 0.42 || (node_count > 18 && cols < 80) {
+        MermaidFidelity::Compact
+    } else if min_scale > 0.85 && density < 0.25 && cols >= 60 && rows >= 20 {
+        MermaidFidelity::Rich
+    } else {
+        MermaidFidelity::Normal
+    }
+}
+
+/// Interactive node selection state for terminal diagram navigation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectionState {
+    /// Currently selected node index (into `ir.nodes`), if any.
+    pub selected_node: Option<usize>,
+    /// Secondary highlighted nodes (e.g., neighbors of the selected node).
+    pub highlighted_nodes: Vec<usize>,
+}
+
+impl SelectionState {
+    /// Build a `SelectionState` with `node_idx` selected and its neighbors highlighted.
+    #[must_use]
+    pub fn from_selected(node_idx: usize, ir: &MermaidDiagramIr) -> Self {
+        let adj = build_adjacency(ir);
+        let mut state = Self::default();
+        state.select(node_idx, &adj);
+        state
+    }
+
+    /// Select the next node in index order (wrapping around).
+    pub fn select_next(&mut self, node_count: usize, adj: &[Vec<usize>]) {
+        if node_count == 0 {
+            self.clear();
+            return;
+        }
+        let next = match self.selected_node {
+            Some(idx) => (idx + 1) % node_count,
+            None => 0,
+        };
+        self.select(next, adj);
+    }
+
+    /// Select the previous node in index order (wrapping around).
+    pub fn select_prev(&mut self, node_count: usize, adj: &[Vec<usize>]) {
+        if node_count == 0 {
+            self.clear();
+            return;
+        }
+        let prev = match self.selected_node {
+            Some(0) | None => node_count - 1,
+            Some(idx) => idx - 1,
+        };
+        self.select(prev, adj);
+    }
+
+    /// Select a specific node and populate its connected neighbors.
+    pub fn select(&mut self, idx: usize, adj: &[Vec<usize>]) {
+        self.selected_node = Some(idx);
+        self.highlighted_nodes = adj.get(idx).cloned().unwrap_or_default();
+    }
+
+    /// Clear the current selection.
+    pub fn clear(&mut self) {
+        self.selected_node = None;
+        self.highlighted_nodes.clear();
+    }
+
+    /// Navigate from the currently selected node in a spatial direction (`dx`, `dy`).
+    pub fn navigate(
+        &mut self,
+        layout: &DiagramLayout,
+        adj: &[Vec<usize>],
+        dx: f32,
+        dy: f32,
+    ) -> Option<usize> {
+        let current = self.selected_node?;
+        let target = navigate_direction(layout, current, dx, dy)?;
+        self.select(target, adj);
+        Some(target)
+    }
+}
+
+/// Build an undirected adjacency list from the diagram IR for neighbor highlighting.
+#[must_use]
+pub fn build_adjacency(ir: &MermaidDiagramIr) -> Vec<Vec<usize>> {
+    let n = ir.nodes.len();
+    let mut adj = vec![Vec::new(); n];
+    let resolve = |ep: &IrEndpoint| -> Option<usize> {
+        match ep {
+            IrEndpoint::Node(id) => Some(id.0),
+            IrEndpoint::Port(port_id) => ir.ports.get(port_id.0).map(|p| p.node.0),
+            IrEndpoint::Unresolved => None,
+        }
+    };
+    for edge in &ir.edges {
+        if let (Some(u), Some(v)) = (resolve(&edge.from), resolve(&edge.to))
+            && u < n
+            && v < n
+            && u != v
+        {
+            adj[u].push(v);
+            adj[v].push(u);
+        }
+    }
+    for list in &mut adj {
+        list.sort_unstable();
+        list.dedup();
+    }
+    adj
+}
+
+/// Find the best node in direction `(dx, dy)` from `current` using layout coordinates.
+///
+/// `dx` and `dy` define a unit-ish direction vector (e.g. `(0.0, -1.0)` for up,
+/// `(1.0, 0.0)` for right). Returns the `node_index` of the closest node whose
+/// direction from `current` has a positive dot product with `(dx, dy)`, weighted
+/// to prefer nodes more aligned with the direction vector.
+#[must_use]
+pub fn navigate_direction(
+    layout: &DiagramLayout,
+    current: usize,
+    dx: f32,
+    dy: f32,
+) -> Option<usize> {
+    let cur_box = layout.nodes.iter().find(|b| b.node_index == current)?;
+    let cur_cx = cur_box.bounds.x + cur_box.bounds.width / 2.0;
+    let cur_cy = cur_box.bounds.y + cur_box.bounds.height / 2.0;
+
+    let mut best: Option<(usize, f32)> = None;
+    for nb in &layout.nodes {
+        if nb.node_index == current {
+            continue;
+        }
+        let ncx = nb.bounds.x + nb.bounds.width / 2.0;
+        let ncy = nb.bounds.y + nb.bounds.height / 2.0;
+        let vx = ncx - cur_cx;
+        let vy = ncy - cur_cy;
+        let dot = vx * dx + vy * dy;
+        if dot <= 0.1 {
+            continue;
+        }
+        let dist = vx.hypot(vy);
+        if dist < 1e-6 {
+            continue;
+        }
+        let cos_angle = dot / dist;
+        let score = dist * (2.0 - cos_angle);
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((nb.node_index, score));
+        }
+    }
+    best.map(|(idx, _)| idx)
+}
+
 /// Resolved configuration after auto-detection.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedConfig {
     pub tier: MermaidTier,
+    pub fidelity: MermaidFidelity,
     pub render_mode: MermaidRenderMode,
     pub glyph_mode: MermaidGlyphMode,
     pub cols: usize,
@@ -188,6 +449,9 @@ pub struct ResolvedConfig {
     pub max_label_chars: usize,
     pub max_label_lines: usize,
     pub show_labels: bool,
+    pub show_selection: bool,
+    pub selected_node: Option<usize>,
+    pub link_mode: MermaidLinkMode,
     pub show_clusters: bool,
     pub diagonal_edges: bool,
     pub padding: usize,
@@ -214,6 +478,11 @@ impl ResolvedConfig {
         let available_cols = cols.min(config.max_width);
         let available_rows = rows.min(config.max_height);
         let tier = config.effective_tier(available_cols, available_rows);
+        let fidelity = config.fidelity_override.unwrap_or(match tier {
+            MermaidTier::Compact => MermaidFidelity::Compact,
+            MermaidTier::Normal => MermaidFidelity::Normal,
+            MermaidTier::Rich | MermaidTier::Auto => MermaidFidelity::Rich,
+        });
         let render_mode = config.effective_render_mode(tier);
 
         // Adjust label limits based on tier.
@@ -232,14 +501,20 @@ impl ResolvedConfig {
 
         Self {
             tier,
+            fidelity,
             render_mode,
             glyph_mode: config.glyph_mode,
             cols: available_cols,
             rows: available_rows,
             max_label_chars,
             max_label_lines,
-            show_labels: config.show_labels,
-            show_clusters: config.show_clusters && !matches!(tier, MermaidTier::Compact),
+            show_labels: config.show_labels && !matches!(fidelity, MermaidFidelity::Outline),
+            show_selection: config.show_selection || config.selected_node.is_some(),
+            selected_node: config.selected_node,
+            link_mode: config.link_mode,
+            show_clusters: config.show_clusters
+                && !matches!(tier, MermaidTier::Compact)
+                && !matches!(fidelity, MermaidFidelity::Outline),
             diagonal_edges: config.diagonal_edges,
             padding: config.padding,
             debug_overlay: config.debug_overlay,
@@ -354,12 +629,16 @@ mod tests {
         let config = ResolvedConfig {
             render_mode: MermaidRenderMode::Braille,
             tier: MermaidTier::Rich,
+            fidelity: MermaidFidelity::Rich,
             glyph_mode: MermaidGlyphMode::Unicode,
             cols: 80,
             rows: 24,
             max_label_chars: 24,
             max_label_lines: 2,
             show_labels: true,
+            show_selection: false,
+            selected_node: None,
+            link_mode: MermaidLinkMode::Inline,
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,

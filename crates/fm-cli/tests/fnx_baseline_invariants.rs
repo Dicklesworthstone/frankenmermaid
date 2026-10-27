@@ -18,7 +18,6 @@ const DETERMINISM_RUNS: usize = 5;
 
 /// Baseline invariant for a single scenario.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // scenario_id used in Debug output and BTreeMap keys
 struct BaselineInvariant {
     scenario_id: String,
     input_hash: String,
@@ -209,7 +208,7 @@ fn fnx_off_baseline_evidence_log_emitted() {
         let baseline = capture_fnx_off_baseline(input, case_id);
 
         let entry = serde_json::json!({
-            "scenario_id": case_id,
+            "scenario_id": baseline.scenario_id,
             "input_hash": baseline.input_hash,
             "fnx_mode": "off",
             "projection_mode": "native_only",

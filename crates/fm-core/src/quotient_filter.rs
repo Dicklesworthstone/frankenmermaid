@@ -35,8 +35,6 @@ use rustc_hash::FxHasher;
 #[derive(Debug, Clone)]
 pub struct QuotientFilter {
     /// Number of quotient bits (determines table size = 2^q).
-    /// Retained for diagnostics and documentation; used indirectly via `table_size`.
-    #[allow(dead_code)]
     q_bits: u32,
     /// Number of remainder bits (determines false positive rate ≈ 2^{-r}).
     r_bits: u32,
@@ -259,6 +257,24 @@ impl QuotientFilter {
         1.0 / (1_u64 << self.r_bits) as f64
     }
 
+    /// Number of quotient bits `q` (`table_size == 1 << q`) (`bd-24t2w`).
+    #[must_use]
+    pub const fn quotient_bits(&self) -> u32 {
+        self.q_bits
+    }
+
+    /// Number of remainder bits `r` (`FP rate ≈ 2^{-r}`) (`bd-24t2w`).
+    #[must_use]
+    pub const fn remainder_bits(&self) -> u32 {
+        self.r_bits
+    }
+
+    /// Number of slots in the filter (`2^q`) (`bd-24t2w`).
+    #[must_use]
+    pub const fn table_size(&self) -> usize {
+        self.table_size
+    }
+
     /// Find the start of the run for a given quotient.
     fn find_run_start(&self, quotient: usize) -> usize {
         // Walk backwards from quotient to find the start of the cluster.
@@ -339,6 +355,9 @@ mod tests {
         let qf = QuotientFilter::new(8, 16);
         assert!(qf.is_empty());
         assert_eq!(qf.len(), 0);
+        assert_eq!(qf.quotient_bits(), 8);
+        assert_eq!(qf.remainder_bits(), 16);
+        assert_eq!(qf.table_size(), 256);
         assert!(qf.load_factor() < f64::EPSILON);
     }
 

@@ -5,6 +5,7 @@ use fm_core::{
     NodeShape,
 };
 use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, layout_diagram};
+use unicode_width::UnicodeWidthStr;
 
 use crate::canvas::Canvas;
 use crate::config::{ResolvedConfig, TermRenderConfig};
@@ -37,6 +38,10 @@ pub struct TermRenderResult {
     /// cannot see, so a caller can warn instead of presenting a clean, plausible, incomplete
     /// diagram. Zero whenever the diagram fits.
     pub occluded_node_count: usize,
+    /// Requested graph-edge captions that could not fit without hiding protected content.
+    /// A paired route callout counts as one visible caption. Intentionally hidden labels do not
+    /// contribute to this count.
+    pub occluded_edge_label_count: usize,
     /// Layout-quality metrics shown by the optional debug overlay.
     ///
     /// `None` is the default so existing callers and byte snapshots do not pay for diagnostics.
@@ -53,6 +58,10 @@ pub struct TermDebugMetrics {
     pub crossings: usize,
     pub bends: usize,
     pub symmetry_permille: u16,
+    pub nodes: usize,
+    pub edges: usize,
+    pub ranks: usize,
+    pub cycles: usize,
 }
 
 impl TermDebugMetrics {
@@ -63,10 +72,20 @@ impl TermDebugMetrics {
             .filter(|edge| !edge.bundled && !is_invisible_edge(ir, edge))
             .map(|edge| edge.points.len().saturating_sub(2))
             .sum();
+        let ranks = layout
+            .nodes
+            .iter()
+            .map(|node| node.rank + 1)
+            .max()
+            .unwrap_or(0);
         Self {
             crossings: layout.stats.crossing_count,
             bends,
             symmetry_permille: horizontal_symmetry_permille(layout),
+            nodes: layout.nodes.len(),
+            edges: layout.edges.len(),
+            ranks,
+            cycles: layout.stats.cycle_count,
         }
     }
 }
@@ -99,7 +118,12 @@ fn horizontal_symmetry_permille(layout: &DiagramLayout) -> u16 {
     (score * 1000.0).round() as u16
 }
 
-fn overlay_debug_panel(output: &mut String, width: usize, height: usize, metrics: TermDebugMetrics) {
+fn overlay_debug_panel(
+    output: &mut String,
+    width: usize,
+    height: usize,
+    metrics: TermDebugMetrics,
+) {
     if width == 0 || height == 0 {
         return;
     }
@@ -119,6 +143,10 @@ fn overlay_debug_panel(output: &mut String, width: usize, height: usize, metrics
         format!(
             "crossings={} bends={} symmetry={}/1000",
             metrics.crossings, metrics.bends, metrics.symmetry_permille
+        ),
+        format!(
+            "nodes={} edges={} ranks={} cycles={}",
+            metrics.nodes, metrics.edges, metrics.ranks, metrics.cycles
         ),
     ];
     for (row, label) in labels.iter().take(height).enumerate() {
@@ -385,6 +413,29 @@ impl TermRenderer {
         let (cell_width, cell_height, scale_x, scale_y) =
             self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
+        // Chart marks are data, not graph nodes. Every fidelity uses the same laid-out bars,
+        // points and value scale; only the raster resolution and text budget may change.
+        if ir.diagram_type == fm_core::DiagramType::XyChart
+            && let Some(meta) = &ir.xy_chart_meta
+        {
+            return self.render_xychart(
+                ir,
+                meta,
+                layout,
+                (cell_width, cell_height, scale_x, scale_y),
+            );
+        }
+
+        if ir.diagram_type == fm_core::DiagramType::Pie
+            && let Some(meta) = &ir.pie_meta
+        {
+            return self.render_pie(ir, meta, layout, (cell_width, cell_height));
+        }
+
+        // Outline fidelity stays on the compact cell renderer so specialized geometry (pie
+        // wedges, gantt bars, quadrant marks) survives while labels are suppressed. The legacy
+        // id-marker skeleton is retained only for direct unit-test coverage.
+
         // Use cell-based rendering for Compact tier or CellOnly mode.
         if matches!(self.config.tier, MermaidTier::Compact)
             || matches!(self.config.render_mode, MermaidRenderMode::CellOnly)
@@ -394,6 +445,113 @@ impl TermRenderer {
 
         // Use sub-cell canvas rendering for higher fidelity.
         self.render_subcell_mode(ir, layout, cell_width, cell_height, scale_x, scale_y)
+    }
+
+    /// Return the CGA-backed [`TermTransform`] that maps layout coordinates to terminal cells
+    /// for `layout` (`bd-z8971`).
+    #[must_use]
+    pub fn layout_transform(
+        &self,
+        layout: &DiagramLayout,
+        direction: GraphDirection,
+    ) -> Option<TermTransform> {
+        let (_cell_width, _cell_height, scale_x, scale_y) =
+            self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
+        TermTransform::new(scale_x, scale_y)
+    }
+
+    /// Map a layout-space point into padded terminal cell coordinates `(col, row)` (`bd-z8971`).
+    #[must_use]
+    pub fn map_layout_point_to_cells(
+        &self,
+        layout: &DiagramLayout,
+        direction: GraphDirection,
+        point: fm_layout::LayoutPoint,
+    ) -> (usize, usize) {
+        let (_cell_width, _cell_height, scale_x, scale_y) =
+            self.fit_cell_dimensions(&layout.bounds, direction, &layout.nodes);
+        self.point_to_cells(&point, scale_x, scale_y)
+    }
+
+    /// Render skeleton outline (Outline fidelity mode) for tight viewports or dense graphs.
+    #[cfg(test)]
+    fn render_outline_mode(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        cell_width: usize,
+        cell_height: usize,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> TermRenderResult {
+        let mut buffer = CellBuffer::new(cell_width, cell_height);
+
+        for edge_path in &layout.edges {
+            self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
+        }
+
+        for node_box in &layout.nodes {
+            let ir_node = ir.nodes.get(node_box.node_index);
+            if ir_node.is_some_and(is_block_beta_space_node) {
+                continue;
+            }
+            let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let cy = y + h / 2;
+            let raw_id = self.truncate_label(&node_box.node_id);
+            let marker = if self.is_selected_node(node_box.node_index) {
+                if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    format!(">[{raw_id}]")
+                } else {
+                    format!("▶[{raw_id}]")
+                }
+            } else if w >= 3 {
+                format!("[{raw_id}]")
+            } else if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                String::from("*")
+            } else {
+                String::from("▪")
+            };
+            let marker_len = compact_label_width(&marker);
+            let start_x = x + w.saturating_sub(marker_len) / 2;
+            buffer.set_string(start_x, cy, &marker);
+        }
+
+        self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
+        let mut output = buffer.to_output_string();
+        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        let (debug_rows, debug_width) = if self.config.debug_overlay {
+            append_term_debug_overlay(&mut output, layout)
+        } else {
+            (0, 0)
+        };
+
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        TermRenderResult {
+            output,
+            width: cell_width
+                .max(legend_width)
+                .max(links_width)
+                .max(debug_width),
+            height: cell_height + legend_rows + links_rows + debug_rows,
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                cell_width,
+                cell_height,
+            ),
+            occluded_edge_label_count: 0,
+            debug_metrics,
+        }
     }
 
     /// Render using character cells (Compact mode).
@@ -416,12 +574,47 @@ impl TermRenderer {
             }
         }
 
+        // Compact state markers occupy one character at their actual layout centre. Route
+        // their incident segments to that character rather than leaving an empty circle-sized
+        // gap between the connector's geometric port and the displayed dot.
+        let state_marker_centers: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .filter(|node| self.state_marker_cell_glyph(ir, node.node_index).is_some())
+            .map(|node| (node.node_index, node.bounds.center()))
+            .collect();
+
         // Render edges.
         for edge_path in &layout.edges {
             if is_invisible_edge(ir, edge_path) {
                 continue;
             }
-            self.render_edge_cell(&mut buffer, ir, edge_path, scale_x, scale_y);
+            let marker_path = ir.edges.get(edge_path.edge_index).and_then(|edge| {
+                let from = ir
+                    .resolve_endpoint_node(edge.from)
+                    .and_then(|id| state_marker_centers.get(&id.0));
+                let to = ir
+                    .resolve_endpoint_node(edge.to)
+                    .and_then(|id| state_marker_centers.get(&id.0));
+                if from.is_none() && to.is_none() {
+                    return None;
+                }
+                let mut path = edge_path.clone();
+                if let (Some(center), Some(point)) = (from, path.points.first_mut()) {
+                    *point = *center;
+                }
+                if let (Some(center), Some(point)) = (to, path.points.last_mut()) {
+                    *point = *center;
+                }
+                Some(path)
+            });
+            self.render_edge_cell(
+                &mut buffer,
+                ir,
+                marker_path.as_ref().unwrap_or(edge_path),
+                scale_x,
+                scale_y,
+            );
         }
 
         for marker in &layout.extensions.sequence_lifecycle_markers {
@@ -437,30 +630,11 @@ impl TermRenderer {
         }
 
         // Chart-specific terminal rendering.
-        if ir.diagram_type == fm_core::DiagramType::Pie
-            && let Some(pie_meta) = &ir.pie_meta
-            && !pie_meta.slices.is_empty()
-        {
-            self::render_pie_cell(
-                &mut buffer,
-                pie_meta,
-                cell_width,
-                cell_height,
-                self.config.show_labels,
-            );
-        } else if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
+        if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
             render_gantt_cell(
                 &mut buffer,
                 ir,
                 layout,
-                cell_width,
-                cell_height,
-                self.config.show_labels,
-            );
-        } else if ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some() {
-            render_xychart_cell(
-                &mut buffer,
-                ir,
                 cell_width,
                 cell_height,
                 self.config.show_labels,
@@ -477,6 +651,98 @@ impl TermRenderer {
                 scale_y,
                 self.config.show_labels,
             );
+        } else if ir.diagram_type == fm_core::DiagramType::Treemap {
+            if let Some(meta) = ir.treemap_meta.as_ref() {
+                for tile in &layout.extensions.treemap_tiles {
+                    let (x, y, w, h) = self.bounds_to_cells(&tile.bounds, scale_x, scale_y);
+                    if w >= 3 && h >= 2 {
+                        self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Rect);
+                    }
+                    if let Some(item) = meta.nodes.get(tile.node) {
+                        let caption = self.truncate_label(&format!(
+                            "{} {}",
+                            item.label,
+                            format_terminal_treemap_value(tile.value)
+                        ));
+                        let width = caption.chars().count();
+                        if width + 2 <= w {
+                            let (row, col) = if tile.is_leaf {
+                                (y + h / 2, x + (w.saturating_sub(width)) / 2)
+                            } else {
+                                (y + 1, x + 1)
+                            };
+                            buffer.set_string(col, row, &caption);
+                        }
+                    }
+                }
+            }
+        } else if ir.diagram_type == fm_core::DiagramType::Radar {
+            if let Some((meta, radar)) =
+                ir.radar_meta.as_ref().zip(layout.extensions.radar.as_ref())
+            {
+                let (cx, cy) = self.point_to_cells(&radar.center, scale_x, scale_y);
+                for axis in &radar.axes {
+                    let (tx, ty) = self.point_to_cells(&axis.tip, scale_x, scale_y);
+                    self.draw_line_cell(
+                        &mut buffer,
+                        cx,
+                        cy,
+                        tx,
+                        ty,
+                        &self.edge_glyphs,
+                        false,
+                        ArrowType::Line,
+                    );
+                }
+                for curve in &radar.curves {
+                    let pts: Vec<(usize, usize)> = curve
+                        .points
+                        .iter()
+                        .map(|pt| self.point_to_cells(pt, scale_x, scale_y))
+                        .collect();
+                    for idx in 0..pts.len() {
+                        let (x0, y0) = pts[idx];
+                        let (x1, y1) = pts[(idx + 1) % pts.len()];
+                        self.draw_line_cell(
+                            &mut buffer,
+                            x0,
+                            y0,
+                            x1,
+                            y1,
+                            &self.edge_glyphs,
+                            false,
+                            ArrowType::Line,
+                        );
+                    }
+                }
+                for (index, axis) in radar.axes.iter().enumerate() {
+                    if let Some(declared) = meta.axes.get(index) {
+                        let (ax, ay) = self.point_to_cells(&axis.label_anchor, scale_x, scale_y);
+                        let caption = self.truncate_label(declared.display());
+                        let width = caption.chars().count();
+                        let col = ax
+                            .saturating_sub(width / 2)
+                            .min(cell_width.saturating_sub(width));
+                        let row = ay.min(cell_height.saturating_sub(1));
+                        buffer.set_string(col, row, &caption);
+                    }
+                }
+                if meta.show_legend {
+                    for (index, curve) in meta.curves.iter().enumerate() {
+                        let caption = self.truncate_label(curve.display());
+                        buffer.set_string(1, 1 + index, &caption);
+                    }
+                }
+            }
+        } else if ir.diagram_type == fm_core::DiagramType::Info {
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            let row = cell_height / 2;
+            let col = cell_width.saturating_sub(version.chars().count()) / 2;
+            for (idx, ch) in version.chars().enumerate() {
+                if col + idx < cell_width && row < cell_height {
+                    buffer.set(col + idx, row, ch);
+                }
+            }
         } else {
             // Render nodes (foreground).
             for node_box in &layout.nodes {
@@ -485,12 +751,69 @@ impl TermRenderer {
             for node_box in &layout.extensions.sequence_mirror_headers {
                 self.render_node_cell(&mut buffer, ir, node_box, scale_x, scale_y);
             }
+            for continuation in &layout.extensions.packet_field_continuations {
+                let (x, y, w, h) = self.bounds_to_cells(&continuation.bounds, scale_x, scale_y);
+                if w >= 3 && h >= 1 {
+                    self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Rect);
+                    if let Some(node) = ir.nodes.get(continuation.node_index)
+                        && let Some(label) = self.node_display_label(ir, Some(node), &node.id)
+                    {
+                        let label = self.truncate_label(&label);
+                        let label_len = label.chars().count();
+                        let label_x = x + (w.saturating_sub(label_len)) / 2;
+                        buffer.set_string(label_x, y + h / 2, &label);
+                    }
+                }
+            }
+            for note in &layout.extensions.state_notes {
+                let (x, y, w, h) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+                if w >= 3 && h >= 2 {
+                    self.draw_shape_border(&mut buffer, x, y, w, h, NodeShape::Note);
+                    let budget = w.saturating_sub(2);
+                    for (row, line) in note.text.lines().enumerate() {
+                        if row >= h {
+                            break;
+                        }
+                        let clipped: String =
+                            self.truncate_label(line).chars().take(budget).collect();
+                        buffer.set_string(x + 1, y + row, &clipped);
+                    }
+                }
+            }
+            for fragment in &layout.extensions.sequence_fragments {
+                let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
+                if fw >= 3 && fh >= 3 {
+                    self.draw_shape_border(&mut buffer, fx, fy, fw, fh, NodeShape::Rect);
+                    let mut text = format!("{:?}", fragment.kind).to_lowercase();
+                    if !fragment.label.is_empty() {
+                        text.push(' ');
+                        text.push_str(&fragment.label);
+                    }
+                    let text = self.truncate_label(&text);
+                    buffer.set_string(fx + 1, fy + 1, &text);
+                }
+            }
+            for note in &layout.extensions.sequence_notes {
+                let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+                if nw >= 3 && nh >= 2 {
+                    self.draw_shape_border(&mut buffer, nx, ny, nw, nh, NodeShape::Note);
+                    let text = self.truncate_label(&note.text);
+                    buffer.set_string(nx + 1, ny + 1, &text);
+                }
+            }
         }
 
         if self.config.show_labels {
             self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
         }
-        let mut output = buffer.to_output_string();
+        let mut grid: Vec<Vec<char>> = buffer
+            .cells
+            .chunks(cell_width)
+            .map(<[char]>::to_vec)
+            .collect();
+        let (edge_labels, occluded_edge_label_count) =
+            self.overlay_graph_edge_labels(&mut grid, ir, layout, scale_x, scale_y, &[]);
+        let mut output = serialize_cell_labels(&grid, &edge_labels, true);
         let debug_metrics = self
             .config
             .debug_overlay
@@ -503,11 +826,13 @@ impl TermRenderer {
         } else {
             (0, 0)
         };
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
 
         TermRenderResult {
             output,
-            width: cell_width.max(legend_width),
-            height: cell_height + legend_rows,
+            width: cell_width.max(legend_width).max(links_width),
+            height: cell_height + legend_rows + links_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -519,6 +844,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            occluded_edge_label_count,
             debug_metrics,
         }
     }
@@ -900,7 +1226,7 @@ impl TermRenderer {
         // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
         // and overlay labels.
         let base_grid = canvas.render_char_grid();
-        let mut output = self.overlay_labels(
+        let (mut output, occluded_edge_label_count) = self.overlay_labels(
             base_grid,
             ir,
             layout,
@@ -916,12 +1242,18 @@ impl TermRenderer {
         if let Some(metrics) = debug_metrics {
             overlay_debug_panel(&mut output, cell_width, cell_height, metrics);
         }
-        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
+        let (legend_rows, legend_width) = if self.config.show_labels {
+            append_c4_legend(&mut output, ir)
+        } else {
+            (0, 0)
+        };
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
 
         TermRenderResult {
             output,
-            width: cell_width.max(legend_width),
-            height: cell_height + legend_rows,
+            width: cell_width.max(legend_width).max(links_width),
+            height: cell_height + legend_rows + links_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -933,6 +1265,7 @@ impl TermRenderer {
                 cell_width,
                 cell_height,
             ),
+            occluded_edge_label_count,
             debug_metrics,
         }
     }
@@ -1264,6 +1597,22 @@ impl TermRenderer {
         }
     }
 
+    fn state_marker_cell_glyph(&self, ir: &MermaidDiagramIr, node_index: usize) -> Option<char> {
+        if ir.diagram_type != fm_core::DiagramType::State {
+            return None;
+        }
+        let node = ir.nodes.get(node_index)?;
+        if !ir.is_textless_ornament_node(node) {
+            return None;
+        }
+        let ascii = matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
+        match node.shape {
+            NodeShape::FilledCircle => Some(if ascii { '*' } else { '●' }),
+            NodeShape::DoubleCircle => Some(if ascii { '@' } else { '◉' }),
+            _ => None,
+        }
+    }
+
     fn render_node_cell(
         &self,
         buffer: &mut CellBuffer,
@@ -1277,6 +1626,12 @@ impl TermRenderer {
             return;
         }
 
+        if let Some(glyph) = self.state_marker_cell_glyph(ir, node_box.node_index) {
+            let (cx, cy) = self.point_to_cells(&node_box.bounds.center(), scale_x, scale_y);
+            buffer.set(cx, cy, glyph);
+            return;
+        }
+
         let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
         if w < 3 || h < 1 {
             return;
@@ -1285,8 +1640,29 @@ impl TermRenderer {
         // Get node shape.
         let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
 
+        if shape == NodeShape::HorizontalBar {
+            for row in y..y + h {
+                for col in x..x + w {
+                    buffer.set(col, row, self.box_glyphs.block_full);
+                }
+            }
+            return;
+        }
+
         // Draw shape border.
         self.draw_shape_border(buffer, x, y, w, h, shape);
+        if self.is_selected_node(node_box.node_index) && w >= 2 && h >= 2 {
+            let (tl, tr, bl, br) =
+                if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    ('#', '#', '#', '#')
+                } else {
+                    ('╔', '╗', '╚', '╝')
+                };
+            buffer.set(x, y, tl);
+            buffer.set(x + w - 1, y, tr);
+            buffer.set(x, y + h - 1, bl);
+            buffer.set(x + w - 1, y + h - 1, br);
+        }
 
         // Get label.
         let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
@@ -1649,11 +2025,35 @@ impl TermRenderer {
         let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
 
         match shape {
-            NodeShape::Circle | NodeShape::DoubleCircle => {
-                let radius = w.min(h) / 2;
-                let cx = x + w / 2;
-                let cy = y + h / 2;
-                canvas.draw_circle(cx as isize, cy as isize, radius as isize);
+            NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+                // Scale the layout circle along both axes, just like its connector ports.
+                // Taking min(w, h) after scaling shrank the outline away from those ports.
+                let center = node_box.bounds.center();
+                let radius = node_box.bounds.width.min(node_box.bounds.height) * 0.5;
+                let cx = (center.x * scale_x) as isize + padding_x as isize;
+                let cy = (center.y * scale_y) as isize
+                    + padding_y as isize
+                    + (caption_push * CANVAS_ROWS_PER_CELL) as isize;
+                let rx = (radius * scale_x) as isize;
+                let ry = (radius * scale_y) as isize;
+                if shape == NodeShape::FilledCircle {
+                    canvas.fill_ellipse(cx, cy, rx, ry);
+                } else {
+                    canvas.draw_ellipse(cx, cy, rx, ry);
+                }
+                if shape == NodeShape::DoubleCircle {
+                    let inner_radius = (radius - 4.0).max(radius * 0.5);
+                    let inner_x = (inner_radius * scale_x) as isize;
+                    let inner_y = (inner_radius * scale_y) as isize;
+                    if ir.diagram_type == fm_core::DiagramType::State {
+                        canvas.fill_ellipse(cx, cy, inner_x, inner_y);
+                    } else {
+                        canvas.draw_ellipse(cx, cy, inner_x, inner_y);
+                    }
+                }
+            }
+            NodeShape::HorizontalBar => {
+                canvas.fill_rect(x, y, w.max(1), h.max(1));
             }
             NodeShape::Diamond => {
                 // Draw diamond as four lines.
@@ -1820,7 +2220,7 @@ impl TermRenderer {
         cell_height: usize,
         scale_x: f32,
         scale_y: f32,
-    ) -> String {
+    ) -> (String, usize) {
         // `lines` arrives as the canvas's char grid (`Canvas::render_char_grid`) — one row per cell
         // row — instead of a rendered `String` this fn used to re-parse with `lines().chars().collect()`.
         // Skips a full encode+decode of the whole raster.
@@ -2574,7 +2974,15 @@ impl TermRenderer {
                 .and_then(|map| map.get(&node_box.node_index));
 
             let label_lines: Vec<&str> = label.lines().collect();
-            let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
+            let start_y = if fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type) {
+                // A 2.8-cell-high box has an interior row. Flooring its height before centering
+                // puts the text on its top border instead of that actual geometric center.
+                self.point_to_cells(&node_box.bounds.center(), scale_x, scale_y)
+                    .1
+                    .saturating_sub(label_lines.len() / 2)
+            } else {
+                y + (h.saturating_sub(label_lines.len())) / 2
+            };
 
             for (i, line) in label_lines.iter().enumerate() {
                 // Iterate the label line's chars directly for both the centering width and the placement —
@@ -2654,11 +3062,72 @@ impl TermRenderer {
         // of label rectangles so the later relationship does not overwrite an earlier one (for
         // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
         let mut edge_label_rects = Vec::new();
+        // Protect the actual node and annotation boxes, not just text already stamped into them.
+        // A label in a blank node interior reads as content of that node. Composite-state boxes
+        // are containers: only their border is protected, so internal transitions can be named.
+        for node_box in &layout.nodes {
+            let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let y = y + overlay_caption_pushes
+                .get(&node_box.node_index)
+                .copied()
+                .unwrap_or(0);
+            if fm_layout::is_composite_state_node(ir, node_box) {
+                edge_label_rects.extend([
+                    (x, y, x + w, y + 1),
+                    (x, y + h, x + w + 1, y + h + 1),
+                    (x, y, x + 1, y + h + 1),
+                    (x + w, y, x + w + 1, y + h + 1),
+                ]);
+            } else if !ir
+                .nodes
+                .get(node_box.node_index)
+                .is_some_and(is_block_beta_space_node)
+            {
+                edge_label_rects.push((x, y, x + w + 1, y + h + 1));
+            }
+        }
+        for bounds in layout
+            .extensions
+            .state_notes
+            .iter()
+            .map(|note| &note.bounds)
+            .chain(
+                layout
+                    .extensions
+                    .sequence_notes
+                    .iter()
+                    .map(|note| &note.bounds),
+            )
+            .chain(
+                layout
+                    .extensions
+                    .sequence_mirror_headers
+                    .iter()
+                    .map(|node| &node.bounds),
+            )
+        {
+            let (x, y, w, h) = self.bounds_to_cells(bounds, scale_x, scale_y);
+            edge_label_rects.push((x, y, x + w + 1, y + h + 1));
+        }
+        // Keep all prior overlay text, including text wider than its node's scaled box. The
+        // sub-cell raster only emits block/braille glyphs; everything else is authored content
+        // or an annotation border that must survive the next label.
+        for (y, row) in lines.iter().enumerate() {
+            for (x, ch) in row.iter().enumerate() {
+                if !matches!(*ch, ' ' | '\u{2580}'..='\u{259f}' | '\u{2800}'..='\u{28ff}') {
+                    edge_label_rects.push((x, y, x + 1, y + 1));
+                }
+            }
+        }
+        if generic_terminal_diagram_title(ir).is_some() {
+            edge_label_rects.push((0, 0, cell_width, 1));
+        }
         for edge_path in &layout.edges {
             if edge_path.points.len() < 2 || is_invisible_edge(ir, edge_path) {
                 continue;
             }
-            if let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
+            if !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+                && let Some(label_id) = ir.edges.get(edge_path.edge_index).and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
             {
                 let base_label = self.truncate_label(&label.text);
@@ -2711,10 +3180,19 @@ impl TermRenderer {
                     lines.len(),
                 );
 
+                // Clear one whole backing plate, including a one-cell horizontal gutter. This
+                // keeps short continuation rows from being threaded through connector glyphs.
+                for row in lines.iter_mut().skip(start_y).take(label_lines.len()) {
+                    let left = label_x.saturating_sub(1);
+                    let right = (label_x + label_width + 1).min(cell_width).min(row.len());
+                    if left < right {
+                        row[left..right].fill(' ');
+                    }
+                }
                 for (i, line) in label_lines.iter().enumerate() {
                     // Iterate chars directly (see the node-label loops above): `chars().count()` for the
                     // centering width, `chars().enumerate()` for placement — no per-line Vec allocation.
-                    let line_x = mid_x.saturating_sub(line.chars().count() / 2);
+                    let line_x = label_x + label_width.saturating_sub(line.chars().count()) / 2;
                     let label_y = start_y + i;
 
                     if label_y < lines.len() {
@@ -2727,9 +3205,9 @@ impl TermRenderer {
                     }
                 }
                 edge_label_rects.push((
-                    label_x,
+                    label_x.saturating_sub(1),
                     start_y,
-                    label_x.saturating_add(label_width).min(cell_width),
+                    label_x.saturating_add(label_width + 1).min(cell_width),
                     start_y.saturating_add(label_lines.len()).min(lines.len()),
                 ));
             }
@@ -2814,6 +3292,12 @@ impl TermRenderer {
                             for (offset, ch) in text.chars().enumerate() {
                                 lines[cy][cx + offset] = ch;
                             }
+                            edge_label_rects.push((
+                                cx.saturating_sub(1),
+                                cy,
+                                (cx + width + 1).min(cell_width),
+                                cy + 1,
+                            ));
                             // Placed; a second copy at another offset would be worse than none.
                             break;
                         }
@@ -2942,6 +3426,13 @@ impl TermRenderer {
             }
         }
 
+        if ir.diagram_type == fm_core::DiagramType::Info {
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            let row = cell_height / 2;
+            let col = cell_width.saturating_sub(version.chars().count()) / 2;
+            write_if_blank(&mut lines, row, col, version);
+        }
+
         if let Some(title) = generic_terminal_diagram_title(ir)
             && let Some(first_line) = lines.first_mut()
         {
@@ -2956,22 +3447,367 @@ impl TermRenderer {
             }
         }
 
-        // Single-pass serialization: push every cell char into one pre-sized `String`, with a `'\n'`
-        // between rows. The previous `map(collect::<String>).collect::<Vec>().join("\n")` built one
-        // `String` per row (cell_height allocations) and then RE-COPIED every byte in `join`. Byte-
-        // identical: same chars in row-major order, `'\n'` between rows, no trailing newline. Reserve for
-        // the worst case (every cell a 3-byte U+2800.. braille/box glyph) so no push ever reallocates.
-        let total_chars: usize = lines.iter().map(Vec::len).sum();
-        let mut out = String::with_capacity(total_chars * 3 + lines.len());
-        for (row_index, row) in lines.into_iter().enumerate() {
-            if row_index > 0 {
-                out.push('\n');
+        let (labels, occluded) = self.overlay_graph_edge_labels(
+            &mut lines,
+            ir,
+            layout,
+            scale_x,
+            scale_y,
+            &edge_label_rects,
+        );
+        (serialize_cell_labels(&lines, &labels, false), occluded)
+    }
+
+    /// Use shared geometric placement with terminal-sized measurements, then validate the
+    /// quantized painted cells. A pixel-space clearance smaller than one column is insufficient
+    /// here: it can merge captions or erase a neighbouring connector after rasterization.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_graph_edge_labels(
+        &self,
+        grid: &mut [Vec<char>],
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scale_x: f32,
+        scale_y: f32,
+        protected: &[(usize, usize, usize, usize)],
+    ) -> (Vec<CellLabel>, usize) {
+        let width = grid.first().map_or(0, Vec::len);
+        let height = grid.len();
+        if !self.config.show_labels
+            || !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+        {
+            return (Vec::new(), 0);
+        }
+        if width < 3 || height == 0 {
+            let occluded = layout
+                .edges
+                .iter()
+                .filter(|path| {
+                    !path.bundled
+                        && path.points.len() >= 2
+                        && !is_invisible_edge(ir, path)
+                        && ir
+                            .edges
+                            .get(path.edge_index)
+                            .and_then(|edge| edge.label)
+                            .and_then(|id| ir.labels.get(id.0))
+                            .is_some_and(|label| {
+                                label
+                                    .text
+                                    .chars()
+                                    .any(|ch| !ch.is_control() && !ch.is_whitespace())
+                            })
+                })
+                .count();
+            return (Vec::new(), occluded);
+        }
+        let mut labels = Vec::new();
+        let mut occluded = 0;
+        let mut placer = fm_layout::edge_labels::EdgeLabelPlacer::new(ir, layout, 0.0);
+        let mut node_cells = vec![false; width * height];
+        let mut protect = |left: usize, top: usize, right: usize, bottom: usize| {
+            for row in top.min(height)..bottom.min(height) {
+                node_cells[row * width + left.min(width)..row * width + right.min(width)]
+                    .fill(true);
             }
-            for ch in row {
-                out.push(ch);
+        };
+        for node in &layout.nodes {
+            if fm_layout::is_composite_state_node(ir, node) {
+                continue;
+            }
+            let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+            protect(x, y, x.saturating_add(w + 1), y.saturating_add(h + 1));
+        }
+        for note in &layout.extensions.state_notes {
+            let (x, y, w, h) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+            protect(x, y, x.saturating_add(w + 1), y.saturating_add(h + 1));
+        }
+        for &(left, top, right, bottom) in protected {
+            protect(left, top, right, bottom);
+        }
+
+        for path in &layout.edges {
+            if path.bundled || path.points.len() < 2 || is_invisible_edge(ir, path) {
+                continue;
+            }
+            let Some(label) = ir
+                .edges
+                .get(path.edge_index)
+                .and_then(|edge| edge.label)
+                .and_then(|id| ir.labels.get(id.0))
+            else {
+                continue;
+            };
+            // Preserve the configured total text budget, while fitting line lengths to the
+            // available columns. The default 24-character soft wrap must not cut a 25-column
+            // caption (or identifier) that fits intact in this terminal.
+            let text = edge_caption_text(
+                &label.text,
+                self.config
+                    .max_label_chars
+                    .max(1)
+                    .saturating_mul(self.config.max_label_lines.max(1)),
+            );
+            if text.trim().is_empty() {
+                continue;
+            }
+            let route: Vec<_> = path
+                .points
+                .iter()
+                .map(|point| {
+                    (
+                        point.x * scale_x + self.config.padding as f32,
+                        point.y * scale_y + self.config.padding as f32,
+                    )
+                })
+                .collect();
+            let own_route = self
+                .edge_label_route_grid(ir, layout, path, false, width, height, scale_x, scale_y);
+            let foreign_routes =
+                self.edge_label_route_grid(ir, layout, path, true, width, height, scale_x, scale_y);
+            let mut blocked_nodes = node_cells.clone();
+            for node in layout
+                .nodes
+                .iter()
+                .filter(|node| fm_layout::is_composite_state_node(ir, node))
+            {
+                let contains_endpoint = ir.clusters.iter().any(|cluster| {
+                    cluster
+                        .title
+                        .and_then(|id| ir.labels.get(id.0))
+                        .is_some_and(|title| title.text == node.node_id)
+                        && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                            [edge.from, edge.to].iter().any(|endpoint| {
+                                ir.resolve_endpoint_node(*endpoint)
+                                    .is_some_and(|id| cluster.members.contains(&id))
+                            })
+                        })
+                });
+                if !contains_endpoint {
+                    let (x, y, w, h) = self.bounds_to_cells(&node.bounds, scale_x, scale_y);
+                    for row in y..y.saturating_add(h + 1).min(height) {
+                        for col in x..x.saturating_add(w + 1).min(width) {
+                            blocked_nodes[row * width + col] = true;
+                        }
+                    }
+                }
+            }
+            let occupied: Vec<bool> = grid
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    let own_route = &own_route;
+                    let foreign_routes = &foreign_routes;
+                    let blocked_nodes = &blocked_nodes;
+                    cells.iter().enumerate().map(move |(col, &cell)| {
+                        blocked_nodes[row * width + col]
+                            || !blank_terminal_cell(foreign_routes[row][col])
+                            || (!blank_terminal_cell(cell) && cell != own_route[row][col])
+                    })
+                })
+                .collect();
+
+            let mut caption = CellLabel::new(
+                path.edge_index,
+                false,
+                wrap_cell_label(&text, width - 2, self.config.max_label_lines.max(1)),
+            );
+            let preferred = placer.place(
+                path,
+                (caption.width + 2) as f32 / scale_x,
+                caption.lines.len() as f32 / scale_y,
+            );
+            let preferred = (
+                preferred.x * scale_x + self.config.padding as f32,
+                preferred.y * scale_y + self.config.padding as f32,
+            );
+            if let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                preferred,
+                &route,
+                caption.width,
+                caption.lines.len(),
+                width,
+                height,
+                Some(2.0),
+            ) {
+                caption.x = x;
+                caption.y = y;
+                placer.update_last_placement(Some(caption.layout_bounds(
+                    scale_x,
+                    scale_y,
+                    self.config.padding,
+                )));
+                clear_cell_label(grid, &caption);
+                labels.push(caption);
+                continue;
+            }
+
+            // A finite grid can have enough area for the words but no sufficiently wide slot
+            // beside their route. Pair that caption with a stable, compact route badge. Both
+            // use the same fit checks, and neither is painted unless the complete pair fits.
+            let badge_text = format!("[{}]", path.edge_index + 1);
+            caption = CellLabel::new(
+                path.edge_index,
+                false,
+                wrap_cell_label(
+                    &format!("{badge_text} {text}"),
+                    width - 2,
+                    self.config.max_label_lines.max(1),
+                ),
+            );
+            placer.update_last_placement(None);
+            let preferred = placer.place(
+                path,
+                (caption.width + 2) as f32 / scale_x,
+                caption.lines.len() as f32 / scale_y,
+            );
+            let preferred = (
+                preferred.x * scale_x + self.config.padding as f32,
+                preferred.y * scale_y + self.config.padding as f32,
+            );
+            let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                preferred,
+                &route,
+                caption.width,
+                caption.lines.len(),
+                width,
+                height,
+                None,
+            ) else {
+                placer.update_last_placement(None);
+                occluded += 1;
+                continue;
+            };
+            caption.x = x;
+            caption.y = y;
+            labels.push(caption);
+            let mut badge = CellLabel::new(path.edge_index, true, vec![badge_text]);
+            let anchor = fm_layout::edge_label_position(path);
+            let anchor = (
+                anchor.x * scale_x + self.config.padding as f32,
+                anchor.y * scale_y + self.config.padding as f32,
+            );
+            let Some((x, y)) = fit_edge_label_cells(
+                &occupied,
+                &labels,
+                anchor,
+                &route,
+                badge.width,
+                1,
+                width,
+                height,
+                Some(2.0),
+            ) else {
+                labels.pop();
+                placer.update_last_placement(None);
+                occluded += 1;
+                continue;
+            };
+            badge.x = x;
+            badge.y = y;
+            let caption = labels.last().expect("paired caption was reserved");
+            debug_assert!(
+                caption.edge_index == badge.edge_index && !caption.is_callout && badge.is_callout
+            );
+            placer.update_last_placement(Some(caption.layout_bounds(
+                scale_x,
+                scale_y,
+                self.config.padding,
+            )));
+            clear_cell_label(grid, caption);
+            placer.place(path, (badge.width + 2) as f32 / scale_x, 1.0 / scale_y);
+            placer.update_last_placement(Some(badge.layout_bounds(
+                scale_x,
+                scale_y,
+                self.config.padding,
+            )));
+            clear_cell_label(grid, &badge);
+            labels.push(badge);
+        }
+        (labels, occluded)
+    }
+
+    /// Rasterize the connectors using the same cell/subcell geometry as the drawing pass.
+    /// Collinear shared portions are usable by either edge; distinct crossings stay protected.
+    #[allow(clippy::too_many_arguments)]
+    fn edge_label_route_grid(
+        &self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        own: &LayoutEdgePath,
+        foreign: bool,
+        width: usize,
+        height: usize,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Vec<Vec<char>> {
+        let cell_mode = self.config.tier == MermaidTier::Compact
+            || self.config.render_mode == MermaidRenderMode::CellOnly;
+        let (mult_x, mult_y) = self.config.subcell_multiplier();
+        let mut canvas = Canvas::new(width, height, self.config.render_mode);
+        let mut cells = CellBuffer::new(width, height);
+        for path in &layout.edges {
+            if is_invisible_edge(ir, path) || (path.edge_index == own.edge_index) == foreign {
+                continue;
+            }
+            let mut segments = Vec::new();
+            for pair in path.points.windows(2) {
+                if foreign {
+                    fm_layout::edge_labels::append_foreign_route_obstacles(
+                        own,
+                        pair[0],
+                        pair[1],
+                        &mut segments,
+                    );
+                } else {
+                    segments.push(fm_layout::edge_labels::EdgeLabelObstacle::Segment(
+                        pair[0], pair[1],
+                    ));
+                }
+            }
+            for obstacle in segments {
+                let fm_layout::edge_labels::EdgeLabelObstacle::Segment(from, to) = obstacle else {
+                    continue;
+                };
+                if cell_mode {
+                    let (x0, y0) = self.point_to_cells(&from, scale_x, scale_y);
+                    let (x1, y1) = self.point_to_cells(&to, scale_x, scale_y);
+                    let arrow = ir
+                        .edges
+                        .get(path.edge_index)
+                        .map_or(ArrowType::Arrow, |edge| edge.arrow);
+                    self.draw_line_cell(
+                        &mut cells,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        &self.edge_glyphs,
+                        path.reversed,
+                        arrow,
+                    );
+                } else {
+                    let x0 = (from.x * scale_x * mult_x as f32) as isize
+                        + (self.config.padding * mult_x) as isize;
+                    let y0 = (from.y * scale_y * mult_y as f32) as isize
+                        + (self.config.padding * mult_y) as isize;
+                    let x1 = (to.x * scale_x * mult_x as f32) as isize
+                        + (self.config.padding * mult_x) as isize;
+                    let y1 = (to.y * scale_y * mult_y as f32) as isize
+                        + (self.config.padding * mult_y) as isize;
+                    canvas.draw_line(x0, y0, x1, y1);
+                }
             }
         }
-        out
+        if cell_mode {
+            cells.cells.chunks(width).map(<[char]>::to_vec).collect()
+        } else {
+            canvas.render_char_grid()
+        }
     }
 
     fn render_generic_diagram_title(
@@ -3100,6 +3936,56 @@ impl TermRenderer {
         lines.join("\n")
     }
 
+    const fn is_selected_node(&self, node_index: usize) -> bool {
+        self.config.show_selection
+            && matches!(self.config.selected_node, Some(idx) if idx == node_index)
+    }
+
+    fn is_highlighted_node(&self, ir: &MermaidDiagramIr, node_index: usize) -> bool {
+        let Some(selected) = self
+            .config
+            .selected_node
+            .filter(|_| self.config.show_selection)
+        else {
+            return false;
+        };
+        if selected == node_index {
+            return false;
+        }
+        let resolve = |ep: &fm_core::IrEndpoint| -> Option<usize> {
+            match ep {
+                fm_core::IrEndpoint::Node(id) => Some(id.0),
+                fm_core::IrEndpoint::Port(port_id) => ir.ports.get(port_id.0).map(|p| p.node.0),
+                fm_core::IrEndpoint::Unresolved => None,
+            }
+        };
+        ir.edges.iter().any(|edge| {
+            matches!(
+                (resolve(&edge.from), resolve(&edge.to)),
+                (Some(u), Some(v))
+                    if (u == selected && v == node_index) || (v == selected && u == node_index)
+            )
+        })
+    }
+
+    fn node_link_url(node: &fm_core::IrNode) -> Option<&str> {
+        node.href()
+            .or_else(|| node.menu_links.first().map(|link| link.url.as_str()))
+    }
+
+    fn footnote_index(ir: &MermaidDiagramIr, target_node_id: &str) -> Option<usize> {
+        let mut idx = 0usize;
+        for node in &ir.nodes {
+            if Self::node_link_url(node).is_some() {
+                idx += 1;
+                if node.id == target_node_id {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
     fn node_display_label(
         &self,
         ir: &MermaidDiagramIr,
@@ -3113,12 +3999,42 @@ impl TermRenderer {
             return None;
         }
 
-        Some(
-            node.label
-                .and_then(|lid| ir.labels.get(lid.0))
-                .map(|label| self.truncate_label(&label.text))
-                .unwrap_or_else(|| self.truncate_label(fallback_id)),
-        )
+        let mut text = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|label| self.truncate_label(&label.text))
+            .unwrap_or_else(|| self.truncate_label(fallback_id));
+
+        if matches!(self.config.link_mode, fm_core::MermaidLinkMode::Footnote)
+            && let Some(idx) = Self::footnote_index(ir, &node.id)
+        {
+            text.push_str(&format!(" [{idx}]"));
+        }
+
+        if self.config.show_selection
+            && let Some(node_idx) = ir
+                .nodes
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, node))
+        {
+            if self.is_selected_node(node_idx) {
+                let prefix = if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    "> "
+                } else {
+                    "▶ "
+                };
+                text = format!("{prefix}{text}");
+            } else if self.is_highlighted_node(ir, node_idx) {
+                let prefix = if matches!(self.config.glyph_mode, fm_core::MermaidGlyphMode::Ascii) {
+                    "* "
+                } else {
+                    "• "
+                };
+                text = format!("{prefix}{text}");
+            }
+        }
+
+        Some(text)
     }
 
     /// Render a UML-style three-compartment class box into the character grid.
@@ -3862,10 +4778,297 @@ fn append_c4_legend(output: &mut String, ir: &MermaidDiagramIr) -> (usize, usize
     (rows, width)
 }
 
-/// Place an edge label near its path midpoint without overwriting another edge label.
-///
-/// The candidate order is stable: midpoint first, then alternating rows above and below it. When
-/// no free row exists, preserve the historical midpoint placement rather than dropping the label.
+fn append_footnote_links(
+    output: &mut String,
+    ir: &MermaidDiagramIr,
+    link_mode: fm_core::MermaidLinkMode,
+) -> (usize, usize) {
+    if !matches!(link_mode, fm_core::MermaidLinkMode::Footnote) {
+        return (0, 0);
+    }
+
+    let mut entries = Vec::new();
+    for node in &ir.nodes {
+        if let Some(url) = TermRenderer::node_link_url(node) {
+            let idx = entries.len() + 1;
+            entries.push(format!("[{idx}] {}: {url}", node.id));
+        }
+    }
+    if entries.is_empty() {
+        return (0, 0);
+    }
+
+    let mut width = "Links:".chars().count();
+    output.push_str("\nLinks:");
+    for entry in &entries {
+        width = width.max(entry.chars().count());
+        output.push('\n');
+        output.push_str(entry);
+    }
+    (entries.len() + 1, width)
+}
+
+#[cfg(test)]
+fn append_term_debug_overlay(output: &mut String, layout: &DiagramLayout) -> (usize, usize) {
+    let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+    let banner = format!(
+        "[debug: nodes={} edges={} ranks={} crossings={} cycles={}]",
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    let width = banner.chars().count();
+    output.push('\n');
+    output.push_str(&banner);
+    (1, width)
+}
+
+#[derive(Debug)]
+struct CellLabel {
+    edge_index: usize,
+    is_callout: bool,
+    x: usize,
+    y: usize,
+    width: usize,
+    lines: Vec<String>,
+}
+
+impl CellLabel {
+    fn new(edge_index: usize, is_callout: bool, lines: Vec<String>) -> Self {
+        let width = lines.iter().map(|line| line.width()).max().unwrap_or(0);
+        Self {
+            edge_index,
+            is_callout,
+            x: 0,
+            y: 0,
+            width,
+            lines,
+        }
+    }
+
+    fn layout_bounds(&self, scale_x: f32, scale_y: f32, padding: usize) -> fm_layout::LayoutRect {
+        fm_layout::LayoutRect {
+            x: (self.x as f32 - 1.0 - padding as f32) / scale_x,
+            y: (self.y as f32 - padding as f32) / scale_y,
+            width: (self.width + 2) as f32 / scale_x,
+            height: self.lines.len() as f32 / scale_y,
+        }
+    }
+}
+
+fn blank_terminal_cell(cell: char) -> bool {
+    cell == ' ' || cell == '\u{2800}'
+}
+
+fn clear_cell_label(grid: &mut [Vec<char>], label: &CellLabel) {
+    for row in &mut grid[label.y..label.y + label.lines.len()] {
+        row[label.x - 1..label.x + label.width + 1].fill(' ');
+    }
+}
+
+/// Fit the measured shared proposal to actual character cells. The prefix sum checks the full
+/// painted backing rectangle, including separating blanks, without ever damaging occupied cells.
+#[allow(clippy::too_many_arguments)]
+fn fit_edge_label_cells(
+    occupied: &[bool],
+    labels: &[CellLabel],
+    preferred: (f32, f32),
+    route: &[(f32, f32)],
+    label_width: usize,
+    label_height: usize,
+    cell_width: usize,
+    cell_height: usize,
+    max_route_gap: Option<f32>,
+) -> Option<(usize, usize)> {
+    if label_width + 2 > cell_width || label_height > cell_height || label_height == 0 {
+        return None;
+    }
+    let mut occupied = occupied.to_vec();
+    for label in labels {
+        for row in label.y..label.y + label.lines.len() {
+            for col in label.x..label.x + label.width {
+                occupied[row * cell_width + col] = true;
+            }
+        }
+    }
+    let stride = cell_width + 1;
+    let mut prefix = vec![0_usize; stride * (cell_height + 1)];
+    for row in 0..cell_height {
+        let mut count = 0;
+        for col in 0..cell_width {
+            count += usize::from(occupied[row * cell_width + col]);
+            prefix[(row + 1) * stride + col + 1] = prefix[row * stride + col + 1] + count;
+        }
+    }
+    let mut best = None;
+    let mut best_score = f32::INFINITY;
+    for row in 0..=cell_height - label_height {
+        for col in 1..=cell_width - label_width - 1 {
+            let (left, right, bottom) = (col - 1, col + label_width + 1, row + label_height);
+            let count = prefix[bottom * stride + right] + prefix[row * stride + left]
+                - prefix[row * stride + right]
+                - prefix[bottom * stride + left];
+            if count != 0 {
+                continue;
+            }
+            let gap = cell_label_route_gap(route, col, row, label_width, label_height);
+            if max_route_gap.is_some_and(|limit| gap > limit) {
+                continue;
+            }
+            let center = (
+                col as f32 + label_width as f32 / 2.0,
+                row as f32 + label_height as f32 / 2.0,
+            );
+            let score =
+                (center.0 - preferred.0).abs() + (center.1 - preferred.1).abs() * 2.0 + gap * 4.0;
+            if score < best_score {
+                best = Some((col, row));
+                best_score = score;
+            }
+        }
+    }
+    best
+}
+
+/// Distance from the actual caption rectangle to its own polyline, with terminal rows weighted
+/// twice as high as columns. Measuring from the text's center wrongly detaches long side labels.
+fn cell_label_route_gap(
+    route: &[(f32, f32)],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> f32 {
+    let (left, right) = (x as f32, (x + width) as f32);
+    let (top, bottom) = (y as f32 * 2.0, (y + height) as f32 * 2.0);
+    let mut best = f32::INFINITY;
+    for pair in route.windows(2) {
+        let a = (pair[0].0, pair[0].1 * 2.0);
+        let b = (pair[1].0, pair[1].1 * 2.0);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let (mut enter, mut leave) = (0.0_f32, 1.0_f32);
+        let mut intersects = true;
+        for (origin, delta, lo, hi) in [(a.0, dx, left, right), (a.1, dy, top, bottom)] {
+            if delta.abs() <= f32::EPSILON {
+                intersects &= origin >= lo && origin <= hi;
+            } else {
+                let (p, q) = ((lo - origin) / delta, (hi - origin) / delta);
+                enter = enter.max(p.min(q));
+                leave = leave.min(p.max(q));
+            }
+        }
+        if intersects && enter <= leave {
+            return 0.0;
+        }
+        for point in [a, b] {
+            let gx = (left - point.0).max(0.0).max(point.0 - right);
+            let gy = (top - point.1).max(0.0).max(point.1 - bottom);
+            best = best.min(gx * gx + gy * gy);
+        }
+        let length = dx * dx + dy * dy;
+        for corner in [(left, top), (left, bottom), (right, top), (right, bottom)] {
+            let t = if length > f32::EPSILON {
+                (((corner.0 - a.0) * dx + (corner.1 - a.1) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let gx = corner.0 - (a.0 + dx * t);
+            let gy = corner.1 - (a.1 + dy * t);
+            best = best.min(gx * gx + gy * gy);
+        }
+    }
+    best.sqrt()
+}
+
+fn edge_caption_text(text: &str, budget: usize) -> String {
+    let mut chars = text.chars().map(|ch| match ch {
+        '\n' => '\n',
+        other if other.is_control() => ' ',
+        other => other,
+    });
+    let mut result: String = chars.by_ref().take(budget).collect();
+    if chars.next().is_some() {
+        result.pop();
+        result.push('…');
+    }
+    result
+}
+
+fn wrap_cell_label(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        let mut line = String::new();
+        for word in source_line.split_whitespace() {
+            let needed = line.width() + usize::from(!line.is_empty()) + word.width();
+            if !line.is_empty() && needed > width {
+                lines.push(line);
+                line = String::new();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            if word.width() <= width {
+                line.push_str(word);
+            } else {
+                for ch in word.chars() {
+                    line.push(ch);
+                    if line.width() >= width {
+                        line.pop();
+                        break;
+                    }
+                }
+                line.push('…');
+            }
+        }
+        lines.push(line);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            while last.width() >= width {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines
+}
+
+/// Emit complete caption strings while skipping their measured columns. A Unicode scalar is
+/// not a terminal cell: CJK glyphs occupy two columns and combining marks occupy none.
+fn serialize_cell_labels(grid: &[Vec<char>], labels: &[CellLabel], trim: bool) -> String {
+    let mut output = String::new();
+    for (row_index, row) in grid.iter().enumerate() {
+        if row_index > 0 {
+            output.push('\n');
+        }
+        let mut runs: Vec<_> = labels
+            .iter()
+            .filter_map(|label| {
+                let offset = row_index.checked_sub(label.y)?;
+                let text = label.lines.get(offset)?;
+                Some((label.x + (label.width - text.width()) / 2, text))
+            })
+            .collect();
+        runs.sort_by_key(|(col, _)| *col);
+        let mut line = String::new();
+        let mut cursor = 0;
+        for (col, text) in runs {
+            line.extend(row[cursor..col].iter());
+            line.push_str(text);
+            cursor = col + text.width();
+        }
+        line.extend(row[cursor..].iter());
+        output.push_str(if trim { line.trim_end() } else { &line });
+    }
+    output
+}
+
+/// Place the complete label and a horizontal gutter near its route, within the cell frame.
+/// The distance ordering is deterministic, preferring a vertical slide when distances tie.
+/// Search both axes: fixing the column can make a clear half of the viewport unreachable.
 fn place_edge_label(
     occupied: &[(usize, usize, usize, usize)],
     midpoint_x: usize,
@@ -3875,32 +5078,36 @@ fn place_edge_label(
     cell_width: usize,
     cell_height: usize,
 ) -> (usize, usize) {
-    let label_x = midpoint_x.saturating_sub(label_width / 2);
-    let label_right = label_x.saturating_add(label_width).min(cell_width);
-
-    for offset in 0..cell_height {
-        let candidate_y = match offset {
-            0 => preferred_y,
-            offset if offset % 2 == 1 => match preferred_y.checked_sub(offset.div_ceil(2)) {
-                Some(y) => y,
-                None => continue,
-            },
-            offset => preferred_y.saturating_add(offset / 2),
-        };
-        let candidate_bottom = candidate_y.saturating_add(label_height);
-        if candidate_bottom > cell_height {
-            continue;
-        }
-
-        let overlaps = occupied.iter().any(|&(left, top, right, bottom)| {
-            label_x < right && left < label_right && candidate_y < bottom && top < candidate_bottom
-        });
-        if !overlaps {
-            return (label_x, candidate_y);
+    let max_x = cell_width.saturating_sub(label_width);
+    let max_y = cell_height.saturating_sub(label_height);
+    let preferred_x = midpoint_x.saturating_sub(label_width / 2).min(max_x);
+    let preferred_y = preferred_y.min(max_y);
+    let mut closest = (preferred_x, preferred_y);
+    let mut best = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+    for y in 0..=max_y {
+        for x in 0..=max_x {
+            let left = x.saturating_sub(1);
+            let right = x.saturating_add(label_width + 1).min(cell_width);
+            let bottom = y.saturating_add(label_height).min(cell_height);
+            // In an exhausted viewport minimize the damaged area, while a free placement always
+            // beats every overlapping candidate. Do not silently drop the transition text.
+            let overlap = occupied
+                .iter()
+                .map(|&(ox, oy, oright, obottom)| {
+                    right.min(oright).saturating_sub(left.max(ox))
+                        * bottom.min(obottom).saturating_sub(y.max(oy))
+                })
+                .sum::<usize>();
+            let dx = x.abs_diff(preferred_x);
+            let dy = y.abs_diff(preferred_y);
+            let score = (overlap, dx + dy, dx, y);
+            if score < best {
+                best = score;
+                closest = (x, y);
+            }
         }
     }
-
-    (label_x, preferred_y)
+    closest
 }
 
 fn terminal_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
@@ -3978,98 +5185,39 @@ fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     ir.declared_title_if_drawn()
 }
 
-/// Render a pie chart as an ASCII ellipse with wedge detection and a side legend.
-fn render_pie_cell(
-    buffer: &mut CellBuffer,
-    pie_meta: &fm_core::IrPieMeta,
-    cell_width: usize,
-    cell_height: usize,
-    show_labels: bool,
-) {
-    use std::f32::consts::PI;
+const PIE_SLICE_CHARS: [char; 8] = ['#', '*', '@', '+', '=', '~', '%', '&'];
 
-    let slices = &pie_meta.slices;
-    let total: f32 = slices
-        .iter()
-        .map(|s| s.value.max(0.0))
-        .sum::<f32>()
-        .max(f32::EPSILON);
-
-    // Reserve space for legend on the right.
-    let legend_width = if show_labels {
-        slices
-            .iter()
-            .map(|s| s.label.len() + 8) // " X Label  "
-            .max()
-            .unwrap_or(10)
-            .min(cell_width / 3)
-    } else {
-        0
+/// Cumulative fractions in source order. f64 accumulation keeps finite f32 values from
+/// overflowing their total, and tiny positive values retain their actual proportions.
+fn pie_slice_boundaries(meta: &fm_core::IrPieMeta) -> Vec<f64> {
+    let value = |slice: &fm_core::IrPieSlice| {
+        if slice.value.is_finite() && slice.value > 0.0 {
+            f64::from(slice.value)
+        } else {
+            0.0
+        }
     };
-    let chart_width = cell_width.saturating_sub(legend_width + 2);
-    let chart_height = cell_height.saturating_sub(2);
+    let total = meta.slices.iter().map(value).sum::<f64>();
+    let mut cumulative = 0.0;
+    meta.slices
+        .iter()
+        .map(|slice| {
+            cumulative += value(slice);
+            if total > 0.0 { cumulative / total } else { 0.0 }
+        })
+        .collect()
+}
 
-    if chart_width < 4 || chart_height < 4 {
-        return;
+/// Screen coordinates grow downwards: start at noon and advance clockwise through [0, 1).
+/// Repeated boundaries are zero-area slices and must never acquire a fallback wedge.
+fn pie_slice_at(boundaries: &[f64], dx: f64, dy: f64) -> Option<usize> {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    if dx.mul_add(dx, dy * dy) > 1.0 {
+        return None;
     }
-
-    // Title
-    if show_labels && let Some(title) = &pie_meta.title {
-        let tx = chart_width.saturating_sub(title.len()) / 2;
-        buffer.set_string(tx, 0, title);
-    }
-
-    let cx = chart_width / 2;
-    let cy = chart_height / 2 + 1;
-    let rx = (chart_width / 2).saturating_sub(1).max(2);
-    let ry = (chart_height / 2).saturating_sub(1).max(2);
-
-    let slice_chars: &[char] = &['#', '*', '@', '+', '=', '~', '%', '&'];
-
-    // Build cumulative angle boundaries.
-    let mut boundaries = Vec::with_capacity(slices.len() + 1);
-    boundaries.push(-PI / 2.0);
-    let mut angle = -PI / 2.0;
-    for slice in slices {
-        angle += (slice.value.max(0.0) / total) * 2.0 * PI;
-        boundaries.push(angle);
-    }
-
-    // Render pie ellipse pixel-by-pixel.
-    for row in 0..chart_height {
-        for col in 0..chart_width {
-            let dx = (col as f32 - cx as f32) / rx as f32;
-            let dy = (row as f32 - cy as f32) / ry as f32;
-            if dx * dx + dy * dy > 1.0 {
-                continue;
-            }
-            let cell_angle = (-dy).atan2(dx);
-            // Find which slice this angle belongs to.
-            let slice_idx = boundaries
-                .windows(2)
-                .position(|w| cell_angle >= w[0] && cell_angle < w[1])
-                .unwrap_or(0);
-            let ch = slice_chars[slice_idx % slice_chars.len()];
-            buffer.set(col, row + 1, ch);
-        }
-    }
-
-    // Render legend on the right side.
-    let legend_x = chart_width + 2;
-    if show_labels {
-        for (i, slice) in slices.iter().enumerate() {
-            let row = i + 2;
-            if row >= cell_height {
-                break;
-            }
-            let ch = slice_chars[i % slice_chars.len()];
-            let pct = (slice.value.max(0.0) / total) * 100.0;
-            let entry = format!("{ch} {:.0}% {}", pct, slice.label);
-            // Truncate by character count (not byte count) to avoid UTF-8 boundary panics.
-            let truncated: String = entry.chars().take(legend_width).collect();
-            buffer.set_string(legend_x, row, &truncated);
-        }
-    }
+    let fraction = (dy.atan2(dx) + FRAC_PI_2).rem_euclid(TAU) / TAU;
+    let index = boundaries.partition_point(|&end| end <= fraction);
+    (index < boundaries.len()).then_some(index)
 }
 
 /// Render gantt task bars in the terminal as horizontal block characters.
@@ -4213,167 +5361,717 @@ fn render_gantt_cell(
     }
 }
 
-/// Render an XY chart with ASCII axes, category labels, and data bars.
-fn render_xychart_cell(
-    buffer: &mut CellBuffer,
-    ir: &MermaidDiagramIr,
-    cell_width: usize,
-    cell_height: usize,
-    show_labels: bool,
-) {
-    let Some(xy_meta) = &ir.xy_chart_meta else {
-        return;
-    };
+impl TermRenderer {
+    /// Render pie sectors in every fidelity, with one shared angular partition for cell fills,
+    /// sub-cell hatching, and the legend. Generic graph nodes are only label anchors for a pie.
+    fn render_pie(
+        &self,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrPieMeta,
+        layout: &DiagramLayout,
+        (width, height): (usize, usize),
+    ) -> TermRenderResult {
+        use std::f64::consts::{FRAC_PI_2, TAU};
 
-    let label_margin = if show_labels { 8_usize } else { 0 };
-    let chart_left = label_margin + 1;
-    let chart_right = cell_width.saturating_sub(2);
-    let chart_top = 2_usize;
-    let chart_bottom = cell_height.saturating_sub(3);
-    let chart_w = chart_right.saturating_sub(chart_left);
-    let chart_h = chart_bottom.saturating_sub(chart_top);
-
-    if chart_w < 4 || chart_h < 4 {
-        return;
-    }
-
-    // Title
-    if show_labels && let Some(title) = &xy_meta.title {
-        let tx = cell_width.saturating_sub(title.len()) / 2;
-        buffer.set_string(tx, 0, title);
-    }
-
-    if xy_meta.horizontal {
-        render_xychart_horizontal_cell(
-            buffer,
-            xy_meta,
-            cell_width,
-            chart_top,
-            chart_bottom,
-            show_labels,
-        );
-        return;
-    }
-
-    // Y axis (vertical line).
-    for row in chart_top..=chart_bottom {
-        buffer.set(chart_left, row, '\u{2502}'); // │
-    }
-
-    // X axis (horizontal line).
-    for col in chart_left..=chart_right {
-        buffer.set(col, chart_bottom, '\u{2500}'); // ─
-    }
-    buffer.set(chart_left, chart_bottom, '\u{2514}'); // └ corner
-
-    // Category labels along x axis.
-    let categories = &xy_meta.x_axis.categories;
-    if show_labels && !categories.is_empty() {
-        let cat_spacing = chart_w / categories.len().max(1);
-        for (i, cat) in categories.iter().enumerate() {
-            let x = chart_left + 1 + i * cat_spacing;
-            let label: String = cat.chars().take(cat_spacing.saturating_sub(1)).collect();
-            buffer.set_string(x, chart_bottom + 1, &label);
+        let width = width.min(self.config.cols);
+        let height = height.min(self.config.rows);
+        let mode = if self.config.tier == MermaidTier::Compact
+            || self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii
+        {
+            MermaidRenderMode::CellOnly
+        } else {
+            self.config.render_mode
+        };
+        let title = self
+            .config
+            .show_labels
+            .then(|| ir.declared_title_if_drawn())
+            .flatten();
+        let boundaries = pie_slice_boundaries(meta);
+        let selected = self
+            .config
+            .selected_node
+            .filter(|&index| self.config.show_selection && index < meta.slices.len());
+        let mut previous = 0.0;
+        let legends: Vec<_> = meta
+            .slices
+            .iter()
+            .zip(&boundaries)
+            .enumerate()
+            .map(|(index, (slice, &end))| {
+                let percentage = (end - previous) * 100.0;
+                previous = end;
+                let value = if meta.show_data {
+                    format!(" [{}]", slice.value)
+                } else {
+                    String::new()
+                };
+                let label = self
+                    .truncate_label(&slice.label)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "{}{} {percentage:.0}%{value} {label}",
+                    if selected == Some(index) { ">" } else { "" },
+                    PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()]
+                )
+            })
+            .collect();
+        let padding = self.config.padding.min(width / 2).min(height / 2);
+        let top = (padding + usize::from(title.is_some()) * 2).min(height);
+        let bottom = height.saturating_sub(padding).max(top);
+        let left = padding;
+        let mut right = width.saturating_sub(padding);
+        let mut chart_bottom = bottom;
+        let mut legend = None;
+        if self.config.show_labels && !legends.is_empty() {
+            if width >= 28 {
+                let legend_width = legends
+                    .iter()
+                    .map(|entry| entry.width())
+                    .max()
+                    .unwrap_or(0)
+                    .min(width / 2);
+                right = right.saturating_sub(legend_width + 2);
+                legend = Some((right + 2, top, legend_width, bottom - top));
+            } else if bottom.saturating_sub(top) >= 8 {
+                let legend_rows = legends.len().min((bottom - top) / 2);
+                chart_bottom = bottom.saturating_sub(legend_rows + 1);
+                legend = Some((left, chart_bottom + 1, right - left, legend_rows));
+            }
+        }
+        let chart_width = right.saturating_sub(left);
+        let chart_height = chart_bottom.saturating_sub(top);
+        let cx = left as f64 + chart_width as f64 / 2.0;
+        let cy = top as f64 + chart_height as f64 / 2.0;
+        // A terminal cell is roughly twice as tall as it is wide.
+        let rx = (chart_width as f64 / 2.0).min(chart_height as f64);
+        let ry = rx / 2.0;
+        let mut buffer = CellBuffer::new(width, height);
+        let mut painted = vec![false; meta.slices.len()];
+        if rx > 0.0 && ry > 0.0 {
+            if mode == MermaidRenderMode::CellOnly {
+                for row in top..chart_bottom {
+                    for col in left..right {
+                        let dx = (col as f64 + 0.5 - cx) / rx;
+                        let dy = (row as f64 + 0.5 - cy) / ry;
+                        if let Some(index) = pie_slice_at(&boundaries, dx, dy) {
+                            buffer.set(col, row, PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()]);
+                            painted[index] = true;
+                        }
+                    }
+                }
+            } else {
+                let (mx, my) = crate::canvas::subcell_multiplier(mode);
+                let mut canvas = Canvas::new(width, height, mode);
+                let outline = (1.0 - 1.0 / (rx * mx as f64).min(ry * my as f64).max(1.0)).powi(2);
+                for y in top * my..chart_bottom * my {
+                    for x in left * mx..right * mx {
+                        let dx = ((x as f64 + 0.5) / mx as f64 - cx) / rx;
+                        let dy = ((y as f64 + 0.5) / my as f64 - cy) / ry;
+                        let Some(index) = pie_slice_at(&boundaries, dx, dy) else {
+                            continue;
+                        };
+                        let hatch = match index % 8 {
+                            0 => (x + y).is_multiple_of(4),
+                            1 => (x + 4 - y % 4).is_multiple_of(4),
+                            2 => x.is_multiple_of(3),
+                            3 => y.is_multiple_of(3),
+                            4 => (x + y).is_multiple_of(2),
+                            5 => x.is_multiple_of(4) && y.is_multiple_of(4),
+                            6 => x.is_multiple_of(4) || y.is_multiple_of(4),
+                            _ => true,
+                        };
+                        if hatch || dx.mul_add(dx, dy * dy) >= outline {
+                            canvas.set_pixel(x, y);
+                            painted[index] = true;
+                        }
+                    }
+                }
+                let mut start = 0.0;
+                let positive_slices = boundaries
+                    .iter()
+                    .filter(|&&end| {
+                        let positive = end > start;
+                        start = end;
+                        positive
+                    })
+                    .count();
+                start = 0.0;
+                for &end in &boundaries {
+                    if end > start && positive_slices > 1 {
+                        let angle = start.mul_add(TAU, -FRAC_PI_2);
+                        canvas.draw_line(
+                            (cx * mx as f64) as isize,
+                            (cy * my as f64) as isize,
+                            ((cx + rx * angle.cos()) * mx as f64) as isize,
+                            ((cy + ry * angle.sin()) * my as f64) as isize,
+                        );
+                    }
+                    start = end;
+                }
+                buffer.cells = canvas
+                    .render_char_grid()
+                    .into_iter()
+                    .flatten()
+                    .map(|ch| if ch == '\u{2800}' { ' ' } else { ch })
+                    .collect();
+                if self.config.show_labels {
+                    let mut occupied = std::collections::BTreeSet::new();
+                    start = 0.0;
+                    for (index, &end) in boundaries.iter().enumerate() {
+                        if end > start {
+                            let angle = ((start + end) / 2.0).mul_add(TAU, -FRAC_PI_2);
+                            let col = (cx + rx * 0.65 * angle.cos()) as usize;
+                            let row = (cy + ry * 0.65 * angle.sin()) as usize;
+                            if occupied.insert((col, row)) {
+                                buffer.set(
+                                    col,
+                                    row,
+                                    PIE_SLICE_CHARS[index % PIE_SLICE_CHARS.len()],
+                                );
+                            }
+                        }
+                        start = end;
+                    }
+                }
+            }
+        }
+        if let Some(index) = selected {
+            let start = index
+                .checked_sub(1)
+                .map_or(0.0, |previous| boundaries[previous]);
+            let end = boundaries[index];
+            if end > start && rx > 0.0 && ry > 0.0 {
+                let angle = ((start + end) / 2.0).mul_add(TAU, -FRAC_PI_2);
+                buffer.set(
+                    (cx + rx * 0.65 * angle.cos()) as usize,
+                    (cy + ry * 0.65 * angle.sin()) as usize,
+                    '>',
+                );
+            }
+        }
+        if let Some((column, row, budget, available)) = legend {
+            let shown = if legends.len() > available {
+                available.saturating_sub(1)
+            } else {
+                legends.len()
+            };
+            for (offset, entry) in legends.iter().take(shown).enumerate() {
+                buffer.set_string(column, row + offset, &self.pie_text_to_width(entry, budget));
+            }
+            if shown < legends.len() && available > 0 {
+                buffer.set_string(
+                    column,
+                    row + shown,
+                    &self.pie_text_to_width(
+                        &format!("+{} more slices", legends.len() - shown),
+                        budget,
+                    ),
+                );
+            }
+        }
+        if let Some(title) = title {
+            let title = self.pie_text_to_width(&self.truncate_label(title), width);
+            buffer.set_string(width.saturating_sub(title.width()) / 2, 0, &title);
+        }
+        let mut output = buffer.to_output_string();
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, width, height, metrics);
+        }
+        TermRenderResult {
+            output,
+            width,
+            height,
+            tier: self.config.tier,
+            render_mode: mode,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: meta
+                .slices
+                .iter()
+                .zip(painted)
+                .filter(|(slice, painted)| slice.value.is_finite() && slice.value > 0.0 && !painted)
+                .count(),
+            occluded_edge_label_count: 0,
+            debug_metrics,
         }
     }
 
-    // Render data series as vertical bar characters.
-    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
-    for (series_idx, series) in xy_meta.series.iter().enumerate() {
-        let bar_ch = bar_chars[series_idx % bar_chars.len()];
-        let max_val = series
-            .values
-            .iter()
-            .copied()
-            .fold(0.0_f32, f32::max)
-            .max(f32::EPSILON);
-        let val_count = series.values.len().max(1);
-        let bar_spacing = chart_w / val_count;
+    /// Pie captions terminate their row; measure display columns so wide text stays in the
+    /// legend's reserved space without displacing chart pixels or exceeding the viewport.
+    fn pie_text_to_width(&self, text: &str, budget: usize) -> String {
+        use unicode_width::UnicodeWidthChar;
+        if budget == 0 {
+            return String::new();
+        }
+        let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+            text = text.replace('…', "~");
+        }
+        if text.width() <= budget {
+            return text;
+        }
+        let mut used = 0;
+        let mut clipped: String = text
+            .chars()
+            .take_while(|ch| {
+                used += ch.width().unwrap_or(0);
+                used < budget
+            })
+            .collect();
+        clipped.push(
+            if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+                '~'
+            } else {
+                '…'
+            },
+        );
+        clipped
+    }
 
-        for (i, &val) in series.values.iter().enumerate() {
-            let bar_height = ((val / max_val) * chart_h as f32) as usize;
-            let x = chart_left + 1 + i * bar_spacing;
-            for h in 0..bar_height.min(chart_h) {
-                let y = chart_bottom.saturating_sub(1 + h);
-                if y >= chart_top && x < chart_right {
-                    buffer.set(x, y, bar_ch);
+    /// Project XY marks onto a terminal raster without changing their common numeric scale.
+    fn render_xychart(
+        &self,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrXyChartMeta,
+        layout: &DiagramLayout,
+        dimensions: (usize, usize, f32, f32),
+    ) -> TermRenderResult {
+        let (width, height, scale_x, scale_y) = dimensions;
+        let width = width.min(self.config.cols);
+        let height = height.min(self.config.rows);
+        let mode = if self.config.tier == MermaidTier::Compact {
+            MermaidRenderMode::CellOnly
+        } else {
+            self.config.render_mode
+        };
+        let (mult_x, mult_y) = crate::canvas::subcell_multiplier(mode);
+        let mut canvas = Canvas::new(width, height, mode);
+        let project = |x: f32, y: f32| {
+            (
+                (x * scale_x * mult_x as f32) as isize + (self.config.padding * mult_x) as isize,
+                (y * scale_y * mult_y as f32) as isize + (self.config.padding * mult_y) as isize,
+            )
+        };
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let baseline = min.min(0.0).max(max.min(0.0));
+        let baseline_x = fm_layout::xychart_value_to_x(baseline, min, max, plot);
+        let baseline_y = fm_layout::xychart_value_to_y(baseline, min, max, plot);
+        let (left, top) = project(plot.x, plot.y);
+        let (right, bottom) = project(plot.x + plot.width, plot.y + plot.height);
+        let (zero_x, zero_y) = project(baseline_x, baseline_y);
+        let value_axis = if meta.horizontal {
+            ((left, top), (right, top))
+        } else {
+            ((left, bottom), (right, bottom))
+        };
+        let zero_axis = if meta.horizontal {
+            ((zero_x, top), (zero_x, bottom))
+        } else {
+            ((left, zero_y), (right, zero_y))
+        };
+        let axes = [((left, top), (left, bottom)), value_axis, zero_axis];
+        for &((x0, y0), (x1, y1)) in &axes {
+            canvas.draw_line(x0, y0, x1, y1);
+        }
+        for value in fm_layout::xychart_y_ticks(min, max) {
+            if meta.horizontal {
+                let (x, _) = project(fm_layout::xychart_value_to_x(value, min, max, plot), plot.y);
+                canvas.draw_line(x, top - 1, x, top);
+            } else {
+                let (_, y) = project(plot.x, fm_layout::xychart_value_to_y(value, min, max, plot));
+                canvas.draw_line(left - 1, y, left, y);
+            }
+        }
+
+        let by_index: std::collections::BTreeMap<_, _> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.node_index, node))
+            .collect();
+        let points = |series: &fm_core::IrXySeries| {
+            series
+                .nodes
+                .iter()
+                .filter_map(|id| by_index.get(&id.0))
+                .map(|node| {
+                    let center = node.bounds.center();
+                    project(center.x, center.y)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Hatching separates an area from its line boundary without introducing ANSI color.
+        // Filling along the category axis also preserves both lobes at a zero crossing.
+        for series in &meta.series {
+            if series.kind == fm_core::IrXySeriesKind::Area {
+                fill_xychart_area(
+                    &mut canvas,
+                    &points(series),
+                    if meta.horizontal { zero_x } else { zero_y },
+                    meta.horizontal,
+                );
+            }
+        }
+        // Outlined bars leave overlapping line series readable on a monochrome surface.
+        // Use the layout's exact grouped slots and value endpoints, including negative bars.
+        for series in &meta.series {
+            if series.kind != fm_core::IrXySeriesKind::Bar {
+                continue;
+            }
+            for id in &series.nodes {
+                let Some(node) = by_index.get(&id.0) else {
+                    continue;
+                };
+                let bounds = node.bounds;
+                let (x0, y0) = project(bounds.x, bounds.y);
+                let (x1, y1) = project(bounds.x + bounds.width, bounds.y + bounds.height);
+                let (x0, x1) = (x0.clamp(left, right), x1.clamp(left, right));
+                let (y0, y1) = (y0.clamp(top, bottom), y1.clamp(top, bottom));
+                canvas.draw_line(x0, y0, x1, y0);
+                canvas.draw_line(x0, y1, x1, y1);
+                canvas.draw_line(x0, y0, x0, y1);
+                canvas.draw_line(x1, y0, x1, y1);
+            }
+        }
+        for series in &meta.series {
+            if series.kind == fm_core::IrXySeriesKind::Bar {
+                continue;
+            }
+            let points = points(series);
+            for pair in points.windows(2) {
+                canvas.draw_line(pair[0].0, pair[0].1, pair[1].0, pair[1].1);
+            }
+            for (x, y) in points {
+                canvas.fill_circle(
+                    x,
+                    y,
+                    if mode == MermaidRenderMode::CellOnly {
+                        0
+                    } else {
+                        1
+                    },
+                );
+            }
+        }
+
+        let mut buffer = CellBuffer {
+            cells: canvas
+                .render_char_grid()
+                .into_iter()
+                .flatten()
+                .map(|ch| {
+                    if ch == '\u{2800}' {
+                        ' '
+                    } else if mode == MermaidRenderMode::CellOnly && ch == '█' {
+                        self.box_glyphs.block_full
+                    } else {
+                        ch
+                    }
+                })
+                .collect(),
+            width,
+            height,
+        };
+        if mode == MermaidRenderMode::CellOnly {
+            for &((x0, y0), (x1, y1)) in &axes {
+                self.draw_line_cell(
+                    &mut buffer,
+                    x0.max(0) as usize,
+                    y0.max(0) as usize,
+                    x1.max(0) as usize,
+                    y1.max(0) as usize,
+                    &self.edge_glyphs,
+                    false,
+                    ArrowType::Line,
+                );
+            }
+            for series in &meta.series {
+                if series.kind != fm_core::IrXySeriesKind::Bar {
+                    for (x, y) in points(series) {
+                        buffer.set(x.max(0) as usize, y.max(0) as usize, self.box_glyphs.circle);
+                    }
                 }
             }
+        }
+        if self.config.show_labels {
+            self.overlay_xychart_labels(&mut buffer, ir, meta, layout, (scale_x, scale_y));
+        }
+        if let Some(node) = self.config.selected_node.and_then(|id| by_index.get(&id))
+            && self.config.show_selection
+        {
+            let center = node.bounds.center();
+            let (x, y) = project(center.x, center.y);
+            buffer.set(
+                x.max(0) as usize / mult_x,
+                y.max(0) as usize / mult_y,
+                self.box_glyphs.diamond,
+            );
+        }
+
+        let mut output = buffer.to_output_string();
+        let debug_metrics = self
+            .config
+            .debug_overlay
+            .then(|| TermDebugMetrics::from_layout(ir, layout));
+        if let Some(metrics) = debug_metrics {
+            overlay_debug_panel(&mut output, width, height, metrics);
+        }
+        let (links_rows, links_width) =
+            append_footnote_links(&mut output, ir, self.config.link_mode);
+        TermRenderResult {
+            output,
+            width: width.max(links_width),
+            height: height + links_rows,
+            tier: self.config.tier,
+            render_mode: mode,
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                width,
+                height,
+            ),
+            occluded_edge_label_count: 0,
+            debug_metrics,
+        }
+    }
+
+    fn overlay_xychart_labels(
+        &self,
+        buffer: &mut CellBuffer,
+        ir: &MermaidDiagramIr,
+        meta: &fm_core::IrXyChartMeta,
+        layout: &DiagramLayout,
+        (scale_x, scale_y): (f32, f32),
+    ) {
+        use fm_layout::TextAlign;
+        let plot = fm_layout::xychart_plot_bounds(meta, layout.bounds);
+        let to_cell = |x: f32, y: f32| {
+            (
+                (x * scale_x) as usize + self.config.padding,
+                (y * scale_y) as usize + self.config.padding,
+            )
+        };
+        let (left, top) = to_cell(plot.x, plot.y);
+        let (right, bottom) = to_cell(plot.x + plot.width, plot.y + plot.height);
+        let (min, max) = fm_layout::resolve_xychart_y_domain(meta);
+        let ticks = fm_layout::xychart_y_ticks(min, max);
+        let mut occupied = Vec::<(usize, usize)>::new();
+        // Retain zero and the extreme ticks first when terminal resolution merges nearby ticks.
+        for &value in ticks
+            .iter()
+            .filter(|&&value| value == 0.0)
+            .chain(ticks.first())
+            .chain(ticks.last())
+            .chain(ticks.iter())
+        {
+            let label = fm_layout::format_xychart_tick_value(value);
+            let length = label.chars().count();
+            if meta.horizontal {
+                let (column, _) =
+                    to_cell(fm_layout::xychart_value_to_x(value, min, max, plot), plot.y);
+                if top == 0 || length > buffer.width {
+                    continue;
+                }
+                let column = column
+                    .saturating_sub(length / 2)
+                    .min(buffer.width.saturating_sub(length));
+                let end = column + length;
+                if occupied
+                    .iter()
+                    .any(|&(start, stop)| column <= stop + 1 && end + 1 >= start)
+                {
+                    continue;
+                }
+                buffer.set_string(column, top - 1, &label);
+                occupied.push((column, end));
+            } else {
+                let (_, row) =
+                    to_cell(plot.x, fm_layout::xychart_value_to_y(value, min, max, plot));
+                if row >= buffer.height
+                    || length + 1 > left
+                    || occupied.iter().any(|&(other, _)| row.abs_diff(other) < 2)
+                {
+                    continue;
+                }
+                buffer.set_string(left - length - 1, row, &label);
+                occupied.push((row, row));
+            }
+        }
+
+        let categories = fm_layout::xychart_categories(meta);
+        let count = categories.len().max(1) as f32;
+        let band = if meta.horizontal {
+            plot.height
+        } else {
+            plot.width
+        } / count;
+        let mut previous_row = None;
+        for (index, category) in categories.iter().enumerate() {
+            let position = (index as f32 + 0.5) * band;
+            if meta.horizontal {
+                let (_, row) = to_cell(plot.x, plot.y + position);
+                if previous_row == Some(row) {
+                    continue;
+                }
+                self.write_xychart_text(
+                    buffer,
+                    category,
+                    row,
+                    (0, left.saturating_sub(1)),
+                    TextAlign::End,
+                );
+                previous_row = Some(row);
+            } else {
+                let (start, _) = to_cell(plot.x + index as f32 * band, plot.y);
+                let (end, _) = to_cell(plot.x + (index + 1) as f32 * band, plot.y);
+                self.write_xychart_text(
+                    buffer,
+                    category,
+                    bottom + 1,
+                    (start, end.saturating_sub(1)),
+                    TextAlign::Middle,
+                );
+            }
+        }
+        if let Some(label) = &meta.y_axis.label {
+            self.write_xychart_text(
+                buffer,
+                label,
+                top.saturating_sub(if meta.horizontal { 3 } else { 2 }),
+                if meta.horizontal {
+                    (left, right)
+                } else {
+                    (0, right)
+                },
+                if meta.horizontal {
+                    TextAlign::Middle
+                } else {
+                    TextAlign::Start
+                },
+            );
+        }
+        if let Some(label) = &meta.x_axis.label {
+            self.write_xychart_text(
+                buffer,
+                label,
+                if meta.horizontal {
+                    top.saturating_sub(3)
+                } else {
+                    bottom + 3
+                },
+                if meta.horizontal {
+                    (0, left.saturating_sub(1))
+                } else {
+                    (left, right)
+                },
+                if meta.horizontal {
+                    TextAlign::End
+                } else {
+                    TextAlign::Middle
+                },
+            );
+        }
+        if let Some(title) = ir.declared_title_if_drawn() {
+            self.write_xychart_text(buffer, title, 0, (0, buffer.width), TextAlign::Middle);
+        }
+    }
+
+    fn write_xychart_text(
+        &self,
+        buffer: &mut CellBuffer,
+        text: &str,
+        row: usize,
+        (left, right): (usize, usize),
+        align: fm_layout::TextAlign,
+    ) {
+        let right = right.min(buffer.width);
+        let budget = right.saturating_sub(left);
+        if budget == 0 || row >= buffer.height {
+            return;
+        }
+        let text = self
+            .truncate_label(text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ellipsis = if self.config.glyph_mode == fm_core::MermaidGlyphMode::Ascii {
+            '~'
+        } else {
+            '…'
+        };
+        let mut chars: Vec<_> = text
+            .chars()
+            .map(|ch| if ch == '…' { ellipsis } else { ch })
+            .collect();
+        if chars.len() > budget {
+            chars.truncate(budget);
+            chars[budget - 1] = ellipsis;
+        }
+        let column = match align {
+            fm_layout::TextAlign::Start => left,
+            fm_layout::TextAlign::Middle => left + budget.saturating_sub(chars.len()) / 2,
+            fm_layout::TextAlign::End => right.saturating_sub(chars.len()),
+        };
+        for (offset, ch) in chars.into_iter().enumerate() {
+            buffer.set(column + offset, row, ch);
         }
     }
 }
 
-/// A HORIZONTAL xychart in cells: one row band per category, its label left of the axis and each
-/// series' bar growing rightward from it, as `xychart-beta horizontal` draws upstream.
-fn render_xychart_horizontal_cell(
-    buffer: &mut CellBuffer,
-    xy_meta: &fm_core::IrXyChartMeta,
-    cell_width: usize,
-    chart_top: usize,
-    chart_bottom: usize,
-    show_labels: bool,
+/// Hatch each strip between an area series and its zero baseline. Working along the category
+/// axis avoids self-intersecting fill polygons when successive values cross zero.
+fn fill_xychart_area(
+    canvas: &mut Canvas,
+    points: &[(isize, isize)],
+    baseline: isize,
+    horizontal: bool,
 ) {
-    let categories = &xy_meta.x_axis.categories;
-    let rows = xy_meta
-        .series
-        .iter()
-        .map(|series| series.values.len())
-        .max()
-        .unwrap_or(0)
-        .max(categories.len())
-        .max(1);
-    let label_width = if show_labels {
-        categories
-            .iter()
-            .map(|category| category.chars().count())
-            .max()
-            .unwrap_or(0)
-            .clamp(1, cell_width / 3)
+    let (width, height) = canvas.pixel_dimensions();
+    let (category_extent, value_extent) = if horizontal {
+        (height, width)
     } else {
-        0
+        (width, height)
     };
-    let axis_x = label_width + 1;
-    let chart_right = cell_width.saturating_sub(2);
-    let chart_w = chart_right.saturating_sub(axis_x + 1);
-    if chart_w < 2 {
+    if category_extent == 0 || value_extent == 0 {
         return;
     }
-    for row in chart_top..=chart_bottom {
-        buffer.set(axis_x, row, '\u{2502}'); // │
-    }
-
-    let max_val = xy_meta
-        .series
-        .iter()
-        .flat_map(|series| series.values.iter().copied())
-        .fold(0.0_f32, f32::max)
-        .max(f32::EPSILON);
-    let series_count = xy_meta.series.len().max(1);
-    let band = (chart_bottom.saturating_sub(chart_top) + 1) / rows;
-    let bar_chars: &[char] = &['\u{2588}', '\u{2593}', '\u{2592}', '\u{2591}']; // █ ▓ ▒ ░
-    for index in 0..rows {
-        let band_top = chart_top + index * band.max(1);
-        if band_top > chart_bottom {
-            break;
-        }
-        if show_labels && let Some(category) = categories.get(index) {
-            let label: String = category.chars().take(label_width).collect();
-            let x = axis_x.saturating_sub(label.chars().count() + 1);
-            buffer.set_string(x, band_top, &label);
-        }
-        for (series_idx, series) in xy_meta.series.iter().enumerate() {
-            let Some(&value) = series.values.get(index) else {
-                continue;
+    for pair in points.windows(2) {
+        let (a, b) = if horizontal {
+            ((pair[0].1, pair[0].0), (pair[1].1, pair[1].0))
+        } else {
+            (pair[0], pair[1])
+        };
+        let start = a.0.min(b.0).max(0);
+        let end = a.0.max(b.0).min(category_extent as isize - 1);
+        for category in start..=end {
+            let ratio = if a.0 == b.0 {
+                0.5
+            } else {
+                (category - a.0) as f64 / (b.0 - a.0) as f64
             };
-            let row = band_top + series_idx.min(band.saturating_sub(1).max(series_count - 1));
-            if row > chart_bottom {
-                continue;
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let length = ((value.max(0.0) / max_val) * chart_w as f32) as usize;
-            let bar_ch = bar_chars[series_idx % bar_chars.len()];
-            for col in 0..length.min(chart_w) {
-                buffer.set(axis_x + 1 + col, row, bar_ch);
+            let value = ((b.1 - a.1) as f64).mul_add(ratio, a.1 as f64).round() as isize;
+            let low = value.min(baseline).max(0);
+            let high = value.max(baseline).min(value_extent as isize - 1);
+            for value in low..=high {
+                if (category + value) % 4 == 0 {
+                    let (x, y) = if horizontal {
+                        (value, category)
+                    } else {
+                        (category, value)
+                    };
+                    canvas.set_pixel(x as usize, y as usize);
+                }
             }
         }
     }
@@ -4648,6 +6346,232 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pie_cell_raster_preserves_clockwise_quadrants_and_proportions() {
+        let config = TermRenderConfig {
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            show_labels: false,
+            padding: 0,
+            max_width: 160,
+            max_height: 80,
+            ..TermRenderConfig::default()
+        };
+        let ir = fm_parser::parse("pie\n\"A\":1\n\"B\":1\n\"C\":1\n\"D\":1").ir;
+        let result = crate::render_term_with_config(&ir, &config, 160, 80);
+        let mut counts = [0_usize; 4];
+        let mut centers = [(0_usize, 0_usize); 4];
+        for (row, line) in result.output.lines().enumerate() {
+            for (column, ch) in line.chars().enumerate() {
+                if let Some(index) = ['#', '*', '@', '+'].iter().position(|&mark| mark == ch) {
+                    counts[index] += 1;
+                    centers[index].0 += column;
+                    centers[index].1 += row;
+                }
+            }
+        }
+        assert!(counts.iter().all(|&count| count > 100), "{counts:?}");
+        assert!(
+            counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 2,
+            "{counts:?}"
+        );
+        for (index, &(x, y)) in centers.iter().enumerate() {
+            let right = x / counts[index] >= result.width / 2;
+            let bottom = y / counts[index] >= result.height / 2;
+            assert_eq!(
+                (right, bottom),
+                [(true, false), (true, true), (false, true), (false, false)][index]
+            );
+        }
+
+        let ir = fm_parser::parse("pie\n\"A\":1\n\"B\":2\n\"C\":3").ir;
+        let result = crate::render_term_with_config(&ir, &config, 160, 80);
+        let counts = ['#', '*', '@'].map(|mark| result.output.matches(mark).count());
+        let total = counts.iter().sum::<usize>() as f64;
+        for (count, fraction) in counts.into_iter().zip([1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0]) {
+            assert!(
+                (count as f64 / total - fraction).abs() < 0.02,
+                "pie lost its authored ratios"
+            );
+        }
+    }
+
+    #[test]
+    fn pie_all_modes_draw_sectors_legend_values_and_one_title() {
+        let ir = fm_parser::parse(
+            "pie showData title Allocation\n\"Alpha\":2\n\"Beta\":2\n\"Gamma\":2\n\"Delta\":2",
+        )
+        .ir;
+        for tier in [MermaidTier::Compact, MermaidTier::Normal, MermaidTier::Rich] {
+            for mode in [
+                MermaidRenderMode::CellOnly,
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::Block,
+                MermaidRenderMode::HalfBlock,
+            ] {
+                let config = TermRenderConfig {
+                    tier,
+                    render_mode: mode,
+                    max_width: 160,
+                    max_height: 60,
+                    ..TermRenderConfig::rich()
+                };
+                let result = crate::render_term_with_config(&ir, &config, 160, 60);
+                assert_eq!(
+                    result.output.matches("Allocation").count(),
+                    1,
+                    "{tier:?}/{mode:?}"
+                );
+                for label in ["Alpha", "Beta", "Gamma", "Delta"] {
+                    assert!(
+                        result.output.contains(label),
+                        "{tier:?}/{mode:?}: {label}\n{}",
+                        result.output
+                    );
+                }
+                assert_eq!(result.output.matches("25% [2]").count(), 4);
+                for mark in ['#', '*', '@', '+'] {
+                    assert!(
+                        result.output.matches(mark).count() >= 2,
+                        "slice {mark} has a legend but no sector: {tier:?}/{mode:?}\n{}",
+                        result.output
+                    );
+                }
+                let effective = if tier == MermaidTier::Compact {
+                    MermaidRenderMode::CellOnly
+                } else {
+                    mode
+                };
+                assert_eq!(result.render_mode, effective);
+                if effective == MermaidRenderMode::Braille {
+                    assert!(
+                        result
+                            .output
+                            .chars()
+                            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                    );
+                }
+                assert_eq!(result.occluded_node_count, 0);
+                assert_eq!(
+                    result.output,
+                    crate::render_term_with_config(&ir, &config, 160, 60).output
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_zero_invalid_and_extreme_values_do_not_invent_or_lose_area() {
+        let mut ir = fm_parser::parse("pie\n\"A\":1\n\"B\":1\n\"C\":1\n\"D\":1").ir;
+        let layout = layout_diagram(&ir);
+        let config = TermRenderConfig {
+            show_labels: false,
+            padding: 0,
+            ..TermRenderConfig::compact()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        for values in [
+            [0.0, 1.0, 0.0, 0.0],
+            [f32::NAN, f32::INFINITY, -2.0, 0.0],
+            [f32::MAX, f32::MAX, f32::MAX, f32::MAX],
+            [1.0e-30, 1.0e-30, 1.0e-30, 1.0e-30],
+        ] {
+            let meta = ir.pie_meta.as_mut().unwrap();
+            for (slice, value) in meta.slices.iter_mut().zip(values) {
+                slice.value = value;
+            }
+            let result = renderer.render_pie(&ir, ir.pie_meta.as_ref().unwrap(), &layout, (80, 24));
+            let counts = ['#', '*', '@', '+'].map(|mark| result.output.matches(mark).count());
+            if values[0] == 0.0 {
+                assert_eq!((counts[0], counts[2], counts[3]), (0, 0, 0));
+                assert!(counts[1] > 0);
+            } else if values[0].is_nan() {
+                assert!(
+                    result.output.trim().is_empty(),
+                    "invalid values created a positive wedge"
+                );
+            } else {
+                assert!(counts.iter().all(|&count| count > 0));
+                assert!(
+                    counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 2,
+                    "{counts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_caps_unicode_captions_and_empty_charts_to_the_viewport() {
+        let ir =
+            fm_parser::parse("pie showData title 販売\u{1b}[31m\n\"国内🚀\":20\n\"国外\":30").ir;
+        let layout = layout_diagram(&ir);
+        for (width, height) in [(0, 0), (1, 1), (8, 4), (19, 10), (40, 12), (100, 40)] {
+            let result = crate::render_term_with_layout_and_config(
+                &ir,
+                &layout,
+                &TermRenderConfig::rich(),
+                width,
+                height,
+            );
+            assert!(result.width <= width && result.height <= height);
+            assert!(result.output.lines().count() <= height);
+            assert!(
+                result.output.lines().all(|line| line.width() <= width),
+                "{width}x{height}: {}",
+                result.output
+            );
+            assert!(!result.output.contains('\u{1b}'));
+        }
+        let empty = fm_parser::parse("pie title Empty").ir;
+        let result = crate::render_term_with_config(&empty, &TermRenderConfig::rich(), 80, 24);
+        assert_eq!(result.output.matches("Empty").count(), 1);
+        assert_eq!(result.occluded_node_count, 0);
+
+        let mut config = TermRenderConfig::rich();
+        config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
+        config.max_label_chars = 8;
+        let ir = fm_parser::parse("pie title LongTitleForClipping\n\"LongSliceLabel\":1").ir;
+        let result = crate::render_term_with_config(&ir, &config, 40, 12);
+        assert!(result.output.is_ascii(), "{}", result.output);
+        assert_eq!(result.render_mode, MermaidRenderMode::CellOnly);
+    }
+
+    #[test]
+    fn pie_selection_remains_visible_in_chart_and_legend() {
+        let ir = fm_parser::parse("pie\n\"Alpha\":1\n\"Beta\":1").ir;
+        for mode in [MermaidRenderMode::CellOnly, MermaidRenderMode::Braille] {
+            for show_labels in [false, true] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    show_labels,
+                    ..TermRenderConfig::rich()
+                };
+                let plain = crate::render_term_with_config(&ir, &config, 100, 40);
+                let selected = crate::render_term_with_config(
+                    &ir,
+                    &TermRenderConfig {
+                        selected_node: Some(1),
+                        ..config
+                    },
+                    100,
+                    40,
+                );
+                assert_ne!(plain.output, selected.output);
+                assert_eq!(
+                    selected.output.matches('>').count(),
+                    if show_labels { 2 } else { 1 }
+                );
+                if show_labels {
+                    assert!(selected.output.contains(">* 50% Beta"));
+                }
+                assert_eq!(
+                    (plain.width, plain.height),
+                    (selected.width, selected.height)
+                );
+            }
+        }
+    }
+
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.direction = GraphDirection::LR;
@@ -4838,6 +6762,578 @@ mod tests {
         assert_eq!(renderer.truncate_label("two  spaces"), "two spaces");
         assert_eq!(renderer.truncate_label("tab\there"), "tab here");
         assert_eq!(renderer.truncate_label("界面 42"), "界面 42");
+    }
+
+    #[test]
+    fn edge_labels_search_the_whole_frame_and_leave_a_text_gutter() {
+        assert_eq!(
+            place_edge_label(&[(0, 0, 10, 8)], 5, 0, 4, 1, 10, 12),
+            (3, 8),
+            "free rows beyond half of the viewport must be considered"
+        );
+        assert_eq!(
+            place_edge_label(&[(3, 0, 7, 12)], 5, 4, 4, 1, 14, 12),
+            (8, 4),
+            "a full-height obstruction requires a horizontal slide"
+        );
+        assert_eq!(
+            place_edge_label(&[], 79, 23, 22, 2, 80, 24),
+            (58, 22),
+            "the whole measured plate must remain inside the frame"
+        );
+        let (x, y) = place_edge_label(&[(0, 0, 4, 1)], 4, 0, 4, 1, 12, 1);
+        assert_eq!((x, y), (5, 0));
+        assert!(x > 4, "adjacent labels need a separating blank cell");
+    }
+
+    fn cyclic_state_ir() -> MermaidDiagramIr {
+        fm_parser::parse(concat!(
+            "stateDiagram-v2\n",
+            "[*] --> Idle\n",
+            "Idle --> Starting: Space down / tap\n",
+            "Starting --> Idle: closed\n",
+            "Starting --> Recording: opened\n",
+            "Starting --> Releasing: Space up, focus lost\n",
+            "Recording --> Idle: closed\n",
+            "Recording --> Stopping: Space up, focus lost / tap\n",
+            "Releasing --> Idle: closed\n",
+            "Releasing --> Stopping: opened / tap\n",
+            "Stopping --> Settling: closed\n",
+            "Settling --> Idle: quiet 1 s\n",
+            "Settling --> Stopping: opened / tap\n",
+        ))
+        .ir
+    }
+
+    #[test]
+    fn state_markers_keep_their_fill_rings_and_scaled_connection_ports() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\nstate Fork <<fork>>\n[*] --> Fork\nFork --> Active\nActive --> [*]\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        let renderer =
+            TermRenderer::new(ResolvedConfig::resolve(&TermRenderConfig::rich(), 100, 40));
+        for shape in [
+            NodeShape::FilledCircle,
+            NodeShape::DoubleCircle,
+            NodeShape::HorizontalBar,
+        ] {
+            let mut node = layout
+                .nodes
+                .iter()
+                .find(|node| ir.nodes[node.node_index].shape == shape)
+                .expect("parsed state marker")
+                .clone();
+            node.bounds.x = 16.0;
+            node.bounds.y = 16.0;
+            for (scale_x, scale_y) in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)] {
+                let mut canvas = Canvas::new(100, 40, MermaidRenderMode::Braille);
+                renderer.render_node_canvas(&mut canvas, &ir, &node, scale_x, scale_y, 0, 0, 0);
+                let center = node.bounds.center();
+                let cx = (center.x * scale_x) as usize;
+                let cy = (center.y * scale_y) as usize;
+                assert!(
+                    canvas.get_pixel(cx, cy),
+                    "{shape:?} must have a filled centre"
+                );
+                if shape == NodeShape::HorizontalBar {
+                    continue;
+                }
+                let radius = node.bounds.width.min(node.bounds.height) * 0.5;
+                let rx = (radius * scale_x) as usize;
+                let ry = (radius * scale_y) as usize;
+                for (x, y) in [(cx - rx, cy), (cx + rx, cy), (cx, cy - ry), (cx, cy + ry)] {
+                    assert!(
+                        canvas.get_pixel(x, y),
+                        "{shape:?} lost a connection port under scale ({scale_x}, {scale_y})"
+                    );
+                }
+                assert!(
+                    !canvas.get_pixel(cx + rx, cy + ry),
+                    "a circular mark must not become a rectangle"
+                );
+                if shape == NodeShape::DoubleCircle {
+                    let inner_x = ((radius - 4.0).max(radius * 0.5) * scale_x) as usize;
+                    if rx > inner_x + 1 {
+                        assert!(
+                            !canvas.get_pixel(cx + inner_x + 1, cy),
+                            "the final marker needs a clear annulus"
+                        );
+                    }
+                    let mut flowchart = ir.clone();
+                    flowchart.diagram_type = DiagramType::Flowchart;
+                    canvas.clear();
+                    renderer.render_node_canvas(
+                        &mut canvas,
+                        &flowchart,
+                        &node,
+                        scale_x,
+                        scale_y,
+                        0,
+                        0,
+                        0,
+                    );
+                    assert!(
+                        !canvas.get_pixel(cx, cy),
+                        "a flowchart double circle stays hollow"
+                    );
+                    assert!(
+                        canvas.get_pixel(cx + inner_x, cy),
+                        "a flowchart double circle needs its second ring"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_state_markers_are_distinct_and_connected_in_both_glyph_modes() {
+        let ir = fm_parser::parse("stateDiagram-v2\n[*] --> Idle\nIdle --> [*]\n").ir;
+        let layout = layout_diagram(&ir);
+        for (mode, start, end) in [
+            (fm_core::MermaidGlyphMode::Unicode, '●', '◉'),
+            (fm_core::MermaidGlyphMode::Ascii, '*', '@'),
+        ] {
+            let config = TermRenderConfig {
+                glyph_mode: mode,
+                ..TermRenderConfig::compact()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let result = renderer.render_layout(&ir, &layout);
+            assert!(result.output.contains("Idle"));
+            assert!(!result.output.contains("__state"));
+            let grid: Vec<Vec<char>> = result
+                .output
+                .lines()
+                .map(|line| line.chars().collect())
+                .collect();
+            for glyph in [start, end] {
+                assert_eq!(result.output.matches(glyph).count(), 1, "{}", result.output);
+                let (y, x) = grid
+                    .iter()
+                    .enumerate()
+                    .find_map(|(y, row)| row.iter().position(|ch| *ch == glyph).map(|x| (y, x)))
+                    .unwrap();
+                let connected = (y.saturating_sub(1)..=(y + 1).min(grid.len() - 1)).any(|ny| {
+                    (x.saturating_sub(1)..=(x + 1).min(grid[ny].len().saturating_sub(1))).any(
+                        |nx| (nx, ny) != (x, y) && grid[ny].get(nx).is_some_and(|ch| *ch != ' '),
+                    )
+                });
+                assert!(
+                    connected,
+                    "state marker {glyph} is detached:\n{}",
+                    result.output
+                );
+            }
+            if mode == fm_core::MermaidGlyphMode::Ascii {
+                assert!(result.output.is_ascii());
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_cyclic_state_keeps_a_visible_start_transition() {
+        let ir = cyclic_state_ir();
+        let layout = layout_diagram(&ir);
+        let start = layout
+            .nodes
+            .iter()
+            .find(|node| ir.nodes[node.node_index].shape == NodeShape::FilledCircle)
+            .unwrap();
+        let path = layout
+            .edges
+            .iter()
+            .find(|path| {
+                ir.resolve_endpoint_node(ir.edges[path.edge_index].from)
+                    == Some(IrNodeId(start.node_index))
+            })
+            .expect("start transition reaches layout");
+        let mut without_entry = layout.clone();
+        without_entry
+            .edges
+            .retain(|edge| edge.edge_index != path.edge_index);
+        for mode in [
+            MermaidRenderMode::Braille,
+            MermaidRenderMode::HalfBlock,
+            MermaidRenderMode::Block,
+        ] {
+            let config = TermRenderConfig {
+                render_mode: mode,
+                ..TermRenderConfig::default()
+            };
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+            let (cols, rows, sx, sy) =
+                renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+            let (mx, my) = renderer.config.subcell_multiplier();
+            let mut marker = Canvas::new(cols, rows, mode);
+            renderer.render_node_canvas(
+                &mut marker,
+                &ir,
+                start,
+                sx * mx as f32,
+                sy * my as f32,
+                renderer.config.padding * mx,
+                renderer.config.padding * my,
+                0,
+            );
+            let port = path.points[0];
+            let px = (port.x * sx * mx as f32) as usize + renderer.config.padding * mx;
+            let py = (port.y * sy * my as f32) as usize + renderer.config.padding * my;
+            assert!(
+                (py.saturating_sub(1)..=py + 1)
+                    .any(|y| (px.saturating_sub(1)..=px + 1).any(|x| marker.get_pixel(x, y))),
+                "the start transition's port is detached from its {mode:?} marker"
+            );
+            let result = renderer.render_layout(&ir, &layout);
+            let control = renderer.render_layout(&ir, &without_entry);
+            let control_grid: Vec<Vec<char>> = control
+                .output
+                .lines()
+                .map(|line| line.chars().collect())
+                .collect();
+            let (x, y, w, h) = renderer.bounds_to_cells(&start.bounds, sx, sy);
+            let visible_route_cells = result
+                .output
+                .lines()
+                .enumerate()
+                .map(|(row, drawn)| {
+                    drawn
+                        .chars()
+                        .enumerate()
+                        .filter(|(col, ch)| {
+                            *ch != control_grid
+                                .get(row)
+                                .and_then(|line| line.get(*col))
+                                .copied()
+                                .unwrap_or(' ')
+                                && !(row >= y && row <= y + h && *col >= x && *col <= x + w)
+                        })
+                        .count()
+                })
+                .sum::<usize>();
+            assert!(
+                visible_route_cells >= 2,
+                "start transition vanished beneath the overlays in {mode:?}:\n{}",
+                result.output
+            );
+            assert!(result.width <= 80 && result.height <= 24);
+        }
+    }
+
+    #[test]
+    fn cyclic_state_labels_remain_separate_and_complete_in_terminal_cells() {
+        // GitHub #16/#17: duplicate transition text and shared return corridors used to fuse
+        // labels, and a long transition's second row was painted through other routes.
+        let ir = cyclic_state_ir();
+        assert_eq!(ir.edges.len(), 12);
+        let cases = [
+            (TermRenderConfig::default(), 80, 24),
+            (
+                TermRenderConfig {
+                    render_mode: MermaidRenderMode::HalfBlock,
+                    ..TermRenderConfig::rich()
+                },
+                110,
+                40,
+            ),
+            (
+                TermRenderConfig {
+                    glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+                    ..TermRenderConfig::rich()
+                },
+                110,
+                40,
+            ),
+        ];
+        for (config, cols, rows) in cases {
+            let result = render_diagram_with_config(&ir, &config, cols, rows);
+            assert!(result.width <= cols && result.height <= rows);
+            assert_eq!(
+                result.output,
+                render_diagram_with_config(&ir, &config, cols, rows).output,
+                "placement must be deterministic"
+            );
+            for name in [
+                "Idle",
+                "Starting",
+                "Recording",
+                "Releasing",
+                "Stopping",
+                "Settling",
+            ] {
+                assert!(
+                    result.output.contains(name),
+                    "lost state {name}:\n{}",
+                    result.output
+                );
+            }
+            assert_eq!(
+                result.output.matches("closed").count(),
+                4,
+                "{}",
+                result.output
+            );
+            assert_eq!(
+                result.output.matches("opened / tap").count(),
+                2,
+                "{}",
+                result.output
+            );
+            for text in ["Space down / tap", "Space up, focus lost", "quiet 1 s"] {
+                assert!(
+                    result.output.contains(text),
+                    "lost transition {text}:\n{}",
+                    result.output
+                );
+            }
+            let grid: Vec<Vec<char>> = result
+                .output
+                .lines()
+                .map(|row| row.chars().collect())
+                .collect();
+            for text in ["closed", "opened / tap", "Space down / tap", "quiet 1 s"] {
+                let chars: Vec<char> = text.chars().collect();
+                for row in &grid {
+                    for (x, segment) in row.windows(chars.len()).enumerate() {
+                        if segment == chars.as_slice() {
+                            assert!(
+                                x == 0 || row[x - 1] == ' ',
+                                "no left gutter for {text}:\n{}",
+                                result.output
+                            );
+                            assert!(
+                                x + chars.len() == row.len() || row[x + chars.len()] == ' ',
+                                "no right gutter for {text}:\n{}",
+                                result.output
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+            assert_eq!(
+                result.output.matches("Space up, focus lost / tap").count(),
+                1,
+                "a complete 25-column caption fits on one row at these widths:\n{}",
+                result.output,
+            );
+            assert!(result.output.lines().all(|line| line.width() <= cols));
+        }
+    }
+
+    #[test]
+    fn terminal_label_blocks_are_bounded_and_separated_after_quantization() {
+        let ir = cyclic_state_ir();
+        let layout = layout_diagram(&ir);
+        for cols in [40, 60, 80, 110] {
+            for mode in [
+                MermaidRenderMode::Braille,
+                MermaidRenderMode::HalfBlock,
+                MermaidRenderMode::CellOnly,
+            ] {
+                let config = TermRenderConfig {
+                    render_mode: mode,
+                    ..Default::default()
+                };
+                let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, cols, 24));
+                let (width, height, sx, sy) =
+                    renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+                let mut grid = vec![vec![' '; width]; height];
+                let (labels, occluded) =
+                    renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, sx, sy, &[]);
+                assert_eq!(
+                    labels.iter().filter(|label| !label.is_callout).count() + occluded,
+                    11
+                );
+                for (index, label) in labels.iter().enumerate() {
+                    assert!(label.x + label.width < width && label.y + label.lines.len() <= height);
+                    for other in &labels[..index] {
+                        let horizontal =
+                            label.x <= other.x + other.width && other.x <= label.x + label.width;
+                        let vertical = label.y < other.y + other.lines.len()
+                            && other.y < label.y + label.lines.len();
+                        assert!(
+                            !(horizontal && vertical),
+                            "labels merge at {cols} columns in {mode:?}"
+                        );
+                    }
+                    if label.is_callout {
+                        let caption = labels
+                            .iter()
+                            .find(|caption| {
+                                !caption.is_callout && caption.edge_index == label.edge_index
+                            })
+                            .expect("every badge has a visible caption");
+                        assert!(caption.lines[0].starts_with(&label.lines[0]));
+                        let path = layout
+                            .edges
+                            .iter()
+                            .find(|path| path.edge_index == label.edge_index)
+                            .unwrap();
+                        let route = renderer.edge_label_route_grid(
+                            &ir, &layout, path, false, width, height, sx, sy,
+                        );
+                        let adjacent = route
+                            .iter()
+                            .take((label.y + 2).min(height))
+                            .skip(label.y.saturating_sub(1))
+                            .any(|row| {
+                                row.iter()
+                                    .take((label.x + label.width + 2).min(width))
+                                    .skip(label.x.saturating_sub(2))
+                                    .any(|&cell| !blank_terminal_cell(cell))
+                            });
+                        assert!(
+                            adjacent,
+                            "badge must touch or sit beside its own rasterized route"
+                        );
+                    }
+                }
+                let result = renderer.render_layout(&ir, &layout);
+                assert!(
+                    result.output.lines().all(|line| line.width() <= cols),
+                    "{}",
+                    result.output
+                );
+                assert_eq!(result.output, renderer.render_layout(&ir, &layout).output);
+            }
+        }
+    }
+
+    #[test]
+    fn detached_caption_has_a_matching_local_callout_and_never_an_orphan() {
+        let text = "the complete transition caption remains readable";
+        let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B")).ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes[0].bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 3.0,
+            width: 20.0,
+            height: 4.0,
+        };
+        layout.nodes[1].bounds = fm_layout::LayoutRect {
+            x: 40.0,
+            y: 3.0,
+            width: 20.0,
+            height: 4.0,
+        };
+        layout.edges[0].points = [
+            fm_layout::LayoutPoint { x: 20.0, y: 5.0 },
+            fm_layout::LayoutPoint { x: 40.0, y: 5.0 },
+        ]
+        .into_iter()
+        .collect();
+        let config = TermRenderConfig {
+            tier: MermaidTier::Normal,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 60, 12));
+        let mut grid = vec![vec![' '; 60]; 12];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut grid, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 0);
+        let caption = labels
+            .iter()
+            .find(|label| !label.is_callout)
+            .expect("complete caption");
+        let badge = labels
+            .iter()
+            .find(|label| label.is_callout)
+            .expect("local route badge");
+        assert_eq!(labels.len(), 2);
+        assert_eq!(caption.lines, [format!("[1] {text}")]);
+        assert_eq!(badge.lines, ["[1]"]);
+        assert!(badge.x >= 21 && badge.x + badge.width < 40);
+        assert!(
+            (4..=6).contains(&badge.y),
+            "badge must stay beside the horizontal route"
+        );
+        let output = serialize_cell_labels(&grid, &labels, false);
+        assert_eq!(output.matches("[1]").count(), 2);
+        assert_eq!(output.matches(text).count(), 1);
+
+        let mut impossible = vec![vec![' '; 6]; 1];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut impossible, &ir, &layout, 1.0, 1.0, &[]);
+        assert_eq!(occluded, 1);
+        assert!(
+            labels.is_empty(),
+            "a badge without its caption would misidentify the route"
+        );
+        let mut too_narrow = vec![vec![' '; 2]; 1];
+        let (labels, occluded) =
+            renderer.overlay_graph_edge_labels(&mut too_narrow, &ir, &layout, 1.0, 1.0, &[]);
+        assert!(labels.is_empty());
+        assert_eq!(
+            occluded, 1,
+            "an impossible grid must report the missing caption"
+        );
+    }
+
+    #[test]
+    fn cell_only_uses_shared_placement_and_keeps_both_cycle_captions() {
+        let ir = fm_parser::parse("flowchart LR\nA -->|sent| B\nB -->|acknowledged| A").ir;
+        let config = TermRenderConfig {
+            render_mode: MermaidRenderMode::CellOnly,
+            ..Default::default()
+        };
+        let result = render_diagram_with_config(&ir, &config, 80, 24);
+        assert_eq!(result.occluded_edge_label_count, 0, "{}", result.output);
+        for text in ["sent", "acknowledged"] {
+            assert_eq!(result.output.matches(text).count(), 1, "{}", result.output);
+        }
+    }
+
+    #[test]
+    fn unicode_edge_labels_use_display_columns_and_keep_fitting_long_words() {
+        let text = "界面 e\u{301} ready";
+        let mut label = CellLabel::new(0, false, vec![text.to_owned()]);
+        label.x = 2;
+        assert_eq!(label.width, 12);
+        let output = serialize_cell_labels(&[vec![' '; 30]], &[label], false);
+        assert_eq!(output.width(), 30);
+        assert!(output.contains(text));
+        let long = "aLongTransitionIdentifier";
+        assert!(long.width() > 24);
+        assert_eq!(wrap_cell_label(&edge_caption_text(long, 48), 78, 2), [long]);
+        let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B\nB -->|{long}| A")).ir;
+        let rendered = render_diagram(&ir);
+        assert_eq!(rendered.occluded_edge_label_count, 0, "{}", rendered.output);
+        assert!(rendered.output.contains(text), "{}", rendered.output);
+        assert!(rendered.output.contains(long), "{}", rendered.output);
+        assert!(rendered.output.lines().all(|line| line.width() <= 80));
+        let wrapped = wrap_cell_label("界面 文本 界面 文本", 8, 2);
+        assert!(wrapped.iter().all(|line| line.width() <= 8));
+    }
+
+    #[test]
+    fn graph_node_name_uses_the_interior_row_at_fractional_cell_height() {
+        let ir = fm_parser::parse("flowchart TB\nA[Alpha]").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes[0].bounds = fm_layout::LayoutRect {
+            x: 10.0,
+            y: 0.0,
+            width: 100.0,
+            height: 28.0,
+        };
+        layout.bounds = fm_layout::LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 220.0,
+        };
+        let result = render_diagram_with_layout_and_config(
+            &ir,
+            &layout,
+            &TermRenderConfig::default(),
+            80,
+            24,
+        );
+        let rows: Vec<_> = result.output.lines().collect();
+        assert!(rows[2].contains("Alpha"), "{}", result.output);
+        assert!(!rows[1].contains("Alpha"), "name erased the top border");
+        assert!(!rows[3].contains("Alpha"), "name erased the bottom border");
     }
 
     #[inline]
@@ -5595,5 +8091,197 @@ mod tests {
                 .chars()
                 .all(|ch| ch.is_whitespace() || ch == '⠀')
         );
+    }
+
+    #[test]
+    fn debug_overlay_appends_stats_banner_when_enabled() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+
+        let default_res = render_diagram_with_config(&ir, &TermRenderConfig::default(), 60, 20);
+        assert!(!default_res.output.contains("[layout debug]"));
+        assert!(default_res.debug_metrics.is_none());
+
+        let debug_cfg = TermRenderConfig {
+            debug_overlay: true,
+            ..TermRenderConfig::default()
+        };
+        let debug_res = render_diagram_with_config(&ir, &debug_cfg, 60, 20);
+        assert!(debug_res.output.contains("[layout debug]"));
+        assert!(debug_res.output.contains("nodes=2"));
+        assert!(debug_res.output.contains("edges=0"));
+        assert_eq!(debug_res.height, default_res.height);
+        assert_eq!(debug_res.width, default_res.width);
+
+        let mut banner = String::new();
+        let (rows, _width) = append_term_debug_overlay(&mut banner, &layout_diagram(&ir));
+        assert_eq!(rows, 1);
+        assert!(banner.contains("[debug: nodes=2 edges=0"));
+    }
+
+    #[test]
+    fn cell_mode_renders_treemap_radar_and_notes() {
+        let compact = TermRenderConfig::compact();
+
+        // 1. Treemap in Compact / CellOnly mode
+        let mut treemap_ir = MermaidDiagramIr::empty(DiagramType::Treemap);
+        treemap_ir.treemap_meta = Some(fm_core::IrTreemapMeta {
+            nodes: vec![
+                fm_core::IrTreemapItem {
+                    label: "Root".to_string(),
+                    value: None,
+                    parent: None,
+                    children: vec![1],
+                    depth: 0,
+                    ..Default::default()
+                },
+                fm_core::IrTreemapItem {
+                    label: "LeafA".to_string(),
+                    value: Some(40.0),
+                    parent: Some(0),
+                    children: Vec::new(),
+                    depth: 1,
+                    ..Default::default()
+                },
+            ],
+            roots: vec![0],
+        });
+        let treemap_res = render_diagram_with_config(&treemap_ir, &compact, 80, 24);
+        assert!(
+            treemap_res.output.contains("LeafA"),
+            "Compact cell mode must render treemap leaf labels: {}",
+            treemap_res.output
+        );
+
+        // 2. Radar in Compact / CellOnly mode
+        let mut radar_ir = MermaidDiagramIr::empty(DiagramType::Radar);
+        radar_ir.radar_meta = Some(fm_core::IrRadarMeta {
+            axes: vec![
+                fm_core::IrRadarAxis {
+                    id: "A".to_string(),
+                    label: Some("Speed".to_string()),
+                    span: Default::default(),
+                },
+                fm_core::IrRadarAxis {
+                    id: "B".to_string(),
+                    label: Some("Power".to_string()),
+                    span: Default::default(),
+                },
+                fm_core::IrRadarAxis {
+                    id: "C".to_string(),
+                    label: Some("Range".to_string()),
+                    span: Default::default(),
+                },
+            ],
+            curves: vec![fm_core::IrRadarCurve {
+                id: "c1".to_string(),
+                label: Some("Bot".to_string()),
+                values: vec![80.0, 60.0, 90.0],
+                span: Default::default(),
+            }],
+            show_legend: true,
+            ..Default::default()
+        });
+        let radar_res = render_diagram_with_config(&radar_ir, &compact, 80, 24);
+        assert!(
+            radar_res.output.contains("Speed") && radar_res.output.contains("Bot"),
+            "Compact cell mode must render radar axis labels and legend: {}",
+            radar_res.output
+        );
+    }
+
+    #[test]
+    fn outline_fidelity_and_selection_and_footnote_links_render_end_to_end() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut node_a = IrNode {
+            id: "Alpha".to_string(),
+            ..IrNode::default()
+        };
+        node_a.interaction_mut().href = Some("https://example.com/alpha".to_string());
+        let node_b = IrNode {
+            id: "Beta".to_string(),
+            ..IrNode::default()
+        };
+        ir.nodes.push(node_a);
+        ir.nodes.push(node_b);
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            crate::select_fidelity(0.2, 0.2, 0.1, 2, 14, 5, fm_core::MermaidTier::Auto),
+            fm_core::MermaidFidelity::Outline
+        );
+
+        let selection = crate::SelectionState::from_selected(0, &ir);
+        assert_eq!(selection.selected_node, Some(0));
+        assert_eq!(selection.highlighted_nodes, vec![1]);
+
+        let adj = crate::build_adjacency(&ir);
+        assert_eq!(adj[0], vec![1]);
+        let layout = layout_diagram(&ir);
+        let next = crate::navigate_direction(&layout, 0, 1.0, 0.0)
+            .or_else(|| crate::navigate_direction(&layout, 0, 0.0, 1.0));
+        assert_eq!(next, Some(1));
+
+        let mut cfg = TermRenderConfig::compact().with_selection(&selection);
+        cfg.link_mode = fm_core::MermaidLinkMode::Footnote;
+        let res = render_diagram_with_config(&ir, &cfg, 80, 24);
+        assert!(res.output.contains("▶ Alpha [1]"), "{}", res.output);
+        assert!(res.output.contains("• Beta"), "{}", res.output);
+        assert!(
+            res.output.contains("[1] Alpha: https://example.com/alpha"),
+            "{}",
+            res.output
+        );
+
+        let outline_cfg = TermRenderConfig::outline().with_selection(&selection);
+        let outline_res = render_diagram_with_config(&ir, &outline_cfg, 80, 24);
+        assert!(!outline_res.output.is_empty(), "{}", outline_res.output);
+        assert!(
+            !outline_res.output.contains("Alpha"),
+            "outline cell renderer leaked a label: {}",
+            outline_res.output
+        );
+        assert!(
+            !outline_res.output.contains("Beta"),
+            "outline cell renderer leaked a label: {}",
+            outline_res.output
+        );
+
+        // The low-level marker renderer takes fitted cell scales, not layout-pixel scales.
+        // Its IDs obey the same label visibility setting as the public renderer.
+        let render_skeleton = |config: &TermRenderConfig| {
+            let renderer = TermRenderer::new(ResolvedConfig::resolve(config, 80, 24));
+            let (cols, rows, scale_x, scale_y) =
+                renderer.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
+            renderer.render_outline_mode(&ir, &layout, cols, rows, scale_x, scale_y)
+        };
+        let skeleton = render_skeleton(&TermRenderConfig::compact().with_selection(&selection));
+        assert!(skeleton.output.contains("▶[Alpha]"), "{}", skeleton.output);
+        assert!(skeleton.output.contains("[Beta]"), "{}", skeleton.output);
+
+        let textless = render_skeleton(&outline_cfg);
+        assert!(textless.output.contains("▶[]"), "{}", textless.output);
+        assert_eq!(
+            textless.output.matches("[]").count(),
+            2,
+            "{}",
+            textless.output
+        );
+        assert!(!textless.output.contains("Alpha"));
+        assert!(!textless.output.contains("Beta"));
+        assert!(textless.width <= outline_cfg.max_width);
+        assert!(textless.height <= outline_cfg.max_height);
     }
 }

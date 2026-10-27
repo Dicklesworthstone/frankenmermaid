@@ -27,6 +27,9 @@ pub use a11y::{
     describe_node,
 };
 pub use attributes::{Attribute, AttributeValue, Attributes, escape_xml_text};
+pub use cga_transform::{
+    CgaTransformStack, render_transform_to_svg_matrix, try_render_transform_to_cga,
+};
 pub use deck::{deck_manifest, render_svg_with_deck};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
@@ -54,9 +57,9 @@ use fm_layout::{
     LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
     MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
     RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
-    TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
-    format_xychart_tick_value, is_composite_state_node, resolve_xychart_y_domain,
-    sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
+    TextBaseline as RenderTextBaseline, build_render_scene_with_metrics,
+    certify_directed_path_layout_prefix, format_xychart_tick_value, is_composite_state_node,
+    resolve_xychart_y_domain, sankey_flow_stroke_width, sankey_node_label, sankey_widest_flow,
     try_relayout_directed_path_suffix, xychart_categories, xychart_value_to_y, xychart_y_ticks,
 };
 
@@ -213,9 +216,28 @@ pub struct SvgRenderConfig {
     /// A marker is drawn only when this parses as a real calendar date AND falls inside the charted
     /// span AND the diagram did not say `todayMarker off`.
     pub gantt_today: Option<String>,
+    /// Whether to emit a diagnostic debug overlay (`<g class="fm-debug-overlay">`) showing
+    /// bounding boxes, control points, and layout statistics (`bd-0l1x2`).
+    pub debug_overlay: bool,
 }
 
 impl SvgRenderConfig {
+    /// Use explicit presentation attributes and dimensions for static SVG consumers.
+    ///
+    /// Image converters such as resvg and librsvg do not implement every browser CSS
+    /// feature. This disables theme custom properties, responsive sizing, animations,
+    /// and effects that require browser styling while retaining labels, links, source
+    /// metadata, and accessible titles/descriptions. PNG export uses the same profile.
+    pub fn make_portable(&mut self) {
+        self.responsive = false;
+        self.embed_theme_css = false;
+        self.animations_enabled = false;
+        self.print_optimized = false;
+        self.shadows = false;
+        self.glow_enabled = false;
+        self.a11y.accessibility_css = false;
+    }
+
     /// Apply a degradation plan to this config, disabling visual effects as directed.
     pub fn apply_degradation(&mut self, plan: &fm_core::MermaidDegradationPlan) {
         if plan.reduce_decoration {
@@ -251,12 +273,29 @@ impl SvgRenderConfig {
             trace_fallbacks: false,
         })
     }
+
+    /// Render the CSS custom property block (`--fm-bg`, `--fm-primary-fill`, etc.)
+    /// for this configuration's theme preset (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn theme_css_vars(&self) -> String {
+        render_theme_css_vars(self.theme)
+    }
+}
+
+/// Render the CSS custom property declarations (`--fm-bg`, `--fm-primary-fill`, etc.)
+/// for a given [`ThemePreset`] (`bd-5ben5`).
+#[inline]
+#[must_use]
+pub fn render_theme_css_vars(preset: ThemePreset) -> String {
+    ThemeColors::from_preset(preset).to_css_vars()
 }
 
 impl Default for SvgRenderConfig {
     fn default() -> Self {
         Self {
             gantt_today: None,
+            debug_overlay: false,
             backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
@@ -672,7 +711,7 @@ fn render_svg_with_layout_impl_reusing(
             )
         }
         SvgBackend::Scene => {
-            let scene = build_render_scene(ir, layout);
+            let scene = build_render_scene_with_metrics(ir, layout, &config.font_metrics());
             (
                 render_scene_document_with_ir(&scene, config, Some(ir)),
                 None,
@@ -680,10 +719,82 @@ fn render_svg_with_layout_impl_reusing(
         }
     };
     if direct_minified_css {
+        if config.debug_overlay {
+            append_svg_debug_overlay(&mut svg, ir, layout, config.padding);
+        }
         return svg;
     }
     apply_output_post_passes(&mut svg, use_post_pass_cache, known_live_marker_mask);
+    if config.debug_overlay {
+        append_svg_debug_overlay(&mut svg, ir, layout, config.padding);
+    }
     svg
+}
+
+fn append_svg_debug_overlay(
+    svg: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    padding: f32,
+) {
+    use std::fmt::Write as _;
+    let Some(close_at) = svg.rfind("</svg>") else {
+        return;
+    };
+    let offset_x = padding - layout.bounds.x;
+    let offset_y = padding - layout.bounds.y;
+    let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+    let mut overlay = String::new();
+    let _ = write!(
+        overlay,
+        r##"<g class="fm-debug-overlay" data-node-count="{}" data-edge-count="{}" data-rank-count="{}" data-crossing-count="{}" data-cycle-count="{}">"##,
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    for cluster in &layout.clusters {
+        let x = cluster.bounds.x + offset_x;
+        let y = cluster.bounds.y + offset_y;
+        let _ = write!(
+            overlay,
+            r##"<rect class="fm-debug-cluster-bbox" x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="3 2" opacity="0.7"/>"##,
+            cluster.bounds.width, cluster.bounds.height,
+        );
+    }
+    for node in &layout.nodes {
+        let x = node.bounds.x + offset_x;
+        let y = node.bounds.y + offset_y;
+        let node_id = ir.nodes.get(node.node_index).map_or("", |n| n.id.as_str());
+        overlay.push_str(r#"<rect class="fm-debug-node-bbox" data-node-id=""#);
+        let _ = crate::attributes::write_escaped_attr(&mut overlay, node_id);
+        let _ = write!(
+            overlay,
+            r##"" data-rank="{}" x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="2 2" opacity="0.8"/>"##,
+            node.rank, node.bounds.width, node.bounds.height,
+        );
+    }
+    for edge in &layout.edges {
+        for pt in &edge.points {
+            let cx = pt.x + offset_x;
+            let cy = pt.y + offset_y;
+            let _ = write!(
+                overlay,
+                r##"<circle class="fm-debug-edge-point" cx="{cx:.1}" cy="{cy:.1}" r="2" fill="#f59e0b" opacity="0.85"/>"##,
+            );
+        }
+    }
+    let _ = write!(
+        overlay,
+        r##"<text class="fm-debug-hud" x="8" y="14" font-family="monospace" font-size="10" fill="#ef4444">debug: nodes={} edges={} ranks={} crossings={} cycles={}</text></g>"##,
+        layout.nodes.len(),
+        layout.edges.len(),
+        rank_count,
+        layout.stats.crossing_count,
+        layout.stats.cycle_count,
+    );
+    svg.insert_str(close_at, &overlay);
 }
 
 /// Post-pass: drop the contiguous node-STATE rule region (inactive / block-beta / highlighted /
@@ -1573,15 +1684,6 @@ fn c4_card_text_color(person_card: bool, colors: &ThemeColors) -> &str {
     }
 }
 
-/// The inline restatement of the Person card's white, which `.fm-node text` would otherwise beat.
-fn write_c4_card_text_style(out: &mut String, person_card: bool) {
-    if person_card {
-        out.push_str(" style=\"fill:");
-        out.push_str(MERMAID_DEFAULT_C4_STEREOTYPE_COLOR);
-        out.push('"');
-    }
-}
-
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
 /// both render backends add via `DefsBuilder::marker`. Ordinary markers remain byte-identical;
@@ -1961,7 +2063,13 @@ fn render_scene_document_with_ir(
     ir: Option<&MermaidDiagramIr>,
 ) -> String {
     let padding = config.padding;
-    let visible_title = ir.and_then(|diagram_ir| diagram_ir.meta.title.as_deref());
+    let theme = resolve_theme(ir, config);
+    let planned_title = scene.root.children.iter().any(|item| {
+        matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
+    });
+    let visible_title = ir
+        .and_then(|diagram_ir| diagram_ir.meta.title.as_deref())
+        .filter(|_| !planned_title);
     let title_height = if visible_title.is_some() {
         config.font_size + 22.0
     } else {
@@ -1987,6 +2095,8 @@ fn render_scene_document_with_ir(
 
     if config.responsive {
         doc = doc.responsive();
+    } else {
+        doc = doc.width(&width.to_string()).height(&height.to_string());
     }
 
     let (group_count, path_count, text_count) = count_scene_items(&scene.root);
@@ -2016,7 +2126,11 @@ fn render_scene_document_with_ir(
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
-                .fill("var(--fm-text-color, #1f2937)")
+                .fill(if config.embed_theme_css {
+                    "var(--fm-text-color, #1f2937)"
+                } else {
+                    &theme.colors.text
+                })
                 .class("fm-diagram-title")
                 .build(),
         );
@@ -2042,7 +2156,6 @@ fn render_scene_document_with_ir(
     let effects_enabled = clamp_unit_interval(config.inactive_opacity) < 0.999
         || clamp_unit_interval(config.cluster_fill_opacity) < 0.999;
 
-    let theme = resolve_theme(ir, config);
     let classdef_css = ir.map_or(String::new(), collect_classdef_css);
 
     let mut css = String::new();
@@ -2232,9 +2345,23 @@ fn render_scene_path(
 
     if let Some(ir) = ir
         && let RenderSource::Node(index) = path.source
-        && let Some(style) = resolve_scene_node_inline_styles(ir, index).0
     {
-        elem = elem.attr("style", &style);
+        if ir.diagram_type == DiagramType::Gantt && path.stroke.is_none() {
+            // Gantt task outlines always carry a stroke; their unstroked Node paths are progress
+            // decorations. Keep those decorations' semantic paint: inheriting the task fill would
+            // make progress invisible, and its outline/dash would invent a second task boundary.
+            // Overall author opacity still applies independently of the overlay's fill-opacity.
+            if let Some(opacity) = ir
+                .resolved_node_style(index)
+                .get("opacity")
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|opacity| opacity.is_finite())
+            {
+                elem = elem.opacity(opacity.clamp(0.0, 1.0));
+            }
+        } else if let Some(style) = resolve_scene_node_inline_styles(ir, index).0 {
+            elem = elem.attr("style", &style);
+        }
     }
 
     if path.marker_start != MarkerKind::None {
@@ -2473,10 +2600,52 @@ fn render_scene_text(
 
     elem = apply_fill_style(elem, &text.fill);
     if let Some(ir) = ir
-        && let RenderSource::Node(index) = text.source
-        && let Some(style) = resolve_scene_node_inline_styles(ir, index).1
+        && matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Gantt)
     {
-        elem = elem.attr("style", &style);
+        let theme = resolve_theme(Some(ir), config);
+        let color = if let RenderSource::Node(index) = text.source
+            && (ir.diagram_type == DiagramType::Journey || text.align == RenderTextAlign::Middle)
+        {
+            let declared = ir.resolved_node_style(index);
+            let semantic_fill = if ir.diagram_type == DiagramType::Gantt {
+                ir.gantt_meta.as_ref().map(|meta| {
+                    let flags = meta
+                        .tasks
+                        .iter()
+                        .find(|task| task.node.0 == index)
+                        .map(|task| task.flags)
+                        .unwrap_or_default();
+                    fm_layout::gantt_task_fill(flags)
+                })
+            } else {
+                fm_layout::journey_score_fill(ir, index)
+            };
+            let fill = declared
+                .get("fill")
+                .map(String::as_str)
+                .or(semantic_fill)
+                .unwrap_or("#ffffff");
+            fm_core::readable_label_color(fill, &theme.colors.text, &theme.colors.background)
+        } else {
+            &theme.colors.text
+        };
+        elem = elem.fill(color).attr("xml:space", "preserve");
+    }
+    if let Some(ir) = ir
+        && let RenderSource::Node(index) = text.source
+    {
+        let mut style = resolve_scene_node_inline_styles(ir, index).1;
+        if ir
+            .nodes
+            .get(index)
+            .is_some_and(|node| node.c4_meta.is_some())
+            && ir.resolved_node_style(index).contains_key("font-size")
+        {
+            style = Some(c4_measured_font_style(style.as_deref(), text.font_size));
+        }
+        if let Some(style) = style {
+            elem = elem.attr("style", &style);
+        }
     }
     apply_source_metadata(elem, text.source, config.include_source_spans, ir)
 }
@@ -2512,9 +2681,19 @@ fn apply_source_metadata(
         match source {
             RenderSource::Node(index) => {
                 if let Some(node) = diagram_ir.nodes.get(index) {
+                    let description = if let Some(meta) = diagram_ir.gantt_meta.as_ref()
+                        && diagram_ir.diagram_type == DiagramType::Gantt
+                    {
+                        gantt_bar_accessible_name(
+                            diagram_ir.node_display_text(node),
+                            meta.tasks.iter().find(|task| task.node.0 == index),
+                        )
+                    } else {
+                        crate::a11y::describe_node(node, diagram_ir)
+                    };
                     elem = elem
                         .attr("role", "graphics-symbol")
-                        .attr("aria-label", &crate::a11y::describe_node(node, diagram_ir));
+                        .attr("aria-label", &description);
                 }
             }
             RenderSource::Edge(index) => {
@@ -2605,10 +2784,10 @@ fn register_clip_path(
 }
 
 fn scene_transform_value(transform: RenderTransform) -> String {
-    // Use direct matrix formatting for bit-identical output.
-    // A fallible CGA rotor conversion is available via
-    // cga_transform::try_render_transform_to_cga() when rotation extraction or other
-    // similarity-transform-only features are needed.
+    if let Some(cga_stack) = cga_transform::try_render_transform_to_cga(transform) {
+        let _rotation_deg = cga_stack.rotation_degrees();
+        let _scale = cga_stack.scale_factor();
+    }
     cga_transform::render_transform_to_svg_matrix(transform)
 }
 
@@ -2713,7 +2892,9 @@ fn map_text_baseline(baseline: RenderTextBaseline) -> text::DominantBaseline {
     match baseline {
         RenderTextBaseline::Top => text::DominantBaseline::Hanging,
         RenderTextBaseline::Middle => text::DominantBaseline::Middle,
-        RenderTextBaseline::Bottom => text::DominantBaseline::Alphabetic,
+        RenderTextBaseline::Bottom | RenderTextBaseline::Alphabetic => {
+            text::DominantBaseline::Alphabetic
+        }
     }
 }
 
@@ -3295,7 +3476,14 @@ fn resolve_scene_node_inline_styles(
             fm_core::sanitize_style_value(&value).map(|value| (property, value))
         })
         .collect();
-    let (shape, text) = split_style_properties(&properties);
+    let (shape, mut text) = split_style_properties(&properties);
+    // Journey rows occupy a separate layer in both SVG backends. Preserve node opacity there
+    // instead of relying on inheritance from the shape's group.
+    if ir.diagram_type == DiagramType::Journey
+        && let Some(opacity) = shape.get("opacity")
+    {
+        text.insert("opacity".to_owned(), opacity.clone());
+    }
     (style_map_to_css(&shape), style_map_to_css(&text))
 }
 
@@ -3378,31 +3566,15 @@ fn resolve_cluster_inline_styles(
 }
 
 fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
-    use fm_core::{IrStyleTarget, parse_style_string};
-    if let Some(edge) = ir.edges.get(edge_index)
-        && let Some(style) = edge.inline_style.as_ref()
-    {
-        return style_map_to_css(&style.properties);
-    }
-    if ir.style_refs.is_empty() {
-        return None;
-    }
+    style_map_to_css(&fm_layout::edge_labels::edge_label_style(ir, edge_index))
+}
 
-    let mut merged = BTreeMap::new();
-    for sr in &ir.style_refs {
-        if sr.target == IrStyleTarget::LinkDefault {
-            merged.extend(parse_style_string(&sr.style).properties);
-        }
-    }
-    for sr in &ir.style_refs {
-        if let IrStyleTarget::Link(link_idx) = sr.target
-            && link_idx == edge_index
-        {
-            merged.extend(parse_style_string(&sr.style).properties);
-        }
-    }
-
-    style_map_to_css(&merged)
+fn edge_label_font_size(ir: &MermaidDiagramIr, edge_index: usize, default: f32) -> f32 {
+    fm_layout::edge_labels::edge_label_style(ir, edge_index)
+        .get("font-size")
+        .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+        .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        .unwrap_or(default)
 }
 
 fn truncate_label(label: &str, max_chars: Option<usize>) -> Cow<'_, str> {
@@ -3871,13 +4043,20 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u32 {
 fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u32> {
     (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
         layout.edges.iter().fold(0, |mask, edge_path| {
-            let edge_mask = if edge_path.reversed {
-                MARKER_OPEN
-            } else {
-                ir.edges
-                    .get(edge_path.edge_index)
-                    .map_or(MARKER_END, |edge| arrow_marker_mask(edge.arrow))
-            };
+            let edge_mask = ir.edges.get(edge_path.edge_index).map_or(
+                if edge_path.reversed {
+                    MARKER_OPEN
+                } else {
+                    MARKER_END
+                },
+                |edge| {
+                    if fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed) {
+                        MARKER_OPEN
+                    } else {
+                        arrow_marker_mask(edge.arrow)
+                    }
+                },
+            );
             mask | edge_mask
         })
     })
@@ -4259,7 +4438,7 @@ fn svg_geometry(
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_width = if legend_enabled { 320.0 } else { 0.0 };
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let title_height = if generic_title_for(ir).is_none() {
+    let title_height = if layout.extensions.journey.is_some() || generic_title_for(ir).is_none() {
         0.0
     } else {
         config.font_size + 22.0
@@ -4284,8 +4463,8 @@ fn svg_geometry(
                 continue;
             };
             let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
-            let (width, height, _) =
-                edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+            let font_size = edge_label_font_size(ir, index, detail.edge_font_size);
+            let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
             let x = position.x + frame.offset_x;
             let y = position.y + frame.offset_y;
             left = left.min(x - width / 2.0 - 2.0);
@@ -4304,6 +4483,31 @@ fn svg_geometry(
         frame.viewbox_height = bottom - top;
         frame.offset_x -= left;
         frame.offset_y -= top;
+    }
+    if let Some(meta) = ir.quadrant_meta.as_ref() {
+        let chart = quadrant_plot_bounds(layout, meta, (frame.offset_x, frame.offset_y));
+        for label in quadrant_label_placements(
+            layout,
+            meta,
+            chart,
+            (frame.offset_x, frame.offset_y),
+            config,
+        ) {
+            frame.viewbox_width = frame
+                .viewbox_width
+                .max(label.bounds.x + label.bounds.width + padding);
+            frame.viewbox_height = frame
+                .viewbox_height
+                .max(label.bounds.y + label.bounds.height + padding);
+        }
+        for heading in quadrant_headings(meta, chart, config) {
+            frame.viewbox_width = frame
+                .viewbox_width
+                .max(heading.bounds.x + heading.bounds.width + padding);
+            frame.viewbox_height = frame
+                .viewbox_height
+                .max(heading.bounds.y + heading.bounds.height + padding);
+        }
     }
     SvgGeometry {
         frame,
@@ -4357,13 +4561,16 @@ fn render_layout_to_svg(
 ) -> String {
     let SvgGeometry {
         frame,
-        detail,
+        mut detail,
         label_positions: preserved_label_positions,
     } = svg_geometry(ir, layout, config);
+    if layout.extensions.journey.is_some() {
+        detail.show_node_labels = false;
+    }
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
-    let generic_title = generic_title_for(ir);
+    let generic_title = generic_title_for(ir).filter(|_| layout.extensions.journey.is_none());
     let width = frame.viewbox_width;
     let height = frame.viewbox_height;
 
@@ -4379,6 +4586,8 @@ fn render_layout_to_svg(
 
     if config.responsive {
         doc = doc.responsive();
+    } else {
+        doc = doc.width(&width.to_string()).height(&height.to_string());
     }
 
     if config.accessible {
@@ -4530,6 +4739,18 @@ fn render_layout_to_svg(
         defs = defs.raw_gradients(grad_svg);
     }
 
+    let mut edge_label_mask_css = String::new();
+    if let Some((id, mask)) = graph_edge_label_mask(
+        ir,
+        config,
+        detail,
+        frame,
+        preserved_label_positions.as_deref(),
+    ) {
+        defs = defs.custom(mask);
+        doc = doc.class(&id);
+        edge_label_mask_css = format!(".{id} path[data-fm-edge-id]{{mask:url(#{id})}}");
+    }
     doc = doc.defs(defs);
 
     // Embed theme CSS if enabled
@@ -4564,6 +4785,7 @@ fn render_layout_to_svg(
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
         }
+        css.push_str(&edge_label_mask_css);
         if direct_minified_css {
             // The direct flowchart path returns before `apply_output_post_passes`, and it minifies
             // here, so prune while the stylesheet is still pretty. Pruning before the cache also
@@ -4607,6 +4829,7 @@ fn render_layout_to_svg(
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
         }
+        css.push_str(&edge_label_mask_css);
         if !css.is_empty() {
             doc = doc.style(css);
         }
@@ -4718,29 +4941,13 @@ fn render_layout_to_svg(
         }
     }
 
-    // The journey ACTOR LEGEND, which mermaid draws and we drew nowhere (bd-mq273).
-    //
-    // Measured on the pinned 11.15.0 bundle, `journey_basic` gives the run order
-    // ["System","User","Browse","Visit homepage",…,"User Shopping Journey"] — the actors come FIRST,
-    // each exactly once, and SORTED rather than in source order: `One: 3: Zed` then `Two: 4: Alpha`
-    // draws ["Alpha","Zed"]. A step naming several actors contributes each of them separately, so
-    // `One: 3: Bob, Ann` draws ["Ann","Bob"].
-    //
-    // ⚠️ FROM `journey_meta`, NOT FROM THE `journey-actor-*` CLASSES. Those are CSS-normalized, so a
-    // legend built from them would draw `Big_Corp` for an author who wrote `Big Corp` — the same
-    // defect the accessible name carried until this change.
-    for actor in journey_actor_legend(ir) {
-        doc = doc.child(
-            TextBuilder::new(&actor.name)
-                .x(padding + actor.offset_x)
-                .y(padding + config.font_size * 2.0 + 12.0)
-                .anchor(TextAnchor::Start)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(config.font_size - 2.0)
-                .fill(&theme.colors.text)
-                .class("fm-journey-actor")
-                .build(),
-        );
+    if let Some(journey) = &layout.extensions.journey {
+        for row in journey.title.iter().chain(&journey.legend) {
+            let mut text = row.to_render_text(RenderSource::Diagram, &theme.colors.text);
+            text.x += offset_x;
+            text.y += offset_y;
+            doc = doc.child(render_scene_text(&text, config, Some(ir)));
+        }
     }
 
     // The `info` diagram (bd-a3tmn): one text run, the renderer's own version.
@@ -4793,12 +5000,32 @@ fn render_layout_to_svg(
         );
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
-            if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {
+            // A timeline section already has its caption on the cluster frame. Keep its
+            // background band, but do not overprint a second caption in the same header.
+            let suppress_section_label = ir.diagram_type == fm_core::DiagramType::Timeline
+                && band.kind == fm_layout::LayoutBandKind::Section;
+            if (suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane)
+                || suppress_section_label
+            {
                 let mut unlabelled = band.clone();
                 unlabelled.label.clear();
-                write_layout_band_into(&mut bands_svg, &unlabelled, offset_x, offset_y, config);
+                write_layout_band_into(
+                    &mut bands_svg,
+                    &unlabelled,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
             } else {
-                write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+                write_layout_band_into(
+                    &mut bands_svg,
+                    band,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
             }
         }
         doc = doc.child(Element::raw_svg(bands_svg));
@@ -4852,6 +5079,7 @@ fn render_layout_to_svg(
                 tick.position + offset_x,
                 tick_y,
                 config,
+                &theme.colors,
             );
         }
         doc = doc.child(Element::raw_svg(ticks_svg));
@@ -5500,6 +5728,7 @@ fn render_layout_to_svg(
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
         preserved_label_positions: preserved_label_positions.as_deref(),
+        sequence_messages: &layout.extensions.sequence_messages,
         // Computed ONCE here; the per-edge helper used to recompute it, re-parsing every flow
         // value on every edge.
         sankey_widest_flow: sankey_widest_flow(ir),
@@ -5594,6 +5823,17 @@ fn render_layout_to_svg(
                     &theme.colors,
                     emit_classdef_classes,
                     &centrality_map,
+                );
+            }
+            if let Some(journey) = &layout.extensions.journey {
+                write_journey_steps_into(
+                    out,
+                    ir,
+                    journey,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
                 );
             }
             // Sequence mirror headers (participant boxes repeated at the bottom) sit AFTER the nodes in the
@@ -5820,6 +6060,20 @@ fn render_layout_to_svg(
         if !node_svg.is_empty() {
             doc = doc.child(Element::raw_svg(node_svg));
         }
+    }
+
+    if let Some(journey) = &layout.extensions.journey {
+        let mut rows = String::new();
+        write_journey_steps_into(
+            &mut rows,
+            ir,
+            journey,
+            offset_x,
+            offset_y,
+            config,
+            &theme.colors,
+        );
+        doc = doc.child(Element::raw_svg(rows));
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
@@ -6373,8 +6627,14 @@ fn write_layout_band_into(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let text_color = if config.embed_theme_css {
+        "var(--fm-text-color, #4a5568)"
+    } else {
+        &colors.text
+    };
     let (fill, stroke, class_name) = match band.kind {
         LayoutBandKind::Section => (
             "rgba(191,219,254,0.18)",
@@ -6429,7 +6689,7 @@ fn write_layout_band_into(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
-                .fill("var(--fm-text-color, #4a5568)")
+                .fill(text_color)
                 .class("fm-band-label")
                 .build()
                 .write_to_string(out);
@@ -6449,7 +6709,9 @@ fn write_layout_band_into(
                 out,
                 clamp_font_size(config.font_size * 0.82, config.min_font_size),
             );
-            out.push_str("\" fill=\"var(--fm-text-color, #4a5568)\" class=\"fm-band-label\">");
+            out.push_str("\" fill=\"");
+            let _ = write_escaped_attr(out, text_color);
+            out.push_str("\" class=\"fm-band-label\">");
             let _ = write_escaped_text(out, &band.label);
             out.push_str("</text>");
         }
@@ -6465,6 +6727,7 @@ fn render_layout_band(
     offset_x: f32,
     offset_y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) -> Element {
     let (fill, stroke, class_name) = match band.kind {
         LayoutBandKind::Section => (
@@ -6505,7 +6768,11 @@ fn render_layout_band(
                     config.font_size * 0.82,
                     config.min_font_size,
                 ))
-                .fill("var(--fm-text-color, #4a5568)")
+                .fill(if config.embed_theme_css {
+                    "var(--fm-text-color, #4a5568)"
+                } else {
+                    &colors.text
+                })
                 .class("fm-band-label")
                 .build(),
         );
@@ -6526,8 +6793,19 @@ fn write_layout_axis_tick_into(
     x: f32,
     y: f32,
     config: &SvgRenderConfig,
+    colors: &ThemeColors,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let edge_color = if config.embed_theme_css {
+        "var(--fm-edge-color, #94a3b8)"
+    } else {
+        &colors.edge
+    };
+    let text_color = if config.embed_theme_css {
+        "var(--fm-text-color, #64748b)"
+    } else {
+        &colors.text
+    };
     out.push_str("<g class=\"fm-axis-tick\"><line x1=\"");
     let _ = write_number_into(out, x);
     out.push_str("\" y1=\"");
@@ -6536,7 +6814,9 @@ fn write_layout_axis_tick_into(
     let _ = write_number_into(out, x);
     out.push_str("\" y2=\"");
     let _ = write_number_into(out, y + 16.0);
-    out.push_str("\" stroke=\"var(--fm-edge-color, #94a3b8)\" stroke-width=\"1\"/><text x=\"");
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, edge_color);
+    out.push_str("\" stroke-width=\"1\"/><text x=\"");
     let _ = write_number_into(out, x + 3.0);
     out.push_str("\" y=\"");
     let _ = write_number_into(out, y);
@@ -6551,7 +6831,9 @@ fn write_layout_axis_tick_into(
         out,
         clamp_font_size(config.font_size * 0.72, config.min_font_size),
     );
-    out.push_str("\" fill=\"var(--fm-text-color, #64748b)\" class=\"fm-axis-tick-label\">");
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, text_color);
+    out.push_str("\" class=\"fm-axis-tick-label\">");
     let _ = write_escaped_text(out, label);
     out.push_str("</text></g>");
 }
@@ -6559,7 +6841,13 @@ fn write_layout_axis_tick_into(
 /// The `Element`-building axis-tick renderer, superseded by [`write_layout_axis_tick_into`] on the render
 /// path and retained only as the byte-identity oracle for `layout_axis_tick_streaming_matches_element`.
 #[cfg(test)]
-fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig) -> Element {
+fn render_layout_axis_tick(
+    label: &str,
+    x: f32,
+    y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) -> Element {
     let mut group = Element::group().class("fm-axis-tick");
     group = group.child(
         Element::line()
@@ -6567,7 +6855,11 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
             .y1(y + 4.0)
             .x2(x)
             .y2(y + 16.0)
-            .stroke("var(--fm-edge-color, #94a3b8)")
+            .stroke(if config.embed_theme_css {
+                "var(--fm-edge-color, #94a3b8)"
+            } else {
+                &colors.edge
+            })
             .stroke_width(1.0),
     );
     group.child(
@@ -6579,7 +6871,11 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
                 config.font_size * 0.72,
                 config.min_font_size,
             ))
-            .fill("var(--fm-text-color, #64748b)")
+            .fill(if config.embed_theme_css {
+                "var(--fm-text-color, #64748b)"
+            } else {
+                &colors.text
+            })
             .class("fm-axis-tick-label")
             .build(),
     )
@@ -6720,20 +7016,11 @@ fn render_quadrant_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    // Replicate the exact chart dimensions from the layout engine so axes align
-    // with the node positions computed by layout_diagram_quadrant_traced().
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let node_count = layout.nodes.len();
-    let base_size = 300.0_f32 + (node_count as f32 * 15.0).min(200.0);
-    let chart_w = base_size.clamp(200.0, 600.0);
-    let chart_h = chart_w;
-    let axis_label_width = quad_meta
-        .x_axis_left
-        .as_ref()
-        .map(|label| metrics.estimate_dimensions(label).0)
-        .unwrap_or(0.0);
-    let margin_left = (axis_label_width + 20.0).clamp(50.0, 120.0) + offset_x;
-    let margin_top = 60.0_f32 + offset_y;
+    let chart = quadrant_plot_bounds(layout, quad_meta, (offset_x, offset_y));
+    let chart_w = chart.width;
+    let chart_h = chart.height;
+    let margin_left = chart.x;
+    let margin_top = chart.y;
 
     let quadrant_fills: [&str; 4] = [
         &theme.colors.accents[0 % theme.colors.accents.len()],
@@ -6759,43 +7046,28 @@ fn render_quadrant_svg(
                 .width(*w)
                 .height(*h)
                 .fill(quadrant_fills[i])
-                .attr("fill-opacity", "0.4")
+                .attr("fill-opacity", "0.10")
                 .class("fm-quadrant-bg"),
         );
     }
 
-    // Quadrant labels in each section.
-    let label_positions = [
-        (
-            margin_left + half_w + half_w / 2.0,
-            margin_top + half_h / 2.0,
-        ),
-        (margin_left + half_w / 2.0, margin_top + half_h / 2.0),
-        (
-            margin_left + half_w / 2.0,
-            margin_top + half_h + half_h / 2.0,
-        ),
-        (
-            margin_left + half_w + half_w / 2.0,
-            margin_top + half_h + half_h / 2.0,
-        ),
-    ];
-    for (i, label) in quad_meta.quadrant_labels.iter().enumerate() {
-        if let Some((lx, ly)) = label_positions.get(i) {
-            doc = doc.child(
-                Element::text()
-                    .x(*lx)
-                    .y(*ly)
-                    .content(label)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "middle")
-                    .attr_num("font-size", config.font_size * 0.9)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .attr("fill-opacity", "0.5")
-                    .fill(&theme.colors.text)
-                    .class("fm-quadrant-label"),
-            );
-        }
+    // Section headings belong in a consistent header band, leaving the middle of each quadrant
+    // available to its data. Point-label placement reserves these same bands below.
+    for heading in quadrant_headings(quad_meta, chart, config) {
+        doc = doc.child(
+            TextBuilder::new(&heading.lines.join("\n"))
+                .x(heading.bounds.x)
+                .y(heading.bounds.y + heading.font_size * 0.65)
+                .anchor(TextAnchor::Start)
+                .baseline(text::DominantBaseline::Central)
+                .font_size(heading.font_size)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_weight("600")
+                .line_height(1.3)
+                .fill(&theme.colors.text)
+                .class("fm-quadrant-label")
+                .build(),
+        );
     }
 
     // Axes.
@@ -6824,6 +7096,9 @@ fn render_quadrant_svg(
     // Grid lines at 25% intervals.
     let grid_color = axis_color;
     for i in 1..4 {
+        if i == 2 {
+            continue; // The solid axes already occupy the halfway positions.
+        }
         let frac = i as f32 / 4.0;
         // Vertical grid lines.
         doc = doc.child(
@@ -6918,18 +7193,71 @@ fn render_quadrant_svg(
                 .content(title)
                 .attr("text-anchor", "middle")
                 .attr_num("font-size", config.font_size + 4.0)
+                .attr("font-weight", "600")
                 .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-title"),
         );
     }
 
-    // Data points.
+    // Move labels rather than data: each point remains at its authored coordinate, while the
+    // labels fit inside the plotting area and avoid every point, heading, and preceding label.
+    let label_font_size = clamp_font_size(config.font_size * 0.8, config.min_font_size);
+    let label_placements =
+        quadrant_label_placements(layout, quad_meta, chart, (offset_x, offset_y), config);
+    for (node, placement) in layout.nodes.iter().zip(&label_placements) {
+        let center = node.bounds.center();
+        let point = fm_layout::LayoutPoint {
+            x: center.x + offset_x,
+            y: center.y + offset_y,
+        };
+        let target = fm_layout::LayoutPoint {
+            x: point.x.clamp(
+                placement.bounds.x,
+                placement.bounds.x + placement.bounds.width,
+            ),
+            y: point.y.clamp(
+                placement.bounds.y,
+                placement.bounds.y + placement.bounds.height,
+            ),
+        };
+        let dx = target.x - point.x;
+        let dy = target.y - point.y;
+        let distance = dx.hypot(dy);
+        if distance > placement.radius + 10.0 {
+            let start_distance = placement.radius + 2.0;
+            doc = doc.child(
+                Element::line()
+                    .x1(point.x + dx * start_distance / distance)
+                    .y1(point.y + dy * start_distance / distance)
+                    .x2(target.x)
+                    .y2(target.y)
+                    .stroke(&theme.colors.edge)
+                    .stroke_width(0.75)
+                    .attr("opacity", "0.65")
+                    .class("fm-quadrant-label-leader"),
+            );
+        }
+    }
+
+    for placement in &label_placements {
+        doc = doc.child(quadrant_label_background(
+            placement,
+            &theme.colors.background,
+        ));
+        doc = doc.child(quadrant_label_text(
+            placement,
+            label_font_size,
+            config,
+            &theme.colors.text,
+        ));
+    }
+
+    // Point markers are the final layer: neither a distant annotation nor a congested fallback
+    // may paint over the actual data, including an authored large-radius point.
     let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
-    // Stream all data points (circle + label) into one raw fragment under embedded CSS — the label's only
-    // config-dependent attribute (`font-family`) is then CSS-driven/absent, so the whole point stack is a
-    // fixed set of bytes. Skips two `Element` builds + `Attributes` Vecs per point. Byte-identical; the
-    // non-embedded (attribute-driven) export keeps the Element path so `font-family` is emitted inline.
+    // Keep the dot writer's streaming path; labels share a builder with the portable renderer
+    // so their measurement, wrapping, and baselines are identical in both output profiles.
     if config.embed_theme_css {
         let mut points_svg = String::with_capacity(layout.nodes.len().saturating_mul(160));
         for (i, node_box) in layout.nodes.iter().enumerate() {
@@ -6940,28 +7268,12 @@ fn render_quadrant_svg(
                 accent_colors[i % accent_colors.len()],
                 &theme.colors.background,
             );
-            let label = quad_meta
-                .points
-                .get(i)
-                .map(|p| p.label.as_str())
-                .unwrap_or(&node_box.node_id);
             let accessible_name = quad_meta
                 .points
                 .get(i)
                 .filter(|_| config.a11y.text_alternatives)
                 .map(|point| quadrant_point_accessible_name(point, &quad_meta.quadrant_labels));
-            write_quadrant_point_into(
-                &mut points_svg,
-                cx,
-                cy,
-                &paint,
-                cx + paint.radius + 4.0,
-                cy + 4.0,
-                config.font_size * 0.75,
-                &theme.colors.text,
-                label,
-                accessible_name.as_deref(),
-            );
+            write_quadrant_point_into(&mut points_svg, cx, cy, &paint, accessible_name.as_deref());
         }
         if !points_svg.is_empty() {
             doc = doc.child(Element::raw_svg(points_svg));
@@ -6997,26 +7309,320 @@ fn render_quadrant_svg(
             None => point_circle,
         };
         doc = doc.child(point_circle);
-        // Point label from quadrant metadata or node ID.
-        let label = quad_meta
-            .points
-            .get(i)
-            .map(|p| p.label.as_str())
-            .unwrap_or(&node_box.node_id);
-        doc = doc.child(
-            Element::text()
-                .x(cx + paint.radius + 4.0)
-                .y(cy + 4.0)
-                .content(label)
-                .attr("text-anchor", "start")
-                .attr_num("font-size", config.font_size * 0.75)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .fill(&theme.colors.text)
-                .class("fm-quadrant-point-label"),
-        );
     }
 
     doc
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct QuadrantPointLabel {
+    lines: Vec<String>,
+    bounds: fm_layout::LayoutRect,
+    radius: f32,
+}
+
+fn quadrant_plot_bounds(
+    layout: &DiagramLayout,
+    meta: &fm_core::IrQuadrantMeta,
+    offset: (f32, f32),
+) -> fm_layout::LayoutRect {
+    // These are the layout engine's plot dimensions, not the enclosing node-label boxes.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let width = (300.0_f32 + (layout.nodes.len() as f32 * 15.0).min(200.0)).clamp(200.0, 600.0);
+    let axis_width = meta
+        .x_axis_left
+        .as_ref()
+        .map_or(0.0, |label| metrics.estimate_dimensions(label).0);
+    fm_layout::LayoutRect {
+        x: (axis_width + 20.0).clamp(50.0, 120.0) + offset.0,
+        y: 60.0 + offset.1,
+        width,
+        height: width,
+    }
+}
+
+fn quadrant_wrapped_lines(
+    text: &str,
+    font_size: f32,
+    max_width: f32,
+    config: &SvgRenderConfig,
+) -> (Vec<String>, f32) {
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        preset: fm_core::FontPreset::from_family(&config.font_family),
+        font_size,
+        line_height: 1.3,
+        ..Default::default()
+    });
+    let measure = |text: &str| {
+        metrics.estimate_preserved_width(
+            text,
+            font_size,
+            config.avg_char_width * font_size / config.font_size.max(1.0),
+        )
+    };
+    let mut wrap_width = max_width / 1.125;
+    let mut lines = metrics.wrap_to_width(text, wrap_width);
+    let mut width = lines
+        .iter()
+        .map(|line| measure(line))
+        .fold(0.0_f32, f32::max);
+    // Account for wide glyphs and caller calibrations using the measured excess, not char counts.
+    for _ in 0..3 {
+        if width <= max_width {
+            break;
+        }
+        wrap_width *= max_width / width;
+        lines = metrics.wrap_to_width(text, wrap_width);
+        width = lines
+            .iter()
+            .map(|line| measure(line))
+            .fold(0.0_f32, f32::max);
+    }
+    (lines, width)
+}
+
+struct QuadrantHeading {
+    lines: Vec<String>,
+    bounds: fm_layout::LayoutRect,
+    font_size: f32,
+}
+
+fn quadrant_headings(
+    meta: &fm_core::IrQuadrantMeta,
+    chart: fm_layout::LayoutRect,
+    config: &SvgRenderConfig,
+) -> Vec<QuadrantHeading> {
+    let font_size = clamp_font_size(config.font_size * 0.9, config.min_font_size);
+    let mut headings = Vec::new();
+    let mut overflow_y = chart.y + chart.height + (config.font_size * 2.0 + 20.0).max(48.0);
+    for (index, text) in meta.quadrant_labels.iter().take(4).enumerate() {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let max_width = (chart.width / 2.0 - 24.0).max(1.0);
+        let (mut lines, mut width) = quadrant_wrapped_lines(text, font_size, max_width, config);
+        let mut height = font_size * 1.3 * lines.len() as f32;
+        if height > chart.height / 2.0 - 20.0 {
+            // Long section descriptions cannot cover another quadrant. A short in-plot key
+            // preserves their association while the complete heading gets its own annotation.
+            let key = format!("Q{}", index + 1);
+            let (annotation, annotation_width) = quadrant_wrapped_lines(
+                &format!("{key}: {text}"),
+                font_size,
+                (chart.width - 24.0).max(1.0),
+                config,
+            );
+            let annotation_height = font_size * 1.3 * annotation.len() as f32;
+            headings.push(QuadrantHeading {
+                lines: annotation,
+                bounds: fm_layout::LayoutRect {
+                    x: chart.x + 12.0,
+                    y: overflow_y,
+                    width: annotation_width,
+                    height: annotation_height,
+                },
+                font_size,
+            });
+            overflow_y += annotation_height + 14.0;
+            (lines, width) = quadrant_wrapped_lines(&key, font_size, max_width, config);
+            height = font_size * 1.3 * lines.len() as f32;
+        }
+        headings.push(QuadrantHeading {
+            lines,
+            bounds: fm_layout::LayoutRect {
+                x: chart.x
+                    + 12.0
+                    + if matches!(index, 0 | 3) {
+                        chart.width / 2.0
+                    } else {
+                        0.0
+                    },
+                y: chart.y + 8.0 + if index >= 2 { chart.height / 2.0 } else { 0.0 },
+                width,
+                height,
+            },
+            font_size,
+        });
+    }
+    headings
+}
+
+fn quadrant_overlap_area(a: fm_layout::LayoutRect, b: fm_layout::LayoutRect) -> f32 {
+    let width = ((a.x + a.width).min(b.x + b.width) - a.x.max(b.x)).max(0.0);
+    let height = ((a.y + a.height).min(b.y + b.height) - a.y.max(b.y)).max(0.0);
+    width * height
+}
+
+/// Stable, bounded placement for scatter labels. Candidate rectangles radiate from the fixed
+/// data point; the least occluded candidate wins, with distance and source order breaking ties.
+/// We reserve all dots up front so an earlier label cannot conceal a later point. A label that
+/// cannot fit without occlusion receives an annotation row below the plot, inside the SVG frame.
+fn quadrant_label_placements(
+    layout: &DiagramLayout,
+    meta: &fm_core::IrQuadrantMeta,
+    chart: fm_layout::LayoutRect,
+    offset: (f32, f32),
+    config: &SvgRenderConfig,
+) -> Vec<QuadrantPointLabel> {
+    use fm_layout::LayoutRect;
+
+    let font_size = clamp_font_size(config.font_size * 0.8, config.min_font_size);
+    let centers: Vec<_> = layout
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let center = node.bounds.center();
+            let paint = QuadrantPointPaint::resolve(meta.points.get(index), "", "");
+            let radius = paint.radius + paint.stroke_width.max(0.0) / 2.0;
+            (center.x + offset.0, center.y + offset.1, radius)
+        })
+        .collect();
+    let mut obstacles: Vec<_> = centers
+        .iter()
+        .map(|&(x, y, radius)| LayoutRect {
+            x: x - radius - 3.0,
+            y: y - radius - 3.0,
+            width: (radius + 3.0) * 2.0,
+            height: (radius + 3.0) * 2.0,
+        })
+        .collect();
+    let mut overflow_y = chart.y + chart.height + (config.font_size * 2.0 + 20.0).max(48.0);
+    for heading in quadrant_headings(meta, chart, config) {
+        if heading.bounds.y >= chart.y + chart.height {
+            overflow_y = overflow_y.max(heading.bounds.y + heading.bounds.height + 14.0);
+        }
+        obstacles.push(LayoutRect {
+            x: heading.bounds.x - 4.0,
+            y: heading.bounds.y - 4.0,
+            width: heading.bounds.width + 8.0,
+            height: heading.bounds.height + 8.0,
+        });
+    }
+
+    let mut labels = Vec::with_capacity(layout.nodes.len());
+    for (index, node) in layout.nodes.iter().enumerate() {
+        let text = meta
+            .points
+            .get(index)
+            .map_or(node.node_id.as_str(), |point| point.label.as_str());
+        let max_width = (chart.width * 0.38)
+            .max(80.0)
+            .min((chart.width - 12.0).max(1.0));
+        let (mut lines, text_width) = quadrant_wrapped_lines(text, font_size, max_width, config);
+        let width = text_width + 6.0;
+        let height = font_size * 1.3 * lines.len().max(1) as f32 + 4.0;
+        let (cx, cy, radius) = centers[index];
+        let mut best = LayoutRect {
+            x: chart.x + 4.0,
+            y: chart.y + 4.0,
+            width,
+            height,
+        };
+        let mut best_score = (f32::INFINITY, f32::INFINITY);
+        for ring in 0..if height <= chart.height / 2.0 { 16 } else { 0 } {
+            let gap = radius + 5.0 + ring as f32 * (font_size * 1.3 + 6.0);
+            let candidates = [
+                (cx + gap, cy - height / 2.0),
+                (cx - gap - width, cy - height / 2.0),
+                (cx - width / 2.0, cy - gap - height),
+                (cx - width / 2.0, cy + gap),
+                (cx + gap, cy - gap - height),
+                (cx - gap - width, cy - gap - height),
+                (cx + gap, cy + gap),
+                (cx - gap - width, cy + gap),
+            ];
+            for (x, y) in candidates {
+                let candidate = LayoutRect {
+                    x: x.clamp(
+                        chart.x + 4.0,
+                        (chart.x + chart.width - width - 4.0).max(chart.x + 4.0),
+                    ),
+                    y: y.clamp(
+                        chart.y + 4.0,
+                        (chart.y + chart.height - height - 4.0).max(chart.y + 4.0),
+                    ),
+                    width,
+                    height,
+                };
+                let overlap = obstacles
+                    .iter()
+                    .map(|&other| quadrant_overlap_area(candidate, other))
+                    .sum::<f32>();
+                let dx = cx - cx.clamp(candidate.x, candidate.x + width);
+                let dy = cy - cy.clamp(candidate.y, candidate.y + height);
+                let distance = dx * dx + dy * dy;
+                if overlap < best_score.0 || (overlap == best_score.0 && distance < best_score.1) {
+                    best = candidate;
+                    best_score = (overlap, distance);
+                }
+            }
+            // Every later ring starts farther from the point; a clear local placement needs no
+            // further search. Clamping may shorten a distant candidate, but cannot improve on the
+            // ordinary immediate placements enough to justify detaching a clear label.
+            if best_score.0 == 0.0 {
+                break;
+            }
+        }
+        if best_score.0 > 0.0 {
+            // A paragraph or truly dense chart needs annotation space, not smaller type, clipped
+            // text, or a plate over its data. The shared SVG frame expands to include these rows.
+            let (overflow_lines, overflow_width) =
+                quadrant_wrapped_lines(text, font_size, (chart.width - 14.0).max(1.0), config);
+            lines = overflow_lines;
+            best = LayoutRect {
+                x: chart.x + 4.0,
+                y: overflow_y,
+                width: overflow_width + 6.0,
+                height: font_size * 1.3 * lines.len().max(1) as f32 + 4.0,
+            };
+            overflow_y += best.height + 10.0;
+        }
+        obstacles.push(LayoutRect {
+            x: best.x - 2.0,
+            y: best.y - 2.0,
+            width: best.width + 4.0,
+            height: best.height + 4.0,
+        });
+        labels.push(QuadrantPointLabel {
+            lines,
+            bounds: best,
+            radius,
+        });
+    }
+    labels
+}
+
+fn quadrant_label_background(placement: &QuadrantPointLabel, fill: &str) -> Element {
+    Element::rect()
+        .x(placement.bounds.x)
+        .y(placement.bounds.y)
+        .width(placement.bounds.width)
+        .height(placement.bounds.height)
+        .rx(3.0)
+        .fill(fill)
+        .attr("fill-opacity", "0.92")
+        .class("fm-quadrant-point-label-bg")
+}
+
+fn quadrant_label_text(
+    placement: &QuadrantPointLabel,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    fill: &str,
+) -> Element {
+    TextBuilder::new(&placement.lines.join("\n"))
+        .x(placement.bounds.x + 3.0)
+        .y(placement.bounds.y + 2.0 + font_size * 0.65)
+        .anchor(TextAnchor::Start)
+        .baseline(text::DominantBaseline::Central)
+        .font_size(font_size)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+        .font_weight("400")
+        .line_height(1.3)
+        .fill(fill)
+        .class("fm-quadrant-point-label")
+        .build()
 }
 
 /// The accessible name for one quadrant data point (bd-0eoa6).
@@ -7045,10 +7651,6 @@ fn quadrant_point_accessible_name(point: &fm_core::IrQuadrantPoint, labels: &[St
     }
 }
 
-/// Stream a quadrant data point (`<circle>` + `<text>` label) byte-identical to the slow path's
-/// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
-/// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
-/// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
 /// How one quadrant point is painted: the theme's accent dot unless the point (or its class)
 /// declared `radius`, `color`, `stroke-color` or `stroke-width`.
 struct QuadrantPointPaint<'a> {
@@ -7088,11 +7690,6 @@ fn write_quadrant_point_into(
     cx: f32,
     cy: f32,
     paint: &QuadrantPointPaint<'_>,
-    label_x: f32,
-    label_y: f32,
-    label_font_size: f32,
-    text_fill: &str,
-    label: &str,
     accessible_name: Option<&str>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
@@ -7126,17 +7723,6 @@ fn write_quadrant_point_into(
         }
         None => f.push_str("/>"),
     }
-    f.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(f, label_x);
-    f.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(f, label_y);
-    f.push_str("\" text-anchor=\"start\" font-size=\"");
-    let _ = crate::attributes::write_number_into(f, label_font_size);
-    f.push_str("\" fill=\"");
-    let _ = write_escaped_attr(f, text_fill);
-    f.push_str("\" class=\"fm-quadrant-point-label\">");
-    let _ = write_escaped_text(f, label);
-    f.push_str("</text>");
 }
 
 /// The accessible name for one gantt task bar (bd-ic3rx).
@@ -7167,6 +7753,16 @@ fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -
         }
         Some(fm_core::GanttDate::DurationDays(days)) => {
             let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
+        }
+        Some(fm_core::GanttDate::UntilTasks(targets)) if !targets.is_empty() => {
+            if targets.len() == 1 {
+                name.push_str(", ends when ");
+                name.push_str(&targets[0]);
+                name.push_str(" starts");
+            } else {
+                name.push_str(", ends at the earliest start of ");
+                name.push_str(&targets.join(", "));
+            }
         }
         _ => {}
     }
@@ -7245,63 +7841,6 @@ fn write_gantt_bar_into(
             f.push_str("</title></rect>");
         }
         None => f.push_str("/>"),
-    }
-}
-
-/// WCAG relative luminance of a `#rgb`/`#rrggbb` colour, or `None` for anything else.
-///
-/// `None` rather than a guess: a `var(...)`, a gradient reference or a named colour cannot be
-/// measured here, and the caller falls back to its previous behaviour instead of picking a colour
-/// from arithmetic it did not actually do.
-fn relative_luminance(colour: &str) -> Option<f64> {
-    let hex = colour.trim().strip_prefix('#')?;
-    let expanded: String = match hex.len() {
-        3 => hex.chars().flat_map(|c| [c, c]).collect(),
-        6 => hex.to_string(),
-        _ => return None,
-    };
-    let mut channels = [0.0_f64; 3];
-    for (index, channel) in channels.iter_mut().enumerate() {
-        let start = index * 2;
-        let raw = u8::from_str_radix(expanded.get(start..start + 2)?, 16).ok()?;
-        let value = f64::from(raw) / 255.0;
-        *channel = if value <= 0.03928 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        };
-    }
-    Some(0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2])
-}
-
-/// WCAG contrast ratio between two colours, or `None` if either cannot be measured.
-fn contrast_ratio(a: &str, b: &str) -> Option<f64> {
-    let (x, y) = (relative_luminance(a)?, relative_luminance(b)?);
-    Some((x.max(y) + 0.05) / (x.min(y) + 0.05))
-}
-
-/// The theme colour that reads best ON `background` (bd-u0x67).
-///
-/// Gantt task bars are FIXED pastels — `#93c5fd` normal, `#fca5a5` critical, `#86efac` done,
-/// `#94a3b8` active — the same in every theme. The label, however, used `colors.text`, which flips
-/// to near-white on a dark theme. So every task label in every gantt chart measured 1.34–2.45:1
-/// against its own bar in dark mode, against 6.65–12.15:1 in light. All four task types, not an
-/// edge case.
-///
-/// Chooses between the theme's own TEXT and BACKGROUND colours rather than hardcoding black or
-/// white: both stay theme-derived, the light theme keeps exactly the colour it already had (so its
-/// output is unchanged), and a user-restyled bar — which may be dark — gets the right answer instead
-/// of an assumption that bars are always pale.
-///
-/// Falls back to `text` when either colour cannot be measured, which keeps an unparseable fill on
-/// its previous behaviour rather than inventing one.
-fn readable_label_colour<'a>(background: &str, colors: &'a ThemeColors) -> &'a str {
-    match (
-        contrast_ratio(&colors.text, background),
-        contrast_ratio(&colors.background, background),
-    ) {
-        (Some(on_text), Some(on_background)) if on_background > on_text => &colors.background,
-        _ => &colors.text,
     }
 }
 
@@ -7445,6 +7984,7 @@ fn render_gantt_svg(
                     tick.position + offset_x,
                     axis.y + offset_y,
                     config,
+                    &theme.colors,
                 );
             }
             ticks_svg.push_str("</g>");
@@ -7505,17 +8045,6 @@ fn render_gantt_svg(
         }
     }
 
-    // Task bars with type-based coloring.
-    let task_color = |task_type: &fm_core::GanttTaskType| -> &str {
-        match task_type {
-            fm_core::GanttTaskType::Done => "#86efac",
-            fm_core::GanttTaskType::Active => "#94a3b8",
-            fm_core::GanttTaskType::Critical => "#fca5a5",
-            fm_core::GanttTaskType::Milestone => "#c4b5fd",
-            fm_core::GanttTaskType::Normal => "#93c5fd",
-        }
-    };
-
     // Stream all task bars/milestones/progress/labels into ONE raw fragment instead of ~2-3 `Element`s
     // per task (the dominant cost of gantt render). Byte-identical: the same `<rect>`/`<path>`/`<text>`
     // bytes in the same per-task order (bar/milestone, then progress, then label) the `Element` children
@@ -7541,7 +8070,7 @@ fn render_gantt_svg(
                 .unwrap_or_default();
             let task_type = task_flags.primary_type();
             let task_type = &task_type;
-            let fill = task_color(task_type);
+            let fill = fm_layout::gantt_task_fill(task_flags);
             let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
 
             if is_milestone {
@@ -7704,7 +8233,11 @@ fn render_gantt_svg(
                         None => (x + w / 2.0, "middle", true),
                     };
                 let label_fill = if inside {
-                    readable_label_colour(fill, &theme.colors)
+                    fm_core::readable_label_color(
+                        fill,
+                        &theme.colors.text,
+                        &theme.colors.background,
+                    )
                 } else {
                     &theme.colors.text
                 };
@@ -7766,7 +8299,7 @@ fn render_gantt_svg(
         let mut dep_svg = String::new();
         for edge_path in &layout.edges {
             if edge_path.points.len() >= 2 {
-                let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+                let path_d = layout_edge_path(ir, edge_path, offset_x, offset_y);
                 dep_svg.push_str("<path d=\"");
                 dep_svg.push_str(&path_d);
                 dep_svg.push_str("\" fill=\"none\" stroke=\"");
@@ -8989,44 +9522,52 @@ fn write_xychart_mark_accessible_name(
     }
 }
 
-/// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
-pub(crate) struct JourneyLegendEntry {
-    pub(crate) name: String,
-    pub(crate) offset_x: f32,
-}
-
-/// The actors a journey declares, deduplicated and sorted, as mermaid lists them (bd-mq273).
-///
-/// Empty for every other diagram type, and for a journey whose steps name no actor — an empty legend
-/// row must not reserve space or draw a stray separator.
-fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
-    if ir.diagram_type != DiagramType::Journey {
-        return Vec::new();
+/// Emit the same measured title, score, and actor rows used by the other graphical backends.
+#[allow(clippy::too_many_arguments)]
+fn write_journey_steps_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    journey: &fm_layout::LayoutJourney,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for step in &journey.steps {
+        let declared = ir.resolved_node_style(step.node_index);
+        let fill = declared
+            .get("fill")
+            .map(String::as_str)
+            .or_else(|| fm_layout::journey_score_fill(ir, step.node_index))
+            .unwrap_or(&colors.node_fill);
+        let color = fm_core::readable_label_color(fill, &colors.text, &colors.background);
+        let (_, text_style) = resolve_scene_node_inline_styles(ir, step.node_index);
+        for row in &step.rows {
+            let center = row.bounds.center();
+            let mut text = TextBuilder::new(&row.text)
+                .x(center.x + offset_x)
+                .y(center.y + offset_y)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(row.font_size)
+                .anchor(TextAnchor::Middle)
+                .baseline(text::DominantBaseline::Middle)
+                .fill(color)
+                .class("fm-journey-row")
+                .build()
+                .attr("pointer-events", "none")
+                .attr("xml:space", "preserve");
+            if let Some(style) = &text_style {
+                text = text.attr("style", style);
+            }
+            apply_source_metadata(
+                text,
+                RenderSource::Node(step.node_index),
+                config.include_source_spans,
+                Some(ir),
+            )
+            .write_to_string(out);
+        }
     }
-    let mut names: Vec<&str> = ir
-        .nodes
-        .iter()
-        .filter_map(|node| node.journey_meta.as_deref())
-        .flat_map(|meta| meta.actors.iter().map(String::as_str))
-        .collect();
-    // Sorted then deduped, which is the order mermaid draws them in and NOT source order.
-    names.sort_unstable();
-    names.dedup();
-
-    let mut offset = 0.0_f32;
-    names
-        .into_iter()
-        .map(|name| {
-            let entry = JourneyLegendEntry {
-                name: name.to_string(),
-                offset_x: offset,
-            };
-            // Advance by the name's own width so entries do not overlap; the constant is the same
-            // average-character estimate the rest of this renderer sizes text with.
-            offset += (name.chars().count() as f32).mul_add(8.0, 24.0);
-            entry
-        })
-        .collect()
 }
 
 /// Look up a node's centrality tier by index (O(1) via HashMap).
@@ -9216,6 +9757,7 @@ fn write_class_compartments_into(
     node: &fm_core::IrNode,
     meta: &fm_core::IrClassNodeMeta,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -9223,116 +9765,104 @@ fn write_class_compartments_into(
     font_size: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
 ) {
-    let line_h = font_size * config.line_height;
-    let text_x = x + 8.0;
-    let mut cursor_y = y + line_h;
-    let fill = colors.text.as_str();
     let class_name = node
         .label
         .and_then(|lid| ir.labels.get(lid.0))
         .map(|l| l.text.as_str())
         .unwrap_or(&node.id);
-    if let Some(stereotype) = &meta.stereotype {
-        let stereo_text = stereotype.label();
-        let stereo_text = stereo_text.as_ref();
-        write_class_text_into(
-            f,
-            x + w / 2.0,
-            cursor_y,
-            "middle",
-            font_size * 0.85,
-            " font-style=\"italic\"",
-            fill,
-            stereo_text,
-        );
-        cursor_y += line_h;
-    }
-    let display_name = meta.display_header(class_name);
-    write_class_text_into(
-        f,
-        x + w / 2.0,
-        cursor_y,
-        "middle",
+    let declared = ir.resolved_node_style(node_index);
+    let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+        meta,
+        class_name,
         font_size,
-        " font-weight=\"bold\"",
-        fill,
-        &display_name,
+        config.line_height,
+        declared.get("font-size").map(String::as_str),
     );
-    cursor_y += line_h * 0.5;
-    write_class_separator_into(f, x, cursor_y, x + w);
-    cursor_y += line_h * 0.3;
-    let member_font_size = font_size * 0.9;
-    for attr in &meta.attributes {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(attr.visibility);
-        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
-        // turns it into `List<int>` only when the row is drawn (bd class-generics).
-        let name = fm_core::class_member_display_name(&attr.name, false);
-        let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
-        } else {
-            format!("{vis}{name}")
-        };
-        write_class_text_into(
-            f,
-            text_x,
-            cursor_y,
-            "start",
-            member_font_size,
-            "",
-            fill,
-            &text,
+    let border = declared
+        .get("stroke")
+        .and_then(|paint| sanitize_svg_paint(paint))
+        .unwrap_or_else(|| colors.node_stroke.clone());
+    // The header is a quiet secondary surface. An explicitly authored fill retains full
+    // precedence: do not cover it with a theme-derived decoration.
+    if !declared.contains_key("fill") && w > 2.0 && h > 2.0 {
+        let hx = x + 0.75;
+        let hy = y + 0.75;
+        let hw = w - 1.5;
+        let hh = compartments.header_height.min(h) - 0.75;
+        let radius = config.rounded_corners.max(0.0).min(hw * 0.5).min(hh * 0.5);
+        let path = format!(
+            "M {} {hy} H {} Q {} {hy} {} {} V {} H {hx} V {} Q {hx} {hy} {} {hy} Z",
+            hx + radius,
+            hx + hw - radius,
+            hx + hw,
+            hx + hw,
+            hy + radius,
+            hy + hh,
+            hy + radius,
+            hx + radius,
+        );
+        let fill = fm_core::mindmap::branch_fill(&colors.node_fill, &border, false);
+        f.push_str(
+            &Element::path()
+                .attr("d", &path)
+                .fill(&fill)
+                .attr("style", "stroke:none;filter:none")
+                .class("fm-class-header")
+                .render(),
         );
     }
-    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-        cursor_y += line_h * 0.3;
-        write_class_separator_into(f, x, cursor_y, x + w);
-        cursor_y += line_h * 0.3;
+    for separator_y in compartments.separator_ys {
+        f.push_str(
+            &Element::line()
+                .x1(x + 0.75)
+                .y1(y + separator_y)
+                .x2(x + w - 0.75)
+                .y2(y + separator_y)
+                .attr(
+                    "style",
+                    &format!("stroke:{border};stroke-width:0.75;opacity:0.65"),
+                )
+                .class("fm-class-divider")
+                .render(),
+        );
     }
-    for method in &meta.methods {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
+    for row in compartments.rows {
+        let mut text = TextBuilder::new(&row.text)
+            .x(if row.centered() {
+                x + w * 0.5
+            } else {
+                x + fm_core::ClassCompartmentLayout::PADDING_X
+            })
+            .y(y + row.center_y)
+            .anchor(if row.centered() {
+                TextAnchor::Middle
+            } else {
+                TextAnchor::Start
+            })
+            .baseline(text::DominantBaseline::Central)
+            .font_size(row.font_size)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .fill(&colors.text);
+        if row.kind == fm_core::ClassCompartmentRowKind::Name {
+            text = text.font_weight("600");
         }
-        let vis = visibility_symbol(method.visibility);
-        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
-        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
-        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
-        // here made the same member read as a different NAME.
-        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
-        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
-        // typed method row differed from the incumbent by one character in every class diagram.
-        let ret = method
-            .return_type
-            .as_deref()
-            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
-            .unwrap_or_default();
-        let text = format!(
-            "{vis}{}{ret}",
-            fm_core::class_member_display_name(&method.name, true)
-        );
-        // Same slot `TextBuilder` emits `font-style`/`text-decoration` into — after `font-size`,
-        // before `fill` — so the streaming and Element paths stay byte-identical.
-        let classifier_attr = match classifier {
-            Some("font-style:italic") => " font-style=\"italic\"",
-            Some("text-decoration:underline") => " text-decoration=\"underline\"",
-            _ => "",
-        };
-        write_class_text_into(
-            f,
-            text_x,
-            cursor_y,
-            "start",
-            member_font_size,
-            classifier_attr,
-            fill,
-            &text,
-        );
+        if row.italic {
+            text = text.italic();
+        }
+        if row.underline {
+            text = text.text_decoration("underline");
+        }
+        let mut text = text.build();
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        if let Some(style) = label_style {
+            text = text.attr("style", style);
+        }
+        f.push_str(&text.render());
     }
 }
 
@@ -9543,7 +10073,9 @@ fn write_class_node_fragment_into<const A11Y: bool>(
     out.push_str("\" rx=\"");
     let _ = crate::attributes::write_number_into(out, rx);
     out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
-    write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
+    write_class_compartments_into(
+        out, node, meta, ir, node_index, x, y, w, h, font_size, config, colors, None, false,
+    );
     if A11Y {
         // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
         out.push_str("<title>Node: ");
@@ -9557,7 +10089,7 @@ fn write_class_node_fragment_into<const A11Y: bool>(
 /// Stream a complete C4 node (`<g>` + solid-fill rounded `<rect>` + stereotype/[person icon]/name/description +
 /// `<title>`) directly into `out`, **byte-identical** to what `render_node` builds via `Element`s (the C4
 /// analogue of [`write_class_node_fragment_into`]). Used only via `render_node_into`'s C4 gate, which guarantees
-/// a `Rounded` node with `c4_meta`, no `technology`, and an absent-or-single-line description — so none of
+/// a `Rounded` node with `c4_meta` and no `technology` — so none of
 /// `render_node`'s conditional classes/children/post-processing apply. The wrapper mirrors the class fragment's
 /// (proven) `<g>`/title bytes; the rect uses the Rounded shape's SOLID `node_fill` (NOT the gradient the class/ER
 /// fragments use, matching `render_node`'s `NodeShape::Rounded => rect.fill(node_fill).rx(rounded_corners)`); the
@@ -9623,87 +10155,9 @@ fn write_c4_node_fragment_into(
     // C4 style. Keep that exact order so the streaming and Element renderers stay byte-identical.
     out.push_str(" fill=\"url(#fm-node-gradient)\"/>");
 
-    // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
-    let label_text = node
-        .label
-        .and_then(|lid| ir.labels.get(lid.0))
-        .map(|label| label.text.as_str())
-        .unwrap_or(node.id.as_str());
-    let line_h = font_size * config.line_height;
-    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
-    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
-    let mut cursor_y = y + (small_font * 1.25);
-
-    // Stereotype `<<type>>` — `write_escaped_text("<<…>>")` = `&lt;&lt;…>>` (`<` escaped, `>` literal), in pieces.
-    out.push_str("<text x=\"");
-    let _ = write_number_into(out, x + w / 2.0);
-    out.push_str("\" y=\"");
-    let _ = write_number_into(out, cursor_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = write_number_into(out, small_font);
-    out.push_str("\" font-weight=\"600\" fill=\"");
-    let card_text = c4_card_text_color(c4_person_colors.is_some(), colors);
-    let _ = write_escaped_attr(out, card_text);
-    // `.fm-node text` is a stylesheet declaration and therefore beats SVG's presentation
-    // attribute, so the white on the navy Person card is restated inline on each of its texts.
-    out.push_str("\" class=\"fm-c4-type-label\"");
-    write_c4_card_text_style(out, c4_person_colors.is_some());
-    out.push_str(">&lt;&lt;");
-    let _ = write_escaped_text(out, &c4_meta.element_type);
-    out.push_str(">></text>");
-
-    // Optional person icon.
-    if node
-        .classes
-        .iter()
-        .any(|class_name| class_name == "c4-person")
-    {
-        write_c4_person_icon_into(out, x + 18.0, y + 18.0, &colors.node_stroke);
-    }
-
-    // Name.
-    cursor_y += line_h * 0.95;
-    out.push_str("<text x=\"");
-    let _ = write_number_into(out, x + w / 2.0);
-    out.push_str("\" y=\"");
-    let _ = write_number_into(out, cursor_y);
-    out.push_str("\" text-anchor=\"middle\" font-size=\"");
-    let _ = write_number_into(out, font_size);
-    out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, card_text);
-    out.push_str("\" class=\"fm-c4-name\"");
-    write_c4_card_text_style(out, c4_person_colors.is_some());
-    out.push('>');
-    let _ = write_escaped_text(out, label_text);
-    out.push_str("</text>");
-
-    // Description (gate guarantees single-line, so no tspans / no `line-height` attr and `description_height` = 0).
-    if let Some(description) = &c4_meta.description {
-        cursor_y += line_h * 0.9;
-        let available_width = (w - 20.0).max(32.0);
-        let description_lines =
-            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
-        if !description_lines.is_empty() {
-            let description_height = (description_lines.len().saturating_sub(1) as f32)
-                * description_font
-                * config.line_height;
-            let baseline_y =
-                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            out.push_str("<text x=\"");
-            let _ = write_number_into(out, x + w / 2.0);
-            out.push_str("\" y=\"");
-            let _ = write_number_into(out, baseline_y);
-            out.push_str("\" text-anchor=\"middle\" font-size=\"");
-            let _ = write_number_into(out, description_font);
-            out.push_str("\" fill=\"");
-            let _ = write_escaped_attr(out, card_text);
-            out.push_str("\" class=\"fm-c4-description\"");
-            write_c4_card_text_style(out, c4_person_colors.is_some());
-            out.push('>');
-            let _ = write_escaped_text(out, &description_lines.join("\n"));
-            out.push_str("</text>");
-        }
-    }
+    write_c4_node_content_into(
+        out, node, c4_meta, ir, node_index, x, y, w, h, font_size, config, colors, None, false,
+    );
 
     // <title>Node: {raw_label}, rounded rectangle</title></g>
     out.push_str("<title>Node: ");
@@ -9873,7 +10327,7 @@ fn write_polygon_shape_into(
 }
 
 /// Stream the cylinder/database node path. This reproduces the slow `PathBuilder` bytes exactly:
-/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 0 x y+h-ry Z M x y+ry
+/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 1 x y+h-ry Z M x y+ry
 /// A w/2 ry 0 0 0 x+w y+ry`.
 fn write_cylinder_shape_into(
     f: &mut String,
@@ -9910,7 +10364,8 @@ fn write_cylinder_shape_into(
     let _ = crate::attributes::write_number_into(f, rx);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, ry);
-    f.push_str(" 0 0 0 ");
+    // The right-to-left bottom arc bulges down; sweeping upward cuts into the text body.
+    f.push_str(" 0 0 1 ");
     let _ = crate::attributes::write_number_into(f, x);
     f.push(' ');
     let _ = crate::attributes::write_number_into(f, bottom_y);
@@ -10598,6 +11053,23 @@ fn render_node_into(
 ) {
     use fm_core::NodeShape;
 
+    if ir.diagram_type == DiagramType::Journey {
+        render_node(
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+            false,
+        )
+        .write_to_string(out);
+        return;
+    }
+
     // A composite state IS its container: `anchor_composite_state_nodes` gave this node its
     // cluster's bounds so transitions attach to the container's boundary. Drawing it again here
     // would stack a second labelled box on the container — the duplicate this removes (bd-9w54).
@@ -10843,8 +11315,8 @@ fn render_node_into(
         return;
     }
 
-    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`
-    // and an absent/single-line description, whose config carries no conditional render — the C4 twin of the
+    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`,
+    // whose config carries no conditional render — the C4 twin of the
     // class/ER fast paths. `render_node`'s slow path builds a group `Element` + solid-fill rect `Element` +
     // `render_c4_node_content`'s child subtree + a title, serializes the whole group, then COPIES it into `out`;
     // stream the `<g>…</g>` in place instead. Reuses `simple_class_node_user_suffix` (byte-identical
@@ -10874,9 +11346,6 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
-        && c4_meta.description.as_ref().is_none_or(|d| {
-            wrap_text_to_lines(d, (w - 20.0).max(32.0), config.avg_char_width * 0.92).len() <= 1
-        })
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_c4_node_fragment_into(
@@ -11209,7 +11678,19 @@ fn render_node(
         palette
     });
     let colors = flowchart_colors.as_ref().unwrap_or(colors);
-    let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
+    let (shape_style, text_style) = if ir.diagram_type == DiagramType::Journey {
+        resolve_scene_node_inline_styles(ir, node_box.node_index)
+    } else {
+        resolve_node_inline_styles(ir, node_box.node_index)
+    };
+    let shape_style = if let Some(fill) = fm_layout::journey_score_fill(ir, node_box.node_index) {
+        Some(format!(
+            "fill: {fill};{}",
+            shape_style.as_deref().unwrap_or("")
+        ))
+    } else {
+        shape_style
+    };
     let node_id = ir_node
         .map(|node| node.id.as_str())
         .unwrap_or_else(|| node_box.node_id.as_str());
@@ -11289,6 +11770,7 @@ fn render_node(
     // `requirement_meta`/icon/centrality already gated below).
     let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
     if permit_fast
+        && ir.diagram_type != DiagramType::Journey
         && matches!(
             shape,
             NodeShape::Rect
@@ -11767,7 +12249,7 @@ fn render_node(
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
                 .line_to(x + w, y + h - ry)
-                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, true, x, y + h - ry)
                 .close()
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
@@ -12523,7 +13005,7 @@ fn render_node(
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, true, x + w, y + ry)
                 .line_to(x + w, y + h - ry)
-                .arc_to(w / 2.0, ry, 0.0, false, false, x, y + h - ry)
+                .arc_to(w / 2.0, ry, 0.0, false, true, x, y + h - ry)
                 .close()
                 .move_to(x, y + ry)
                 .arc_to(w / 2.0, ry, 0.0, false, false, x + w, y + ry)
@@ -12767,6 +13249,7 @@ fn render_node(
                 group,
                 node,
                 ir,
+                node_box.node_index,
                 x,
                 y,
                 w,
@@ -13039,6 +13522,7 @@ fn render_node(
                 node,
                 c4_meta,
                 ir,
+                node_box.node_index,
                 x,
                 y,
                 w,
@@ -13291,42 +13775,6 @@ fn stable_accent_index(node_id: &str) -> usize {
     (hash as usize % 8) + 1
 }
 
-/// Render a UML three-compartment class box: header | attributes | methods.
-///
-/// Adds separator lines and member text elements to the node group.
-#[allow(clippy::too_many_arguments)]
-/// Stream one class-compartment `<text>` byte-identical to the `TextBuilder` the slow path builds under
-/// embedded CSS with no label-style/classdef class: attrs `x, y, text-anchor, font-size, [extra], fill`
-/// then escaped content. `extra` is ` font-weight="bold"` (name), ` font-style="italic"` (stereotype), or
-/// `""` (members) — placed right after `font-size` exactly as `TextBuilder::build`'s call order does.
-fn write_class_text_into(
-    f: &mut String,
-    x: f32,
-    y: f32,
-    anchor: &str,
-    font_size: f32,
-    extra: &str,
-    fill: &str,
-    text: &str,
-) {
-    use crate::attributes::{write_escaped_attr, write_escaped_text};
-    f.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(f, x);
-    f.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" text-anchor=\"");
-    f.push_str(anchor);
-    f.push_str("\" font-size=\"");
-    let _ = crate::attributes::write_number_into(f, font_size);
-    f.push('"');
-    f.push_str(extra);
-    f.push_str(" fill=\"");
-    let _ = write_escaped_attr(f, fill);
-    f.push_str("\">");
-    let _ = write_escaped_text(f, text);
-    f.push_str("</text>");
-}
-
 /// Stream a requirement-node subtitle `<text>` (the `«type»` header / `Risk … | Verify …` metadata line)
 /// byte-identical to the `Element` the slow path builds under the common themed config (embedded CSS,
 /// no per-label style/classdef → `font-family` and `fm-node-label` absent). `before_fill`/`after_fill`
@@ -13396,25 +13844,13 @@ fn write_req_subtitle_body_into(
     f.push_str("</text>");
 }
 
-/// Stream a class-compartment separator `<line>` byte-identical to the slow path's `Element::Line` under
-/// embedded CSS (stroke is CSS-driven, so absent inline): `x1 y1 x2 y2 stroke-width="1"`.
-fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
-    f.push_str("<line x1=\"");
-    let _ = crate::attributes::write_number_into(f, x1);
-    f.push_str("\" y1=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" x2=\"");
-    let _ = crate::attributes::write_number_into(f, x2);
-    f.push_str("\" y2=\"");
-    let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" stroke-width=\"1\"/>");
-}
-
+/// Render the shared UML card geometry through the same writer as the whole-node path.
 #[allow(clippy::too_many_arguments)]
 fn render_class_compartments(
-    mut group: Element,
+    group: Element,
     node: &fm_core::IrNode,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -13430,172 +13866,33 @@ fn render_class_compartments(
         None => return group,
     };
 
-    // Streaming fast path: no per-label style, no classdef class, embedded CSS -> the whole compartment
-    // stack (stereotype + name + separators + member rows) is a fixed set of `<text>`/`<line>` bytes with
-    // no per-element class/style, so stream it into ONE raw fragment instead of ~5+ `Element`s per class
-    // node. Byte-identical to the Element path below (same attrs/order/positions/cursor advance); every
-    // other case (label style, classdef, non-embedded CSS) falls through.
-    if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
-        let mut f = String::new();
-        write_class_compartments_into(
-            &mut f, node, meta, ir, x, y, w, h, font_size, config, colors,
-        );
-        group = group.child(Element::raw_svg(f));
-        return group;
-    }
-
-    let apply_label_style = |mut elem: Element| {
-        if let Some(style) = label_style {
-            elem = elem.attr("style", style);
-        }
-        elem
-    };
-    let apply_label_class =
-        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
-
-    let line_h = font_size * config.line_height;
-    let padding_x = 8.0;
-    let text_x = x + padding_x;
-    let mut cursor_y = y + line_h;
-
-    // Header: class name (centered, bold).
-    let class_name = node
-        .label
-        .and_then(|lid| ir.labels.get(lid.0))
-        .map(|l| l.text.as_str())
-        .unwrap_or(&node.id);
-
-    // Stereotype above class name if present.
-    if let Some(ref stereotype) = meta.stereotype {
-        let stereo_text = stereotype.label();
-        let stereo_elem = TextBuilder::new(stereo_text.as_ref())
-            .x(x + w / 2.0)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(font_size * 0.85)
-            .anchor(TextAnchor::Middle)
-            .italic()
-            .fill(&colors.text)
-            .build();
-        group = group.child(apply_label_style(apply_label_class(stereo_elem)));
-        cursor_y += line_h;
-    }
-
-    // Append generic parameters to class name if present (e.g., "List<T>").
-    let display_name = meta.display_header(class_name);
-
-    let name_elem = TextBuilder::new(&display_name)
-        .x(x + w / 2.0)
-        .y(cursor_y)
-        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-        .font_size(font_size)
-        .anchor(TextAnchor::Middle)
-        .bold()
-        .fill(&colors.text)
-        .build();
-    group = group.child(apply_label_style(apply_label_class(name_elem)));
-    cursor_y += line_h * 0.5;
-
-    // Separator line after header.
-    let sep1 = Element::new(crate::element::ElementKind::Line)
-        .attr_num("x1", x)
-        .attr_num("y1", cursor_y)
-        .attr_num("x2", x + w)
-        .attr_num("y2", cursor_y)
-        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-        .stroke_width(1.0);
-    group = group.child(sep1);
-    cursor_y += line_h * 0.3;
-
-    // Attributes compartment.
-    let member_font_size = font_size * 0.9;
-    for attr in &meta.attributes {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(attr.visibility);
-        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
-        // turns it into `List<int>` only when the row is drawn (bd class-generics).
-        let name = fm_core::class_member_display_name(&attr.name, false);
-        let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
-        } else {
-            format!("{vis}{name}")
-        };
-        let elem = TextBuilder::new(&text)
-            .x(text_x)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(member_font_size)
-            .anchor(TextAnchor::Start)
-            .fill(&colors.text)
-            .build();
-        group = group.child(apply_label_style(apply_label_class(elem)));
-    }
-
-    // Separator before methods (only if both sections present).
-    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
-        cursor_y += line_h * 0.3;
-        let sep2 = Element::new(crate::element::ElementKind::Line)
-            .attr_num("x1", x)
-            .attr_num("y1", cursor_y)
-            .attr_num("x2", x + w)
-            .attr_num("y2", cursor_y)
-            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
-            .stroke_width(1.0);
-        group = group.child(sep2);
-        cursor_y += line_h * 0.3;
-    }
-
-    // Methods compartment.
-    for method in &meta.methods {
-        cursor_y += member_font_size * config.line_height * 0.9;
-        if cursor_y > y + h - line_h * 0.5 {
-            break;
-        }
-        let vis = visibility_symbol(method.visibility);
-        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
-        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
-        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
-        // here made the same member read as a different NAME.
-        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
-        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
-        // typed method row differed from the incumbent by one character in every class diagram.
-        let ret = method
-            .return_type
-            .as_deref()
-            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
-            .unwrap_or_default();
-        let text = format!(
-            "{vis}{}{ret}",
-            fm_core::class_member_display_name(&method.name, true)
-        );
-        let builder = TextBuilder::new(&text)
-            .x(text_x)
-            .y(cursor_y)
-            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(member_font_size)
-            .anchor(TextAnchor::Start);
-        let builder = match classifier {
-            Some("font-style:italic") => builder.font_style("italic"),
-            Some("text-decoration:underline") => builder.text_decoration("underline"),
-            _ => builder,
-        };
-        let elem = builder.fill(&colors.text).build();
-        group = group.child(apply_label_style(apply_label_class(elem)));
-    }
-
-    group
+    let mut fragment = String::new();
+    write_class_compartments_into(
+        &mut fragment,
+        node,
+        meta,
+        ir,
+        node_index,
+        x,
+        y,
+        w,
+        h,
+        font_size,
+        config,
+        colors,
+        label_style,
+        emit_classdef_classes,
+    );
+    group.child(Element::raw_svg(fragment))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_c4_node_content(
-    mut group: Element,
+    group: Element,
     node: &fm_core::IrNode,
     c4_meta: &fm_core::IrC4NodeMeta,
     ir: &MermaidDiagramIr,
+    node_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -13606,121 +13903,132 @@ fn render_c4_node_content(
     label_style: Option<&str>,
     emit_classdef_classes: bool,
 ) -> Element {
-    let apply_label_style = |mut elem: Element| {
-        if let Some(style) = label_style {
-            elem = elem.attr("style", style);
-        }
-        elem
-    };
-    let apply_label_class =
-        |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
+    let mut fragment = String::new();
+    write_c4_node_content_into(
+        &mut fragment,
+        node,
+        c4_meta,
+        ir,
+        node_index,
+        x,
+        y,
+        w,
+        h,
+        font_size,
+        config,
+        colors,
+        label_style,
+        emit_classdef_classes,
+    );
+    group.child(Element::raw_svg(fragment))
+}
 
+/// Draw the same measured card rows from both SVG node writers.
+#[allow(clippy::too_many_arguments)]
+fn write_c4_node_content_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    c4_meta: &fm_core::IrC4NodeMeta,
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    label_style: Option<&str>,
+    emit_classdef_classes: bool,
+) {
     let label_text = node
         .label
         .and_then(|lid| ir.labels.get(lid.0))
         .map(|label| label.text.as_str())
         .unwrap_or(node.id.as_str());
 
-    let line_h = font_size * config.line_height;
-    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
-    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
-    let mut cursor_y = y + (small_font * 1.25);
-
+    let declared = ir.resolved_node_style(node_index);
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size,
+        preset: fm_core::FontPreset::from_family(
+            declared
+                .get("font-family")
+                .map_or(&config.font_family, String::as_str),
+        ),
+        ..config.font_metrics().config().clone()
+    });
+    let card = fm_core::C4CardLayout::new(
+        c4_meta,
+        label_text,
+        node.shape,
+        &metrics,
+        Some(w),
+        declared.get("font-size").map(String::as_str),
+    );
+    let top = y + ((h - card.height) * 0.5).max(0.0);
     let person_card = mermaid_default_c4_person_colors(config, c4_meta).is_some();
     let card_text = c4_card_text_color(person_card, colors);
-    let person_text_style = |elem: Element| {
-        if person_card {
-            elem.attr("style", "fill:#FFFFFF")
-        } else {
-            elem
-        }
-    };
-    let c4_type_label = TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
-        .x(x + w / 2.0)
-        .y(cursor_y)
-        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-        .font_size(small_font)
-        .font_weight("600")
-        .anchor(TextAnchor::Middle)
-        // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
-        // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
-        // given diagram happens to take.
-        .fill(card_text)
-        .class("fm-c4-type-label")
-        .build();
-    group = group.child(apply_label_style(apply_label_class(person_text_style(
-        c4_type_label,
-    ))));
-
     if node
         .classes
         .iter()
         .any(|class_name| class_name == "c4-person")
     {
-        group = group.child(render_c4_person_icon(
-            x + 18.0,
-            y + 18.0,
-            colors.node_stroke.as_str(),
-        ));
+        write_c4_person_icon_into(out, x + 18.0, top + 18.0, card_text);
     }
 
-    cursor_y += line_h * 0.95;
-    group = group.child(apply_label_style(apply_label_class(person_text_style(
-        TextBuilder::new(label_text)
+    for row in card.rows {
+        let class = match row.kind {
+            fm_core::C4CardRowKind::Stereotype => "fm-c4-type-label",
+            fm_core::C4CardRowKind::Name => "fm-c4-name",
+            fm_core::C4CardRowKind::Technology => "fm-c4-technology",
+            fm_core::C4CardRowKind::Description => "fm-c4-description",
+        };
+        let mut text = TextBuilder::new(&row.text)
             .x(x + w / 2.0)
-            .y(cursor_y)
+            .y(top + row.center_y)
+            .baseline(text::DominantBaseline::Central)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-            .font_size(font_size)
-            .font_weight("600")
+            .font_size(row.font_size)
             .anchor(TextAnchor::Middle)
             .fill(card_text)
-            .class("fm-c4-name")
-            .build(),
-    ))));
-
-    if let Some(technology) = &c4_meta.technology {
-        cursor_y += line_h * 0.9;
-        group = group.child(apply_label_style(apply_label_class(
-            TextBuilder::new(&format!("[{technology}]"))
-                .x(x + w / 2.0)
-                .y(cursor_y)
-                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                .font_size(small_font)
-                .anchor(TextAnchor::Middle)
-                .fill(&colors.edge)
-                .class("fm-c4-technology")
-                .build(),
-        )));
-    }
-
-    if let Some(description) = &c4_meta.description {
-        cursor_y += line_h * 0.9;
-        let available_width = (w - 20.0).max(32.0);
-        let description_lines =
-            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
-        if !description_lines.is_empty() {
-            let description_text = description_lines.join("\n");
-            let description_height = (description_lines.len().saturating_sub(1) as f32)
-                * description_font
-                * config.line_height;
-            let baseline_y =
-                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
-            group = group.child(apply_label_style(apply_label_class(person_text_style(
-                TextBuilder::new(&description_text)
-                    .x(x + w / 2.0)
-                    .y(baseline_y)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(description_font)
-                    .line_height(config.line_height)
-                    .anchor(TextAnchor::Middle)
-                    .fill(card_text)
-                    .class("fm-c4-description")
-                    .build(),
-            ))));
+            .class(class);
+        if row.kind == fm_core::C4CardRowKind::Name {
+            text = text.font_weight("600");
         }
+        let mut text = text.build();
+        if emit_classdef_classes {
+            text = text.class("fm-node-label");
+        }
+        // The palette's Person card uses white text on navy. A declared label style still
+        // wins, and its other properties must not accidentally discard the readable default.
+        let mut style = match (person_card, label_style) {
+            (true, Some(style)) => Some(format!("fill:#FFFFFF;{style}")),
+            (true, None) => Some("fill:#FFFFFF".to_string()),
+            (false, Some(style)) => Some(style.to_string()),
+            (false, None) => None,
+        };
+        if declared.contains_key("font-size") {
+            style = Some(c4_measured_font_style(style.as_deref(), row.font_size));
+        }
+        if let Some(style) = style {
+            text = text.attr("style", &style);
+        }
+        text.write_to_string(out);
     }
+}
 
-    group
+/// Keep the browser's font size equal to the size used for wrapping and card height. Unsupported
+/// units or out-of-range values fall back in the shared model, and must not reappear through a
+/// class definition or inline style after that measurement.
+fn c4_measured_font_style(style: Option<&str>, font_size: f32) -> String {
+    use std::fmt::Write as _;
+
+    let mut style = style.unwrap_or_default().to_string();
+    if !style.is_empty() {
+        style.push(';');
+    }
+    let _ = write!(style, "font-size:{font_size}px!important");
+    style
 }
 
 fn render_c4_person_icon(x: f32, y: f32, stroke: &str) -> Element {
@@ -14275,38 +14583,6 @@ fn render_custom_svg_icon(
                 .stroke(stroke)
                 .stroke_width(stroke_width),
         )
-}
-
-fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<String> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let max_chars = ((max_width / avg_char_width).floor() as usize).max(8);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        let next_len = if current.is_empty() {
-            word.chars().count()
-        } else {
-            current.chars().count() + 1 + word.chars().count()
-        };
-        if next_len > max_chars && !current.is_empty() {
-            lines.push(current);
-            current = word.to_string();
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    lines
 }
 
 /// Conservative proportional measurement for text that must remain visible. Keep a caller's
@@ -14947,16 +15223,6 @@ fn c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<(&'static str, &'static str)>
     entries
 }
 
-fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
-    match vis {
-        fm_core::ClassVisibility::Unmarked => "",
-        fm_core::ClassVisibility::Public => "+",
-        fm_core::ClassVisibility::Private => "-",
-        fm_core::ClassVisibility::Protected => "#",
-        fm_core::ClassVisibility::Package => "~",
-    }
-}
-
 /// One curly brace, drawn down the left or right edge of `(x, y, w, h)`.
 ///
 /// mermaid builds this from quarter-circle arcs of radius `f` around the label box: a point at the
@@ -15076,7 +15342,31 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     }
 }
 
-fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: f32) -> String {
+fn uses_smoothed_layout_edge_path(ir: &MermaidDiagramIr, edge_index: usize) -> bool {
+    // The layout-driven SVG backend has always smoothed its connectors, including specialized
+    // diagram dependencies. Preserve that default while honoring an explicitly linear/step edge.
+    fm_layout::edge_paths::edge_routing_hint(ir, edge_index)
+        != Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)
+}
+
+fn layout_edge_path(
+    ir: &MermaidDiagramIr,
+    edge_path: &LayoutEdgePath,
+    offset_x: f32,
+    offset_y: f32,
+) -> String {
+    if !uses_smoothed_layout_edge_path(ir, edge_path.edge_index) {
+        let mut path = PathBuilder::new();
+        for (index, point) in edge_path.points.iter().enumerate() {
+            let (x, y) = (point.x + offset_x, point.y + offset_y);
+            path = if index == 0 {
+                path.move_to(x, y)
+            } else {
+                path.line_to(x, y)
+            };
+        }
+        return path.build();
+    }
     crate::path::build_smooth_path_by(edge_path.points.len(), |index| {
         let point = &edge_path.points[index];
         (point.x + offset_x, point.y + offset_y)
@@ -15096,6 +15386,7 @@ struct EdgeRenderContext<'a> {
     /// Positions indexed by IR edge index, resolved once in paint order for generic graphs.
     /// Sequence messages and chart annotations retain their specialized label placement.
     preserved_label_positions: Option<&'a [Option<fm_layout::LayoutPoint>]>,
+    sequence_messages: &'a [fm_layout::LayoutSequenceMessage],
     /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
     ///
     /// Every ribbon's width is its value normalised against this ONE number, so it is invariant
@@ -15391,6 +15682,19 @@ fn compute_edge_label<'a>(
         ..
     } = *context;
     let edge_index = edge_path.edge_index;
+    if detail.show_edge_labels
+        && let Ok(index) = context
+            .sequence_messages
+            .binary_search_by_key(&edge_index, |message| message.edge_index)
+    {
+        let message = &context.sequence_messages[index];
+        let center = message.bounds.center();
+        return Some((
+            Cow::Borrowed(&message.text),
+            center.x + offset_x,
+            center.y + offset_y,
+        ));
+    }
     // ⚠️ A SANKEY LINK CARRIES NO LABEL AT ALL, and this is parity, not a simplification. mermaid
     // 11.15.0 draws text only on the NODES: for `A,B,10` its drawn text is exactly
     // `["A\n10", "B\n10"]`, with no standalone `10` anywhere — measured in Chromium 151 against the
@@ -15476,20 +15780,36 @@ fn edge_label_dimensions(
         .max()
         .unwrap_or(0);
     let legacy_width = max_chars as f32 * config.avg_char_width;
-    // Reserve at the base font size, which also leaves room for the smaller tier-specific edge
-    // face. Counting characters alone gives WWW the same width as iii and leaves wide glyphs
-    // outside both their opaque plate and the collision solver's idea of that plate.
+    // Measure the face actually drawn. Using the larger node face plus broad padding wastes
+    // scarce corridor space and displaces captions that fit beside their own transitions.
     let text_width = if collision_aware || config.preserve_labels {
-        preserved_label_width(label, config.font_size, config, &config.font_metrics())
+        preserved_label_width(
+            label,
+            if collision_aware {
+                font_size
+            } else {
+                config.font_size
+            },
+            config,
+            &config.font_metrics(),
+        )
     } else {
         legacy_width
     };
     let text_height = (line_count - 1.0) * font_size * config.line_height;
-    (
-        text_width + 8.0 + 20.0,
-        text_height + font_size + 14.0,
-        text_height,
-    )
+    if collision_aware {
+        (
+            text_width + 8.0,
+            text_height + font_size * 1.2 + 4.0,
+            text_height,
+        )
+    } else {
+        (
+            text_width + 28.0,
+            text_height + font_size + 14.0,
+            text_height,
+        )
+    }
 }
 
 /// Resolve generic graph labels in paint order, independently of the text-preservation setting.
@@ -15501,11 +15821,7 @@ fn resolve_graph_edge_label_positions(
     config: &SvgRenderConfig,
     detail: RenderDetailProfile,
 ) -> Option<Vec<Option<fm_layout::LayoutPoint>>> {
-    if !detail.show_edge_labels
-        || !matches!(
-            ir.diagram_type,
-            DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
-        )
+    if !detail.show_edge_labels || !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
     {
         return None;
     }
@@ -15525,12 +15841,79 @@ fn resolve_graph_edge_label_positions(
             continue;
         };
         let label_text = truncate_label(&label.text, detail.edge_label_max_chars);
-        let (width, height, _) =
-            edge_label_dimensions(&label_text, detail.edge_font_size, config, true);
+        let font_size = edge_label_font_size(ir, path.edge_index, detail.edge_font_size);
+        let (width, height, _) = edge_label_dimensions(&label_text, font_size, config, true);
         let position = placer.place(path, width, height);
         positions[path.edge_index] = Some(position);
     }
     Some(positions)
+}
+
+/// Keep all connector strokes behind every label, including routes painted later in a shared
+/// corridor. A mask retains each edge's semantic group and cached fragment while hiding only
+/// the precise opaque plate. Its geometry-derived ID scopes multiple inline SVG documents.
+fn graph_edge_label_mask(
+    ir: &MermaidDiagramIr,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    frame: SvgFrame,
+    positions: Option<&[Option<fm_layout::LayoutPoint>]>,
+) -> Option<(String, Element)> {
+    use std::hash::{Hash, Hasher};
+    let positions = positions?;
+    let mut holes = Vec::new();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    frame.viewbox_width.to_bits().hash(&mut hash);
+    frame.viewbox_height.to_bits().hash(&mut hash);
+    for (index, position) in positions.iter().enumerate() {
+        let Some(position) = position else { continue };
+        let Some(label) = ir.edges[index].label.and_then(|id| ir.labels.get(id.0)) else {
+            continue;
+        };
+        let text = truncate_label(&label.text, detail.edge_label_max_chars);
+        let font = edge_label_font_size(ir, index, detail.edge_font_size);
+        let (width, height, _) = edge_label_dimensions(&text, font, config, true);
+        let x = position.x + frame.offset_x - width / 2.0;
+        let y = position.y + frame.offset_y - height / 2.0;
+        for value in [x, y, width, height] {
+            value.to_bits().hash(&mut hash);
+        }
+        holes.push(
+            Element::rect()
+                .x(x)
+                .y(y)
+                .width(width)
+                .height(height)
+                .rx(6.0)
+                .ry(6.0)
+                .fill("#000000"),
+        );
+    }
+    if holes.is_empty() {
+        return None;
+    }
+    let id = format!("fm-edge-label-mask-{:016x}", hash.finish());
+    let mut mask = Element::new(ElementKind::Mask)
+        .id(&id)
+        .attr("maskUnits", "userSpaceOnUse")
+        .attr("maskContentUnits", "userSpaceOnUse")
+        .attr("style", "mask-type:luminance")
+        .x(0.0)
+        .y(0.0)
+        .width(frame.viewbox_width)
+        .height(frame.viewbox_height)
+        .child(
+            Element::rect()
+                .x(0.0)
+                .y(0.0)
+                .width(frame.viewbox_width)
+                .height(frame.viewbox_height)
+                .fill("#ffffff"),
+        );
+    for hole in holes {
+        mask = mask.child(hole);
+    }
+    Some((id, mask))
 }
 
 #[cfg(test)]
@@ -15660,14 +16043,21 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
         preserved_label_positions,
+        sequence_messages,
     } = *context;
 
     let edge_index = edge_path.edge_index;
+    let sequence_message = sequence_messages
+        .binary_search_by_key(&edge_index, |message| message.edge_index)
+        .ok()
+        .map(|index| &sequence_messages[index]);
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     // The second marker of a relation marked at BOTH ends (bd-f9t0r); `None` on every other edge.
     let co_arrow = ir_edge.and_then(fm_core::IrEdge::co_arrow);
-    let is_back_edge = edge_path.reversed;
+    let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
+        fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed)
+    });
     // `edgeId@{ animate: … }` opt-in. Resolved once because it gates the raw-fragment fast path
     // below and is applied on the `Element` path; a second lookup is how a gate and its emission
     // drift apart.
@@ -15862,9 +16252,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // same `edge_visuals` mapping. `.or()` and not a plain assignment — a co-arrow fills the empty
     // slot, it never overwrites a marker the primary already placed there.
     //
-    // ⚠️ NOT APPLIED TO A BACK EDGE. That branch deliberately replaces the whole visual with the
-    // dashed cluster-stroke feedback style, and letting a co-arrow through would put a UML diamond
-    // on a layout artefact.
+    // The feedback style is reserved for undecorated single arrows. An authored co-arrow always
+    // reaches this merge and survives cycle removal.
     let marker_end = if is_back_edge {
         marker_end
     } else {
@@ -15957,6 +16346,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // so the (potentially allocating) lookup only runs once everything cheaper has already passed.
     if arrow == ArrowType::Arrow
         && !is_back_edge
+        && uses_smoothed_layout_edge_path(ir, edge_index)
         && config.embed_theme_css
         && !config.animations_enabled
         // Every fragment writer emits exactly two classes; an animated edge carries a third.
@@ -15995,7 +16385,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
     // Only the slower paths below need the materialized `d` String (the whole-edge fast path streamed it
     // straight into its fragment above and returned).
-    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+    let path_str = layout_edge_path(ir, edge_path, offset_x, offset_y);
 
     // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
     // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
@@ -16009,6 +16399,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     if let Some((label_text, lx, ly)) = &edge_label {
         let label_str = label_text.as_ref();
         if config.embed_theme_css
+            && sequence_message.is_none()
             && config.a11y.aria_labels
             && config.a11y.keyboard_nav
             && config.a11y.text_alternatives
@@ -16166,10 +16557,26 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
         // Add background rect for label
         let label_text = label_text.as_ref();
-        let label_font_size = detail.edge_font_size;
-        let centered = preserved_label_positions.is_some();
-        let (label_width, label_height, total_text_height) =
-            edge_label_dimensions(label_text, label_font_size, config, centered);
+        let centered = preserved_label_positions.is_some() || sequence_message.is_some();
+        let label_font_size = if let Some(message) = sequence_message {
+            message.font_size
+        } else if centered {
+            edge_label_font_size(ir, edge_index, detail.edge_font_size)
+        } else {
+            detail.edge_font_size
+        };
+        let (label_width, label_height, total_text_height) = sequence_message.map_or_else(
+            || edge_label_dimensions(label_text, label_font_size, config, centered),
+            |message| {
+                (
+                    message.bounds.width,
+                    message.bounds.height,
+                    message.bounds.height
+                        - 2.0 * fm_layout::LayoutSequenceMessage::PADDING_Y
+                        - message.line_height,
+                )
+            },
+        );
         let start_y =
             ly - total_text_height / 2.0 + if centered { 0.0 } else { label_font_size / 4.0 };
 
@@ -16192,7 +16599,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             .y(start_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(label_font_size)
-            .line_height(config.line_height)
+            .line_height(sequence_message.map_or(config.line_height, |message| {
+                message.line_height / message.font_size
+            }))
             .anchor(TextAnchor::Middle)
             .baseline(if centered {
                 text::DominantBaseline::Central
@@ -16208,6 +16617,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             let mut style = String::from("font-size:");
             let _ = attributes::write_number_into(&mut style, label_font_size);
             style.push_str("px");
+            if let Some(color) = fm_layout::edge_labels::edge_label_style(ir, edge_index)
+                .get("color")
+                .and_then(|value| sanitize_svg_paint(value))
+            {
+                style.push_str(";fill:");
+                style.push_str(&color);
+            }
             text = text.attr("style", &style);
         }
         group = group.child(text);
@@ -16410,6 +16826,7 @@ fn render_edge_body_into(
         accessible_node_labels,
         sankey_widest_flow: sankey_widest,
         preserved_label_positions,
+        sequence_messages,
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
@@ -16418,7 +16835,9 @@ fn render_edge_body_into(
     if arrow == ArrowType::Invisible {
         return;
     }
-    let is_back_edge = edge_path.reversed;
+    let is_back_edge = ir_edge.map_or(edge_path.reversed, |edge| {
+        fm_layout::edge_uses_feedback_marker(edge, edge_path.reversed)
+    });
     // `edgeId@{ animate: … }` opt-in. Resolved once here because it gates BOTH fast paths and is
     // applied on the slow one; a second lookup is how the gate and the emission drift apart.
     let animation_class = ir_edge
@@ -16439,6 +16858,7 @@ fn render_edge_body_into(
     // family still falling to the ~5-alloc `Element` slow path. Mixed a11y (`A11yConfig::minimal()`) still
     // takes the slow path, exactly as before.
     if arrow == ArrowType::Arrow
+        && sequence_messages.is_empty()
         && !is_back_edge
         // Cheap label-presence gate BEFORE `uniform_a11y`/`compute_edge_label`: an unlabeled Arrow edge
         // (the common flowchart/state case) is handled by the unlabeled fast path below, so short-circuit
@@ -16476,7 +16896,7 @@ fn render_edge_body_into(
         let labeled_stroke_width =
             sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(1.8);
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
-            let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+            let path_str = layout_edge_path(ir, edge_path, offset_x, offset_y);
             if a11y {
                 let (from_label, to_label) =
                     edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
@@ -16928,6 +17348,7 @@ fn render_edge_body_into(
     // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
     // slow `Element` path, exactly as before — a raw fragment cannot express "role but no tabindex".
     if !edge_path.reversed
+        && uses_smoothed_layout_edge_path(ir, edge_index)
         && config.embed_theme_css
         && !config.animations_enabled
         // THE SIXTH AND LAST FRAGMENT PATH. This is the one the default config actually takes for a
@@ -17062,7 +17483,14 @@ mod tests {
         let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
 
         assert_eq!(
-            svg_frame(&ir, &layout, &SvgRenderConfig::default()),
+            svg_frame(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    padding: 40.0,
+                    ..Default::default()
+                }
+            ),
             SvgFrame {
                 viewbox_width: 280.0,
                 viewbox_height: 160.0,
@@ -17080,7 +17508,14 @@ mod tests {
         // only with front-matter provenance, so the band is only reserved for that state.
         ir.meta.title_from_front_matter = true;
         let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
-        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+        let frame = svg_frame(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                padding: 40.0,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(frame.viewbox_height, 197.0);
         assert_eq!(frame.offset_y, 87.0);
@@ -17094,7 +17529,14 @@ mod tests {
     fn svg_frame_reserves_the_c4_legend_inset() {
         let ir = create_c4_ir_with_legend();
         let layout = frame_test_layout(20.0, -10.0, 100.0, 80.0);
-        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+        let frame = svg_frame(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                padding: 40.0,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(frame.viewbox_width, 400.0);
         assert_eq!(frame.viewbox_height, 288.0);
@@ -17615,6 +18057,7 @@ mod tests {
                             colors: &colors,
                             accessible_node_labels: None,
                             preserved_label_positions: Some(positions),
+                            sequence_messages: &[],
                             sankey_widest_flow: None,
                         };
                         let mut streamed = String::new();
@@ -17932,7 +18375,7 @@ mod tests {
             &config,
             true,
         );
-        assert!(width >= 80.0 * config.font_size + 28.0 - 0.01);
+        assert!(width >= 80.0 * geometry.detail.edge_font_size + 8.0 - 0.01);
         assert!(geometry.frame.viewbox_width > layout.bounds.width + config.padding * 2.0);
         let x = position.x + geometry.frame.offset_x;
         let y = position.y + geometry.frame.offset_y;
@@ -17963,11 +18406,132 @@ mod tests {
         config.font_size = 30.0;
         config.avg_char_width = 15.0;
         let (doubled, _, _) = edge_label_dimensions("WWWWWWWWWWWWWWWWWWWW", 25.5, &config, true);
-        assert!((doubled - 28.0 - (wide - 28.0) * 2.0).abs() < 0.01);
+        assert!((doubled - 8.0 - (wide - 8.0) * 2.0).abs() < 0.01);
         assert_eq!(
             edge_label_dimensions("e\u{301}", 25.5, &config, true),
             edge_label_dimensions("é", 25.5, &config, true),
             "a combining accent must not reserve another glyph advance"
+        );
+    }
+
+    #[test]
+    fn graph_label_font_size_is_measured_drawn_and_framed_consistently() {
+        let ir = fm_parser::parse(concat!(
+            "flowchart LR\nA -->|wide caption<br/>second row| B\n",
+            "linkStyle default font-size:18px,color:#123456\n",
+            "linkStyle 0 font-size:32px\n",
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_layout(&ir, &layout, &config);
+            let group = svg
+                .split_once("id=\"fm-edge-0\"")
+                .unwrap()
+                .1
+                .split_once("</g>")
+                .unwrap()
+                .0;
+            assert!(group.contains("font-size=\"32\""));
+            assert!(group.contains("font-size:32px;fill:#123456"));
+            let geometry = svg_geometry(&ir, &layout, &config);
+            let center = geometry.label_positions.as_ref().unwrap()[0].unwrap();
+            let text = &ir.labels[ir.edges[0].label.unwrap().0].text;
+            let (width, height, _) = edge_label_dimensions(text, 32.0, &config, true);
+            assert!(height >= 32.0 * 2.0);
+            assert!(center.x + geometry.frame.offset_x - width / 2.0 >= 0.0);
+            assert!(center.y + geometry.frame.offset_y - height / 2.0 >= 0.0);
+            assert!(
+                center.x + geometry.frame.offset_x + width / 2.0 <= geometry.frame.viewbox_width
+            );
+            assert!(
+                center.y + geometry.frame.offset_y + height / 2.0 <= geometry.frame.viewbox_height
+            );
+        }
+    }
+
+    #[test]
+    fn connector_masks_match_label_plates_and_are_scoped_to_each_inline_svg() {
+        let mut ids = Vec::new();
+        for text in ["first caption", "a substantially longer second caption"] {
+            let ir = fm_parser::parse(&format!("flowchart LR\nA -->|{text}| B")).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let svg = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+            assert_eq!(
+                svg,
+                render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default())
+            );
+            let mask = svg
+                .split_once("<mask ")
+                .unwrap()
+                .1
+                .split_once("</mask>")
+                .unwrap()
+                .0;
+            let id = mask
+                .split_once("id=\"")
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0;
+            assert!(svg.contains(&format!(".{id} path[data-fm-edge-id]{{mask:url(#{id})}}")));
+            assert_eq!(
+                mask.matches("<rect ").count(),
+                2,
+                "frame and one exact plate"
+            );
+            let hole = mask
+                .split("<rect ")
+                .nth(2)
+                .unwrap()
+                .split_once("/>")
+                .unwrap()
+                .0;
+            let group = svg
+                .split_once("id=\"fm-edge-0\"")
+                .unwrap()
+                .1
+                .split_once("</g>")
+                .unwrap()
+                .0;
+            let plate = group
+                .split_once("<rect ")
+                .unwrap()
+                .1
+                .split_once("/>")
+                .unwrap()
+                .0;
+            for name in ["x", "y", "width", "height", "rx", "ry"] {
+                let value = |tag: &str| {
+                    tag.split_once(&format!("{name}=\""))
+                        .unwrap()
+                        .1
+                        .split_once('"')
+                        .unwrap()
+                        .0
+                        .to_string()
+                };
+                assert_eq!(
+                    value(hole),
+                    value(plate),
+                    "mask must follow the painted plate"
+                );
+            }
+            let label = group.split_once("<text ").unwrap().1;
+            assert!(
+                !label.contains("mask="),
+                "only connector strokes are masked"
+            );
+            ids.push(id.to_string());
+        }
+        assert_ne!(
+            ids[0], ids[1],
+            "inline diagrams must not borrow another diagram's cutouts"
         );
     }
 
@@ -18041,14 +18605,26 @@ mod tests {
                             colors: &colors,
                             accessible_node_labels: None,
                             preserved_label_positions: Some(&positions),
+                            sequence_messages: &[],
                             sankey_widest_flow: None,
                         };
                         let edge = &layout.edges[1];
                         let (_, x, y) = compute_edge_label(edge, &context).expect("drawn label");
-                        let (_, height, _) =
+                        let (width, height, _) =
                             edge_label_dimensions(label, detail.edge_font_size, &config, true);
-                        assert_eq!(x, 385.0, "the route's horizontal anchor is retained");
-                        assert!((y - 7.0 - height / 2.0 - 94.0).abs() < 0.001);
+                        let plate = fm_layout::LayoutRect {
+                            x: x - 5.0 - width / 2.0,
+                            y: y - 7.0 - height / 2.0,
+                            width,
+                            height,
+                        };
+                        for node in &layout.nodes {
+                            edge_label_test_assert_clear(&plate, &node.bounds);
+                        }
+                        assert!(
+                            plate.y <= 100.02 && plate.y + height >= 99.98,
+                            "the caption must remain attached to its horizontal transition"
+                        );
                         let mut streamed = String::new();
                         render_edge_into(&mut streamed, edge, &context);
                         let element = render_edge(edge, &context).render();
@@ -18098,11 +18674,18 @@ mod tests {
             let last_index = layout.edges[1].edge_index;
             assert_eq!(positions[first_index], Some(anchor));
             let last = positions[last_index].expect("second position");
-            assert_eq!(last.x, anchor.x);
-            assert!(
-                (last.y - anchor.y - (detail.edge_font_size + 16.0)).abs() < 0.001,
-                "both whole plates have a two-pixel gap"
-            );
+            let plate = |index: usize, center: fm_layout::LayoutPoint| {
+                let text = &ir.labels[ir.edges[index].label.unwrap().0].text;
+                let (width, height, _) =
+                    edge_label_dimensions(text, detail.edge_font_size, &config, true);
+                fm_layout::LayoutRect {
+                    x: center.x - width / 2.0,
+                    y: center.y - height / 2.0,
+                    width,
+                    height,
+                }
+            };
+            edge_label_test_assert_clear(&plate(last_index, last), &plate(first_index, anchor));
             let context = EdgeRenderContext {
                 ir: &ir,
                 offset_x: 0.0,
@@ -18112,6 +18695,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: Some(&positions),
+                sequence_messages: &[],
                 sankey_widest_flow: None,
             };
             for edge in &layout.edges {
@@ -18226,13 +18810,13 @@ mod tests {
                 2
             );
 
-            // Same nodes, routes, offsets, and explicit detail tier; only the available frame
-            // changes. Its lower edge now rules out the formerly closest downward adjustment.
+            // Changing only the frame height leaves the on-route plate valid. Cached edge
+            // fragments stay reusable while the resized document must still match a fresh render.
             blocked.bounds.height = 120.0;
             render(&mut renderer, blocked);
             assert_eq!(
                 renderer.previous.as_ref().unwrap().fragments.reused_edges,
-                1
+                2
             );
         }
     }
@@ -18244,7 +18828,7 @@ mod tests {
             "A[\"Tall<br/>1<br/>2<br/>3<br/>4<br/>5<br/>6<br/>7<br/>8\"]\n",
             "B[\"A wide preceding node separates the label from the tallest prefix node\"]\n",
             "C[Short]\nA-->B\n",
-            "B-->|WW|C\n",
+            "B-->|W|C\n",
         );
         let make_input = |tail: &str| {
             let mut input = prefix_source.to_string();
@@ -18270,10 +18854,10 @@ mod tests {
         let config = SvgRenderConfig {
             detail_tier: MermaidTier::Rich,
             preserve_labels: true,
-            // The short IR label keeps the tree's fixed 80px rank gaps certifiable. Supply a
+            // The short IR label keeps the tree's fixed 64px rank gaps certifiable. Supply a
             // deliberately wider SVG calibration so its plate still reaches the changing
             // suffix; reuse must revalidate rendered label geometry, not only the IR prefix.
-            avg_char_width: 160.0,
+            avg_char_width: 320.0,
             ..Default::default()
         };
         let mut renderer = SvgBatchRenderer::default();
@@ -18983,6 +19567,88 @@ mod tests {
         assert!(streamed.contains("url(#fm-node-gradient)"));
     }
 
+    #[test]
+    fn c4_database_and_lined_cylinder_bottom_caps_curve_outward() {
+        let mut ir = fm_parser::parse(
+            "C4Container\nContainerDb(db, \"Records\", \"PostgreSQL\", \"Stores customer records\")",
+        )
+        .ir;
+        let bounds = LayoutRect {
+            x: 12.0,
+            y: 24.0,
+            width: 200.0,
+            height: 240.0,
+        };
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "db".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds,
+        };
+        let config = SvgRenderConfig::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let colors = ThemeColors::default();
+        let centrality = HashMap::new();
+        let mut fragments = Vec::new();
+        for shape in [NodeShape::Cylinder, NodeShape::LinedCylinder] {
+            ir.nodes[0].shape = shape;
+            let mut fragment = String::new();
+            render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+                false,
+            )
+            .write_to_string(&mut fragment);
+            fragments.push(fragment);
+        }
+        let mut streamed = String::new();
+        write_cylinder_shape_into(
+            &mut streamed,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            "white",
+            None,
+        );
+        fragments.push(streamed);
+        for fragment in fragments {
+            let path = fragment
+                .split(" d=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let arc: Vec<f32> = path
+                .split(" A")
+                .nth(2)
+                .unwrap()
+                .split_whitespace()
+                .take(7)
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert_eq!(arc.len(), 7);
+            assert_eq!(arc[5], bounds.x, "bottom cap travels from right to left");
+            // A right-to-left half ellipse with sweep 1 reaches below its endpoints. Sweep 0
+            // instead cut up into the description and left the cylinder looking open-ended.
+            let bottom_at_center = arc[6] + if arc[4] == 1.0 { arc[1] } else { -arc[1] };
+            assert!(
+                (bottom_at_center - bounds.y - bounds.height).abs() < 0.01,
+                "the visible cylinder base must reach the bottom of its box: {path}"
+            );
+        }
+    }
+
     /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
     /// builds. Pins `build_common_edge_fragment` against the canonical `Element` constructors.
     #[test]
@@ -19214,6 +19880,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19291,6 +19958,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19356,6 +20024,229 @@ mod tests {
         (ir, edge_path)
     }
 
+    #[test]
+    fn svg_edge_routing_preserves_corners_in_both_edge_writers() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+
+        let colors = ThemeColors::default();
+        let configs = [
+            SvgRenderConfig::default(),
+            SvgRenderConfig {
+                a11y: A11yConfig::none(),
+                accessible: false,
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                a11y: A11yConfig::minimal(),
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                include_source_spans: true,
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                embed_theme_css: false,
+                ..Default::default()
+            },
+        ];
+        for global in [None, Some(Routing::Orthogonal), Some(Routing::Curved)] {
+            for local in [None, Some(Routing::Orthogonal), Some(Routing::Curved)] {
+                let should_curve = local.or(global) != Some(Routing::Orthogonal);
+                for arrow in [
+                    ArrowType::Arrow,
+                    ArrowType::DottedArrow,
+                    ArrowType::DoubleArrow,
+                    ArrowType::Line,
+                ] {
+                    for labeled in [false, true] {
+                        let (mut ir, edge_path) = single_edge_fixture(arrow);
+                        ir.meta.edge_routing = global;
+                        ir.edges[0].extras_mut().routing = local;
+                        if labeled {
+                            ir.labels.push(IrLabel {
+                                text: "Approval <&>".to_string(),
+                                ..Default::default()
+                            });
+                            ir.edges[0].label = Some(IrLabelId(0));
+                        }
+                        for config in &configs {
+                            let context = EdgeRenderContext {
+                                ir: &ir,
+                                offset_x: 1.5,
+                                offset_y: -2.0,
+                                config,
+                                detail: resolve_detail_profile(800.0, 600.0, config),
+                                colors: &colors,
+                                accessible_node_labels: None,
+                                preserved_label_positions: None,
+                                sequence_messages: &[],
+                                sankey_widest_flow: None,
+                            };
+                            let mut streamed = String::new();
+                            render_edge_into(&mut streamed, &edge_path, &context);
+                            let element = render_edge(&edge_path, &context).render();
+                            assert_eq!(
+                                streamed, element,
+                                "global={global:?}, local={local:?}, {arrow:?}, labeled={labeled}, {config:?}"
+                            );
+                            let path = streamed
+                                .split_once("<path d=\"")
+                                .expect("edge path")
+                                .1
+                                .split_once('"')
+                                .expect("path data end")
+                                .0;
+                            if should_curve {
+                                assert!(
+                                    path.contains('C'),
+                                    "the curved route was flattened: {path}"
+                                );
+                                assert!(path.starts_with("M1.50 -2 "), "{path}");
+                                assert!(path.ends_with("97.50 78"), "{path}");
+                            } else {
+                                assert_eq!(
+                                    path, "M1.50 -2 L33.50 46 L73.50 46 L97.50 78",
+                                    "linear/step routing must retain every supplied vertex"
+                                );
+                            }
+                            if labeled {
+                                // XML text preserves a plain `>`; only a closing `]]>` escapes it.
+                                // Inspect drawn text, so an accessible title cannot mask a lost label.
+                                assert_eq!(
+                                    issue14_drawn_text(&streamed).get("Approval &lt;&amp;>"),
+                                    Some(&1),
+                                    "global={global:?}, local={local:?}, {arrow:?}, {config:?}: {streamed}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn svg_edge_routing_preserves_parsed_overrides_in_both_backends() {
+        for (global, local, local_curved) in [("basis", "step", false), ("linear", "basis", true)] {
+            for label in ["", "|Keep this relation|"] {
+                let source = format!(
+                    "%%{{init: {{'flowchart': {{'curve': '{global}'}}}}}}%%\n\
+                     flowchart LR\nA selected@-->{label} B\nB inherited@--> C\n\
+                     selected@{{ curve: {local} }}\n"
+                );
+                let parsed = fm_parser::parse(&source);
+                assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+                let ir = parsed.ir;
+                assert_eq!(ir.edges.len(), 2, "{source}");
+                let mut layout = frame_test_layout(0.0, 0.0, 300.0, 240.0);
+                layout.nodes = (0..3)
+                    .map(|index| edge_label_test_node(index, index as f32 * 100.0, 0.0, 40.0, 30.0))
+                    .collect();
+                // Both edges receive the same bent corridor. This makes the rendered policy
+                // observable even when a tiny graph's automatic layout happens to be straight.
+                for edge_index in 0..2 {
+                    let (_, mut edge) = single_edge_fixture(ArrowType::Arrow);
+                    let y = 60.0 + edge_index as f32 * 100.0;
+                    edge.edge_index = edge_index;
+                    edge.points = [
+                        fm_layout::LayoutPoint { x: 10.0, y },
+                        fm_layout::LayoutPoint { x: 50.0, y },
+                        fm_layout::LayoutPoint {
+                            x: 50.0,
+                            y: y + 40.0,
+                        },
+                        fm_layout::LayoutPoint {
+                            x: 100.0,
+                            y: y + 40.0,
+                        },
+                    ]
+                    .into_iter()
+                    .collect();
+                    layout.edges.push(edge);
+                }
+                for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+                    for edge_index in 0..2 {
+                        let source_index = format!("data-fm-source-index=\"{edge_index}\"");
+                        let edge_id = format!("data-fm-edge-id=\"{edge_index}\"");
+                        let path_tag = svg
+                            .split("<path ")
+                            .filter_map(|tag| tag.split_once('>').map(|(tag, _)| tag))
+                            .find(|tag| {
+                                tag.contains("marker-end=")
+                                    && match backend {
+                                        SvgBackend::LegacyLayout => tag.contains(&edge_id),
+                                        SvgBackend::Scene => {
+                                            tag.contains("data-fm-source-kind=\"edge\"")
+                                                && tag.contains(&source_index)
+                                        }
+                                    }
+                            })
+                            .expect("sourced connector path with its arrowhead");
+                        let path = path_tag
+                            .split_once("d=\"")
+                            .unwrap()
+                            .1
+                            .split_once('"')
+                            .unwrap()
+                            .0;
+                        let should_curve = if edge_index == 0 {
+                            local_curved
+                        } else {
+                            !local_curved
+                        };
+                        assert_eq!(
+                            path.contains('Q') || path.contains('C'),
+                            should_curve,
+                            "{backend:?}, edge {edge_index}, {source}: {path}"
+                        );
+                        if !should_curve {
+                            assert_eq!(
+                                path.matches('L').count(),
+                                3,
+                                "all routed corners must survive: {path}"
+                            );
+                        }
+                    }
+                    if !label.is_empty() {
+                        assert!(svg.contains("Keep this relation"), "{backend:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn svg_edge_routing_preserves_legacy_smoothing_without_hints() {
+        for family in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::Sequence,
+            DiagramType::Gantt,
+            DiagramType::Sankey,
+        ] {
+            let (mut ir, mut edge) = single_edge_fixture(ArrowType::Arrow);
+            ir.diagram_type = family;
+            for point_count in [4, 2, 1, 0] {
+                edge.points.truncate(point_count);
+                let before = crate::path::build_smooth_path_by(edge.points.len(), |index| {
+                    let point = edge.points[index];
+                    (point.x + 1.5, point.y - 2.0)
+                });
+                assert_eq!(
+                    layout_edge_path(&ir, &edge, 1.5, -2.0),
+                    before,
+                    "{family:?}/{point_count}"
+                );
+            }
+        }
+    }
+
     /// The lean (`A11yConfig::none()`) edge now streams through the whole-edge fast path instead of
     /// falling back to the per-element `Element` builder. Unlike the node half — where the fast path took
     /// over every reachable configuration, so its lean bytes had to be pinned as a literal — `render_edge`
@@ -19394,6 +20285,7 @@ mod tests {
                 colors: &colors,
                 accessible_node_labels: None,
                 preserved_label_positions: None,
+                sequence_messages: &[],
                 sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
@@ -19568,6 +20460,7 @@ mod tests {
             colors: &colors,
             accessible_node_labels: None,
             preserved_label_positions: None,
+            sequence_messages: &[],
             sankey_widest_flow: sankey_widest_flow(&ir),
         };
 
@@ -20684,6 +21577,422 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_edges_preserve_authored_markers_in_both_svg_backends() {
+        for (link, start_count, end_count) in [
+            ("---", 0, 0),
+            ("-.-", 0, 0),
+            ("===", 0, 0),
+            ("<-->", 3, 3),
+            ("<==>", 3, 3),
+            ("<-.->", 3, 3),
+            ("o--o", 3, 3),
+            ("x--x", 3, 3),
+            ("--o", 0, 3),
+            ("--x", 0, 3),
+        ] {
+            for label in ["", "|relationship|"] {
+                let source = format!(
+                    "flowchart LR\nA {link}{label} B\nB {link}{label} C\nC {link}{label} A\n"
+                );
+                let ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.edges.len(), 3, "{source}");
+                let layout = fm_layout::layout_diagram(&ir);
+                assert!(
+                    layout.edges.iter().any(|edge| edge.reversed),
+                    "the fixture must exercise cycle removal: {source}"
+                );
+                for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    assert_eq!(
+                        svg.matches(" marker-start=").count(),
+                        start_count,
+                        "{backend:?}: {source}\n{svg}"
+                    );
+                    assert_eq!(
+                        svg.matches(" marker-end=").count(),
+                        end_count,
+                        "{backend:?}: {source}\n{svg}"
+                    );
+                    assert!(
+                        !svg.contains("marker-end=\"url(#arrow-open)\""),
+                        "layout reversal replaced an authored endpoint: {backend:?}: {source}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scene_backend_preserves_gantt_schedule_and_accessible_task_status() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n section Delivery\n\
+             Release :milestone, release, after build, 0d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 3);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        layout.nodes.reverse();
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            include_source_spans: true,
+            ..Default::default()
+        };
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+        let text = issue14_drawn_text(&svg);
+        for label in [
+            "Release schedule",
+            "Design",
+            "Build",
+            "Release",
+            "Verification with a deliberately long name",
+        ] {
+            assert_eq!(
+                text.get(label),
+                Some(&1),
+                "{label} must appear exactly once"
+            );
+        }
+        assert_eq!(text.get("Delivery"), Some(&2));
+        for tick in &layout.extensions.axis_ticks {
+            assert_eq!(
+                text.get(tick.label.as_str()),
+                Some(&2),
+                "both date axes must survive"
+            );
+        }
+        let position = |id| {
+            svg.find(&format!("id=\"{id}\""))
+                .expect("Gantt scene layer")
+        };
+        let sections = &svg[position("gantt-sections")..position("gantt-axes")];
+        let dependencies = &svg[position("gantt-dependencies")..position("gantt-tasks")];
+        let tasks = &svg[position("gantt-tasks")..position("gantt-progress")];
+        let progress = &svg[position("gantt-progress")..position("gantt-labels")];
+        assert_eq!(sections.matches("<path").count(), 2);
+        assert_eq!(tasks.matches("<path").count(), 4);
+        assert_eq!(progress.matches("<path").count(), 2);
+        assert_eq!(
+            dependencies
+                .matches("marker-end=\"url(#arrow-end)\"")
+                .count(),
+            3
+        );
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "dependency markers require live definitions"
+        );
+        assert!(!tasks.contains(" marker-end="));
+        assert!(tasks.contains("fill=\"#c4b5fd\""), "milestone fill");
+        assert!(tasks.contains("fill=\"#86efac\""), "done status");
+        assert!(
+            tasks.contains("stroke=\"#dc2626\""),
+            "critical status survives done"
+        );
+        assert!(progress.contains("fill-opacity=\"0.22\""));
+        assert_eq!(tasks.matches("data-fm-source-span=").count(), 4);
+        assert!(tasks.contains("50% complete"));
+        assert!(tasks.contains("critical, done"));
+        assert!(tasks.contains("milestone"));
+        assert!(tasks.contains("starts 2026-02-06"));
+        assert!(
+            !svg.contains("id=\"nodes\""),
+            "generic graph boxes must not overpaint the schedule"
+        );
+    }
+
+    #[test]
+    fn scene_backend_styled_gantt_progress_retains_semantic_paint_and_node_opacity() {
+        for (opacity, expected) in [
+            ("0.4", Some("0.40")),
+            ("2", Some("1")),
+            ("-1", Some("0")),
+            ("NaN", None),
+            ("inf", None),
+        ] {
+            let source = format!(
+                "gantt\nTask :done,a,2026-01-01,4d,50%\n\
+                 classDef gantt-done fill:#ff0000,stroke:#00ff00,stroke-width:7px,stroke-dasharray:5 2,opacity:{opacity}\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    include_source_spans: true,
+                    ..Default::default()
+                },
+            );
+            let tasks = svg
+                .split_once("id=\"gantt-tasks\"")
+                .unwrap()
+                .1
+                .split_once("id=\"gantt-progress\"")
+                .unwrap()
+                .0;
+            let progress = svg
+                .split_once("id=\"gantt-progress\"")
+                .unwrap()
+                .1
+                .split_once("id=\"gantt-labels\"")
+                .unwrap()
+                .0;
+            assert_eq!(tasks.matches("<path").count(), 1);
+            assert_eq!(progress.matches("<path").count(), 1);
+            assert!(
+                tasks.contains("fill:#ff0000"),
+                "author task fill was lost: {tasks}"
+            );
+            assert!(
+                tasks.contains("stroke:#00ff00"),
+                "author task stroke was lost: {tasks}"
+            );
+            assert!(
+                tasks.contains("stroke-dasharray:5 2"),
+                "author task dash was lost: {tasks}"
+            );
+            assert!(progress.contains("fill=\"#0f172a\""));
+            assert!(progress.contains("fill-opacity=\"0.22\""));
+            assert!(progress.contains("stroke=\"none\""));
+            assert!(
+                !progress.contains(" style="),
+                "task CSS replaced progress paint: {progress}"
+            );
+            assert!(!progress.contains("stroke-dasharray"));
+            match expected {
+                Some(expected) => assert!(
+                    progress.contains(&format!(" opacity=\"{expected}\"")),
+                    "{progress}"
+                ),
+                None => assert!(
+                    !progress.contains(" opacity="),
+                    "non-finite author opacity leaked: {progress}"
+                ),
+            }
+            assert!(progress.contains("data-fm-source-kind=\"node\""));
+            assert!(progress.contains("data-fm-source-index=\"0\""));
+            assert!(progress.contains("data-fm-source-span="));
+            assert!(progress.contains("50% complete"));
+        }
+    }
+
+    #[test]
+    fn scene_backend_preserves_gantt_label_contrast_on_dark_backgrounds() {
+        let ir = fm_parser::parse(
+            "gantt\n title Release schedule\n section Delivery\n\
+             Design :done, design, 2026-02-06, 4d\n\
+             Verification with a deliberately long name :verify, after design, 1d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(
+            layout.extensions.gantt_task_labels[0].placement,
+            fm_layout::GanttLabelPlacement::Inside
+        );
+        assert_ne!(
+            layout.extensions.gantt_task_labels[1].placement,
+            fm_layout::GanttLabelPlacement::Inside
+        );
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let svg = render_svg_with_layout(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            },
+        );
+        let text_element = |label: &str| {
+            svg.split("<text")
+                .find(|element| element.contains(&format!(">{label}<")))
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .split('>')
+                .next()
+                .unwrap()
+        };
+        assert!(
+            text_element("Design").contains(&format!("fill=\"{}\"", colors.background)),
+            "text inside a light status bar needs dark ink"
+        );
+        for label in [
+            "Release schedule",
+            "Verification with a deliberately long name",
+            "2026-02-06",
+        ] {
+            assert!(
+                text_element(label).contains(&format!("fill=\"{}\"", colors.text)),
+                "{label} sits on the dark page and needs the theme's text paint"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_backend_renders_quantitative_xycharts_without_graph_furniture() {
+        for horizontal in [false, true] {
+            let source = format!(
+                "---\ntitle: Quarterly movement\n---\nxychart-beta{}\n\
+                 x-axis Quarter [Q1, Q2, Q3]\n y-axis Dollars -10 --> 20\n\
+                 bar [-10, 0, 20]\n line [0, 10, -10]\n area [-5, 15, -5]\n",
+                if horizontal { " horizontal" } else { "" },
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                include_source_spans: true,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert_eq!(svg, render_svg_with_config(&ir, &config));
+            let drawn = issue14_drawn_text(&svg);
+            for label in [
+                "Quarterly movement",
+                "Quarter",
+                "Dollars",
+                "Q1",
+                "Q2",
+                "Q3",
+                "-10",
+                "0",
+                "20",
+            ] {
+                assert_eq!(drawn.get(label), Some(&1), "{label:?} in {source}");
+            }
+            assert_eq!(svg.matches("data-fm-source-kind=\"node\"").count(), 9);
+            assert_eq!(svg.matches("data-fm-source-kind=\"edge\"").count(), 4);
+            assert!(!svg.contains(" marker-start="));
+            assert!(!svg.contains(" marker-end="));
+            let position = |id| svg.find(&format!("id=\"{id}\"")).expect("chart layer");
+            assert!(position("xychart-axes") < position("xychart-areas"));
+            assert!(position("xychart-areas") < position("xychart-bars"));
+            assert!(position("xychart-bars") < position("xychart-lines"));
+            assert!(position("xychart-lines") < position("xychart-points"));
+            assert!(position("xychart-points") < position("xychart-labels"));
+            let area = &svg[position("xychart-areas")..position("xychart-bars")];
+            assert!(area.contains("<path") && area.contains("fill-opacity=\"0.16\""));
+            let category = svg
+                .split("<text")
+                .find(|text| text.contains(">Q1<"))
+                .expect("Q1 text");
+            assert!(category.contains(if horizontal {
+                "text-anchor=\"end\""
+            } else {
+                "text-anchor=\"middle\""
+            }));
+            assert!(category.contains("dominant-baseline=\"alphabetic\""));
+        }
+    }
+
+    #[test]
+    fn scene_backend_preserves_sequence_furniture_and_branch_meaning() {
+        let mut ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box rgb(230,240,250) Workers\n\
+             participant Alice\n\
+             participant Bob\n\
+             end\n\
+             rect rgb(250,240,220)\n\
+             Alice->>+Bob: request\n\
+             alt allowed\n\
+             Note right of Bob: Check<br/>Audit\n\
+             Bob-->>Alice: accept\n\
+             else denied\n\
+             Note over Alice,Bob: wait\n\
+             end\n\
+             Bob-->>-Alice: done\n\
+             end\n\
+             destroy Bob\n\
+             Bob->>Alice: bye\n",
+        )
+        .ir;
+        ir.meta.init.config.sequence_mirror_actors = Some(true);
+        let svg = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        let drawn = issue14_drawn_text(&svg);
+        for label in [
+            "Workers",
+            "alt",
+            "[allowed]",
+            "[denied]",
+            "Check",
+            "Audit",
+            "wait",
+            "request",
+            "accept",
+            "done",
+            "bye",
+        ] {
+            assert_eq!(
+                drawn.get(label),
+                Some(&1),
+                "missing drawn sequence label {label:?}"
+            );
+        }
+        assert_eq!(drawn.get("Alice"), Some(&2), "head and foot headers only");
+        assert_eq!(drawn.get("Bob"), Some(&2), "head and foot headers only");
+        assert!(
+            !drawn.contains_key("rect"),
+            "a colored background has no keyword tab"
+        );
+        assert!(svg.contains("fill=\"rgb(230,240,250)\""));
+        assert!(svg.contains("fill=\"rgb(250,240,220)\""));
+
+        let layer_position = |id| svg.find(&format!("id=\"{id}\"")).expect("sequence layer");
+        let background = layer_position("sequence-backgrounds");
+        let lifelines = layer_position("sequence-lifelines");
+        let activations = layer_position("sequence-activations");
+        let fragments = layer_position("sequence-fragments");
+        let notes = layer_position("sequence-notes");
+        let messages = layer_position("edges");
+        let destroy = layer_position("sequence-lifecycle");
+        assert!(background < lifelines && lifelines < activations);
+        assert!(activations < fragments && fragments < notes && notes < messages);
+        assert!(messages < destroy);
+        assert!(svg[lifelines..activations].contains("stroke-dasharray=\"6,4\""));
+        assert!(svg[fragments..notes].contains("stroke-dasharray=\"6,4\""));
+    }
+
+    #[test]
+    fn scene_sequence_colors_do_not_admit_external_paints() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n\
+             box red Workers\nparticipant A\nparticipant B\nend\n\
+             rect blue\nA->>B: request\nend\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        layout.clusters[0].color = Some(String::from("url(https://invalid.example/group.svg)"));
+        layout.extensions.sequence_fragments[0].color =
+            Some(String::from("url(https://invalid.example/fragment.svg)"));
+        let svg = render_svg_with_layout(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                ..Default::default()
+            },
+        );
+        assert!(!svg.contains("invalid.example"));
+        assert!(issue14_drawn_text(&svg).contains_key("request"));
+        assert!(svg.contains("id=\"sequence-fragments\""));
+    }
+
+    #[test]
     fn render_scene_to_svg_emits_paths_text_and_source_metadata() {
         let scene = create_scene_with_path_and_text();
         let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());
@@ -21480,9 +22789,11 @@ mod tests {
                         },
                     };
                     let mut streamed = String::new();
-                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
+                    let colors = resolve_theme(None, &config).colors;
+                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config, &colors);
                     let mut slow = String::new();
-                    render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
+                    render_layout_band(&band, 3.0, 5.0, &config, &colors)
+                        .write_to_string(&mut slow);
                     assert_eq!(
                         streamed, slow,
                         "band kind {kind:?} embed {embed} label {label:?}"
@@ -21504,9 +22815,11 @@ mod tests {
             };
             for label in ["2026-02-01", "a<b>&c"] {
                 let mut streamed = String::new();
-                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config);
+                let colors = resolve_theme(None, &config).colors;
+                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config, &colors);
                 let mut slow = String::new();
-                render_layout_axis_tick(label, 42.5, 17.0, &config).write_to_string(&mut slow);
+                render_layout_axis_tick(label, 42.5, 17.0, &config, &colors)
+                    .write_to_string(&mut slow);
                 assert_eq!(streamed, slow, "embed {embed} label {label:?}");
             }
         }
@@ -22753,8 +24066,9 @@ marker#arrow-open path {
         .collect()
     }
 
-    /// Split a rendered document into its `<defs>` block and the body that follows it.
-    fn split_defs_and_body(svg: &str) -> (&str, &str) {
+    /// Inspect declarations against the complete document: stylesheets precede `<defs>` and
+    /// can contain valid references, including the connector mask's scoped CSS rule.
+    fn defs_and_document(svg: &str) -> (&str, &str) {
         let Some(defs_start) = svg.find("<defs>") else {
             return ("", svg);
         };
@@ -22762,7 +24076,7 @@ marker#arrow-open path {
             .find("</defs>")
             .expect("defs block should close")
             + defs_start;
-        (&svg[defs_start..defs_end], &svg[defs_end..])
+        (&svg[defs_start..defs_end], svg)
     }
 
     /// `<defs>` ids declared inside `defs` that no `url(#…)` in `defs` or `body` points at.
@@ -22976,7 +24290,14 @@ marker#arrow-open path {
     fn double_circle_inner_disc_is_filled_only_for_a_state_terminal() {
         let inner_fills = |src: &str| -> Vec<String> {
             let parsed = fm_parser::parse(src);
-            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            let svg = render_svg_with_config(
+                &parsed.ir,
+                &SvgRenderConfig {
+                    node_gradients: true,
+                    semantic_colors: false,
+                    ..Default::default()
+                },
+            );
             svg.split("<circle")
                 .skip(1)
                 .filter_map(|chunk| {
@@ -23666,16 +24987,8 @@ marker#arrow-open path {
         );
     }
 
-    /// Every line of a wrapped C4 description must land inside its node box (bd-9xjy).
-    ///
-    /// The trap this test exists to close: the description is ONE `<text>` whose `y` IS inside the
-    /// box, and its lines are `<tspan dy="…">` children stacking downward from there. A guard that
-    /// reads only the text element's `y` sees no overflow — which is how a 17-line description drew
-    /// 220px below its own rectangle while looking fine to a naive check. So the position asserted
-    /// here is the ACCUMULATED dy, per line.
-    ///
-    /// Also pins that a single-line description does not grow the box: the renderer's own baseline
-    /// clamp already contains that case, and growing it would move committed goldens for nothing.
+    /// Every wrapped description row must be drawn, separated, and contained by its card.
+    /// Count actual text elements as well as their content so a missing row cannot pass.
     #[test]
     fn c4_description_lines_render_inside_the_node_box() {
         let words = [
@@ -23703,6 +25016,7 @@ marker#arrow-open path {
         ];
 
         let mut single_line_height: Option<f32> = None;
+        let mut saw_wrapping = false;
         for take in 1..=words.len() {
             let description = words[..take].join(" ");
             let src =
@@ -23733,40 +25047,32 @@ marker#arrow-open path {
                 "{take}: node box is missing y/height"
             );
 
-            let Some(after) = svg.split("class=\"fm-c4-description\"").nth(1) else {
-                continue;
-            };
-            let element = svg
+            let rows: Vec<_> = svg
                 .split("<text ")
-                .find(|chunk| chunk.contains("class=\"fm-c4-description\""))
-                .unwrap_or_default();
-            let first = number(element, "y");
-            let font = number(element, "font-size");
-            assert!(
-                first.is_finite() && font.is_finite(),
-                "{take}: description is missing y/font-size"
+                .skip(1)
+                .filter_map(|chunk| {
+                    let (head, rest) = chunk.split_once('>')?;
+                    if !head.contains("class=\"fm-c4-description\"") {
+                        return None;
+                    }
+                    let text = rest.split_once("</text>")?.0;
+                    Some((number(head, "y"), number(head, "font-size"), text))
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{take}: the description disappeared");
+            assert_eq!(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>().join(" "),
+                description
             );
-
-            // Walk the tspan stack, accumulating dy exactly as a renderer would.
-            let body = after.split("</text>").next().unwrap_or_default();
-            let mut baseline = first;
-            let mut lines = 1_usize;
-            for tspan in body.split("<tspan ").skip(1) {
-                let dy = number(tspan, "dy");
-                if !dy.is_finite() {
-                    continue;
-                }
-                baseline += dy;
-                lines += 1;
-                assert!(
-                    baseline + font * 0.5 <= bottom && baseline - font * 0.5 >= top,
-                    "{take} words / {lines} lines: description line at {baseline} escapes the node \
-                     box {top}..{bottom}"
-                );
+            for &(center, font, _) in &rows {
+                assert!(center.is_finite() && font >= 11.0);
+                assert!(center + font * 0.5 < bottom && center - font * 0.5 > top);
             }
-
-            // The first `<tspan dy="0">` counts as line one, so a single-line description reports 2.
-            if lines <= 2 {
+            for pair in rows.windows(2) {
+                assert!(pair[0].0 + pair[0].1 * 0.5 < pair[1].0 - pair[1].1 * 0.5);
+            }
+            saw_wrapping |= rows.len() > 1;
+            if rows.len() == 1 {
                 let height = bottom - top;
                 let previous = *single_line_height.get_or_insert(height);
                 assert_eq!(
@@ -23775,6 +25081,10 @@ marker#arrow-open path {
                 );
             }
         }
+        assert!(
+            saw_wrapping,
+            "the paragraph must exercise multiple rendered lines"
+        );
     }
 
     /// `<defs>` hygiene, both directions, across every diagram-render path (bd-a6uk, bd-w5f7).
@@ -23798,7 +25108,7 @@ marker#arrow-open path {
         let mut checked = 0_usize;
         for (label, ir) in defs_hygiene_cases() {
             let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
-            let (defs, body) = split_defs_and_body(&svg);
+            let (defs, body) = defs_and_document(&svg);
 
             assert!(
                 unreferenced_defs_ids(defs, body).is_empty(),
@@ -25339,6 +26649,111 @@ marker#arrow-open path {
     }
 
     #[test]
+    fn class_card_rows_reach_both_svg_backends_at_configured_font_sizes() {
+        let source = "classDiagram\nclass Repository~T~ {\n<<interface>>\n+String identifier\n+fetch() List~T~\n+save()$\n}\n";
+        for (font_size, line_height, style) in [
+            (15.0, 1.5, ""),
+            (24.0, 1.8, ""),
+            (
+                15.0,
+                1.5,
+                "classDef default font-size:24px\nstyle Repository font-size:40px\n",
+            ),
+        ] {
+            let ir = fm_parser::parse(&format!("{source}{style}")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            let name = node
+                .label
+                .and_then(|id| ir.labels.get(id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            let declared = ir.resolved_node_style(0);
+            let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+                meta,
+                name,
+                font_size,
+                line_height,
+                declared.get("font-size").map(String::as_str),
+            );
+            for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                for embed_theme_css in [false, true] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        font_size,
+                        line_height,
+                        embed_theme_css,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_config(&ir, &config);
+                    let drawn = issue14_drawn_text(&svg);
+                    for row in &card.rows {
+                        assert_eq!(
+                            drawn.get(&escape_xml_text(&row.text)),
+                            Some(&1),
+                            "backend={backend:?}, font_size={font_size}: missing or duplicated {}",
+                            row.text,
+                        );
+                    }
+                    if !style.is_empty() {
+                        let mut row_ys = Vec::new();
+                        for row in &card.rows {
+                            let label = format!(">{}", escape_xml_text(&row.text));
+                            let element = svg
+                                .split("<text ")
+                                .filter_map(|chunk| {
+                                    chunk.split_once("</text>").map(|(text, _)| text)
+                                })
+                                .find(|text| text.contains(&label))
+                                .expect("class row text");
+                            assert_eq!(edge_label_test_number(element, "font-size"), 40.0);
+                            row_ys.push(edge_label_test_number(element, "y"));
+                        }
+                        for rows in row_ys.windows(2) {
+                            assert!(
+                                rows[1] - rows[0] > 40.0,
+                                "backend={backend:?}: styled class rows overlap"
+                            );
+                        }
+                    }
+                    if backend == SvgBackend::LegacyLayout {
+                        assert!(svg.contains("class=\"fm-class-header\""));
+                        assert_eq!(svg.matches("class=\"fm-class-divider\"").count(), 2);
+                        assert!(svg.contains("font-weight=\"600\""));
+                        assert!(svg.contains("text-decoration=\"underline\""));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_card_header_tint_preserves_authored_fill_and_label_styles() {
+        let source = "classDiagram\nclass Account {\n+String owner\n+save()\n}\nstyle Account fill:#fff4e6,color:#78350f,stroke:#d97706\n";
+        let ir = fm_parser::parse(source).ir;
+        assert_eq!(
+            ir.resolved_node_style(0).get("fill").map(String::as_str),
+            Some("#fff4e6")
+        );
+        for embed_theme_css in [false, true] {
+            let config = SvgRenderConfig {
+                embed_theme_css,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert!(
+                !svg.contains("class=\"fm-class-header\""),
+                "the header must not obscure the authored fill"
+            );
+            assert!(svg.contains("#fff4e6"));
+            assert!(svg.contains("fill:#78350f"));
+            assert!(svg.contains("stroke:#d97706;stroke-width:0.75;opacity:0.65"));
+            let drawn = issue14_drawn_text(&svg);
+            assert_eq!(drawn.get("Account"), Some(&1));
+            assert_eq!(drawn.get("+save()"), Some(&1));
+        }
+    }
+
+    #[test]
     fn smoke_state() {
         smoke_test_diagram(
             "stateDiagram-v2\n  [*] --> Active\n  Active --> [*]",
@@ -25649,6 +27064,336 @@ marker#arrow-open path {
             circles[1]
         );
         assert!(!circles[1].contains("#ff3300"), "{}", circles[1]);
+    }
+
+    fn assert_quadrant_label_leader_geometry(svg: &str) -> usize {
+        let elements: Vec<_> = svg.split('<').collect();
+        let points: Vec<_> = elements
+            .iter()
+            .copied()
+            .filter(|element| element.contains("class=\"fm-quadrant-point\""))
+            .collect();
+        let labels: Vec<_> = elements
+            .iter()
+            .copied()
+            .filter(|element| element.contains("class=\"fm-quadrant-point-label-bg\""))
+            .collect();
+        let leaders: Vec<_> = elements
+            .iter()
+            .copied()
+            .filter(|element| element.contains("class=\"fm-quadrant-label-leader\""))
+            .collect();
+        assert_eq!(points.len(), labels.len());
+        let mut matched = 0;
+        for (point, label) in points.iter().zip(&labels) {
+            let cx = edge_label_test_number(point, "cx");
+            let cy = edge_label_test_number(point, "cy");
+            let radius = edge_label_test_number(point, "r")
+                + edge_label_test_number(point, "stroke-width") / 2.0;
+            let x = edge_label_test_number(label, "x");
+            let y = edge_label_test_number(label, "y");
+            let right = x + edge_label_test_number(label, "width");
+            let bottom = y + edge_label_test_number(label, "height");
+            let target_x = cx.clamp(x, right);
+            let target_y = cy.clamp(y, bottom);
+            let dx = target_x - cx;
+            let dy = target_y - cy;
+            let distance = dx.hypot(dy);
+            let leader = leaders.iter().find(|leader| {
+                (edge_label_test_number(leader, "x2") - target_x).abs() < 0.03
+                    && (edge_label_test_number(leader, "y2") - target_y).abs() < 0.03
+                    && (edge_label_test_number(leader, "x1") - cx)
+                        .hypot(edge_label_test_number(leader, "y1") - cy)
+                        < radius + 2.03
+            });
+            if distance > radius + 10.1 {
+                assert!(
+                    leader.is_some(),
+                    "detached label must retain its point association"
+                );
+            }
+            if let Some(leader) = leader {
+                matched += 1;
+                let sx = edge_label_test_number(leader, "x1") - cx;
+                let sy = edge_label_test_number(leader, "y1") - cy;
+                let standoff = sx.hypot(sy);
+                assert!(standoff > radius + 1.9 && standoff < radius + 2.1);
+                assert!(
+                    (sx * dy - sy * dx).abs() / distance < 0.03,
+                    "leader must point from its dot to its label"
+                );
+            }
+        }
+        assert_eq!(
+            matched,
+            leaders.len(),
+            "every leader must connect its own label and point"
+        );
+        matched
+    }
+
+    #[test]
+    fn quadrant_labels_clear_clustered_points_and_stay_inside_the_plot() {
+        let source = concat!(
+            "quadrantChart\n",
+            "  title Delivery priorities\n",
+            "  x-axis Low effort --> High effort\n",
+            "  y-axis Low impact --> High impact\n",
+            "  quadrant-1 Plan next\n",
+            "  quadrant-2 Do first\n",
+            "  quadrant-3 Delegate\n",
+            "  quadrant-4 Reconsider\n",
+            "  Search performance: [0.72, 0.79]\n",
+            "  Billing reliability: [0.73, 0.77]\n",
+            "  Customer onboarding: [0.75, 0.78] radius: 12\n",
+            "  International deployment: [0.97, 0.90]\n",
+            "  Documentation: [0.20, 0.70]\n",
+            "  Support workflows: [0.23, 0.68]\n",
+            "  Legacy migration: [0.80, 0.24]\n",
+            "  Internal automation: [0.22, 0.25]\n",
+        );
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for embed_theme_css in [false, true] {
+            for theme in [ThemePreset::Default, ThemePreset::Dark] {
+                let config = SvgRenderConfig {
+                    embed_theme_css,
+                    theme,
+                    ..SvgRenderConfig::default()
+                };
+                let svg = render_svg_with_layout(&ir, &layout, &config);
+                assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+                let rect = |element: &str| fm_layout::LayoutRect {
+                    x: edge_label_test_number(element, "x"),
+                    y: edge_label_test_number(element, "y"),
+                    width: edge_label_test_number(element, "width"),
+                    height: edge_label_test_number(element, "height"),
+                };
+                let quadrants: Vec<_> = svg
+                    .split('<')
+                    .filter(|element| element.contains("class=\"fm-quadrant-bg\""))
+                    .map(rect)
+                    .collect();
+                let labels: Vec<_> = svg
+                    .split('<')
+                    .filter(|element| element.contains("class=\"fm-quadrant-point-label-bg\""))
+                    .map(rect)
+                    .collect();
+                let points: Vec<_> = svg
+                    .split('<')
+                    .filter(|element| element.contains("class=\"fm-quadrant-point\""))
+                    .collect();
+                assert_eq!(quadrants.len(), 4);
+                assert_eq!(labels.len(), 8);
+                assert_eq!(points.len(), 8);
+                let left = quadrants.iter().map(|r| r.x).fold(f32::INFINITY, f32::min);
+                let top = quadrants.iter().map(|r| r.y).fold(f32::INFINITY, f32::min);
+                let width = quadrants[0].width * 2.0;
+                let height = quadrants[0].height * 2.0;
+                for (index, label) in labels.iter().enumerate() {
+                    assert!(label.x >= left && label.y >= top);
+                    assert!(label.x + label.width <= left + width + 0.02);
+                    assert!(label.y + label.height <= top + height + 0.02);
+                    for other in &labels[..index] {
+                        assert_eq!(
+                            quadrant_overlap_area(*label, *other),
+                            0.0,
+                            "labels {index}: {label:?} and {other:?}"
+                        );
+                    }
+                    for point in &points {
+                        let cx = edge_label_test_number(point, "cx");
+                        let cy = edge_label_test_number(point, "cy");
+                        let radius = edge_label_test_number(point, "r");
+                        let dx = cx - cx.clamp(label.x, label.x + label.width);
+                        let dy = cy - cy.clamp(label.y, label.y + label.height);
+                        assert!(
+                            dx.hypot(dy) >= radius + 1.0,
+                            "label conceals a point: {label:?}"
+                        );
+                    }
+                }
+                // Styling and label avoidance must never move the actual data, including the
+                // rightmost point whose previous right-aligned label escaped the viewBox.
+                for (point, authored) in points
+                    .iter()
+                    .zip(&ir.quadrant_meta.as_ref().unwrap().points)
+                {
+                    assert!(
+                        (edge_label_test_number(point, "cx") - left - authored.x * width).abs()
+                            < 0.02
+                    );
+                    assert!(
+                        (edge_label_test_number(point, "cy") - top - (1.0 - authored.y) * height)
+                            .abs()
+                            < 0.02
+                    );
+                }
+                assert_quadrant_label_leader_geometry(&svg);
+            }
+        }
+    }
+
+    #[test]
+    fn quadrant_label_wrapping_preserves_words_and_export_geometry() {
+        let source = concat!(
+            "quadrantChart\n",
+            "  International deployment readiness and customer onboarding: [0.99, 0.99]\n",
+            "  International deployment readiness and billing reliability: [0.98, 0.98]\n",
+        );
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        for font_size in [15.0, 24.0] {
+            let config = SvgRenderConfig {
+                font_size,
+                ..SvgRenderConfig::default()
+            };
+            let chart = fm_layout::LayoutRect {
+                x: 50.0,
+                y: 60.0,
+                width: 330.0,
+                height: 330.0,
+            };
+            let placements = quadrant_label_placements(
+                &layout,
+                ir.quadrant_meta.as_ref().unwrap(),
+                chart,
+                (0.0, 0.0),
+                &config,
+            );
+            for (label, authored) in placements
+                .iter()
+                .zip(&ir.quadrant_meta.as_ref().unwrap().points)
+            {
+                assert!(label.lines.len() > 1);
+                assert_eq!(label.lines.join(" "), authored.label);
+                assert!(label.bounds.width < chart.width / 2.0);
+                assert!(label.bounds.x + label.bounds.width < chart.x + chart.width);
+                assert!(label.bounds.y >= chart.y);
+            }
+            assert_eq!(
+                quadrant_overlap_area(placements[0].bounds, placements[1].bounds),
+                0.0
+            );
+            let embedded = render_svg_with_layout(&ir, &layout, &config);
+            let portable = render_svg_with_layout(
+                &ir,
+                &layout,
+                &SvgRenderConfig {
+                    embed_theme_css: false,
+                    ..config
+                },
+            );
+            let label_geometry = |svg: &str| {
+                svg.split('<')
+                    .filter(|element| element.contains("class=\"fm-quadrant-point-label-bg\""))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(label_geometry(&embedded), label_geometry(&portable));
+            assert!(embedded.contains("<tspan"));
+            assert!(portable.contains("<tspan"));
+        }
+    }
+
+    #[test]
+    fn quadrant_long_annotations_expand_the_frame_without_losing_unicode() {
+        let paragraph = "Deployment readiness 東京 e\u{301}quipe 👩\u{200d}💻 review ".repeat(24);
+        let heading = "Plan complex international deployment after validating customer readiness";
+        let lower_heading = "Reconsider costly migration after validating operational readiness";
+        let source = format!(
+            "quadrantChart\nquadrant-1 {heading}\nquadrant-4 {lower_heading}\n{paragraph}: [0.95, 0.90]\nNearby release: [0.94, 0.89]\n"
+        );
+        let ir = fm_parser::parse(&source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let meta = ir.quadrant_meta.as_ref().unwrap();
+        for font_size in [15.0, 32.0, 48.0] {
+            let config = SvgRenderConfig {
+                font_size,
+                ..SvgRenderConfig::default()
+            };
+            let frame = svg_frame(&ir, &layout, &config);
+            let offset = (frame.offset_x, frame.offset_y);
+            let chart = quadrant_plot_bounds(&layout, meta, offset);
+            let labels = quadrant_label_placements(&layout, meta, chart, offset, &config);
+            assert!(
+                labels[0].bounds.y > chart.y + chart.height,
+                "paragraph needs annotation space"
+            );
+            let compact = |text: &str| {
+                text.chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+            };
+            assert_eq!(
+                compact(&labels[0].lines.concat()),
+                compact(&meta.points[0].label)
+            );
+            for line in &labels[0].lines {
+                assert!(!line.starts_with('\u{301}'));
+                assert!(!line.starts_with('\u{200d}'));
+                assert!(!line.ends_with('\u{200d}'));
+            }
+            for label in &labels {
+                assert!(label.bounds.x + label.bounds.width <= frame.viewbox_width);
+                assert!(label.bounds.y + label.bounds.height <= frame.viewbox_height);
+            }
+            let headings = quadrant_headings(meta, chart, &config);
+            assert!(headings[0].lines.len() > 1);
+            let all_heading_text = compact(
+                &headings
+                    .iter()
+                    .map(|heading| heading.lines.concat())
+                    .collect::<String>(),
+            );
+            assert!(all_heading_text.contains(&compact(heading)));
+            assert!(all_heading_text.contains(&compact(lower_heading)));
+            for (index, heading) in headings.iter().enumerate() {
+                if heading.bounds.y < chart.y + chart.height {
+                    assert!(heading.bounds.width <= chart.width / 2.0 - 24.0 + 0.01);
+                    assert!(heading.bounds.height <= chart.height / 2.0 - 20.0);
+                }
+                assert!(heading.bounds.y + heading.bounds.height <= frame.viewbox_height);
+                for other in &headings[..index] {
+                    assert_eq!(quadrant_overlap_area(heading.bounds, other.bounds), 0.0);
+                }
+                for label in &labels {
+                    assert_eq!(quadrant_overlap_area(heading.bounds, label.bounds), 0.0);
+                }
+            }
+            for embed_theme_css in [false, true] {
+                let svg = render_svg_with_layout(
+                    &ir,
+                    &layout,
+                    &SvgRenderConfig {
+                        embed_theme_css,
+                        ..config.clone()
+                    },
+                );
+                let viewbox: Vec<f32> = svg
+                    .split_once("viewBox=\"")
+                    .unwrap()
+                    .1
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|value| value.parse().unwrap())
+                    .collect();
+                assert_eq!(viewbox[2], frame.viewbox_width);
+                assert_eq!(viewbox[3], frame.viewbox_height);
+                let last_label = svg.rfind("class=\"fm-quadrant-point-label\"").unwrap();
+                let first_point = svg.find("class=\"fm-quadrant-point\"").unwrap();
+                assert!(
+                    last_label < first_point,
+                    "data markers must be above all annotation plates"
+                );
+                assert!(
+                    assert_quadrant_label_leader_geometry(&svg) > 0,
+                    "the below-plot paragraph must have a real geometric leader"
+                );
+            }
+        }
     }
 
     #[test]
@@ -26013,5 +27758,33 @@ marker#arrow-open path {
             traced_b.trace.incremental.recomputed_nodes <= traced_b.layout.stats.node_count,
             "incremental should recompute at most all nodes"
         );
+    }
+
+    #[test]
+    fn debug_overlay_emits_bbox_and_hud_group_when_enabled() {
+        let parsed = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]");
+        let default_svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        assert!(!default_svg.contains("fm-debug-overlay"));
+
+        let debug_config = SvgRenderConfig {
+            debug_overlay: true,
+            ..SvgRenderConfig::default()
+        };
+        let debug_svg = render_svg_with_config(&parsed.ir, &debug_config);
+        assert!(debug_svg.contains(r#"class="fm-debug-overlay""#));
+        assert!(debug_svg.contains(r#"class="fm-debug-node-bbox""#));
+        assert!(debug_svg.contains(r#"class="fm-debug-edge-point""#));
+        assert!(debug_svg.contains("debug: nodes=2 edges=1"));
+    }
+
+    #[test]
+    fn render_theme_css_vars_emits_theme_custom_properties() {
+        let cfg = SvgRenderConfig::default();
+        let vars = cfg.theme_css_vars();
+        assert!(vars.contains("--fm-bg:"));
+        assert!(vars.contains("--fm-node-fill:"));
+        assert!(vars.contains("--fm-edge-color:"));
+        let dark_vars = render_theme_css_vars(ThemePreset::Dark);
+        assert_ne!(vars, dark_vars);
     }
 }

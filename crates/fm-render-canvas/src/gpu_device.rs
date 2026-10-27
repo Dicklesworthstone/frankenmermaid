@@ -23,6 +23,8 @@ use crate::gpu_pipeline::{InstanceLayout, PipelineDescriptor, VertexFormat};
 /// GPU-less box indistinguishable from one that passes on a broken pipeline.
 #[derive(Debug)]
 pub enum GpuDeviceError {
+    /// The requested image or layout cannot be represented by this device.
+    InvalidInput(String),
     /// No adapter at all — no render node, no software fallback, nothing.
     NoAdapter(String),
     /// An adapter exists but would not give us a device.
@@ -34,6 +36,7 @@ pub enum GpuDeviceError {
 impl core::fmt::Display for GpuDeviceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidInput(why) => write!(f, "invalid GPU render input: {why}"),
             Self::NoAdapter(why) => write!(f, "no wgpu adapter available: {why}"),
             Self::NoDevice(why) => write!(f, "adapter would not provide a device: {why}"),
             Self::Readback(why) => write!(f, "could not read the rendered texture back: {why}"),
@@ -197,29 +200,57 @@ pub fn vertex_attributes(layout: &InstanceLayout) -> Vec<wgpu::VertexAttribute> 
 /// Camera uniform matching `struct Camera { transform: vec4<f32> }` in every diagram shader:
 /// `xy` scale and `zw` translate, mapping layout coordinates to clip space.
 ///
-/// The Y scale is NEGATIVE. Layout space grows downward like every 2D canvas; clip space grows
-/// upward. Without the flip a diagram renders upside down, which is a mistake that looks like a
-/// layout bug rather than a camera bug and is correspondingly slow to find.
-#[must_use]
-pub fn camera_transform(bounds: &fm_layout::LayoutRect) -> [f32; 4] {
-    let width = if bounds.width > 0.0 {
-        bounds.width
-    } else {
-        1.0
-    };
-    let height = if bounds.height > 0.0 {
-        bounds.height
-    } else {
-        1.0
-    };
-    let scale_x = 2.0 / width;
-    let scale_y = -2.0 / height;
-    [
-        scale_x,
-        scale_y,
-        (-1.0) - bounds.x * scale_x,
-        1.0 - bounds.y * scale_y,
-    ]
+/// The image uses one physical scale on both axes and centers any unused space. Mapping both
+/// bounds axes independently to [-1, 1] stretches circles, glyphs, and chart angles whenever the
+/// requested image has a different aspect ratio. The negative Y scale preserves canvas orientation.
+///
+/// # Errors
+/// Returns [`GpuDeviceError::InvalidInput`] for an empty image or invalid layout bounds.
+pub fn camera_transform(
+    bounds: &fm_layout::LayoutRect,
+    width: u32,
+    height: u32,
+) -> Result<[f32; 4], GpuDeviceError> {
+    image_viewport(bounds, width, height)
+        .and_then(|viewport| viewport.clip_transform())
+        .ok_or_else(|| GpuDeviceError::InvalidInput("image dimensions and layout bounds must be finite, with nonzero image dimensions and nonnegative extents".to_string()))
+}
+
+fn image_viewport(
+    bounds: &fm_layout::LayoutRect,
+    width: u32,
+    height: u32,
+) -> Option<crate::Viewport> {
+    crate::Viewport::fit_image(
+        [bounds.x, bounds.y, bounds.width, bounds.height].map(f64::from),
+        f64::from(width),
+        f64::from(height),
+    )
+}
+
+fn validate_target(gpu: &GpuDevice, width: u32, height: u32) -> Result<(), GpuDeviceError> {
+    let limits = gpu.device.limits();
+    if width == 0
+        || height == 0
+        || width > limits.max_texture_dimension_2d
+        || height > limits.max_texture_dimension_2d
+    {
+        return Err(GpuDeviceError::InvalidInput(format!(
+            "image dimensions {width}x{height} exceed the nonzero texture limit {}",
+            limits.max_texture_dimension_2d
+        )));
+    }
+    let alignment = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let padded_row = (u64::from(width) * 4).div_ceil(alignment) * alignment;
+    let readback_size = padded_row.checked_mul(u64::from(height)).ok_or_else(|| {
+        GpuDeviceError::InvalidInput("image readback size overflows addressable memory".to_string())
+    })?;
+    if readback_size > limits.max_buffer_size || usize::try_from(readback_size).is_err() {
+        return Err(GpuDeviceError::InvalidInput(format!(
+            "image readback requires {readback_size} bytes, exceeding device or address-space limits"
+        )));
+    }
+    Ok(())
 }
 
 /// The glyph atlas as a GPU texture, plus the sampler the text shader reads it with.
@@ -446,7 +477,8 @@ impl InstancePass {
     }
 }
 
-/// A rendered image: RGBA8 rows, tightly packed at `width * 4` bytes.
+/// A rendered image: unpremultiplied RGBA8 rows, tightly packed at `width * 4` bytes.
+/// The bytes can be passed directly to browser ImageData or a PNG encoder.
 pub struct RenderedImage {
     pub width: u32,
     pub height: u32,
@@ -472,21 +504,13 @@ impl RenderedImage {
     /// re-deriving the camera, which is exactly how a test comes to agree with a bug.
     #[must_use]
     pub fn pixel_for(&self, bounds: &fm_layout::LayoutRect, x: f32, y: f32) -> (u32, u32) {
-        let width = if bounds.width > 0.0 {
-            bounds.width
-        } else {
-            1.0
+        let Some(viewport) = image_viewport(bounds, self.width, self.height) else {
+            return (0, 0);
         };
-        let height = if bounds.height > 0.0 {
-            bounds.height
-        } else {
-            1.0
-        };
-        let u = ((x - bounds.x) / width * self.width as f32).round();
-        let v = ((y - bounds.y) / height * self.height as f32).round();
+        let (u, v) = viewport.diagram_to_canvas(f64::from(x), f64::from(y));
         (
-            (u.max(0.0) as u32).min(self.width.saturating_sub(1)),
-            (v.max(0.0) as u32).min(self.height.saturating_sub(1)),
+            (u.floor().max(0.0) as u32).min(self.width.saturating_sub(1)),
+            (v.floor().max(0.0) as u32).min(self.height.saturating_sub(1)),
         )
     }
 }
@@ -625,8 +649,10 @@ pub async fn render_diagram_async(
     width: u32,
     height: u32,
 ) -> Result<RenderedImage, GpuDeviceError> {
-    use crate::gpu_pipeline::PrimitiveFamily;
+    use crate::gpu_pipeline::{PrimitiveFamily, PrimitiveInstances};
 
+    validate_target(gpu, width, height)?;
+    let camera = camera_transform(&plan.bounds, width, height)?;
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fm-diagram"),
         size: wgpu::Extent3d {
@@ -645,7 +671,6 @@ pub async fn render_diagram_async(
 
     // ONE camera for every family, which is what makes the passes compose: a per-family camera could
     // drift and the picture would come apart at the seams rather than fail.
-    let camera = camera_transform(&plan.bounds);
     let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fm-camera"),
         size: size_of::<[f32; 4]>() as u64,
@@ -659,39 +684,19 @@ pub async fn render_diagram_async(
     // must outlive it.
     let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
     for (family, _) in &pipelines.passes {
-        let (bytes, count) = match family {
-            PrimitiveFamily::SequenceFragment => (
-                node_instance_bytes(&plan.sequence_fragment_instances),
-                plan.sequence_fragment_instances.len(),
-            ),
-            PrimitiveFamily::SequenceFragmentBorder => (
-                edge_instance_bytes(&plan.sequence_fragment_border_segments),
-                plan.sequence_fragment_border_segments.len(),
-            ),
-            PrimitiveFamily::Edge => (
-                edge_instance_bytes(&plan.edge_segments),
-                plan.edge_segments.len(),
-            ),
-            PrimitiveFamily::Arrowhead => (
-                arrowhead_instance_bytes(&plan.arrowheads),
-                plan.arrowheads.len(),
-            ),
-            PrimitiveFamily::Node => (
-                node_instance_bytes(&plan.node_instances),
-                plan.node_instances.len(),
-            ),
-            // Dashed node borders ride the EDGE pipeline (bd-l3nsf) but draw AFTER the nodes, since
-            // a border sits on top of the fill it outlines. Same pipeline, different slot in the
-            // order — which is why the family exists separately from `Edge`.
-            PrimitiveFamily::NodeBorder => (
-                edge_instance_bytes(&plan.node_border_segments),
-                plan.node_border_segments.len(),
-            ),
-            PrimitiveFamily::Text => (text_instance_bytes(&plan.text_quads), plan.text_quads.len()),
-        };
+        let instances = family.instances(plan);
+        let count = instances.len();
         if count == 0 {
             continue;
         }
+        let bytes = match instances {
+            PrimitiveInstances::Nodes(instances) => node_instance_bytes(instances),
+            PrimitiveInstances::Edges(instances) => edge_instance_bytes(instances),
+            PrimitiveInstances::Triangles(instances) => triangle_instance_bytes(instances),
+            PrimitiveInstances::Arrowheads(instances) => arrowhead_instance_bytes(instances),
+            PrimitiveInstances::Pies(instances) => pie_instance_bytes(instances),
+            PrimitiveInstances::Text(instances) => text_instance_bytes(instances),
+        };
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fm-instances"),
             size: bytes.len().max(4) as u64,
@@ -855,6 +860,8 @@ pub fn render_instances(
         instance_count,
         atlas,
     } = *draw;
+    validate_target(gpu, width, height)?;
+    let camera = camera_transform(bounds, width, height)?;
     assert_eq!(
         pass.samples_atlas,
         atlas.is_some(),
@@ -877,7 +884,6 @@ pub fn render_instances(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let camera = camera_transform(bounds);
     let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fm-camera"),
         size: size_of::<[f32; 4]>() as u64,
@@ -1053,11 +1059,31 @@ async fn read_back_async(
     drop(mapped);
     readback.unmap();
 
+    // ALPHA_BLENDING accepts straight shader colors but accumulates premultiplied RGB in the
+    // transparent attachment. ImageData and PNG expect straight RGB; leaving it premultiplied
+    // darkens translucent fills and antialiased letters a second time when the host composites.
+    unpremultiply_rgba(rgba.as_chunks_mut::<4>().0);
+
     Ok(RenderedImage {
         width,
         height,
         rgba,
     })
+}
+
+fn unpremultiply_rgba(pixels: &mut [[u8; 4]]) {
+    for [red, green, blue, alpha] in pixels {
+        let alpha = u16::from(*alpha);
+        if alpha == 0 {
+            *red = 0;
+            *green = 0;
+            *blue = 0;
+        } else if alpha < 255 {
+            for channel in [red, green, blue] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
 }
 
 /// `[f32; 4]` as bytes, without pulling in `bytemuck` for one cast.
@@ -1141,6 +1167,92 @@ fn instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
 #[must_use]
 pub fn node_instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
     instance_bytes(instances)
+}
+
+/// Area triangle bytes at the offsets bound by the triangle pipeline.
+#[must_use]
+pub fn triangle_instance_bytes(triangles: &[crate::gpu_plan::GpuTriangleInstance]) -> Vec<u8> {
+    use crate::gpu_plan::GpuTriangleInstance;
+
+    let stride = size_of::<GpuTriangleInstance>();
+    let mut out = vec![0_u8; std::mem::size_of_val(triangles)];
+    for (index, triangle) in triangles.iter().enumerate() {
+        let base = index * stride;
+        for (offset, values) in [
+            (
+                core::mem::offset_of!(GpuTriangleInstance, a),
+                triangle.a.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, b),
+                triangle.b.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, c),
+                triangle.c.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuTriangleInstance, color),
+                triangle.color.as_slice(),
+            ),
+        ] {
+            for (component, value) in values.iter().enumerate() {
+                let start = base + offset + component * size_of::<f32>();
+                out[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// Pie-sector bytes at the offsets bound by the sector shader.
+#[must_use]
+pub fn pie_instance_bytes(wedges: &[crate::gpu_plan::GpuPieWedge]) -> Vec<u8> {
+    use crate::gpu_plan::GpuPieWedge;
+
+    let stride = size_of::<GpuPieWedge>();
+    let mut out = vec![0_u8; std::mem::size_of_val(wedges)];
+    for (index, wedge) in wedges.iter().enumerate() {
+        let base = index * stride;
+        for (offset, values) in [
+            (
+                core::mem::offset_of!(GpuPieWedge, center),
+                wedge.center.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, radius),
+                std::slice::from_ref(&wedge.radius),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, start_angle),
+                std::slice::from_ref(&wedge.start_angle),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, sweep_angle),
+                std::slice::from_ref(&wedge.sweep_angle),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, fill),
+                wedge.fill.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, stroke),
+                wedge.stroke.as_slice(),
+            ),
+            (
+                core::mem::offset_of!(GpuPieWedge, stroke_width),
+                std::slice::from_ref(&wedge.stroke_width),
+            ),
+        ] {
+            for (component, value) in values.iter().enumerate() {
+                let start = base + offset + component * size_of::<f32>();
+                out[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let start = base + core::mem::offset_of!(GpuPieWedge, slice_index);
+        out[start..start + size_of::<u32>()].copy_from_slice(&wedge.slice_index.to_ne_bytes());
+    }
+    out
 }
 
 /// Text quads as instance bytes, each field written AT ITS `offset_of!` POSITION.
@@ -1286,4 +1398,62 @@ pub fn edge_instance_bytes(segments: &[crate::gpu_plan::GpuEdgeSegment]) -> Vec<
         );
     }
     out
+}
+
+#[cfg(test)]
+mod image_output_tests {
+    use super::{RenderedImage, unpremultiply_rgba};
+
+    #[test]
+    fn pixel_queries_select_containing_pixels_after_letterboxing() {
+        let image = RenderedImage {
+            width: 30,
+            height: 10,
+            rgba: Vec::new(),
+        };
+        let bounds = fm_layout::LayoutRect {
+            x: -5.0,
+            y: -5.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        assert_eq!(image.pixel_for(&bounds, -4.25, -4.25), (10, 0));
+        assert_eq!(image.pixel_for(&bounds, 0.75, 0.75), (15, 5));
+        assert_eq!(image.pixel_for(&bounds, -100.0, -100.0), (0, 0));
+        assert_eq!(image.pixel_for(&bounds, 100.0, 100.0), (29, 9));
+    }
+
+    #[test]
+    fn readback_recovers_straight_colors_and_preserves_alpha() {
+        let mut pixels = [
+            [128, 64, 32, 128],
+            [64, 0, 128, 191],
+            [33, 66, 99, 255],
+            [9, 8, 7, 0],
+        ];
+        unpremultiply_rgba(&mut pixels);
+        assert_eq!(
+            pixels,
+            [
+                [255, 128, 64, 128],
+                [85, 0, 171, 191],
+                [33, 66, 99, 255],
+                [0, 0, 0, 0]
+            ]
+        );
+    }
+
+    #[test]
+    fn every_coverage_level_recomposes_without_extra_darkening() {
+        for alpha in 1_u16..=255 {
+            for color in 0_u16..=255 {
+                let encoded = (color * alpha + 127) / 255;
+                let mut pixels = [[encoded as u8, 0, 0, alpha as u8]];
+                unpremultiply_rgba(&mut pixels);
+                let recomposed = (u16::from(pixels[0][0]) * alpha + 127) / 255;
+                assert_eq!(encoded, recomposed, "color={color}, alpha={alpha}");
+                assert_eq!(pixels[0][3], alpha as u8);
+            }
+        }
+    }
 }

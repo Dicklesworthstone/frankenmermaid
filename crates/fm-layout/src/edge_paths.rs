@@ -3,7 +3,7 @@
 //! Smoothing belongs after routing: it may soften a corner, but it must not introduce the
 //! large excursions that an unconstrained spline can make outside a routed corridor.
 
-use fm_core::DiagramType;
+use fm_core::{DiagramType, MermaidDiagramIr, MermaidEdgeRoutingHint};
 
 use crate::{LayoutPoint, PathCmd};
 
@@ -58,17 +58,61 @@ pub const fn uses_smoothed_edge_paths(diagram_type: DiagramType) -> bool {
     )
 }
 
-/// Emit the diagram family's connector path without allocating an intermediate command vector.
-/// Returns no endpoints when the route has no finite, nonzero drawable segment.
+/// Resolve the edge's explicit routing before the diagram-wide fallback.
+#[must_use]
+pub fn edge_routing_hint(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> Option<MermaidEdgeRoutingHint> {
+    ir.edges
+        .get(edge_index)
+        .and_then(|edge| edge.routing())
+        .or(ir.meta.edge_routing)
+}
+
+/// Whether this connector uses the family's smoothed presentation after source-level overrides.
+/// Explicit linear/step routing keeps its corners; absent hints preserve the established default.
+#[must_use]
+pub fn edge_uses_smoothed_path(ir: &MermaidDiagramIr, edge_index: usize) -> bool {
+    uses_smoothed_edge_paths(ir.diagram_type)
+        && edge_routing_hint(ir, edge_index) != Some(MermaidEdgeRoutingHint::Orthogonal)
+}
+
+/// Emit an IR edge with its local and diagram-wide routing overrides applied to presentation.
+pub fn emit_diagram_edge_path<F>(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    points: &[LayoutPoint],
+    emit: F,
+) -> Option<PathEndpoints>
+where
+    F: FnMut(PathCmd),
+{
+    emit_path_with_smoothing(edge_uses_smoothed_path(ir, edge_index), points, emit)
+}
+
+/// Emit the diagram family's default connector path without an intermediate command vector.
+/// Call [`emit_diagram_edge_path`] when an IR edge is available, to preserve its curve override.
 pub fn emit_edge_path<F>(
     diagram_type: DiagramType,
+    points: &[LayoutPoint],
+    emit: F,
+) -> Option<PathEndpoints>
+where
+    F: FnMut(PathCmd),
+{
+    emit_path_with_smoothing(uses_smoothed_edge_paths(diagram_type), points, emit)
+}
+
+fn emit_path_with_smoothing<F>(
+    smooth: bool,
     points: &[LayoutPoint],
     mut emit: F,
 ) -> Option<PathEndpoints>
 where
     F: FnMut(PathCmd),
 {
-    if uses_smoothed_edge_paths(diagram_type) {
+    if smooth {
         return emit_smoothed_path(
             points.len(),
             |index| (points[index].x, points[index].y),

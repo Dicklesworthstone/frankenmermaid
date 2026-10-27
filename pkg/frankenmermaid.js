@@ -442,6 +442,31 @@ export class Diagram {
         }
     }
     /**
+     * Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
+     * @returns {string | undefined}
+     */
+    selectedNodeId() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_selectedNodeId(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            let v1;
+            if (r0 !== 0) {
+                v1 = getStringFromWasm0(r0, r1);
+                wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Stable author IDs, primary keyboard anchor, active token and usable-frame availability.
      * @returns {any}
      */
@@ -494,6 +519,33 @@ export function acquireWebGpuCanvasContext(canvas) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         wasm.acquireWebGpuCanvasContext(retptr, addHeapObject(canvas));
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Apply a complete edited IR through the semantic family lens and return fresh source bindings.
+ *
+ * Unlike source-span replacement, this validates graph meaning before returning an edit. The
+ * `edited_ir` object has the same shape as `parseLens(input).parsed.ir`.
+ * @param {string} input
+ * @param {any} edited_ir
+ * @returns {any}
+ */
+export function applyIrLensEdit(input, edited_ir) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.applyIrLensEdit(retptr, ptr0, len0, addHeapObject(edited_ir));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -1069,6 +1121,12 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbg___wbindgen_bigint_get_as_i64_a2383202b9353e4c: function(arg0, arg1) {
+            const v = getObject(arg1);
+            const ret = typeof(v) === 'bigint' ? v : undefined;
+            getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+        },
         __wbg___wbindgen_boolean_get_5b446f51afd21013: function(arg0) {
             const v = getObject(arg0);
             const ret = typeof(v) === 'boolean' ? v : undefined;
@@ -1076,6 +1134,14 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_in_92f62ee1427d9e49: function(arg0, arg1) {
             const ret = getObject(arg0) in getObject(arg1);
+            return ret;
+        },
+        __wbg___wbindgen_is_bigint_b123553bed3bb382: function(arg0) {
+            const ret = typeof(getObject(arg0)) === 'bigint';
+            return ret;
+        },
+        __wbg___wbindgen_is_function_1f9d30630b8b1d3d: function(arg0) {
+            const ret = typeof(getObject(arg0)) === 'function';
             return ret;
         },
         __wbg___wbindgen_is_null_e343b7d08827ba72: function(arg0) {
@@ -1093,6 +1159,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_undefined_8865fb403f8fe9d8: function(arg0) {
             const ret = getObject(arg0) === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_jsval_eq_02babf21faa37971: function(arg0, arg1) {
+            const ret = getObject(arg0) === getObject(arg1);
             return ret;
         },
         __wbg___wbindgen_jsval_loose_eq_677f21e468d6b461: function(arg0, arg1) {
@@ -1131,11 +1201,19 @@ function __wbg_get_imports() {
         __wbg_bezierCurveTo_4e6afc9957d235e6: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
             getObject(arg0).bezierCurveTo(arg1, arg2, arg3, arg4, arg5, arg6);
         },
+        __wbg_call_6137034ef55c9d0f: function() { return handleError(function (arg0, arg1) {
+            const ret = getObject(arg0).call(getObject(arg1));
+            return addHeapObject(ret);
+        }, arguments); },
         __wbg_clearRect_a5e36505218c247a: function(arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).clearRect(arg1, arg2, arg3, arg4);
         },
         __wbg_closePath_355eb6da179dd9c2: function(arg0) {
             getObject(arg0).closePath();
+        },
+        __wbg_done_b41a1d26cdb37fb6: function(arg0) {
+            const ret = getObject(arg0).done;
+            return ret;
         },
         __wbg_entries_fb6397112b1de25f: function(arg0) {
             const ret = Object.entries(getObject(arg0));
@@ -1162,6 +1240,10 @@ function __wbg_get_imports() {
             const ret = Reflect.get(getObject(arg0), getObject(arg1));
             return addHeapObject(ret);
         }, arguments); },
+        __wbg_get_658f6698067d9515: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(getObject(arg0), getObject(arg1));
+            return addHeapObject(ret);
+        }, arguments); },
         __wbg_get_6c896e0571ddae51: function(arg0, arg1) {
             const ret = getObject(arg0)[arg1 >>> 0];
             return addHeapObject(ret);
@@ -1169,6 +1251,10 @@ function __wbg_get_imports() {
         __wbg_get_index_f4750150bb3083b3: function(arg0, arg1) {
             const ret = getObject(arg0)[arg1 >>> 0];
             return ret;
+        },
+        __wbg_get_unchecked_288889d017702237: function(arg0, arg1) {
+            const ret = getObject(arg0)[arg1 >>> 0];
+            return addHeapObject(ret);
         },
         __wbg_get_with_ref_key_6412cf3094599694: function(arg0, arg1) {
             const ret = getObject(arg0)[getObject(arg1)];
@@ -1222,9 +1308,17 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_isArray_e15a2ff68ffdbef2: function(arg0) {
+            const ret = Array.isArray(getObject(arg0));
+            return ret;
+        },
         __wbg_isSafeInteger_717808ad6a54bd9e: function(arg0) {
             const ret = Number.isSafeInteger(getObject(arg0));
             return ret;
+        },
+        __wbg_iterator_e3c31c892080e444: function() {
+            const ret = Symbol.iterator;
+            return addHeapObject(ret);
         },
         __wbg_length_7f3c00c40364105e: function(arg0) {
             const ret = getObject(arg0).length;
@@ -1264,6 +1358,14 @@ function __wbg_get_imports() {
             const ret = new Array();
             return addHeapObject(ret);
         },
+        __wbg_next_33784799010f1bbe: function(arg0) {
+            const ret = getObject(arg0).next;
+            return addHeapObject(ret);
+        },
+        __wbg_next_f4aac29c42af995c: function() { return handleError(function (arg0) {
+            const ret = getObject(arg0).next();
+            return addHeapObject(ret);
+        }, arguments); },
         __wbg_now_e7c6795a7f81e10f: function(arg0) {
             const ret = getObject(arg0).now();
             return ret;
@@ -1322,6 +1424,9 @@ function __wbg_get_imports() {
         __wbg_set_globalAlpha_ae4b85201dda64c5: function(arg0, arg1) {
             getObject(arg0).globalAlpha = arg1;
         },
+        __wbg_set_lineCap_c9b7bdd3b7f5ce74: function(arg0, arg1, arg2) {
+            getObject(arg0).lineCap = getStringFromWasm0(arg1, arg2);
+        },
         __wbg_set_lineJoin_c1780f2096e6f970: function(arg0, arg1, arg2) {
             getObject(arg0).lineJoin = getStringFromWasm0(arg1, arg2);
         },
@@ -1374,6 +1479,10 @@ function __wbg_get_imports() {
         __wbg_translate_b75b7d842d89a889: function() { return handleError(function (arg0, arg1, arg2) {
             getObject(arg0).translate(arg1, arg2);
         }, arguments); },
+        __wbg_value_f3c585ee8f5ba40c: function(arg0) {
+            const ret = getObject(arg0).value;
+            return addHeapObject(ret);
+        },
         __wbg_width_3d0dce3d9892e35e: function(arg0) {
             const ret = getObject(arg0).width;
             return ret;

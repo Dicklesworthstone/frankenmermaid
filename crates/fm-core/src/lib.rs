@@ -15,6 +15,10 @@ pub mod quotient_filter;
 pub mod reuse_proof;
 pub mod succinct;
 
+pub use constraints::{
+    ConstraintCounterexample, ConstraintExample, ConstraintExamplePosition,
+    ConstraintSynthesisResult, synthesize_order_constraints,
+};
 pub use evidence::{
     DecisionMode, EvidenceBundle, EvidenceLogEntry, EvidenceSummary, FallbackReason, FnxFeatures,
     FnxMode, PassFailReason, ProjectionMode, fnv1a_hex,
@@ -935,7 +939,7 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             dedicated_parser: true,
             layout: "sequence",
             svg_render: true,
-            runtime: MermaidSupportLevel::Partial,
+            runtime: MermaidSupportLevel::Supported,
             parity: MermaidParityLevel::Partial,
             notes: "Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups",
         },
@@ -1120,11 +1124,11 @@ pub const fn family_parity_rows() -> &'static [FamilyParityRow] {
             diagram_type: Some(DiagramType::C4Context),
             detection: true,
             dedicated_parser: true,
-            layout: "architecture",
+            layout: "auto",
             svg_render: true,
             runtime: MermaidSupportLevel::Supported,
             parity: MermaidParityLevel::Partial,
-            notes: "Boundary detection, C4 node metadata; one notation at five zoom levels; direction-aware algorithm engages on a declared relationship side",
+            notes: "Boundary detection, C4 node metadata; one notation at five zoom levels; routes through the general graph selector",
         },
         FamilyParityRow {
             family: "kanban",
@@ -2225,6 +2229,30 @@ fn shape_color_contrast(a: f64, b: f64) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// Choose the more readable theme paint for text on a fixed or author-supplied fill.
+///
+/// Opaque hexadecimal colors can be compared deterministically. Unknown paints retain the
+/// normal text color, and ties prefer it too. Callers should honor explicit author text colors
+/// before using this fallback.
+#[must_use]
+pub fn readable_label_color<'a>(fill: &str, text: &'a str, background: &'a str) -> &'a str {
+    let (Some(fill), Some(text_rgb), Some(background_rgb)) = (
+        mindmap::hex_rgb(fill),
+        mindmap::hex_rgb(text),
+        mindmap::hex_rgb(background),
+    ) else {
+        return text;
+    };
+    let fill_luminance = shape_color_luminance(fill);
+    if shape_color_contrast(fill_luminance, shape_color_luminance(background_rgb))
+        > shape_color_contrast(fill_luminance, shape_color_luminance(text_rgb))
+    {
+        background
+    } else {
+        text
+    }
+}
+
 /// The closed outline of a block arrow filling the box `(x, y, w, h)`, or `None` for any other
 /// shape. The shaft is the middle 60% across the arrow; each head is as long as the shaft is
 /// thick, capped at 40% of the length.
@@ -2987,6 +3015,177 @@ pub struct IrClassMember {
     pub is_abstract: bool,
 }
 
+impl IrClassMember {
+    /// The complete UML row displayed and measured by every graphical backend.
+    #[must_use]
+    pub fn display_text(&self, is_method: bool) -> String {
+        let visibility = match self.visibility {
+            ClassVisibility::Unmarked => "",
+            ClassVisibility::Public => "+",
+            ClassVisibility::Private => "-",
+            ClassVisibility::Protected => "#",
+            ClassVisibility::Package => "~",
+        };
+        let mut text = format!(
+            "{visibility}{}",
+            class_member_display_name(&self.name, is_method)
+        );
+        if let Some(return_type) = &self.return_type {
+            text.push_str(" : ");
+            text.push_str(&parse_generic_types(return_type));
+        }
+        text
+    }
+}
+
+/// A class row's role determines its alignment and typographic emphasis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassCompartmentRowKind {
+    Stereotype,
+    Name,
+    Attribute,
+    Method,
+}
+
+/// One complete class label, positioned relative to the top of its node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassCompartmentRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: ClassCompartmentRowKind,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+impl ClassCompartmentRow {
+    #[must_use]
+    pub fn centered(&self) -> bool {
+        matches!(
+            self.kind,
+            ClassCompartmentRowKind::Stereotype | ClassCompartmentRowKind::Name
+        )
+    }
+}
+
+/// Shared geometry for a UML card: a distinct header and two aligned member compartments.
+///
+/// Layout reserves this exact height and renderers consume these exact row centers. Empty
+/// attribute or method compartments retain a small amount of space, while authored members
+/// are never dropped because a renderer independently guessed a different line height.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassCompartmentLayout {
+    pub rows: Vec<ClassCompartmentRow>,
+    pub header_height: f32,
+    pub separator_ys: [f32; 2],
+    pub height: f32,
+}
+
+impl ClassCompartmentLayout {
+    pub const PADDING_X: f32 = 8.0;
+
+    #[must_use]
+    pub fn new(meta: &IrClassNodeMeta, class_name: &str, font_size: f32, line_height: f32) -> Self {
+        Self::with_font_size_override(meta, class_name, font_size, line_height, None)
+    }
+
+    /// Resolve an authored node font size before measuring the compartment stack.
+    ///
+    /// An inline CSS size applies to every class row, including the otherwise smaller
+    /// stereotype and members. Their line boxes and the surrounding padding must grow with
+    /// that actual size; replacing glyph sizes after positioning rows makes them overlap.
+    #[must_use]
+    pub fn with_font_size_override(
+        meta: &IrClassNodeMeta,
+        class_name: &str,
+        font_size: f32,
+        line_height: f32,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(font_size);
+        let font_size = if font_size.is_finite() && font_size > 0.0 {
+            font_size
+        } else {
+            15.0
+        };
+        let line_height = if line_height.is_finite() && line_height > 0.0 {
+            line_height
+        } else {
+            1.5
+        };
+        let mut rows = Vec::with_capacity(meta.attributes.len() + meta.methods.len() + 2);
+        let mut cursor = font_size * 0.5;
+        if let Some(stereotype) = &meta.stereotype {
+            let size = declared_font_size.unwrap_or(font_size * 0.85);
+            let row_height = size * line_height;
+            rows.push(ClassCompartmentRow {
+                text: stereotype.label().into_owned(),
+                center_y: cursor + row_height * 0.5,
+                font_size: size,
+                kind: ClassCompartmentRowKind::Stereotype,
+                italic: true,
+                underline: false,
+            });
+            cursor += row_height;
+        }
+        let name_height = font_size * line_height;
+        rows.push(ClassCompartmentRow {
+            text: meta.display_header(class_name).into_owned(),
+            center_y: cursor + name_height * 0.5,
+            font_size,
+            kind: ClassCompartmentRowKind::Name,
+            italic: false,
+            underline: false,
+        });
+        cursor += name_height + font_size * 0.5;
+        let header_height = cursor;
+        let member_size = declared_font_size.unwrap_or(font_size * 0.9);
+        let member_height = member_size * line_height;
+        let section_padding = font_size * 0.4;
+        let mut separator_ys = [header_height; 2];
+        for (section, members) in [&meta.attributes, &meta.methods].into_iter().enumerate() {
+            cursor += section_padding;
+            for member in members {
+                let is_method = section == 1;
+                let classifier = is_method
+                    .then(|| class_member_classifier_css(member.is_static, member.is_abstract))
+                    .flatten();
+                rows.push(ClassCompartmentRow {
+                    text: member.display_text(is_method),
+                    center_y: cursor + member_height * 0.5,
+                    font_size: member_size,
+                    kind: if is_method {
+                        ClassCompartmentRowKind::Method
+                    } else {
+                        ClassCompartmentRowKind::Attribute
+                    },
+                    italic: classifier == Some("font-style:italic"),
+                    underline: classifier == Some("text-decoration:underline"),
+                });
+                cursor += member_height;
+            }
+            cursor += section_padding;
+            if section == 0 {
+                separator_ys[1] = cursor;
+            }
+        }
+        Self {
+            rows,
+            header_height,
+            separator_ys,
+            height: cursor,
+        }
+    }
+}
+
 /// A journey step's actors, as the AUTHOR wrote them (bd-mq273).
 ///
 /// ⚠️ THE CSS CLASSES CANNOT CARRY THIS, which is the whole reason the field exists. The parser also
@@ -3094,6 +3293,169 @@ pub struct IrC4NodeMeta {
     pub technology: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// The typographic role of a row in a C4 card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum C4CardRowKind {
+    Stereotype,
+    Name,
+    Technology,
+    Description,
+}
+
+/// A complete, wrapped C4 text row, positioned relative to the card's top edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct C4CardRow {
+    pub text: String,
+    pub center_y: f32,
+    pub font_size: f32,
+    pub kind: C4CardRowKind,
+}
+
+/// Shared text geometry for C4 cards in layout, SVG, Canvas, and GPU plans.
+///
+/// Descriptions grow the card vertically instead of turning it into a page-wide strip. Every
+/// authored word survives wrapping, and the measured rows are the rows both renderers draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct C4CardLayout {
+    pub rows: Vec<C4CardRow>,
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+}
+
+impl C4CardLayout {
+    /// Measure a card, or reflow its content into an already positioned card's width.
+    /// An authored CSS font size applies to all rows, matching the text style cascade.
+    #[must_use]
+    pub fn new(
+        meta: &IrC4NodeMeta,
+        name: &str,
+        shape: NodeShape,
+        metrics: &FontMetrics,
+        width: Option<f32>,
+        declared_font_size: Option<&str>,
+    ) -> Self {
+        let declared_font_size = declared_font_size.and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        });
+        let font_size = declared_font_size.unwrap_or(metrics.font_size());
+        let padding = font_size * 1.2;
+        let small_font = declared_font_size.unwrap_or((font_size * 0.78).max(8.0));
+        let body_font = declared_font_size.unwrap_or((font_size * 0.85).max(8.0));
+        let mut sections = Vec::with_capacity(4);
+        if !meta.element_type.trim().is_empty() {
+            sections.push((
+                format!("<<{}>>", meta.element_type),
+                small_font,
+                C4CardRowKind::Stereotype,
+            ));
+        }
+        sections.push((name.to_string(), font_size, C4CardRowKind::Name));
+        if let Some(technology) = meta.technology.as_deref().filter(|s| !s.trim().is_empty()) {
+            sections.push((
+                format!("[{technology}]"),
+                small_font,
+                C4CardRowKind::Technology,
+            ));
+        }
+        if let Some(description) = meta.description.as_deref().filter(|s| !s.trim().is_empty()) {
+            sections.push((
+                description.to_string(),
+                body_font,
+                C4CardRowKind::Description,
+            ));
+        }
+
+        let body_width_ratio = match shape {
+            NodeShape::Parallelogram | NodeShape::InvParallelogram => {
+                1.0 - 2.0 * SLANTED_SHAPE_INSET_RATIO
+            }
+            _ => 1.0,
+        };
+        // The content cap scales with the chosen face, so a larger requested font remains
+        // readable. A short card retains a useful minimum width beside its longer siblings.
+        let natural_width = sections
+            .iter()
+            .map(|(text, size, _)| {
+                (metrics.estimate_preserved_width(text, *size, metrics.avg_char_width())
+                    + 2.0 * padding)
+                    / body_width_ratio
+            })
+            .fold(font_size * 12.0, f32::max)
+            .min(font_size * 21.0);
+        let width = width
+            .filter(|width| width.is_finite() && *width > 2.0 * padding)
+            .unwrap_or(natural_width);
+        // Queue cards use a parallelogram: keep every row inside both slanted sides, including
+        // rows near the top and bottom where a full bounding-box width would cross the outline.
+        let available = (width * body_width_ratio - 2.0 * padding).max(font_size);
+        let mut rows = Vec::new();
+        let mut cursor = padding;
+        for (text, size, kind) in sections {
+            if !rows.is_empty() {
+                cursor += if kind == C4CardRowKind::Description {
+                    font_size * 0.5
+                } else {
+                    font_size * 0.2
+                };
+            }
+            let row_metrics = FontMetrics::new(FontMetricsConfig {
+                font_size: size,
+                ..metrics.config().clone()
+            });
+            // Leave room for actual system-font advances and the emphasized name. The width
+            // estimator intentionally remains deterministic rather than depending on a browser.
+            let mut wrap_width = available / 1.4;
+            let mut lines = row_metrics.wrap_to_width(&text, wrap_width);
+            // A fixed allowance alone cannot cover runs of wide glyphs or a condensed preset.
+            // Reflow against the same conservative measurement used to size the card itself.
+            for _ in 0..6 {
+                let widest = lines
+                    .iter()
+                    .map(|line| {
+                        metrics.estimate_preserved_width(line, size, metrics.avg_char_width())
+                    })
+                    .fold(0.0, f32::max);
+                if widest <= available {
+                    break;
+                }
+                wrap_width *= (available / widest).min(0.95);
+                lines = row_metrics.wrap_to_width(&text, wrap_width);
+            }
+            let line_height = size * metrics.config().line_height.max(1.2);
+            for text in lines {
+                rows.push(C4CardRow {
+                    text,
+                    center_y: cursor + line_height * 0.5,
+                    font_size: size,
+                    kind,
+                });
+                cursor += line_height;
+            }
+        }
+        let mut height = cursor + padding;
+        if shape == NodeShape::Cylinder {
+            // Database caps occupy the upper 20% and lower 10% in both graphical renderers.
+            // Solve for a body that holds the complete text stack, then place it below the rim.
+            height /= 0.7;
+            for row in &mut rows {
+                row.center_y += height * 0.2;
+            }
+        }
+        Self {
+            rows,
+            width,
+            height,
+            padding,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -3321,6 +3683,12 @@ pub struct IrEdgeExtras {
     /// lives in [`IrEdgeExtras`] rather than inline on [`IrEdge`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<EdgeAnimation>,
+    /// Per-edge routing selected by `edgeId@{ curve: ... }` or `linkStyle ... interpolate ...`.
+    ///
+    /// Names resolve to the same supported routing families as the diagram's global curve hint.
+    /// When absent, layout inherits the diagram or caller's routing mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<MermaidEdgeRoutingHint>,
     /// A C4 relationship's technology, drawn as its OWN row beneath the label.
     ///
     /// ⚠️ A SEPARATE ROW, NOT PART OF THE LABEL. mermaid's `drawRels` emits two text elements: the
@@ -3415,11 +3783,11 @@ pub enum ArchitectureSide {
     Bottom,
 }
 
-/// A placement direction declared by a C4 relationship macro.
+/// A relationship direction declared by a C4 relationship macro (`Rel_U`, `Rel_D`, `Rel_L`, `Rel_R`).
 ///
-/// `Rel_Up` and its short alias `Rel_U` are layout constraints, not names for distinct edge
-/// kinds. Keeping the closed four-value grammar in the IR lets the layout engine honour it without
-/// reparsing the macro name or treating author-provided text as a direction.
+/// Preserved in the IR as typed parser metadata (`IrEdge::c4_direction`) so callers can inspect
+/// which directional macro was written without reparsing the macro name, while C4 layout routes
+/// through the general graph selector to match Mermaid 11.15.0 geometry.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum C4RelationshipDirection {
     Up,
@@ -3509,6 +3877,14 @@ impl IrEdge {
     pub const fn animation(&self) -> Option<EdgeAnimation> {
         match &self.extras {
             Some(extras) => extras.animation,
+            None => None,
+        }
+    }
+    /// The routing family selected for this individual edge, if any.
+    #[must_use]
+    pub const fn routing(&self) -> Option<MermaidEdgeRoutingHint> {
+        match &self.extras {
+            Some(extras) => extras.routing,
             None => None,
         }
     }
@@ -7369,12 +7745,16 @@ impl GanttTaskFlags {
 pub enum GanttDate {
     Absolute(String),
     AfterTask(String),
+    /// End at the earliest start among the named tasks, without inclusive-end adjustment.
+    UntilTasks(Vec<String>),
     DurationDays(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GanttExclude {
     Weekends,
+    /// A recurring excluded weekday, numbered Sunday = 0 through Saturday = 6.
+    Weekday(u8),
     Dates(Vec<String>),
 }
 
@@ -7429,12 +7809,33 @@ pub struct IrGanttMeta {
     pub inclusive_end_dates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekday_start: Option<u8>,
+    /// First of the two weekend days: Friday = 5 or Saturday = 6 (the default).
+    /// This is independent of `weekday_start`, which controls weekly axis ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekend_start: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excludes: Vec<GanttExclude>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<IrGanttSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<IrGanttTask>,
+}
+
+impl IrGanttMeta {
+    /// The recurring nonworking days as a seven-bit mask, with Sunday in bit zero.
+    /// Invalid programmatic weekday values are ignored, and an invalid weekend start uses
+    /// the Saturday/Sunday default. Explicit date exclusions remain in `excludes`.
+    #[must_use]
+    pub fn excluded_weekday_mask(&self) -> u8 {
+        let weekend_start = if self.weekend_start == Some(5) { 5 } else { 6 };
+        self.excludes.iter().fold(0, |mask, exclusion| {
+            mask | match exclusion {
+                GanttExclude::Weekends => (1 << weekend_start) | (1 << ((weekend_start + 1) % 7)),
+                GanttExclude::Weekday(day) if *day < 7 => 1 << *day,
+                GanttExclude::Weekday(_) | GanttExclude::Dates(_) => 0,
+            }
+        })
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -8880,6 +9281,304 @@ impl MermaidDiagramIr {
         }
     }
 
+    /// Lower the diagram's [`IrConstraint`] entries into a validated
+    /// [`crate::constraints::ConstraintSet`] with automatic conflict detection.
+    #[must_use]
+    pub fn constraint_set(&self) -> crate::constraints::ConstraintSet {
+        use crate::constraints::{
+            AlignAxis, AlignConstraint, ConstraintStrength, LayoutConstraint, OrderConstraint,
+            OrderRelation, PinConstraint, SpacingConstraint, SpacingDimension,
+        };
+
+        let mut set = crate::constraints::ConstraintSet::new();
+        let horizontal_rank = matches!(self.direction, GraphDirection::TB | GraphDirection::BT);
+        for constraint in &self.constraints {
+            match constraint {
+                IrConstraint::SameRank { node_ids, .. } => {
+                    set.add(LayoutConstraint::Align(AlignConstraint {
+                        nodes: node_ids.clone(),
+                        axis: if horizontal_rank {
+                            AlignAxis::Horizontal
+                        } else {
+                            AlignAxis::Vertical
+                        },
+                        strength: ConstraintStrength::Hard,
+                    }));
+                }
+                IrConstraint::MinLength { min_len, .. } => {
+                    set.add(LayoutConstraint::Spacing(SpacingConstraint {
+                        dimension: SpacingDimension::Rank,
+                        min_value: *min_len as f32,
+                    }));
+                }
+                IrConstraint::Pin { node_id, x, y, .. } => {
+                    set.add(LayoutConstraint::Pin(PinConstraint {
+                        node: node_id.clone(),
+                        x: *x as f32,
+                        y: *y as f32,
+                    }));
+                }
+                IrConstraint::OrderInRank { node_ids, .. } => {
+                    let relation = if horizontal_rank {
+                        OrderRelation::LeftOf
+                    } else {
+                        OrderRelation::Above
+                    };
+                    for pair in node_ids.windows(2) {
+                        set.add(LayoutConstraint::Order(OrderConstraint {
+                            subject: pair[0].clone(),
+                            relation,
+                            reference: pair[1].clone(),
+                            min_gap: 1.0,
+                            strength: ConstraintStrength::Hard,
+                        }));
+                    }
+                }
+                IrConstraint::NonOverlap { gap, .. } => {
+                    set.add(LayoutConstraint::Spacing(SpacingConstraint {
+                        dimension: SpacingDimension::Node,
+                        min_value: *gap as f32,
+                    }));
+                }
+            }
+        }
+        set
+    }
+
+    /// Build a compact Compressed Sparse Row ([`crate::succinct::CsrGraph`]) adjacency structure
+    /// from the diagram's resolved node edges.
+    #[must_use]
+    pub fn csr_graph(&self, directed: bool) -> crate::succinct::CsrGraph {
+        let edges: Vec<(usize, usize)> = self
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let from = self.resolve_endpoint_node(edge.from)?.0;
+                let to = self.resolve_endpoint_node(edge.to)?.0;
+                Some((from, to))
+            })
+            .collect();
+        crate::succinct::CsrGraph::from_edges(self.nodes.len(), &edges, directed)
+    }
+
+    /// Compute forward reachability from `start` as a compact [`crate::succinct::BitVector`]
+    /// with $O(1)$ `rank`/`select` support.
+    #[must_use]
+    pub fn reachability_bitvector(&self, start: IrNodeId) -> crate::succinct::BitVector {
+        let csr = self.csr_graph(true);
+        let mut bv = crate::succinct::BitVector::new(self.nodes.len());
+        if start.0 >= self.nodes.len() {
+            bv.build_rank();
+            return bv;
+        }
+        let mut stack = vec![start.0];
+        bv.set(start.0);
+        while let Some(curr) = stack.pop() {
+            for &next in csr.neighbors(curr) {
+                let next_idx = next as usize;
+                if next_idx < self.nodes.len() && !bv.get(next_idx) {
+                    bv.set(next_idx);
+                    stack.push(next_idx);
+                }
+            }
+        }
+        bv.build_rank();
+        bv
+    }
+
+    /// Build a [`crate::quotient_filter::QuotientFilter`] over `(from, to, arrow)` edge keys and
+    /// return `(filter, exact_duplicate_count)` (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn edge_quotient_filter(&self) -> (crate::quotient_filter::QuotientFilter, usize) {
+        let mut filter =
+            crate::quotient_filter::QuotientFilter::with_capacity(self.edges.len().max(1));
+        if self.edges.is_empty() {
+            return (filter, 0);
+        }
+        let mut exact_seen = FxHashSet::default();
+        let mut duplicates = 0;
+        for edge in &self.edges {
+            let Some(from) = self.resolve_endpoint_node(edge.from) else {
+                continue;
+            };
+            let Some(to) = self.resolve_endpoint_node(edge.to) else {
+                continue;
+            };
+            let key = (from.0, to.0, edge.arrow);
+            if filter.may_contain(&key) && !exact_seen.insert(key) {
+                duplicates += 1;
+            } else {
+                filter.insert(&key);
+                exact_seen.insert(key);
+            }
+        }
+        (filter, duplicates)
+    }
+
+    /// Count duplicate parallel edges `(from, to, arrow)` using a [`crate::quotient_filter::QuotientFilter`]
+    /// fast path backed by exact verification on probable hits.
+    #[must_use]
+    pub fn duplicate_edge_count(&self) -> usize {
+        if self.edges.len() < 2 {
+            return 0;
+        }
+        self.edge_quotient_filter().1
+    }
+
+    /// Return edge quotient filter telemetry `(duplicate_count, load_factor, false_positive_rate,
+    /// quotient_bits, remainder_bits, table_size)` (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn edge_filter_metrics(&self) -> (usize, f64, f64, u32, u32, usize) {
+        let (filter, duplicates) = self.edge_quotient_filter();
+        (
+            duplicates,
+            filter.load_factor(),
+            filter.false_positive_rate(),
+            filter.quotient_bits(),
+            filter.remainder_bits(),
+            filter.table_size(),
+        )
+    }
+
+    /// Build a string-keyed Adaptive Radix Tree ([`crate::art::StringArt`]) indexing all node IDs.
+    #[must_use]
+    pub fn node_prefix_index(&self) -> crate::art::StringArt<IrNodeId> {
+        let mut index = crate::art::StringArt::new();
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if !node.id.is_empty() {
+                index.insert(&node.id, IrNodeId(idx));
+            }
+        }
+        index
+    }
+
+    /// Exact node lookup by identifier using [`Self::node_prefix_index`] (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn lookup_node_by_id_art(&self, id: &str) -> Option<IrNodeId> {
+        self.node_prefix_index().get(id).copied()
+    }
+
+    /// Return all `(node_id, IrNodeId)` pairs in lexicographical order using
+    /// [`crate::art::StringArt::to_sorted_vec`] (`bd-jh9zp`).
+    #[inline]
+    #[must_use]
+    pub fn sorted_node_ids_art(&self) -> Vec<(String, IrNodeId)> {
+        self.node_prefix_index()
+            .to_sorted_vec()
+            .into_iter()
+            .map(|(k, &v)| (k, v))
+            .collect()
+    }
+
+    /// Return all [`IrNodeId`]s whose identifier starts with `prefix`, ordered by node index,
+    /// using [`Self::node_prefix_index`].
+    #[must_use]
+    pub fn nodes_with_prefix(&self, prefix: &str) -> Vec<IrNodeId> {
+        let index = self.node_prefix_index();
+        let mut matches: Vec<IrNodeId> = index
+            .prefix_search(prefix)
+            .into_iter()
+            .map(|(_, &node_id)| node_id)
+            .collect();
+        matches.sort_unstable_by_key(|id| id.0);
+        matches.dedup();
+        matches
+    }
+
+    /// Find nodes that belong to *all* specified `cluster_indices` using worst-case-optimal
+    /// [`crate::leapfrog::leapfrog_join`].
+    #[must_use]
+    pub fn shared_cluster_members(&self, cluster_indices: &[usize]) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_join};
+
+        if cluster_indices.is_empty() {
+            return Vec::new();
+        }
+        let mut relations = Vec::with_capacity(cluster_indices.len());
+        for &cluster_idx in cluster_indices {
+            let Some(cluster) = self.clusters.get(cluster_idx) else {
+                return Vec::new();
+            };
+            let members: Vec<u64> = cluster.members.iter().map(|id| id.0 as u64).collect();
+            relations.push(SortedRelation::from_unsorted(&members));
+        }
+        let refs: Vec<&SortedRelation> = relations.iter().collect();
+        leapfrog_join(&refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
+    }
+
+    /// Find top-level nodes that do not belong to any cluster using [`crate::leapfrog::leapfrog_anti_join`].
+    #[must_use]
+    pub fn unclustered_nodes(&self) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_anti_join};
+
+        let all_ids: Vec<u64> = (0..self.nodes.len() as u64).collect();
+        let base = SortedRelation::new(all_ids);
+        let exclusions: Vec<SortedRelation> = self
+            .clusters
+            .iter()
+            .filter(|c| !c.members.is_empty())
+            .map(|c| {
+                let members: Vec<u64> = c.members.iter().map(|id| id.0 as u64).collect();
+                SortedRelation::from_unsorted(&members)
+            })
+            .collect();
+        let refs: Vec<&SortedRelation> = exclusions.iter().collect();
+        leapfrog_anti_join(&base, &refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
+    }
+
+    /// Extract all alignment constraints declared on this diagram (`bd-3616r`).
+    #[inline]
+    #[must_use]
+    pub fn alignment_constraints(&self) -> Vec<crate::constraints::AlignConstraint> {
+        self.constraint_set()
+            .alignments()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Return the succinct CSR edge count (directed or undirected) for this diagram (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn succinct_edge_count(&self, directed: bool) -> usize {
+        self.csr_graph(directed).num_edges()
+    }
+
+    /// Compute the sorted union of outgoing neighbor [`IrNodeId`]s for the given `node_ids`
+    /// using [`crate::leapfrog::leapfrog_union`] (`bd-5ben5`).
+    #[inline]
+    #[must_use]
+    pub fn union_outgoing_neighbors_leapfrog(&self, node_ids: &[IrNodeId]) -> Vec<IrNodeId> {
+        use crate::leapfrog::{SortedRelation, leapfrog_union};
+
+        if node_ids.is_empty() {
+            return Vec::new();
+        }
+        let csr = self.csr_graph(true);
+        let relations: Vec<SortedRelation> = node_ids
+            .iter()
+            .map(|id| {
+                let neighbors: Vec<u64> =
+                    csr.neighbors(id.0).iter().map(|&n| u64::from(n)).collect();
+                SortedRelation::from_unsorted(&neighbors)
+            })
+            .collect();
+        let refs: Vec<&SortedRelation> = relations.iter().collect();
+        leapfrog_union(&refs)
+            .into_iter()
+            .map(|id| IrNodeId(id as usize))
+            .collect()
+    }
+
     #[must_use]
     pub fn source_map(&self) -> MermaidSourceMap {
         let entry_capacity = self.nodes.len() + self.edges.len() + self.clusters.len();
@@ -9886,6 +10585,199 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn class_cards_keep_every_member_inside_distinct_compartments() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            stereotype: Some(ClassStereotype::Interface),
+            generics: vec!["T".into()],
+            attributes: vec![IrClassMember {
+                visibility: ClassVisibility::Private,
+                name: "items".into(),
+                return_type: Some("List~T~".into()),
+                ..Default::default()
+            }],
+            methods: vec![
+                IrClassMember {
+                    visibility: ClassVisibility::Public,
+                    name: "load()".into(),
+                    return_type: Some("T".into()),
+                    is_abstract: true,
+                    ..Default::default()
+                },
+                IrClassMember {
+                    name: "count()".into(),
+                    is_static: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        for font_size in [10.0, 15.0, 28.0] {
+            for line_height in [1.2, 1.5, 2.0] {
+                let card = ClassCompartmentLayout::new(&meta, "Repository", font_size, line_height);
+                let text: Vec<_> = card.rows.iter().map(|row| row.text.as_str()).collect();
+                assert_eq!(
+                    text,
+                    [
+                        "«interface»",
+                        "Repository<T>",
+                        "-items : List<T>",
+                        "+load() : T",
+                        "count()"
+                    ]
+                );
+                assert!(card.rows[3].italic);
+                assert!(card.rows[4].underline);
+                for row in &card.rows {
+                    let (top, bottom) = match row.kind {
+                        ClassCompartmentRowKind::Name | ClassCompartmentRowKind::Stereotype => {
+                            (0.0, card.header_height)
+                        }
+                        ClassCompartmentRowKind::Attribute => {
+                            (card.header_height, card.separator_ys[1])
+                        }
+                        ClassCompartmentRowKind::Method => (card.separator_ys[1], card.height),
+                    };
+                    assert!(row.center_y - row.font_size * 0.5 > top);
+                    assert!(row.center_y + row.font_size * 0.5 < bottom);
+                }
+                for adjacent in card.rows.windows(2) {
+                    assert!(
+                        adjacent[0].center_y + adjacent[0].font_size * 0.5
+                            < adjacent[1].center_y - adjacent[1].font_size * 0.5
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_cards_preserve_empty_compartments_and_sanitize_metrics() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            generics: vec!["T".into()],
+            ..Default::default()
+        };
+        let card = ClassCompartmentLayout::new(&meta, "Empty", 15.0, 1.5);
+        assert_eq!(card.rows.len(), 1);
+        assert_eq!(card.rows[0].text, "Empty<T>");
+        assert!(card.header_height < card.separator_ys[1]);
+        assert!(card.separator_ys[1] < card.height);
+        assert_eq!(
+            card,
+            ClassCompartmentLayout::new(&meta, "Empty", f32::NAN, -1.0)
+        );
+    }
+
+    #[test]
+    fn class_cards_measure_author_font_sizes_before_positioning_rows() {
+        use super::*;
+        let meta = IrClassNodeMeta {
+            stereotype: Some(ClassStereotype::Interface),
+            attributes: vec![
+                IrClassMember {
+                    name: "identifier".into(),
+                    ..Default::default()
+                },
+                IrClassMember {
+                    name: "revision".into(),
+                    ..Default::default()
+                },
+            ],
+            methods: vec![IrClassMember {
+                name: "save()".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for declared in ["40px", "40", " 40 px "] {
+            let card = ClassCompartmentLayout::with_font_size_override(
+                &meta,
+                "Repository",
+                15.0,
+                1.5,
+                Some(declared),
+            );
+            assert!(card.rows.iter().all(|row| row.font_size == 40.0));
+            for adjacent in card.rows.windows(2) {
+                assert!(adjacent[0].center_y + 20.0 < adjacent[1].center_y - 20.0);
+            }
+            for row in &card.rows {
+                let (top, bottom) = match row.kind {
+                    ClassCompartmentRowKind::Stereotype | ClassCompartmentRowKind::Name => {
+                        (0.0, card.header_height)
+                    }
+                    ClassCompartmentRowKind::Attribute => {
+                        (card.header_height, card.separator_ys[1])
+                    }
+                    ClassCompartmentRowKind::Method => (card.separator_ys[1], card.height),
+                };
+                assert!(row.center_y - 20.0 > top);
+                assert!(row.center_y + 20.0 < bottom);
+            }
+        }
+        let default = ClassCompartmentLayout::new(&meta, "Repository", 15.0, 1.5);
+        for invalid in ["NaN", "inf", "0", "-5px", "100000px", "big"] {
+            assert_eq!(
+                default,
+                ClassCompartmentLayout::with_font_size_override(
+                    &meta,
+                    "Repository",
+                    15.0,
+                    1.5,
+                    Some(invalid),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn readable_label_color_keeps_fixed_task_palettes_legible_in_both_themes() {
+        let light = "#f1f5f9";
+        let dark = "#0f172a";
+        for fill in [
+            "#fca5a5", "#fdba74", "#fde68a", "#bef264", "#86efac", "#93c5fd", "#94a3b8",
+        ] {
+            for (text, background) in [(light, dark), (dark, light)] {
+                let actual = super::readable_label_color(fill, text, background);
+                assert_eq!(actual, dark, "pastel {fill} requires dark text");
+                let contrast = super::shape_color_contrast(
+                    super::shape_color_luminance(super::mindmap::hex_rgb(fill).unwrap()),
+                    super::shape_color_luminance(super::mindmap::hex_rgb(actual).unwrap()),
+                );
+                assert!(contrast >= 4.5, "{fill}/{actual}: {contrast}");
+            }
+        }
+        assert_eq!(super::readable_label_color("#123", dark, light), light);
+        assert_eq!(super::readable_label_color("#FFF", light, dark), dark);
+    }
+
+    #[test]
+    fn readable_label_color_preserves_unknown_paints_and_ties() {
+        for fill in [
+            "none",
+            "transparent",
+            "var(--fill)",
+            "#abcd",
+            "#ffffffff",
+            "#xxffff",
+        ] {
+            assert_eq!(super::readable_label_color(fill, "#fff", "#000"), "#fff");
+        }
+        assert_eq!(
+            super::readable_label_color("#fff", "currentColor", "#000"),
+            "currentColor"
+        );
+        assert_eq!(
+            super::readable_label_color("#fff", "#eee", "var(--bg)"),
+            "#eee"
+        );
+        assert_eq!(
+            super::readable_label_color("#fff", "#123456", "#123456"),
+            "#123456"
+        );
+    }
 
     /// The two slant constants must stay separate literals, and must keep the exact values the
     /// renderers had before adopting them.
@@ -13835,6 +14727,216 @@ mod tests {
     }
 
     #[test]
+    fn c4_card_wraps_complete_content_in_readable_bounded_rows() {
+        let description = "Authenticates incoming requests, validates payloads, and coordinates customer workflows across the platform.";
+        let meta = super::IrC4NodeMeta {
+            element_type: "container".to_string(),
+            technology: Some("Rust / Axum / OpenTelemetry".to_string()),
+            description: Some(description.to_string()),
+        };
+        let metrics = super::FontMetrics::default_metrics();
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Public API",
+            NodeShape::Rounded,
+            &metrics,
+            None,
+            None,
+        );
+        assert!(card.width >= 180.0 && card.width <= 315.0);
+        let body: Vec<_> = card
+            .rows
+            .iter()
+            .filter(|row| row.kind == super::C4CardRowKind::Description)
+            .collect();
+        assert!(
+            body.len() >= 3,
+            "a paragraph must wrap rather than stretch the card"
+        );
+        assert_eq!(
+            body.iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            description
+        );
+        for row in &card.rows {
+            assert!(row.font_size >= 11.0, "default card text must stay legible");
+            assert!(row.center_y - row.font_size * 0.5 >= card.padding);
+            assert!(row.center_y + row.font_size * 0.5 <= card.height - card.padding);
+            assert!(
+                metrics.estimate_preserved_width(
+                    &row.text,
+                    row.font_size,
+                    metrics.avg_char_width()
+                ) <= card.width - card.padding * 2.0
+            );
+        }
+        for pair in card.rows.windows(2) {
+            assert!(
+                pair[0].center_y + pair[0].font_size * 0.5
+                    < pair[1].center_y - pair[1].font_size * 0.5
+            );
+        }
+    }
+
+    #[test]
+    fn c4_card_preserves_authored_blank_lines_and_unicode_words() {
+        let description = "First line\n\n世界世界世界世界世界世界世界世界世界世界世界世界\nCafe\u{301} 👨\u{200d}👩\u{200d}👧";
+        let meta = super::IrC4NodeMeta {
+            description: Some(description.to_string()),
+            ..Default::default()
+        };
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Name",
+            NodeShape::Rounded,
+            &super::FontMetrics::default(),
+            Some(180.0),
+            None,
+        );
+        let body: Vec<_> = card
+            .rows
+            .iter()
+            .filter(|row| row.kind == super::C4CardRowKind::Description)
+            .map(|row| row.text.as_str())
+            .collect();
+        assert!(
+            body.contains(&""),
+            "the authored paragraph break must survive"
+        );
+        assert_eq!(
+            body.join("").split_whitespace().collect::<String>(),
+            description.split_whitespace().collect::<String>()
+        );
+        assert!(body.iter().any(|line| line.contains("Cafe\u{301}")));
+        assert!(
+            body.iter()
+                .any(|line| line.contains("👨\u{200d}👩\u{200d}👧"))
+        );
+    }
+
+    #[test]
+    fn c4_database_text_stays_between_the_cylinder_caps() {
+        let meta = super::IrC4NodeMeta {
+            element_type: "container_db".to_string(),
+            technology: Some("PostgreSQL".to_string()),
+            description: Some(
+                "Stores customer profiles and a complete audit trail for every account change."
+                    .to_string(),
+            ),
+        };
+        let card = super::C4CardLayout::new(
+            &meta,
+            "Customer records",
+            NodeShape::Cylinder,
+            &super::FontMetrics::default(),
+            None,
+            None,
+        );
+        assert!(card.rows.len() >= 6);
+        for row in card.rows {
+            assert!(row.center_y - row.font_size * 0.5 > card.height * 0.2);
+            assert!(row.center_y + row.font_size * 0.5 < card.height * 0.9);
+        }
+    }
+
+    #[test]
+    fn c4_card_wide_glyphs_fit_inside_queue_slants_for_every_font_preset() {
+        let description = "m".repeat(72) + " " + &"W".repeat(72);
+        let meta = super::IrC4NodeMeta {
+            element_type: "container_queue".to_string(),
+            technology: Some("A message transport with wide metadata".to_string()),
+            description: Some(description.clone()),
+        };
+        for preset in [
+            super::FontPreset::SystemUi,
+            super::FontPreset::SansSerif,
+            super::FontPreset::Serif,
+            super::FontPreset::Monospace,
+            super::FontPreset::Condensed,
+        ] {
+            let metrics = super::FontMetrics::new(super::FontMetricsConfig {
+                preset,
+                ..Default::default()
+            });
+            for shape in [NodeShape::Rounded, NodeShape::Parallelogram] {
+                let card = super::C4CardLayout::new(
+                    &meta,
+                    "Message dispatch",
+                    shape,
+                    &metrics,
+                    None,
+                    None,
+                );
+                let inset = if shape == NodeShape::Parallelogram {
+                    card.width * super::SLANTED_SHAPE_INSET_RATIO
+                } else {
+                    0.0
+                };
+                let available = card.width - 2.0 * (card.padding + inset);
+                for row in &card.rows {
+                    let measured = metrics.estimate_preserved_width(
+                        &row.text,
+                        row.font_size,
+                        metrics.avg_char_width(),
+                    );
+                    assert!(
+                        measured <= available,
+                        "{preset:?}/{shape:?}: row {:?} exceeds its silhouette: {measured} > {available}",
+                        row.text
+                    );
+                }
+                let body = card
+                    .rows
+                    .iter()
+                    .filter(|row| row.kind == super::C4CardRowKind::Description)
+                    .map(|row| row.text.as_str())
+                    .collect::<String>();
+                assert_eq!(
+                    body.split_whitespace().collect::<String>(),
+                    description.split_whitespace().collect::<String>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c4_card_font_override_scales_every_row_and_invalid_values_fall_back() {
+        let meta = super::IrC4NodeMeta {
+            element_type: "container".to_string(),
+            technology: Some("Rust".to_string()),
+            description: Some("A small service".to_string()),
+        };
+        let metrics = super::FontMetrics::monospace(15.0);
+        let ordinary =
+            super::C4CardLayout::new(&meta, "API", NodeShape::Rounded, &metrics, None, None);
+        let large = super::C4CardLayout::new(
+            &meta,
+            "API",
+            NodeShape::Rounded,
+            &metrics,
+            None,
+            Some("30px"),
+        );
+        assert!(large.width > ordinary.width && large.height > ordinary.height);
+        assert!(large.rows.iter().all(|row| row.font_size == 30.0));
+        for invalid in ["0", "-4", "NaN", "inf", "900", "url(bad)"] {
+            assert_eq!(
+                super::C4CardLayout::new(
+                    &meta,
+                    "API",
+                    NodeShape::Rounded,
+                    &metrics,
+                    Some(f32::NAN),
+                    Some(invalid)
+                ),
+                ordinary
+            );
+        }
+    }
+
+    #[test]
     fn er_columns_leave_space_for_measured_default_key_rows() {
         let members = vec![
             IrEntityAttribute {
@@ -14509,6 +15611,12 @@ mod tests {
         assert_eq!(DiagramType::ArchitectureBeta.support_label(), "full");
 
         assert_eq!(
+            DiagramType::Sequence.support_level(),
+            MermaidSupportLevel::Supported
+        );
+        assert_eq!(DiagramType::Sequence.support_label(), "full");
+
+        assert_eq!(
             DiagramType::Unknown.support_level(),
             MermaidSupportLevel::Unsupported
         );
@@ -14918,7 +16026,8 @@ mod tests {
             top_axis: true,
             inclusive_end_dates: true,
             weekday_start: Some(1),
-            excludes: vec![GanttExclude::Weekends],
+            weekend_start: Some(5),
+            excludes: vec![GanttExclude::Weekends, GanttExclude::Weekday(1)],
             sections: vec![IrGanttSection {
                 name: "Planning".to_string(),
             }],
@@ -14928,7 +16037,10 @@ mod tests {
                 meta: "done, plan_1, 2026-02-01, 2d".to_string(),
                 task_id: Some("plan_1".to_string()),
                 start: Some(GanttDate::Absolute("2026-02-01".to_string())),
-                end: Some(GanttDate::DurationDays(2)),
+                end: Some(GanttDate::UntilTasks(vec![
+                    "ship".to_string(),
+                    "review".to_string(),
+                ])),
                 depends_on: Vec::new(),
                 progress: Some(0.5),
                 flags: crate::GanttTaskFlags {
@@ -14941,6 +16053,21 @@ mod tests {
         let json = serde_json::to_string(&meta).expect("serialize");
         let deser: IrGanttMeta = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(meta, deser);
+    }
+
+    #[test]
+    fn gantt_recurring_calendar_keeps_weekend_and_tick_weekday_independent() {
+        let mut meta = IrGanttMeta {
+            weekday_start: Some(5),
+            excludes: vec![GanttExclude::Weekends, GanttExclude::Weekday(1)],
+            ..Default::default()
+        };
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 6) | 1 | (1 << 1));
+        meta.weekend_start = Some(5);
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 5) | (1 << 6) | (1 << 1));
+        meta.weekend_start = Some(255);
+        meta.excludes.push(GanttExclude::Weekday(255));
+        assert_eq!(meta.excluded_weekday_mask(), (1 << 6) | 1 | (1 << 1));
     }
 
     #[test]
@@ -16451,5 +17578,94 @@ mod tests {
         map.insert(42, 2.7);
         assert_eq!(map.get(&0), Some(&1.5));
         assert_eq!(map.get(&42), Some(&2.7));
+    }
+
+    #[test]
+    fn ir_constraint_set_and_alien_data_structures_work_end_to_end() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for id in ["api_gateway", "api_auth", "db_primary", "worker_cron"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..Default::default()
+            });
+        }
+        // Edges: 0 -> 1, 1 -> 2, duplicate 0 -> 1
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(1)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..Default::default()
+        });
+
+        // Clusters: c0=[0, 1], c1=[1, 2]
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(0),
+            members: vec![IrNodeId(0), IrNodeId(1)],
+            ..Default::default()
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(1),
+            members: vec![IrNodeId(1), IrNodeId(2)],
+            ..Default::default()
+        });
+
+        // 1. StringArt prefix search
+        assert_eq!(ir.nodes_with_prefix("api_"), vec![IrNodeId(0), IrNodeId(1)]);
+
+        // 2. CsrGraph + BitVector reachability
+        let csr = ir.csr_graph(true);
+        assert!(csr.has_edge(0, 1));
+        assert!(csr.has_edge(1, 2));
+        assert!(!csr.has_edge(0, 3));
+        let reach = ir.reachability_bitvector(IrNodeId(0));
+        assert!(reach.get(0) && reach.get(1) && reach.get(2));
+        assert!(!reach.get(3));
+        assert_eq!(reach.count_ones(), 3);
+
+        // 3. QuotientFilter duplicate edge count
+        assert_eq!(ir.duplicate_edge_count(), 1);
+
+        // 4. Leapfrog join, anti-join & union on clusters/neighbors
+        assert_eq!(ir.shared_cluster_members(&[0, 1]), vec![IrNodeId(1)]);
+        assert_eq!(ir.unclustered_nodes(), vec![IrNodeId(3)]);
+        assert_eq!(ir.succinct_edge_count(true), 3);
+        assert_eq!(
+            ir.union_outgoing_neighbors_leapfrog(&[IrNodeId(0), IrNodeId(1)]),
+            vec![IrNodeId(1), IrNodeId(2)]
+        );
+
+        // 5. ConstraintSet conflict detection & alignment_constraints
+        ir.constraints.push(super::IrConstraint::Pin {
+            node_id: "api_gateway".to_string(),
+            x: 10.0,
+            y: 20.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(super::IrConstraint::Pin {
+            node_id: "api_gateway".to_string(),
+            x: 50.0,
+            y: 60.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(super::IrConstraint::SameRank {
+            node_ids: vec!["api_gateway".to_string(), "auth_service".to_string()],
+            span: Span::default(),
+        });
+        let cset = ir.constraint_set();
+        assert_eq!(cset.len(), 3);
+        assert!(cset.has_conflicts());
+        assert_eq!(ir.alignment_constraints().len(), 1);
     }
 }

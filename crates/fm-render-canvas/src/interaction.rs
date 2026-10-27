@@ -611,7 +611,8 @@ impl CanvasSession {
         let primary = self.selection.clone();
         self.cancel_active_selection_gesture();
         if let Some(frame) = &self.frame {
-            self.selection_set.select_node(&frame.ir, &frame.layout, id, mode);
+            self.selection_set
+                .select_node(&frame.ir, &frame.layout, id, mode);
         }
         self.reconcile_primary(Some(id));
         before != self.selection_set || primary != self.selection
@@ -639,7 +640,8 @@ impl CanvasSession {
         let primary = self.selection.clone();
         self.cancel_active_selection_gesture();
         if let Some(frame) = &self.frame {
-            self.selection_set.select_at(&frame.ir, &frame.layout, (x, y), mode);
+            self.selection_set
+                .select_at(&frame.ir, &frame.layout, (x, y), mode);
         }
         self.reconcile_primary(preferred.as_deref());
         before != self.selection_set || primary != self.selection
@@ -668,7 +670,11 @@ impl CanvasSession {
                 &frame.ir,
                 &frame.layout,
                 id,
-                if extend { SelectionMode::Add } else { SelectionMode::Replace },
+                if extend {
+                    SelectionMode::Add
+                } else {
+                    SelectionMode::Replace
+                },
             );
         }
         self.reconcile_primary(None);
@@ -761,7 +767,11 @@ impl CanvasSession {
     /// Roll back on Escape, pointer cancellation or lost capture. Wrong/retired tokens do nothing.
     /// Returns whether the selected set or its primary changed; redraw after a true result.
     pub fn cancel_selection_gesture(&mut self, token: u64) -> bool {
-        if self.selection_gesture.as_ref().is_some_and(|gesture| gesture.id == token) {
+        if self
+            .selection_gesture
+            .as_ref()
+            .is_some_and(|gesture| gesture.id == token)
+        {
             self.cancel_active_selection_gesture()
         } else {
             false
@@ -780,7 +790,9 @@ impl CanvasSession {
         };
         let primary = self.selection.clone();
         let changed = if let Some(frame) = &self.frame {
-            gesture.query.cancel(&frame.ir, &frame.layout, &mut self.selection_set)
+            gesture
+                .query
+                .cancel(&frame.ir, &frame.layout, &mut self.selection_set)
         } else {
             self.selection_set.clear()
         };
@@ -808,7 +820,7 @@ impl CanvasSession {
             && viewport.zoom > 0.0
             && viewport.offset_x.is_finite()
             && viewport.offset_y.is_finite())
-            .then_some(viewport)
+        .then_some(viewport)
     }
 
     /// Set the focus-ring appearance for the next redraw.
@@ -1419,18 +1431,28 @@ mod session_tests {
             session.redraw(&mut context).unwrap();
             let (bx, by) = drawn_label(&context, "Beta");
             session.select_node("A");
-            let token = session.begin_selection_gesture(
-                [400.0, 200.0], SelectionMode::Toggle, SelectionContainment::Intersects,
-            ).unwrap();
+            let token = session
+                .begin_selection_gesture(
+                    [400.0, 200.0],
+                    SelectionMode::Toggle,
+                    SelectionContainment::Intersects,
+                )
+                .unwrap();
             assert!(session.preview_selection_gesture(
-                token, marquee((-10.0, -10.0), (410.0, 210.0)), [400.0, 200.0],
+                token,
+                marquee((-10.0, -10.0), (410.0, 210.0)),
+                [400.0, 200.0],
             ));
             assert_eq!(selected(&session), ["B"]);
             assert!(!session.preview_selection_gesture(
-                token, marquee((-10.0, -10.0), (410.0, 210.0)), [400.0, 200.0],
+                token,
+                marquee((-10.0, -10.0), (410.0, 210.0)),
+                [400.0, 200.0],
             ));
             assert!(session.preview_selection_gesture(
-                token, marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)), [400.0, 200.0],
+                token,
+                marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)),
+                [400.0, 200.0],
             ));
             assert_eq!(selected(&session), ["A", "B"]);
             assert_eq!(session.selected_node_id(), Some("A"));
@@ -1447,12 +1469,18 @@ mod session_tests {
         session.redraw(&mut context).unwrap();
         let (ax, ay) = drawn_label(&context, "Alpha");
         session.select_node("B");
-        let token = session.begin_selection_gesture(
-            [400.0, 200.0], SelectionMode::Add, SelectionContainment::Intersects,
-        ).unwrap();
+        let token = session
+            .begin_selection_gesture(
+                [400.0, 200.0],
+                SelectionMode::Add,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
         let points = [(ax - 1.0, ay - 1.0), (ax + 1.0, ay - 1.0), (ax, ay + 1.0)];
         assert!(session.preview_selection_gesture(
-            token, SelectionRegion::Lasso(&points), [400.0, 200.0],
+            token,
+            SelectionRegion::Lasso(&points),
+            [400.0, 200.0],
         ));
         assert_eq!(selected(&session), ["A", "B"]);
         // A normal same-size redraw preserves the drag and uses the shared multi-ring renderer.
@@ -1461,12 +1489,18 @@ mod session_tests {
         assert_eq!(session.active_selection_gesture(), Some(token));
         assert!(session.commit_selection_gesture(token, [400.0, 200.0]));
         assert!(!session.cancel_selection_gesture(token));
-        let next = session.begin_selection_gesture(
-            [400.0, 200.0], SelectionMode::Replace, SelectionContainment::Intersects,
-        ).unwrap();
+        let next = session
+            .begin_selection_gesture(
+                [400.0, 200.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
         assert_ne!(next, token);
         assert!(!session.preview_selection_gesture(
-            token, marquee((0.0, 150.0), (10.0, 160.0)), [400.0, 200.0],
+            token,
+            marquee((0.0, 150.0), (10.0, 160.0)),
+            [400.0, 200.0],
         ));
         assert!(!session.commit_selection_gesture(token, [400.0, 200.0]));
         assert!(!session.cancel_selection_gesture(token));
@@ -1479,11 +1513,17 @@ mod session_tests {
         session.redraw(&mut context).unwrap();
         let (bx, by) = drawn_label(&context, "Beta");
         session.select_node("A");
-        let token = session.begin_selection_gesture(
-            [200.0, 120.0], SelectionMode::Replace, SelectionContainment::Intersects,
-        ).unwrap();
+        let token = session
+            .begin_selection_gesture(
+                [200.0, 120.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
         assert!(session.preview_selection_gesture(
-            token, marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)), [200.0, 120.0],
+            token,
+            marquee((bx - 1.0, by - 1.0), (bx + 1.0, by + 1.0)),
+            [200.0, 120.0],
         ));
         assert_eq!(selected(session), ["B"]);
         token
@@ -1500,15 +1540,22 @@ mod session_tests {
         assert_eq!(session.selected_node_id(), Some("A"));
         assert_eq!(session.active_selection_gesture(), None);
         assert!(!session.commit_selection_gesture(token, [400.0, 240.0]));
-        assert!(Arc::ptr_eq(&layout, &session.frame.as_ref().unwrap().layout));
+        assert!(Arc::ptr_eq(
+            &layout,
+            &session.frame.as_ref().unwrap().layout
+        ));
         let (x, y) = drawn_label(&context, "Alpha");
         assert_eq!(session.hit_test_node(x, y, [400.0, 240.0]), Some("A"));
         let mut expected = MockCanvas2dContext::new(400.0, 240.0);
         let frame = session.frame.as_ref().unwrap();
         let mut primary = session.selection.clone();
         crate::render_to_canvas_with_selection(
-            &frame.ir, &frame.layout, &mut expected, &frame.config,
-            &mut primary, &session.selection_style,
+            &frame.ir,
+            &frame.layout,
+            &mut expected,
+            &frame.config,
+            &mut primary,
+            &session.selection_style,
         );
         assert_eq!(context.operations(), expected.operations());
     }
@@ -1522,7 +1569,9 @@ mod session_tests {
                 assert!(!session.commit_selection_gesture(token, [400.0, 240.0]));
             } else {
                 assert!(session.preview_selection_gesture(
-                    token, marquee((0.0, 0.0), (400.0, 240.0)), [400.0, 240.0],
+                    token,
+                    marquee((0.0, 0.0), (400.0, 240.0)),
+                    [400.0, 240.0],
                 ));
             }
             assert_eq!(selected(&session), ["A"]);
@@ -1568,9 +1617,13 @@ mod session_tests {
         session.set_diagram(ir, layout, CanvasRenderConfig::default());
         let mut context = MockCanvas2dContext::new(200.0, 120.0);
         session.redraw(&mut context).unwrap();
-        let next = session.begin_selection_gesture(
-            [200.0, 120.0], SelectionMode::Replace, SelectionContainment::Contains,
-        ).unwrap();
+        let next = session
+            .begin_selection_gesture(
+                [200.0, 120.0],
+                SelectionMode::Replace,
+                SelectionContainment::Contains,
+            )
+            .unwrap();
         assert_ne!(next, token);
         assert!(!session.cancel_selection_gesture(token));
         assert_eq!(session.active_selection_gesture(), Some(next));
@@ -1581,19 +1634,31 @@ mod session_tests {
     fn session_invalid_queries_and_competing_gestures_leave_the_live_preview_unchanged() {
         let mut session = session(true);
         let token = preview_beta(&mut session);
-        assert!(session.begin_selection_gesture(
-            [200.0, 120.0], SelectionMode::Toggle, SelectionContainment::Contains,
-        ).is_none());
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Toggle,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
         assert!(!session.select_node_with_mode("missing", SelectionMode::Replace));
         assert!(!session.select_at_with_mode(f64::NAN, 32.5, [200.0, 120.0], SelectionMode::Add));
         assert!(!session.preview_selection_gesture(
-            token, SelectionRegion::Lasso(&[(f64::NAN, 0.0); 3]), [200.0, 120.0],
+            token,
+            SelectionRegion::Lasso(&[(f64::NAN, 0.0); 3]),
+            [200.0, 120.0],
         ));
         assert!(!session.preview_selection_gesture(
-            token, marquee((10.0, 10.0), (10.0, 10.0)), [200.0, 120.0],
+            token,
+            marquee((10.0, 10.0), (10.0, 10.0)),
+            [200.0, 120.0],
         ));
         assert!(!session.preview_selection_gesture(
-            token + 1, marquee((0.0, 0.0), (200.0, 120.0)), [400.0, 240.0],
+            token + 1,
+            marquee((0.0, 0.0), (200.0, 120.0)),
+            [400.0, 240.0],
         ));
         assert_eq!(selected(&session), ["B"]);
         assert_eq!(session.selected_node_id(), Some("B"));
@@ -1620,27 +1685,51 @@ mod session_tests {
     #[test]
     fn session_gestures_require_usable_pixels_and_never_wrap_tokens() {
         let mut session = session(true);
-        assert!(session.begin_selection_gesture(
-            [200.0, 120.0], SelectionMode::Replace, SelectionContainment::Contains,
-        ).is_none());
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Replace,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
         let mut context = MockCanvas2dContext::new(200.0, 120.0);
         session.redraw(&mut context).unwrap();
         for size in [[400.0, 240.0], [0.0, 120.0], [f64::NAN, 120.0]] {
-            assert!(session.begin_selection_gesture(
-                size, SelectionMode::Replace, SelectionContainment::Contains,
-            ).is_none());
+            assert!(
+                session
+                    .begin_selection_gesture(
+                        size,
+                        SelectionMode::Replace,
+                        SelectionContainment::Contains,
+                    )
+                    .is_none()
+            );
         }
         for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             session.last_result.as_mut().unwrap().viewport.zoom = zoom;
-            assert!(session.begin_selection_gesture(
-                [200.0, 120.0], SelectionMode::Replace, SelectionContainment::Contains,
-            ).is_none());
+            assert!(
+                session
+                    .begin_selection_gesture(
+                        [200.0, 120.0],
+                        SelectionMode::Replace,
+                        SelectionContainment::Contains,
+                    )
+                    .is_none()
+            );
         }
         session.redraw(&mut context).unwrap();
         session.next_gesture_id = u64::MAX;
-        assert!(session.begin_selection_gesture(
-            [200.0, 120.0], SelectionMode::Replace, SelectionContainment::Contains,
-        ).is_none());
+        assert!(
+            session
+                .begin_selection_gesture(
+                    [200.0, 120.0],
+                    SelectionMode::Replace,
+                    SelectionContainment::Contains,
+                )
+                .is_none()
+        );
         assert_eq!(session.active_selection_gesture(), None);
         assert!(selected(&session).is_empty());
     }
@@ -1664,7 +1753,10 @@ mod session_tests {
         assert!(!session.commit_selection_gesture(token, [200.0, 120.0]));
         assert!(session.last_result([200.0, 120.0]).is_none());
         assert_eq!(session.hit_test_node(20.0, 32.5, [200.0, 120.0]), None);
-        assert!(Arc::ptr_eq(&layout, &session.frame.as_ref().unwrap().layout));
+        assert!(Arc::ptr_eq(
+            &layout,
+            &session.frame.as_ref().unwrap().layout
+        ));
 
         let mut context = MockCanvas2dContext::new(400.0, 200.0);
         session.redraw(&mut context).unwrap();
@@ -1672,7 +1764,10 @@ mod session_tests {
         assert!((x - 47.0).abs() < 1e-6 && (y - 52.0).abs() < 1e-6);
         assert_eq!(session.hit_test_node(x, y, [400.0, 200.0]), Some("A"));
         assert_eq!(session.frame.as_ref().unwrap().config.node_fill, "#123456");
-        assert_eq!(session.frame.as_ref().unwrap().config.label_color, "#abcdef");
+        assert_eq!(
+            session.frame.as_ref().unwrap().config.label_color,
+            "#abcdef"
+        );
         let mut expected = MockCanvas2dContext::new(400.0, 200.0);
         let frame = session.frame.as_ref().unwrap();
         let mut selection = session.selection_set.clone();

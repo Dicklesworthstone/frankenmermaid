@@ -83,12 +83,11 @@ enum Support {
     /// It does not. Confirmed against the SVG arm, which emits it — so this is a real
     /// disagreement between the two renderers, not a property nobody supports.
     ///
-    /// Currently unconstructed, because every row is `Honoured`. KEPT DELIBERATELY: this variant
+    /// Currently unconstructed in `cases()`, because every row is `Honoured`. KEPT DELIBERATELY: this variant
     /// is the vocabulary for recording the next gap someone finds, and the bidirectional check in
     /// `the_styling_matrix_matches_the_table` is built around it. Deleting it to silence a
     /// dead-code warning would mean the next person has to rebuild the mechanism before they can
     /// record a fact — which is how a gap ends up in a commit message instead of a gate.
-    #[allow(dead_code)]
     KnownGap,
 }
 
@@ -379,7 +378,8 @@ fn the_table_covers_every_surface_without_duplicates() {
         all.len()
     );
     assert!(
-        all.iter().all(|c| c.expected == Support::Honoured),
+        all.iter()
+            .all(|c| c.expected == Support::Honoured && c.expected != Support::KnownGap),
         "a KnownGap row reappeared — record why in the bead before letting this stand"
     );
 }

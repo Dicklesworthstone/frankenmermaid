@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+mod browser_glyph_atlas;
 #[cfg(any(target_arch = "wasm32", test))]
 mod canvas_selection;
 
@@ -36,9 +38,10 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
-    ClassParseLens, ErParseLens, FlowchartParseLens, FlowchartParseLensError, ParseLensSnapshot,
-    SequenceParseLens, StateParseLens, apply_parse_lens_delete, apply_parse_lens_edit,
-    apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
+    ClassParseLens, DiagramParseLens, ErParseLens, FlowchartParseLens, FlowchartParseLensError,
+    ParseLensSnapshot, SequenceParseLens, StateParseLens, apply_parse_lens_delete,
+    apply_parse_lens_edit, apply_parse_lens_insert_line_after, build_parse_lens,
+    detect_type_with_confidence, parse,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
@@ -179,7 +182,7 @@ struct RuntimeConfig {
 /// not pixel coordinates: the selected layout algorithm still determines the resulting geometry.
 #[derive(Debug, Clone)]
 pub struct DiagramLens {
-    parse: FlowchartParseLens,
+    parse: DiagramParseLens,
     layout: LayoutLens,
     config: LayoutConfig,
 }
@@ -219,9 +222,10 @@ impl From<LayoutLensError> for DiagramLensError {
 }
 
 impl DiagramLens {
-    /// Parse and lay out a flowchart, retaining both complements for later safe putback.
+    /// Parse and lay out a diagram (`Flowchart`, `Sequence`, `Class`, `State`, or `Er`),
+    /// retaining both complements for later safe putback.
     pub fn from_source(input: &str, config: LayoutConfig) -> Result<Self, DiagramLensError> {
-        let parse = FlowchartParseLens::parse(input)?;
+        let parse = DiagramParseLens::parse(input)?;
         let layout = LayoutLens::new(parse.ir(), config.clone())?;
         Ok(Self {
             parse,
@@ -287,9 +291,12 @@ pub struct IrLensEditResponse {
 /// Re-emit a supported IR edit through the diagram family's formatting-preserving lens.
 ///
 /// Start with the IR returned by `parseLens`, change existing label text, and pass the complete
-/// edited IR with the original source. Each family reparses the candidate and verifies the entire
-/// requested graph before returning it. Flowcharts also accept the independent declaration-order
-/// permutations supported by [`FlowchartParseLens`]. Other structural changes are rejected.
+/// edited IR with the original source. New plain labels can also be attached to existing unlabeled
+/// edges/messages in all five families, and to bare flowchart nodes, by appending an `IrLabel` and
+/// setting the target's previously absent label reference. Reusing an existing plain label is
+/// supported too. Each family reparses the candidate and verifies the entire requested graph
+/// before returning it. Flowcharts also accept the independent declaration-order permutations
+/// supported by [`FlowchartParseLens`]. Other structural changes are rejected.
 ///
 /// Labels are interned: changing one label's text changes every node or edge referring to that
 /// label ID. The family lens must be able to update all those occurrences faithfully. The response
@@ -370,6 +377,8 @@ impl From<&GpuRenderPlan> for WebGpuPlanSummary {
 struct PlannedWebGpuDiagram {
     #[cfg(test)]
     ir: fm_core::MermaidDiagramIr,
+    #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+    font_family: String,
     plan: GpuRenderPlan,
 }
 
@@ -423,16 +432,18 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
 fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
     let geometry = build_diagram_geometry(input, config)?;
     let scene = fm_layout::build_render_scene(&geometry.ir, &geometry.layout);
-    let plan = GpuRenderPlan::from_layout_and_scene(
+    let plan = GpuRenderPlan::from_layout_and_scene_with_config(
         &geometry.ir,
         &geometry.layout,
         &scene,
-        geometry.canvas.edge_stroke_width as f32,
+        &geometry.canvas,
     );
 
     Ok(PlannedWebGpuDiagram {
         #[cfg(test)]
         ir: geometry.ir,
+        #[cfg(all(feature = "webgpu", any(target_arch = "wasm32", test)))]
+        font_family: geometry.canvas.font_family,
         plan,
     })
 }
@@ -480,6 +491,7 @@ struct RuntimeInitConfig {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    debug_overlay: Option<bool>,
     detail_tier: Option<String>,
     preserve_labels: Option<bool>,
 }
@@ -500,6 +512,7 @@ impl RuntimeInitConfig {
             link_mode: self.link_mode.clone(),
             node_gradients: self.node_gradients,
             cluster_fill_opacity: self.cluster_fill_opacity,
+            debug_overlay: self.debug_overlay,
             detail_tier: self.detail_tier.clone(),
             preserve_labels: self.preserve_labels,
         };
@@ -542,6 +555,9 @@ impl RuntimeInitConfig {
         if self.svg.cluster_fill_opacity.is_some() {
             merged.cluster_fill_opacity = self.svg.cluster_fill_opacity;
         }
+        if self.svg.debug_overlay.is_some() {
+            merged.debug_overlay = self.svg.debug_overlay;
+        }
         if self.svg.detail_tier.is_some() {
             merged.detail_tier = self.svg.detail_tier.clone();
         }
@@ -568,6 +584,7 @@ struct SvgConfigOverrides {
     link_mode: Option<String>,
     node_gradients: Option<bool>,
     cluster_fill_opacity: Option<f32>,
+    debug_overlay: Option<bool>,
     detail_tier: Option<String>,
     preserve_labels: Option<bool>,
 }
@@ -578,6 +595,7 @@ struct CanvasConfigOverrides {
     font_size: Option<f64>,
     padding: Option<f64>,
     auto_fit: Option<bool>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1291,6 +1309,9 @@ fn merge_svg_config(
     if let Some(value) = overrides.cluster_fill_opacity {
         merged.cluster_fill_opacity = value;
     }
+    if let Some(value) = overrides.debug_overlay {
+        merged.debug_overlay = value;
+    }
 
     Ok(merged)
 }
@@ -1315,6 +1336,9 @@ fn merge_canvas_config(
     }
     if let Some(value) = overrides.auto_fit {
         merged.auto_fit = value;
+    }
+    if let Some(value) = overrides.debug_overlay {
+        merged.debug_overlay = value;
     }
 
     merged
@@ -1351,6 +1375,9 @@ fn align_canvas_typography_with_svg(
     // did -- would be a divergence between two views of the same diagram (bd-t1jj). Neither renderer
     // ever reads the clock; the date is supplied, and `None` here means no marker in either.
     canvas.gantt_today.clone_from(&svg.gantt_today);
+    if svg.debug_overlay {
+        canvas.debug_overlay = true;
+    }
     canvas
 }
 
@@ -2020,8 +2047,20 @@ pub async fn render_webgpu_to_rgba_js(
     height: u32,
     config: Option<JsValue>,
 ) -> Result<js_sys::Uint8Array, JsValue> {
+    if width == 0 || height == 0 {
+        return Err(js_error("WebGPU render dimensions must be nonzero"));
+    }
     let planned = build_webgpu_plan(&input, config).map_err(js_error)?;
-    let pixels = render_webgpu_pixels(&planned.plan, width, height)
+    let coverage = if planned.plan.text_quads.is_empty() {
+        None
+    } else {
+        Some(
+            browser_glyph_atlas::rasterize(&planned.plan.glyph_atlas, &planned.font_family)
+                .await
+                .map_err(js_error)?,
+        )
+    };
+    let pixels = render_webgpu_pixels(&planned.plan, coverage.as_deref(), width, height)
         .await
         .map_err(js_error)?;
     Ok(js_sys::Uint8Array::from(pixels.as_slice()))
@@ -2035,15 +2074,11 @@ pub async fn render_webgpu_to_rgba_js(
 /// path. This half is compiled and exercised on both targets.
 ///
 /// # Errors
-/// Returns the device or readback failure.
-#[cfg(feature = "webgpu")]
-// Unused in a NATIVE non-test build, and deliberately so: its only production caller is the
-// wasm32-gated `renderWebGpuToRgba`, while the native test suite is what proves it works. Making it
-// wasm-only would put the browser render path beyond the reach of every test that can run here,
-// which is the trade this whole split exists to avoid.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Returns a missing/invalid text atlas, invalid dimensions, or device/readback failure.
+#[cfg(all(feature = "webgpu", any(test, target_arch = "wasm32")))]
 pub(crate) async fn render_webgpu_pixels(
     plan: &GpuRenderPlan,
+    coverage: Option<&[u8]>,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
@@ -2051,19 +2086,25 @@ pub(crate) async fn render_webgpu_pixels(
         DiagramPipelines, GlyphAtlasTexture, GpuDevice, render_diagram_async,
     };
 
+    if width == 0 || height == 0 {
+        return Err("WebGPU render dimensions must be nonzero".to_string());
+    }
+    let coverage = if plan.text_quads.is_empty() {
+        None
+    } else {
+        let expected = browser_glyph_atlas::coverage_len(plan.glyph_atlas.texture_px)?;
+        let coverage = coverage.ok_or("WebGPU text requires a rasterized glyph atlas")?;
+        if coverage.len() != expected {
+            return Err(format!(
+                "WebGPU glyph atlas requires {expected} coverage bytes, received {}",
+                coverage.len()
+            ));
+        }
+        Some(coverage)
+    };
     let gpu = GpuDevice::request().await.map_err(|e| e.to_string())?;
     let pipelines = DiagramPipelines::new(&gpu);
-
-    // The atlas is required exactly when there is text to draw. `solid_coverage` is the placeholder
-    // the device tests use; a browser caller that wants readable labels supplies a rasterised atlas
-    // through `glyph_raster`, which needs a font this crate deliberately does not ship.
-    let atlas = (!plan.text_quads.is_empty()).then(|| {
-        GlyphAtlasTexture::new(
-            &gpu,
-            &plan.glyph_atlas,
-            &fm_render_canvas::gpu_device::solid_coverage(&plan.glyph_atlas),
-        )
-    });
+    let atlas = coverage.map(|pixels| GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, pixels));
 
     let image = render_diagram_async(&gpu, &pipelines, plan, atlas.as_ref(), width, height)
         .await
@@ -2488,6 +2529,21 @@ fn browser_supports_webgpu() -> bool {
     !(gpu.is_null() || gpu.is_undefined())
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn parse_navigation_direction(
+    direction: &str,
+) -> Result<fm_render_canvas::NavigationDirection, String> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "up" | "arrowup" => Ok(fm_render_canvas::NavigationDirection::Up),
+        "down" | "arrowdown" => Ok(fm_render_canvas::NavigationDirection::Down),
+        "left" | "arrowleft" => Ok(fm_render_canvas::NavigationDirection::Left),
+        "right" | "arrowright" => Ok(fm_render_canvas::NavigationDirection::Right),
+        other => Err(format!(
+            "unsupported navigation direction '{other}'; expected 'up', 'down', 'left', or 'right'"
+        )),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct Diagram {
@@ -2501,7 +2557,7 @@ pub struct Diagram {
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
     layout_engine: fm_layout::IncrementalLayoutEngine,
-    session: fm_render_canvas::interaction::CanvasSession,
+    session: fm_render_canvas::CanvasSession,
     destroyed: bool,
 }
 
@@ -2553,7 +2609,7 @@ impl Diagram {
             canvas_config,
             pressure_config,
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
-            session: fm_render_canvas::interaction::CanvasSession::default(),
+            session: fm_render_canvas::CanvasSession::default(),
             destroyed: false,
         })
     }
@@ -2760,6 +2816,13 @@ impl Diagram {
         Ok(self.session.hit_test_edge(x, y, max_distance, size))
     }
 
+    /// Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
+    #[wasm_bindgen(js_name = selectedNodeId)]
+    pub fn selected_node_id(&self) -> Result<Option<String>, JsValue> {
+        self.ensure_alive()?;
+        Ok(self.session.selected_node_id().map(str::to_owned))
+    }
+
     #[wasm_bindgen(js_name = setTheme)]
     pub fn set_theme(&mut self, theme: &str) -> Result<(), JsValue> {
         self.ensure_alive()?;
@@ -2830,6 +2893,30 @@ impl Diagram {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 
+    pub fn selected_node_id(&self) -> Result<Option<String>, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn select_node(&mut self, _node_id: &str) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn select_at(&mut self, _x: f64, _y: f64) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn navigate_selection(&mut self, _direction: &str) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn clear_selection(&mut self) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn redraw(&mut self) -> Result<bool, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
     pub fn set_theme(&mut self, _theme: &str) -> Result<(), JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
@@ -2868,7 +2955,7 @@ mod tests {
         apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
         build_parse_lens, parse,
     };
-    use fm_render_canvas::CanvasRenderConfig;
+    use fm_render_canvas::{CanvasRenderConfig, GpuTextSource};
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
     use sha2::{Digest, Sha256};
     use std::{
@@ -3027,27 +3114,23 @@ mod tests {
         assert_package_source_matches_current_inputs();
     }
 
-    #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct WasmDiagramLens {
         bindings: Vec<MermaidLensBinding>,
     }
 
-    #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct WasmLensEditResponse {
         result: MermaidLensEditResult,
         bindings: Vec<MermaidLensBinding>,
     }
 
-    #[allow(dead_code)]
     fn build_diagram_lens(input: &str) -> WasmDiagramLens {
         WasmDiagramLens {
             bindings: build_parse_lens(input).bindings,
         }
     }
 
-    #[allow(dead_code)]
     fn build_lens_edit_response(
         input: &str,
         element_id: &str,
@@ -3066,11 +3149,25 @@ mod tests {
         })
     }
 
-    #[allow(dead_code)]
     fn describe_diagram_js(input: &str) -> String {
         let parsed = parse(input);
         let traced = layout_diagram_traced(&parsed.ir);
         describe_diagram_with_layout(&parsed.ir, Some(&traced.layout))
+    }
+
+    #[test]
+    fn wasm_diagram_lens_and_describe_diagram_helpers_roundtrip() {
+        let source = "flowchart LR\nA[Start] --> B[End]";
+        let lens = build_diagram_lens(source);
+        assert!(!lens.bindings.is_empty());
+        let first_id = lens.bindings[0].element_id.clone();
+        let edited = build_lens_edit_response(source, &first_id, "Begin")
+            .expect("lens edit on first node binding should succeed");
+        assert!(edited.result.updated_source.contains("Begin"));
+        assert!(!edited.bindings.is_empty());
+
+        let description = describe_diagram_js(source);
+        assert!(description.contains("Key relationships"));
     }
 
     #[test]
@@ -4915,6 +5012,91 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn webgpu_labels_retain_the_resolved_font_family() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        let mut runtime = RuntimeConfig::default();
+        runtime.svg.font_family = "Atlas Test Font, sans-serif".to_string();
+        // SVG typography is the resolved source of truth for layout and all raster surfaces.
+        runtime.canvas.font_family = "stale canvas font".to_string();
+        write_runtime_config(runtime);
+        let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
+        assert_eq!(planned.font_family, "Atlas Test Font, sans-serif");
+        assert!(!planned.plan.text_quads.is_empty());
+    }
+
+    #[test]
+    fn webgpu_plan_uses_resolved_size_family_and_multiline_spacing() {
+        let _serial = config_guard();
+        struct RestoreRuntime(RuntimeConfig);
+        impl Drop for RestoreRuntime {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+        let _restore = RestoreRuntime(read_runtime_config());
+        let mut runtime = RuntimeConfig::default();
+        runtime.svg.font_family = "monospace".to_string();
+        runtime.svg.font_size = 24.0;
+        runtime.svg.line_height = 1.75;
+        runtime.canvas.font_size = 9.0;
+        runtime.canvas.font_family = "serif".to_string();
+        write_runtime_config(runtime);
+        let planned = build_webgpu_plan("flowchart LR\n A[\"iiWW<br/><br/>Wi\"]", None).unwrap();
+        let runs: Vec<_> = planned
+            .plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::Node)
+            .collect();
+        assert_eq!(
+            runs.len(),
+            2,
+            "authored blank rows must separate the two visible rows"
+        );
+        let first =
+            &planned.plan.text_quads[runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let second = &planned.plan.text_quads[runs[1].first_quad as usize];
+        assert_eq!(first.len(), 4);
+        assert!(first.iter().all(|quad| quad.half_extent == [12.0, 12.0]));
+        for pair in first.windows(2) {
+            assert!((pair[1].center[0] - pair[0].center[0] - 14.4).abs() < 0.001);
+        }
+        assert!((second.center[1] - first[0].center[1] - 84.0).abs() < 0.001);
+        assert!(planned.plan.glyph_atlas.cell_px > 32);
+    }
+
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn webgpu_text_rejects_missing_or_incomplete_coverage_before_requesting_a_device() {
+        let _serial = config_guard();
+        let planned = build_webgpu_plan("flowchart LR\nA[Readable labels] --> B", None).unwrap();
+        let missing =
+            pollster::block_on(super::render_webgpu_pixels(&planned.plan, None, 512, 512));
+        assert!(
+            missing
+                .unwrap_err()
+                .contains("requires a rasterized glyph atlas")
+        );
+        let incomplete = pollster::block_on(super::render_webgpu_pixels(
+            &planned.plan,
+            Some(&[255]),
+            512,
+            512,
+        ));
+        assert!(incomplete.unwrap_err().contains("coverage bytes"));
+        let empty = pollster::block_on(super::render_webgpu_pixels(&planned.plan, None, 0, 512));
+        assert!(empty.unwrap_err().contains("dimensions must be nonzero"));
+    }
+
     /// THE BROWSER ENTRY POINT'S OWN PATH, exercised natively (bd-2u0.2).
     ///
     /// `renderWebGpuToRgba` is `async` and wasm-only, but the half that does the work —
@@ -4948,8 +5130,16 @@ mod tests {
             "CONTROL FAILED: no text"
         );
 
-        let rgba = pollster::block_on(super::render_webgpu_pixels(&planned.plan, 512, 512))
-            .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
+        // This native test verifies GPU composition. Browser letterforms come from Canvas2D;
+        // supplying synthetic coverage here explicitly keeps it out of the production path.
+        let coverage = fm_render_canvas::gpu_device::solid_coverage(&planned.plan.glyph_atlas);
+        let rgba = pollster::block_on(super::render_webgpu_pixels(
+            &planned.plan,
+            Some(&coverage),
+            512,
+            512,
+        ))
+        .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
         assert_eq!(
             rgba.len(),
             512 * 512 * 4,
@@ -5369,6 +5559,186 @@ mod tests {
     }
 
     #[test]
+    fn diagram_lens_reemits_standalone_in_rank_drag_and_refreshes_layout() {
+        let lens = DiagramLens::from_source(
+            "flowchart TB\n  A[Alpha]\n  B[Bravo]\n  C[Charlie]\n  A --> B\n  A --> C\n",
+            LayoutConfig::default(),
+        )
+        .expect("flowchart lens");
+        let mut dragged = lens.positioned_graph().clone();
+        let sibling_rank = dragged
+            .nodes
+            .iter()
+            .map(|node| node.rank)
+            .find(|rank| {
+                dragged
+                    .nodes
+                    .iter()
+                    .filter(|node| node.rank == *rank)
+                    .count()
+                    >= 2
+            })
+            .expect("fixture has a sibling rank");
+        let mut sibling_ids: Vec<String> = dragged
+            .nodes
+            .iter()
+            .filter(|node| node.rank == sibling_rank)
+            .map(|node| node.node_id.clone())
+            .collect();
+        sibling_ids.reverse();
+        for (index, node_id) in sibling_ids.iter().enumerate() {
+            dragged
+                .nodes
+                .iter_mut()
+                .find(|node| &node.node_id == node_id)
+                .expect("sibling exists")
+                .center
+                .x = (index as f32) * 100.0;
+        }
+
+        let updated = lens
+            .put_layout(&dragged)
+            .expect("standalone node declarations should re-emit in-rank reorder");
+        assert_eq!(
+            updated
+                .ir()
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "C", "B"]
+        );
+        assert!(
+            updated.source().find("C[Charlie]").expect("C present")
+                < updated.source().find("B[Bravo]").expect("B present"),
+            "updated source must place C[Charlie] before B[Bravo]: {}",
+            updated.source()
+        );
+    }
+
+    #[test]
+    fn diagram_lens_supports_sequence_class_state_and_er_label_and_layout_edits() {
+        // 1. Sequence diagram: label edit + horizontal participant reorder
+        let seq_lens = DiagramLens::from_source(
+            "sequenceDiagram\n  participant A as Alpha\n  participant B as Bravo\n  A->>B: ping\n",
+            LayoutConfig::default(),
+        )
+        .expect("sequence lens");
+        let mut seq_ir = seq_lens.ir().clone();
+        let b_label = seq_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "B")
+            .and_then(|n| n.label)
+            .expect("B label");
+        seq_ir.labels[b_label.0].text = "Bravo V2".to_string();
+        let seq_renamed = seq_lens.put_ir(&seq_ir).expect("sequence label put_ir");
+        assert!(seq_renamed.source().contains("participant B as Bravo V2"));
+
+        let mut seq_dragged = seq_renamed.positioned_graph().clone();
+        // Swap x coordinates of A and B within rank 0
+        let a_x = seq_dragged
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "A")
+            .unwrap()
+            .center
+            .x;
+        let b_x = seq_dragged
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "B")
+            .unwrap()
+            .center
+            .x;
+        seq_dragged
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == "A")
+            .unwrap()
+            .center
+            .x = b_x;
+        seq_dragged
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == "B")
+            .unwrap()
+            .center
+            .x = a_x;
+        let seq_reordered = seq_renamed
+            .put_layout(&seq_dragged)
+            .expect("sequence participant reorder put_layout");
+        assert_eq!(
+            seq_reordered
+                .ir()
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+
+        // 2. Class diagram: label edit
+        let class_lens = DiagramLens::from_source(
+            "classDiagram\n  Animal[\"Living creature\"]\n  Dog[\"Canine\"]\n  Animal <|-- Dog\n",
+            LayoutConfig::default(),
+        )
+        .expect("class lens");
+        let mut class_ir = class_lens.ir().clone();
+        let dog_label = class_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "Dog")
+            .and_then(|n| n.label)
+            .expect("Dog label");
+        class_ir.labels[dog_label.0].text = "Domestic dog".to_string();
+        let class_renamed = class_lens.put_ir(&class_ir).expect("class label put_ir");
+        assert!(class_renamed.source().contains("Dog[\"Domestic dog\"]"));
+
+        // 3. State diagram: label edit
+        let state_lens = DiagramLens::from_source(
+            "stateDiagram-v2\n  state \"Idle State\" as Idle\n  state \"Active State\" as Active\n  Idle --> Active\n",
+            LayoutConfig::default(),
+        )
+        .expect("state lens");
+        let mut state_ir = state_lens.ir().clone();
+        let idle_label = state_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "Idle")
+            .and_then(|n| n.label)
+            .expect("Idle label");
+        state_ir.labels[idle_label.0].text = "Waiting State".to_string();
+        let state_renamed = state_lens.put_ir(&state_ir).expect("state label put_ir");
+        assert!(
+            state_renamed
+                .source()
+                .contains("state \"Waiting State\" as Idle")
+        );
+
+        // 4. ER diagram: label edit
+        let er_lens = DiagramLens::from_source(
+            "erDiagram\n  CUSTOMER[\"Customer Account\"]\n  ORDER[\"Purchase Order\"]\n  CUSTOMER ||--o{ ORDER : places\n",
+            LayoutConfig::default(),
+        )
+        .expect("er lens");
+        let mut er_ir = er_lens.ir().clone();
+        let cust_label = er_ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "CUSTOMER")
+            .and_then(|n| n.label)
+            .expect("CUSTOMER label");
+        er_ir.labels[cust_label.0].text = "Verified Customer".to_string();
+        let er_renamed = er_lens.put_ir(&er_ir).expect("er label put_ir");
+        assert!(
+            er_renamed
+                .source()
+                .contains("CUSTOMER[\"Verified Customer\"]")
+        );
+    }
+
+    #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
         struct RuntimeConfigGuard(RuntimeConfig);
@@ -5393,7 +5763,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x35e2_76d2_2992_e16b;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xa5af_f127_da97_efc8;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -5421,22 +5791,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x4d34_bd9f_f56f_e3d2,
+                0x9976_42a0_b5da_e927,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xa2ba_2daf_063a_b7d1,
+                0x094c_237f_ef93_2a5f,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x0167_f23e_f809_bb61,
+                0x68a0_4950_3803_05e4,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xf434_bccb_f68c_db2f,
+                0xd983_b73c_ca10_d621,
             ),
         ];
 
@@ -5458,5 +5828,35 @@ mod tests {
                  (stale pkg/? config default? or a real cross-target divergence)"
             );
         }
+    }
+
+    #[test]
+    fn canvas_session_and_navigation_direction_work_for_diagram_surface() {
+        assert_eq!(
+            super::parse_navigation_direction("ArrowDown"),
+            Ok(fm_render_canvas::NavigationDirection::Down)
+        );
+        assert_eq!(
+            super::parse_navigation_direction("left"),
+            Ok(fm_render_canvas::NavigationDirection::Left)
+        );
+        assert!(super::parse_navigation_direction("diagonal").is_err());
+
+        let parsed = fm_parser::parse("flowchart LR\nA --> B");
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let mut session = fm_render_canvas::CanvasSession::default();
+        session.set_diagram(
+            parsed.ir,
+            std::sync::Arc::clone(&traced.layout),
+            fm_render_canvas::CanvasRenderConfig::default(),
+        );
+        let mut ctx = fm_render_canvas::MockCanvas2dContext::new(800.0, 600.0);
+        assert!(session.redraw(&mut ctx).is_some());
+        assert!(session.select_node("A"));
+        assert_eq!(session.selected_node_id(), Some("A"));
+        assert!(session.navigate_selection(fm_render_canvas::NavigationDirection::Right));
+        assert_eq!(session.selected_node_id(), Some("B"));
+        assert!(session.clear_selection());
+        assert_eq!(session.selected_node_id(), None);
     }
 }

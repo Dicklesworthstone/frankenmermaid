@@ -48,10 +48,13 @@ pub use gpu_layout::{
 };
 pub use gpu_plan::{
     ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment,
-    GpuNodeInstance, GpuNodeShape, GpuRenderPlan, GpuTextQuad, GpuTextRun, NODE_SDF_WGSL,
-    TEXT_ATLAS_WGSL, parse_paint_rgba,
+    GpuMarkerKind, GpuNodeInstance, GpuNodeShape, GpuPieWedge, GpuRenderPlan, GpuTextQuad,
+    GpuTextRun, GpuTextSource, GpuTriangleInstance, NODE_SDF_WGSL, PIE_WEDGE_WGSL, TEXT_ATLAS_WGSL,
+    TRIANGLE_WGSL, parse_paint_rgba,
 };
-pub use interaction::{HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test};
+pub use interaction::{
+    CanvasSession, HitRegion, NavigationDirection, NodeSelection, hit_regions, hit_test,
+};
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use selection::{
     NodeSelectionSet, SelectionBox, SelectionContainment, SelectionMode,
@@ -130,6 +133,20 @@ impl Default for CanvasSelectionStyle {
             halo_width: 2.0,
             padding: 3.0,
         }
+    }
+}
+
+impl CanvasSelectionStyle {
+    /// Parse the foreground ring stroke CSS color into a structured [`Color`] (`bd-24t2w`).
+    #[must_use]
+    pub fn parsed_stroke_color(&self) -> Option<Color> {
+        Color::from_css(&self.stroke)
+    }
+
+    /// Parse the background halo CSS color into a structured [`Color`] (`bd-24t2w`).
+    #[must_use]
+    pub fn parsed_halo_color(&self) -> Option<Color> {
+        Color::from_css(&self.halo)
     }
 }
 
@@ -241,6 +258,22 @@ pub fn render_scene_to_canvas<C: Canvas2dContext>(
     renderer.render_scene(scene, context)
 }
 
+/// Create a high-DPI [`Viewport`] zoomed around `(center_x, center_y)` (`bd-2lcxg`).
+#[inline]
+#[must_use]
+pub fn zoomed_hi_dpi_viewport(
+    width: f64,
+    height: f64,
+    dpr: f64,
+    zoom_factor: f64,
+    center_x: f64,
+    center_y: f64,
+) -> Viewport {
+    let mut viewport = Viewport::new(width, height).with_dpr(dpr);
+    viewport.zoom_at(zoom_factor, center_x, center_y);
+    viewport
+}
+
 /// Legacy function for backwards compatibility.
 #[must_use]
 pub fn render_canvas(ir: &MermaidDiagramIr) -> CanvasRenderResult {
@@ -281,6 +314,20 @@ mod tests {
         assert!(result.draw_calls >= 1);
         assert_eq!(result.nodes_drawn, 0);
         assert_eq!(result.edges_drawn, 0);
+    }
+
+    #[test]
+    fn point_and_selection_style_color_parsing_roundtrip() {
+        let pt = Point::from_layout(fm_layout::LayoutPoint { x: 12.5, y: -4.0 });
+        assert_eq!(pt, Point::new(12.5, -4.0));
+
+        let style = CanvasSelectionStyle::default();
+        assert_eq!(style.parsed_stroke_color(), Some(Color::rgb(37, 99, 235)));
+        assert_eq!(style.parsed_halo_color(), Some(Color::rgb(255, 255, 255)));
+
+        let rgba = Color::from_css("rgba(226, 232, 240, 0.5)").expect("parse rgba");
+        assert_eq!(rgba, Color::rgba(226, 232, 240, 0.5));
+        assert_eq!(rgba.to_css_string(), "rgba(226,232,240,0.5)");
     }
 
     fn selection_fixture() -> (MermaidDiagramIr, DiagramLayout) {
@@ -672,5 +719,33 @@ mod tests {
         assert_eq!(region.tooltip.as_deref(), Some("Read Alpha"));
         assert_eq!(region.link_target.as_deref(), Some("_self"));
         assert_eq!(region.bounds, layout.nodes[0].bounds);
+
+        // Exercise CanvasSession::set_selection_style, last_result, hit_test_interaction, and zoomed_hi_dpi_viewport (bd-2lcxg)
+        let mut session = CanvasSession::default();
+        session.set_selection_style(CanvasSelectionStyle {
+            stroke: String::from("#10b981"),
+            ..CanvasSelectionStyle::default()
+        });
+        session.set_diagram(
+            ir,
+            std::sync::Arc::new(layout),
+            CanvasRenderConfig {
+                auto_fit: false,
+                padding: 10.0,
+                ..CanvasRenderConfig::default()
+            },
+        );
+        let mut session_ctx = MockCanvas2dContext::new(300.0, 200.0);
+        let drawn = session.redraw(&mut session_ctx).expect("session redraw");
+        let (cx, cy) = drawn.viewport.diagram_to_canvas(-60.0, -5.0);
+        assert!(session.last_result([300.0, 200.0]).is_some());
+        let hit = session
+            .hit_test_interaction(cx, cy, [300.0, 200.0])
+            .expect("hit interaction on A");
+        assert_eq!(hit.href.as_deref(), Some("https://example.com/alpha"));
+
+        let vp = zoomed_hi_dpi_viewport(800.0, 600.0, 2.0, 1.5, 400.0, 300.0);
+        assert_eq!(vp.device_pixel_ratio, 2.0);
+        assert!((vp.zoom - 1.5).abs() < 1e-6);
     }
 }

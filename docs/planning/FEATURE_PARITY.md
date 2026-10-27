@@ -42,7 +42,7 @@ Current status in this file is grounded in:
 | Diagram family | Detection | Dedicated parser | Dedicated layout | SVG render | Runtime | Parity | Notes |
 |---|---|---|---|---|---|---|---|
 | flowchart | Yes | Yes | `auto` | Yes | Full | Partial | Most advanced path; recursive document AST, edge bundling, layout constraints |
-| sequence | Yes | Yes | `sequence` | Yes | Partial | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
+| sequence | Yes | Yes | `sequence` | Yes | Full | Partial | Participants, messages, notes, fragments (loop/alt/par/opt/critical/break), activations, lifecycle events, participant groups |
 | class | Yes | Yes | `auto` | Yes | Full | Partial | Members, inheritance, stereotypes, generics, compartment rendering |
 | state | Yes | Yes | `auto` | Yes | Full | Partial | Transitions, composites, fork/join, history states, choice |
 | er | Yes | Yes | `auto` | Yes | Full | Partial | Entity attributes with PK/FK/UK, crow's-foot cardinality markers (bd-b1sy2) |
@@ -59,7 +59,7 @@ Current status in this file is grounded in:
 | xyChart | Yes | Yes | `xychart` | Yes | Full | Partial | Axis/series metadata, bar/line/area rendering; fixture-backed FrankenTUI conformance for axes + named series |
 | block-beta | Yes | Yes | `grid` | Yes | Full | Partial | Column spanning, space blocks, group nesting; fixture-backed FrankenTUI conformance for nested structure |
 | architecture-beta | Yes | Yes | `architecture` | Yes | Full | Partial | Groups, services, junctions, icon classes; the dedicated architecture algorithm engages when an edge declares a side, otherwise the general selector runs (bd-zce4) |
-| C4 (all five variants) | Yes | Yes | `architecture` | Yes | Full | Partial | Boundary detection, C4 node metadata; one notation at five zoom levels; direction-aware algorithm engages on a declared relationship side |
+| C4 (all five variants) | Yes | Yes | `auto` | Yes | Full | Partial | Boundary detection, C4 node metadata; one notation at five zoom levels; routes through the general graph selector |
 | kanban | Yes | Yes | `kanban` | Yes | Full | Partial | Columns and cards via clusters |
 | DOT bridge | Yes | Yes | `auto` | Yes | Full | Partial | Graphviz DOT format to shared IR |
 | treemap | Yes | Yes | `treemap` | Yes | Full | N/A | Squarified treemap; new family with no FrankenTUI reference counterpart (bd-dw450 certified terminal/canvas/WebGPU draw) |
@@ -78,7 +78,7 @@ Current status in this file is grounded in:
 | Algorithm | Serves | Notes |
 |---|---|---|
 | `auto` | All types | Selection by diagram type and graph topology; sugiyama default in the general selector |
-| `sugiyama` | General graphs (flowchart, class, state, ER, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
+| `sugiyama` | General graphs (flowchart, class, state, ER, C4, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
 | `force` | General (fallback for dense/cyclic) | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
 | `tree` | Tree-like graphs | Reingold-Tilford variant with direction support |
 | `radial` | Mindmap | Leaf-weighted angle allocation |
@@ -93,7 +93,7 @@ Current status in this file is grounded in:
 | `quadrant` | Quadrant charts | 2D scatter on [0,1] axes |
 | `gitgraph` | Git graphs | Lane-based commit positioning |
 | `packet` | Packet-beta | Grid-based field layout |
-| `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
+| `architecture` | Architecture-beta | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
 | `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
@@ -124,10 +124,10 @@ Current status in this file is grounded in:
 | Surface | Current status | Notes |
 |---|---|---|
 | Shared IR pipeline | Complete | `MermaidDiagramIr` feeds all renderers |
-| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 18 algorithms + Auto |
-| SVG renderer | Partial | 21 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
-| Terminal renderer | Partial | 4 sub-cell modes, diff engine, minimap, glyphs, and opt-in bounded debug metrics overlay (crossings/bends/horizontal symmetry) |
-| Canvas/WASM | Partial | Canvas2D with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, dedicated vertical/horizontal XY axes and bar/line/area series, and proportional Sankey ribbons with node throughput labels; Canvas/GPU Sankey plans share SVG quantity rules; compiled package qualification and GPU XY support remain separate |
+| Deterministic layout | Complete | BTreeMap everywhere, stable tie-breaking, 23 algorithms + Auto |
+| SVG renderer | Partial | 23 node shapes, gradients, shadows, themes, accessibility, pie/quadrant/xychart specializations |
+| Terminal renderer | Partial | 4 sub-cell modes, `Outline`/`Compact`/`Normal`/`Rich` fidelity selection, `SelectionState` and directional navigation, `MermaidLinkMode::Footnote`, diff engine, minimap, glyphs, ASCII normalization, and an opt-in viewport-bounded debug panel (crossings, bends, symmetry, node/edge/rank/cycle counts) |
+| Canvas/WASM | Partial | Canvas2D `CanvasSession` with viewport-correct retained selection, directional navigation, box/lasso gestures, interaction hit testing, dedicated vertical/horizontal XY axes and bar/line/area series, and proportional Sankey ribbons with node throughput labels; Canvas/GPU Sankey plans share SVG quantity rules; compiled package qualification and GPU XY support remain separate |
 | Diff engine | Complete | Structural node/edge diffing with change classification |
 | Minimap | Complete | Density-aware scaling with viewport indicator |
 
@@ -138,8 +138,9 @@ Current status in this file is grounded in:
 - The first fixture-backed FrankenTUI conformance slice now exists in
   [`crates/fm-cli/tests/frankentui_conformance_test.rs`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_test.rs)
   and
-  [`crates/fm-cli/tests/frankentui_conformance_cases.json`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_cases.json),
-  covering click/callback directives, block-beta structure, sankey links, and
+  [`crates/fm-cli/tests/frankentui_conformance_cases.json`](/data/projects/frankenmermaid/crates/fm-cli/tests/frankentui_conformance_cases.json)
+  now covers all 27 diagram families (including `treemap`, `radar-beta`, and `info`)
+  plus click/callback directives, block-beta structure, sankey links, and
   xychart axes/series against explicit reference-surface expectations
 - Several `Partial` rows still remain implementation-backed rather than fully
   reference-proved because the fixture corpus is intentionally narrow in this
@@ -159,12 +160,16 @@ Current status in this file is grounded in:
   Frankenmermaid now gives `Outline` distinct skeleton semantics: it uses the compact cell renderer
   but suppresses textual labels/titles/legends/annotations explicitly while retaining structural
   geometry. `Compact` / `Normal` / `Rich` and auto sizing remain separate resolved tiers.
-- The debug overlay is now mapped onto terminal output as an opt-in, viewport-bounded plain-text
-  panel with crossing count, rendered polyline bend count, and a deterministic horizontal
-  symmetry score. Exact reference-panel presentation semantics remain to be audited.
-- Interactive selection state is now mapped into Canvas/WASM: retained author-ID highlight,
-  directional navigation, modifier selection, and transactional box/lasso gestures share the
-  renderer's actual viewport. Remaining work is package rebuild/browser qualification and any
+  `select_fidelity`, `SelectionState`, directional navigation, and `MermaidLinkMode::Footnote`
+  are implemented on the terminal surface.
+- The debug overlay is mapped across SVG (`fm-debug-overlay`), terminal output as an opt-in
+  viewport-bounded plain-text panel (crossing count, rendered polyline bend count, horizontal
+  symmetry, and node/edge/rank/cycle counts), and Canvas2D (`draw_debug_overlay_world` /
+  `draw_debug_overlay_hud`). Exact reference-panel presentation semantics remain to be audited.
+- Interactive selection state is mapped into Canvas/WASM through `CanvasSession`: retained
+  author-ID highlight, directional navigation, modifier selection, and transactional box/lasso
+  gestures share the renderer's actual viewport. Terminal `SelectionState` and footnote link mode
+  stay on the text surface. Remaining work is package rebuild/browser qualification and any
   future mapping onto non-canvas surfaces.
 
 ### Areas Where frankenmermaid Is Ahead of FrankenTUI
@@ -173,7 +178,7 @@ Current status in this file is grounded in:
 - Lifecycle events (create/destroy)
 - Fragment alternatives with labeled sections
 - Fragment nesting (children tracking)
-- 18 dedicated layout algorithms plus Auto (vs ~6 in FrankenTUI)
+- 23 dedicated layout algorithms plus Auto (vs ~6 in FrankenTUI)
 - SVG gradients, shadows, glow effects
 - Canvas2D rendering backend
 - WASM/JavaScript API

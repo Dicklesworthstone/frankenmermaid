@@ -1,0 +1,90 @@
+{
+  "result": "PASS",
+  "version": "0.3.0",
+  "root": "/data/tmp/w1-mermaid-published-e2e-030-f242bf72bcce46778d099651af677a7d",
+  "installerSHA256": "372c582ff5fa4fd1dc7460cd5132602f79e67e61ee74ff592e4cdbdf228890c4",
+  "previousSourceTag": "v0.2.0",
+  "previousPublishedNativeArchive": false,
+  "previousBaselineSHA256": "7d2b71313fdb780f95d51cc37ab9c04873fbaefd6ca2c6f121f3ec18463ef228",
+  "signature": "minisign required and verified",
+  "publishedArchives": [
+    {
+      "name": "frankenmermaid-linux-amd64.tar.xz",
+      "sha256": "d6d112de57d564e497f8e3f1f3e0fe1b5af6ac84c0d7cd4840945446d67e0439",
+      "size": 3544260,
+      "members": [
+        "LICENSE",
+        "README.md",
+        "frankenmermaid",
+        "install.sh",
+        "minisign.pub"
+      ],
+      "binarySHA256": "e485049216a2e2cac77ed1538af74199d5d0842b2421ae6bfe51032b1e0c9218"
+    },
+    {
+      "name": "frankenmermaid-linux-arm64.tar.xz",
+      "sha256": "2ff854fb0931c7f9bf03de9eeabba9082a54f55889c6f4ca19c9874a878ef59e",
+      "size": 2980680,
+      "members": [
+        "LICENSE",
+        "README.md",
+        "frankenmermaid",
+        "install.sh",
+        "minisign.pub"
+      ],
+      "binarySHA256": "9d8374f624100eec669b0db016a2fb4b156d4ad53a96f781236e38dcd5253760"
+    },
+    {
+      "name": "frankenmermaid-darwin-amd64.tar.xz",
+      "sha256": "d0b3c00e4a0dd4fa6eb802af73be4c7e93113de9c394c402e0942266866c6a5a",
+      "size": 3219312,
+      "members": [
+        "LICENSE",
+        "README.md",
+        "frankenmermaid",
+        "install.sh",
+        "minisign.pub"
+      ],
+      "binarySHA256": "0de59a1bee32b67cf23a4b8e2641a30e4644ca0a17807dd9b770459a06534a2f"
+    },
+    {
+      "name": "frankenmermaid-darwin-arm64.tar.xz",
+      "sha256": "bf86f5a31269c6f79064538d7aa19b5414d48960a59f54f9c315a0aa9f736cb6",
+      "size": 2678068,
+      "members": [
+        "LICENSE",
+        "README.md",
+        "frankenmermaid",
+        "install.sh",
+        "minisign.pub"
+      ],
+      "binarySHA256": "a81f055b04f540195bc2e94159e8e3a381b26525ad86f583f95be6567980509e"
+    },
+    {
+      "name": "frankenmermaid-windows-amd64.zip",
+      "sha256": "38411e09b2622780469b40aa394d020d7e29964ef7066cc2d5a951a4af3cd8bc",
+      "size": 4498343,
+      "members": [
+        "LICENSE",
+        "README.md",
+        "frankenmermaid.exe",
+        "install.sh",
+        "minisign.pub"
+      ],
+      "binarySHA256": "0711dd4734d962b1007294ce915af92a7bc44f1683fad0e9108a3a9f4abc2713"
+    }
+  ],
+  "linuxLinkage": "both musl/static; no interpreter, NEEDED dependency or GLIBC imports",
+  "tests": [
+    "all five signed published archive closures and tagged companions",
+    "both Linux static musl linkage",
+    "fresh native install",
+    "source-v0.2.0 canonical + relative-symlink upgrade",
+    "retained old bytes and entries",
+    "both command names",
+    "SVG XML and terminal",
+    "maximum/full-range/distant packet fields",
+    "authored deck markers and real runtime",
+    "wrong-file persistent cache and warm reuse"
+  ]
+}

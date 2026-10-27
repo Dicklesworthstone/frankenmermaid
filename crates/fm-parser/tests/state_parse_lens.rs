@@ -4,6 +4,82 @@ use fm_core::DiagramType;
 use fm_parser::{StateParseLens, StateParseLensError, parse};
 use proptest::prelude::*;
 
+#[test]
+fn attach_transition_labels_preserves_composite_states_notes_and_repeated_edits() {
+    for ending in ["", ":  "] {
+        let source = format!(
+            "stateDiagram-v2\r\n  %% retained comment\r\n  state \"Session\" as A {{\r\n    [*] --> Running\r\n    Running --> [*]\r\n  }}\r\n  state \"Done\" as B\r\n  A --> B{ending}\r\n  note right of A: Retain this note\r\n"
+        );
+        let lens = StateParseLens::parse(&source).unwrap();
+        let original = lens.ir();
+        assert_eq!(original.edges.len(), 3);
+        assert!(original.edges[2].label.is_none());
+        let mut edited = original.clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: "terminé 🦀".to_owned(),
+            span: original.edges[2].span,
+        });
+        edited.edges[2].label = Some(label);
+        let updated = lens.put(&edited).unwrap();
+        let insertion = if ending.is_empty() {
+            ": \"terminé 🦀\""
+        } else {
+            ": \"terminé 🦀\"  "
+        };
+        assert_eq!(
+            updated,
+            source.replace(&format!("A --> B{ending}"), &format!("A --> B{insertion}"))
+        );
+        let actual = parse(&updated);
+        assert_eq!(actual.warnings, parse(&source).warnings);
+        assert_eq!(actual.ir.edges[2].extras, original.edges[2].extras);
+        assert_eq!(actual.ir.clusters[0].members, original.clusters[0].members);
+        assert_eq!(
+            actual.ir.graph.subgraphs[0].members,
+            original.graph.subgraphs[0].members
+        );
+        assert_eq!(actual.ir.state_notes[0].text, original.state_notes[0].text);
+        let next = StateParseLens::parse(&updated).unwrap();
+        let mut renamed = next.ir().clone();
+        renamed.labels[renamed.edges[2].label.unwrap().0].text = "Complete".to_owned();
+        assert_eq!(
+            next.put(&renamed).unwrap(),
+            updated.replace("terminé 🦀", "Complete")
+        );
+    }
+}
+
+#[test]
+fn transition_attachments_cannot_introduce_guards_actions_or_structure() {
+    let lens = StateParseLens::parse("stateDiagram-v2\nA --> B:\n").unwrap();
+    for text in [
+        "",
+        "changed\"\nC --> D",
+        "finish [ready]",
+        "finish / cleanup()",
+    ] {
+        let mut edited = lens.ir().clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: text.to_owned(),
+            span: edited.edges[0].span,
+        });
+        edited.edges[0].label = Some(label);
+        assert!(lens.put(&edited).is_err(), "{text:?}");
+    }
+    let mut edited = lens.ir().clone();
+    let label = fm_core::IrLabelId(edited.labels.len());
+    edited.labels.push(fm_core::IrLabel {
+        text: "Complete".to_owned(),
+        span: edited.edges[0].span,
+    });
+    assert!(lens.put(&edited).is_err(), "unused appended label");
+    edited.edges[0].label = Some(label);
+    edited.meta.title = Some("unrequested".to_owned());
+    assert!(lens.put(&edited).is_err());
+}
+
 fn collect_mmd_sources(directory: &Path, sources: &mut Vec<String>) {
     for entry in fs::read_dir(directory).expect("fixture directory is readable") {
         let path = entry.expect("fixture entry").path();

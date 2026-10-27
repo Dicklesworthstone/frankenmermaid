@@ -54,6 +54,14 @@ class CloudflarePagesOpsTests(unittest.TestCase):
             self.assertEqual(payload["action"], "stage-bundle")
             self.assertTrue((output_dir / "frankenmermaid_demo_showcase.html").exists())
             self.assertTrue((output_dir / "web" / "index.html").exists())
+            self.assertTrue((output_dir / "web" / "playground.html").exists())
+            self.assertTrue((output_dir / "web" / "fm-render.worker.js").exists())
+            self.assertTrue((output_dir / "web" / "fm-source-editor.js").exists())
+            self.assertTrue((output_dir / "web" / "fm-document.js").exists())
+            self.assertTrue((output_dir / "web" / "fm-deck-editor.js").exists())
+            self.assertTrue((output_dir / "web" / "fm-image-export.js").exists())
+            self.assertTrue((output_dir / "web" / "fm-share.js").exists())
+            self.assertTrue((output_dir / "web" / "mermaid.mjs").exists())
             self.assertTrue((output_dir / "_headers").exists())
             self.assertTrue((output_dir / "index.html").exists())
             self.assertTrue((output_dir / "frankenmermaid_illustration.webp").exists())
@@ -201,23 +209,39 @@ class CloudflarePagesOpsTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertTrue(
             any(
-                violation["kind"] == "tracked-workflow" and violation["path"] == ".github/workflows/ci.yml"
-                for violation in payload["violations"]
-            )
-        )
-        self.assertTrue(
-            any(
-                violation["kind"] == "github-action-reference" and violation["path"] == ".github/workflows/ci.yml"
-                for violation in payload["violations"]
-            )
-        )
-        self.assertTrue(
-            any(
                 violation["kind"] == "tracked-workflow"
                 and violation["path"] == "extensions/vscode-frankenmermaid/.github/workflows/react-doctor.yml"
                 for violation in payload["violations"]
             )
         )
+        self.assertTrue(
+            any(
+                violation["kind"] == "github-action-reference"
+                and violation["path"] == "extensions/vscode-frankenmermaid/.github/workflows/react-doctor.yml"
+                for violation in payload["violations"]
+            )
+        )
+        with TemporaryDirectory() as tempdir:
+            temp_repo = Path(tempdir)
+            OPS.run_subprocess(["git", "-C", str(temp_repo), "init", "-q"])
+            workflow_file = temp_repo / ".github" / "workflows" / "ci.yml"
+            workflow_file.parent.mkdir(parents=True, exist_ok=True)
+            workflow_file.write_text("steps:\n  - uses: actions/checkout@v4\n", encoding="utf-8")
+            OPS.run_subprocess(["git", "-C", str(temp_repo), "add", ".github/workflows/ci.yml"])
+            synthetic_payload = OPS.scan_github_actions_policy(temp_repo)
+            self.assertFalse(synthetic_payload["ok"])
+            self.assertTrue(
+                any(
+                    v["kind"] == "tracked-workflow" and v["path"] == ".github/workflows/ci.yml"
+                    for v in synthetic_payload["violations"]
+                )
+            )
+            self.assertTrue(
+                any(
+                    v["kind"] == "github-action-reference" and v["path"] == ".github/workflows/ci.yml"
+                    for v in synthetic_payload["violations"]
+                )
+            )
 
     def test_stage_bundle_cli_emits_machine_readable_json(self):
         repo_root = Path(__file__).resolve().parent.parent

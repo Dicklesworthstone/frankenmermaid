@@ -345,7 +345,6 @@ struct ReleaseEvidenceFile {
 struct QualityGatePolicyFile {
     #[serde(default)]
     release_gate_overrides: Option<ReleaseGateOverridePolicy>,
-    #[allow(dead_code)]
     #[serde(default)]
     release_signoff: Option<ReleaseSignoffPolicy>,
 }
@@ -361,7 +360,6 @@ struct ReleaseGateOverridePolicy {
     overrides_path: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ReleaseSignoffPolicy {
     enabled: bool,
@@ -571,7 +569,6 @@ struct E2eReplayBundle {
 
 #[derive(Debug, Clone, Deserialize)]
 struct PerfBaselineFile {
-    #[allow(dead_code)]
     schema_version: u32,
     benchmarks: BTreeMap<String, PerfBaselineEntry>,
 }
@@ -1201,8 +1198,20 @@ fn verify_overrides_command(root: &Path, args: VerifyOverridesArgs) -> Result<()
 }
 
 fn release_signoff_command(root: &Path, args: ReleaseSignoffArgs) -> Result<()> {
+    let default_policy_path = root.join(DEFAULT_OVERRIDE_POLICY_PATH);
+    let configured_spec_path = if default_policy_path.exists() {
+        load_release_signoff_policy(&default_policy_path)?.and_then(|policy| {
+            if !policy.enabled {
+                return None;
+            }
+            policy.spec_path.map(PathBuf::from)
+        })
+    } else {
+        None
+    };
     let spec_path = root.join(
         args.spec_path
+            .or(configured_spec_path)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_RELEASE_SIGNOFF_SPEC_PATH)),
     );
     let spec = load_release_signoff_spec(&spec_path)?;
@@ -2026,6 +2035,14 @@ fn load_override_policy(path: &Path) -> Result<ReleaseGateOverridePolicy> {
             path.display()
         )
     })
+}
+
+fn load_release_signoff_policy(path: &Path) -> Result<Option<ReleaseSignoffPolicy>> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read policy file {}", path.display()))?;
+    let parsed: QualityGatePolicyFile = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse policy file {}", path.display()))?;
+    Ok(parsed.release_signoff)
 }
 
 fn load_override_ledger(path: &Path) -> Result<ReleaseGateOverrideLedger> {

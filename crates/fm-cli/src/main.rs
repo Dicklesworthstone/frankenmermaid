@@ -30,8 +30,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod minimize;
 mod support_matrix;
 
-#[cfg(feature = "png")]
-use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -159,6 +157,10 @@ enum Command {
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,
 
+        /// Emit a static SVG for image converters and document tools without browser CSS.
+        #[arg(long)]
+        portable: bool,
+
         /// Theme name (default, dark, forest, neutral)
         #[arg(short, long)]
         theme: Option<String>,
@@ -248,6 +250,10 @@ enum Command {
         /// Output format. PNG is rejected: rasterization is not batch-safe here.
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,
+
+        /// Emit static SVGs for image converters and document tools without browser CSS.
+        #[arg(long)]
+        portable: bool,
 
         /// Theme name (default, dark, forest, neutral)
         #[arg(short, long)]
@@ -832,11 +838,22 @@ enum LayoutAlgorithmArg {
     Force,
     Tree,
     Radial,
+    Sequence,
     Timeline,
     Gantt,
+    #[value(name = "xychart", alias = "xy-chart")]
+    XyChart,
     Sankey,
     Kanban,
     Grid,
+    Pie,
+    Quadrant,
+    #[value(name = "gitgraph", alias = "git-graph")]
+    GitGraph,
+    Packet,
+    Architecture,
+    Treemap,
+    Radar,
 }
 
 impl LayoutAlgorithmArg {
@@ -847,11 +864,20 @@ impl LayoutAlgorithmArg {
             Self::Force => LayoutAlgorithm::Force,
             Self::Tree => LayoutAlgorithm::Tree,
             Self::Radial => LayoutAlgorithm::Radial,
+            Self::Sequence => LayoutAlgorithm::Sequence,
             Self::Timeline => LayoutAlgorithm::Timeline,
             Self::Gantt => LayoutAlgorithm::Gantt,
+            Self::XyChart => LayoutAlgorithm::XyChart,
             Self::Sankey => LayoutAlgorithm::Sankey,
             Self::Kanban => LayoutAlgorithm::Kanban,
             Self::Grid => LayoutAlgorithm::Grid,
+            Self::Pie => LayoutAlgorithm::Pie,
+            Self::Quadrant => LayoutAlgorithm::Quadrant,
+            Self::GitGraph => LayoutAlgorithm::GitGraph,
+            Self::Packet => LayoutAlgorithm::Packet,
+            Self::Architecture => LayoutAlgorithm::Architecture,
+            Self::Treemap => LayoutAlgorithm::Treemap,
+            Self::Radar => LayoutAlgorithm::Radar,
         }
     }
 }
@@ -985,12 +1011,14 @@ struct FrankenmermaidRenderConfig {
     default_format: Option<String>,
     show_back_edges: Option<bool>,
     reduced_motion: Option<String>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct FrankenmermaidSvgConfig {
     theme: Option<String>,
+    portable: Option<bool>,
     rounded_corners: Option<f32>,
     padding: Option<f32>,
     shadows: Option<bool>,
@@ -998,6 +1026,7 @@ struct FrankenmermaidSvgConfig {
     accessibility: Option<bool>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1006,6 +1035,7 @@ struct FrankenmermaidTermConfig {
     tier: Option<String>,
     unicode: Option<bool>,
     minimap: Option<bool>,
+    debug_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3368,6 +3398,7 @@ fn run() -> Result<()> {
             parse_mode,
             layout_algorithm,
             format,
+            portable,
             theme,
             font_size,
             output,
@@ -3386,7 +3417,14 @@ fn run() -> Result<()> {
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
             let layout_config = build_layout_config(&loaded_config.file, font_size)?;
-            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            if portable {
+                anyhow::ensure!(
+                    format == OutputFormat::Svg,
+                    "--portable requires --format svg"
+                );
+                svg_base_config.make_portable();
+            }
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
@@ -3442,6 +3480,7 @@ fn run() -> Result<()> {
             parse_mode,
             layout_algorithm,
             format,
+            portable,
             theme,
             font_size,
             json,
@@ -3469,7 +3508,14 @@ fn run() -> Result<()> {
             let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
             let theme = resolve_theme_name(theme, &loaded_config.file);
             let layout_config = build_layout_config(&loaded_config.file, font_size)?;
-            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let mut svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            if portable {
+                anyhow::ensure!(
+                    format == OutputFormat::Svg,
+                    "--portable requires --format svg"
+                );
+                svg_base_config.make_portable();
+            }
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
@@ -3954,15 +4000,17 @@ fn parse_layout_algorithm_name(value: &str) -> Result<LayoutAlgorithm> {
         "sequence" => Ok(LayoutAlgorithm::Sequence),
         "timeline" => Ok(LayoutAlgorithm::Timeline),
         "gantt" => Ok(LayoutAlgorithm::Gantt),
-        "xychart" => Ok(LayoutAlgorithm::XyChart),
+        "xychart" | "xy-chart" => Ok(LayoutAlgorithm::XyChart),
         "sankey" => Ok(LayoutAlgorithm::Sankey),
         "kanban" => Ok(LayoutAlgorithm::Kanban),
         "grid" => Ok(LayoutAlgorithm::Grid),
         "pie" => Ok(LayoutAlgorithm::Pie),
         "quadrant" => Ok(LayoutAlgorithm::Quadrant),
-        "gitgraph" => Ok(LayoutAlgorithm::GitGraph),
+        "gitgraph" | "git-graph" => Ok(LayoutAlgorithm::GitGraph),
         "packet" => Ok(LayoutAlgorithm::Packet),
         "architecture" => Ok(LayoutAlgorithm::Architecture),
+        "treemap" => Ok(LayoutAlgorithm::Treemap),
+        "radar" => Ok(LayoutAlgorithm::Radar),
         other => anyhow::bail!("unknown layout.algorithm '{other}'"),
     }
 }
@@ -4199,6 +4247,16 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
         }
     }
     apply_reduced_motion_setting(&mut config, config_file.render.reduced_motion.as_deref())?;
+    if let Some(debug_overlay) = config_file
+        .svg
+        .debug_overlay
+        .or(config_file.render.debug_overlay)
+    {
+        config.debug_overlay = debug_overlay;
+    }
+    if config_file.svg.portable.unwrap_or(false) {
+        config.make_portable();
+    }
 
     Ok(config)
 }
@@ -4227,6 +4285,13 @@ fn build_base_term_render_config(
     }
     if let Some(show_minimap) = config_file.term.minimap {
         config.show_minimap = show_minimap;
+    }
+    if let Some(debug_overlay) = config_file
+        .term
+        .debug_overlay
+        .or(config_file.render.debug_overlay)
+    {
+        config.debug_overlay = debug_overlay;
     }
 
     Ok(config)
@@ -8003,9 +8068,11 @@ fn render_format(
                 let mut svg_config =
                     build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
                 svg_config.apply_degradation(&degradation);
-                make_svg_render_config_raster_safe(&mut svg_config);
+                svg_config.make_portable();
                 let svg = render_svg_with_layout(ir, render_layout, &svg_config);
-                let svg = resolve_svg_custom_properties_for_rasterization(&svg);
+                // Portable rendering resolves generated paints at their source. Rewriting
+                // the finished SVG would also alter authored labels, titles, and links
+                // that happen to contain CSS expressions such as `var(--fm-color, red)`.
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
                 Ok((png, Some(px_width), Some(px_height), None))
             }
@@ -8104,20 +8171,6 @@ fn build_svg_render_config(
         svg_config.font_size = size;
     }
     svg_config
-}
-
-#[cfg(feature = "png")]
-fn make_svg_render_config_raster_safe(config: &mut SvgRenderConfig) {
-    // usvg/resvg only supports a browser-free subset of the CSS emitted for
-    // interactive SVG output. Prefer a static attribute-driven SVG for PNG so
-    // rasterization remains deterministic across theme presets.
-    config.responsive = false;
-    config.embed_theme_css = false;
-    config.animations_enabled = false;
-    config.print_optimized = false;
-    config.shadows = false;
-    config.glow_enabled = false;
-    config.a11y.accessibility_css = false;
 }
 
 fn normalize_positive_font_size(font_size: Option<f32>) -> Option<f32> {
@@ -8219,106 +8272,127 @@ fn svg_root_tag(svg: &str) -> &str {
 }
 
 #[cfg(feature = "png")]
-fn resolve_svg_custom_properties_for_rasterization(svg: &str) -> String {
-    let mut custom_properties = BTreeMap::new();
-    if let Some(style_start) = svg.find("<style>") {
-        let style_content_start = style_start + "<style>".len();
-        if let Some(style_end_rel) = svg[style_content_start..].find("</style>") {
-            let style_content_end = style_content_start + style_end_rel;
-            let style_content = &svg[style_content_start..style_content_end];
-            custom_properties = extract_svg_custom_properties(style_content);
-        }
-    }
-    if custom_properties.is_empty() && !svg.contains("var(--fm-") {
-        return svg.to_string();
-    }
-
-    let mut resolved = svg.to_string();
-    for _ in 0..8 {
-        let next = substitute_svg_var_calls(&resolved, &custom_properties);
-        if next == resolved {
-            break;
-        }
-        resolved = next;
-    }
-    resolved
-}
-
-#[cfg(feature = "png")]
-fn extract_svg_custom_properties(style_content: &str) -> BTreeMap<String, String> {
-    let mut properties = BTreeMap::new();
-    for line in style_content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("--fm-") {
-            continue;
-        }
-        let Some((name, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_end_matches(';').trim();
-        if !value.is_empty() {
-            properties.insert(name.trim().to_string(), value.to_string());
-        }
-    }
-    properties
-}
-
-#[cfg(feature = "png")]
-fn substitute_svg_var_calls(input: &str, custom_properties: &BTreeMap<String, String>) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-
-    while let Some(rel_start) = input[cursor..].find("var(--fm-") {
-        let start = cursor + rel_start;
-        output.push_str(&input[cursor..start]);
-
-        let content_start = start + "var(".len();
-        let mut depth = 1_usize;
-        let mut end = None;
-        for (offset, ch) in input[content_start..].char_indices() {
-            match ch {
-                '(' => depth = depth.saturating_add(1),
-                ')' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        end = Some(content_start + offset);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(end) = end else {
-            output.push_str(&input[start..]);
-            return output;
-        };
-        let body = &input[content_start..end];
-        let (property_name, fallback) = match body.split_once(',') {
-            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
-            None => (body.trim(), None),
-        };
-
-        if let Some(value) = custom_properties.get(property_name) {
-            output.push_str(value);
-        } else if let Some(fallback) = fallback.filter(|value| !value.is_empty()) {
-            output.push_str(fallback);
-        } else {
-            output.push_str(&input[start..=end]);
-        }
-
-        cursor = end + 1;
-    }
-
-    output.push_str(&input[cursor..]);
-    output
-}
-
-#[cfg(feature = "png")]
 fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<(Vec<u8>, u32, u32)> {
+    // usvg starts with an empty font database and silently drops text it cannot resolve.
+    // Load installed fonts once, shared across exports, before it converts text to paths.
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        ensure_png_generic_font_families(&mut fonts);
+        Arc::new(fonts)
+    });
+    svg_to_png_with_fonts(svg, width, height, Arc::clone(fonts))
+}
+
+#[cfg(feature = "png")]
+fn ensure_png_generic_font_families(fonts: &mut usvg::fontdb::Database) {
+    use usvg::fontdb::{Family, Query};
+
+    // A database can contain fonts while its generic aliases still point to absent
+    // platform defaults (Arial, Times New Roman, Courier New). This happens on
+    // minimal Linux installs without fontconfig. usvg then drops otherwise valid
+    // text, including its final serif fallback for an unavailable named family.
+    for (generic, preferred) in [
+        (
+            Family::SansSerif,
+            &[
+                "DejaVu Sans",
+                "Noto Sans",
+                "Liberation Sans",
+                "Arial",
+                "Helvetica",
+            ][..],
+        ),
+        (
+            Family::Serif,
+            &[
+                "DejaVu Serif",
+                "Noto Serif",
+                "Liberation Serif",
+                "Times New Roman",
+            ][..],
+        ),
+        (
+            Family::Monospace,
+            &[
+                "DejaVu Sans Mono",
+                "Noto Sans Mono",
+                "Liberation Mono",
+                "Courier New",
+                "Menlo",
+            ][..],
+        ),
+        (Family::Cursive, &[][..]),
+        (Family::Fantasy, &[][..]),
+    ] {
+        if fonts
+            .query(&Query {
+                families: &[generic],
+                ..Query::default()
+            })
+            .is_some()
+        {
+            continue;
+        }
+        let replacement = preferred
+            .iter()
+            .find(|name| {
+                fonts
+                    .query(&Query {
+                        families: &[Family::Name(name)],
+                        ..Query::default()
+                    })
+                    .is_some()
+            })
+            .map(|name| (*name).to_owned())
+            .or_else(|| {
+                fonts
+                    .faces()
+                    .filter(|face| face.monospaced == (generic == Family::Monospace))
+                    .filter_map(|face| face.families.first().map(|(name, _)| name))
+                    .min()
+                    .cloned()
+            })
+            .or_else(|| {
+                fonts
+                    .faces()
+                    .filter_map(|face| face.families.first().map(|(name, _)| name))
+                    .min()
+                    .cloned()
+            });
+        let Some(replacement) = replacement else {
+            continue;
+        };
+        match generic {
+            Family::SansSerif => fonts.set_sans_serif_family(replacement),
+            Family::Serif => fonts.set_serif_family(replacement),
+            Family::Monospace => fonts.set_monospace_family(replacement),
+            Family::Cursive => fonts.set_cursive_family(replacement),
+            Family::Fantasy => fonts.set_fantasy_family(replacement),
+            Family::Name(_) => unreachable!("only generic families are configured"),
+        }
+    }
+}
+
+#[cfg(feature = "png")]
+fn svg_to_png_with_fonts(
+    svg: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    fonts: Arc<usvg::fontdb::Database>,
+) -> Result<(Vec<u8>, u32, u32)> {
     use resvg::tiny_skia;
     use usvg::{Options, Transform, Tree};
 
-    let opt = Options::default();
+    anyhow::ensure!(
+        !fonts.is_empty() || !svg.contains("<text"),
+        "PNG text rendering requires installed fonts; install a font family such as DejaVu Sans"
+    );
+    let opt = Options {
+        fontdb: fonts,
+        ..Options::default()
+    };
     let tree = Tree::from_str(svg, &opt).context("Failed to parse SVG")?;
 
     let size = tree.size();
@@ -8370,7 +8444,12 @@ fn svg_to_png(svg: &str, width: Option<u32>, height: Option<u32>) -> Result<(Vec
 
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
-    use super::{resolve_svg_custom_properties_for_rasterization, svg_to_png};
+    use super::{
+        OutputFormat, RenderSurfaceOptions, SvgRenderConfig, TermRenderConfig,
+        build_svg_render_config, ensure_png_generic_font_families, render_format,
+        render_svg_with_layout, svg_to_png, svg_to_png_with_fonts,
+    };
+    use std::sync::Arc;
 
     const SIMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect x="0" y="0" width="100" height="50" fill="#f00"/></svg>"##;
     const ZERO_SVG: &str =
@@ -8408,49 +8487,220 @@ mod png_tests {
     }
 
     #[test]
-    fn png_rasterization_resolves_svg_custom_properties() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>:root {
-  --fm-node-fill: #123456;
-  --fm-node-stroke: #abcdef;
-}
-.fm-box { fill: var(--fm-node-fill, #ffffff); stroke: var(--fm-node-stroke, #000000); }</style><rect class="fm-box" fill="var(--fm-node-fill, #ffffff)" stroke="var(--fm-node-stroke, #000000)" x="0" y="0" width="40" height="20"/></svg>"##;
-
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#123456"));
-        assert!(resolved.contains("#abcdef"));
-        assert!(!resolved.contains("var(--fm-node-fill"));
-        assert!(!resolved.contains("var(--fm-node-stroke"));
+    fn png_rasterization_paints_text_instead_of_dropping_it() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="100">
+<rect width="240" height="100" fill="#ffffff"/>
+<text x="12" y="34" font-family="sans-serif" font-size="24" fill="#000000">Alpha</text>
+<text x="12" y="76" font-family="sans-serif" font-size="20" font-weight="bold" fill="#000000">transfer to Beta</text>
+</svg>"##;
+        let (bytes, width, height) =
+            svg_to_png(svg, None, None).expect("rasterize text with system fonts");
+        assert_eq!((width, height), (240, 100));
+        let image = resvg::tiny_skia::Pixmap::decode_png(&bytes).expect("decode PNG");
+        for (top, bottom) in [(8, 38), (50, 80)] {
+            let ink = (top..bottom)
+                .flat_map(|y| (8..230).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = image.pixel(x, y).expect("inside image");
+                    pixel.red() < 100 && pixel.green() < 100 && pixel.blue() < 100
+                })
+                .count();
+            assert!(
+                ink > 100,
+                "text row {top}..{bottom} is missing: only {ink} dark pixels"
+            );
+        }
     }
 
     #[test]
-    fn png_rasterization_resolves_chained_svg_custom_properties() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>:root {
-  --fm-cluster-stroke: #654321;
-  --fm-edge-muted: var(--fm-cluster-stroke);
-}
-</style><path stroke="var(--fm-edge-muted, #000000)" d="M0 0 L40 20"/></svg>"##;
-
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#654321"));
-        assert!(!resolved.contains("var(--fm-edge-muted"));
+    fn png_fontless_text_fails_explicitly_but_shapes_still_render() {
+        let fonts = Arc::new(usvg::fontdb::Database::new());
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text x="5" y="25">Alpha</text></svg>"#;
+        let error = svg_to_png_with_fonts(svg, None, None, Arc::clone(&fonts)).unwrap_err();
+        assert!(error.to_string().contains("requires installed fonts"));
+        let (_, width, height) = svg_to_png_with_fonts(SIMPLE_SVG, None, None, fonts)
+            .expect("shape-only SVG needs no fonts");
+        assert_eq!((width, height), (100, 50));
     }
 
     #[test]
-    fn png_rasterization_applies_var_fallback_without_style_block() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect fill="var(--fm-missing, #123456)" x="0" y="0" width="40" height="20"/></svg>"##;
+    fn png_text_renders_with_font_files_but_no_fontconfig_aliases() {
+        use usvg::fontdb::{Database, Family, Query};
 
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("#123456"));
-        assert!(!resolved.contains("var(--fm-missing"));
+        let mut system_fonts = Database::new();
+        system_fonts.load_system_fonts();
+        let face_id = system_fonts
+            .query(&Query {
+                families: &[
+                    Family::Name("DejaVu Sans"),
+                    Family::Name("Liberation Sans"),
+                    Family::Name("Noto Sans"),
+                    Family::Name("Arial"),
+                    Family::SansSerif,
+                    Family::Serif,
+                    Family::Monospace,
+                ],
+                ..Query::default()
+            })
+            .or_else(|| {
+                system_fonts
+                    .faces()
+                    .find(|face| !face.monospaced && !face.families.is_empty())
+                    .map(|face| face.id)
+            })
+            .or_else(|| system_fonts.faces().next().map(|face| face.id))
+            .expect("PNG tests require at least one installed font");
+        let data = system_fonts
+            .with_face_data(face_id, |bytes, _| bytes.to_vec())
+            .expect("read an installed font");
+
+        // Load only font data into a fresh database: none of the machine's
+        // fontconfig aliases carry across into this regression fixture.
+        let mut fonts = Database::new();
+        fonts.load_font_data(data);
+        let preserved = fonts.faces().next().unwrap().families[0].0.clone();
+        fonts.set_sans_serif_family(preserved.clone());
+        fonts.set_serif_family("fm-absent-serif");
+        fonts.set_monospace_family("fm-absent-monospace");
+        fonts.set_cursive_family("fm-absent-cursive");
+        fonts.set_fantasy_family("fm-absent-fantasy");
+        assert!(
+            fonts
+                .query(&Query {
+                    families: &[Family::Serif],
+                    ..Query::default()
+                })
+                .is_none(),
+            "fixture must expose the missing generic alias"
+        );
+
+        ensure_png_generic_font_families(&mut fonts);
+        assert_eq!(fonts.family_name(&Family::SansSerif), preserved);
+        for generic in [
+            Family::SansSerif,
+            Family::Serif,
+            Family::Monospace,
+            Family::Cursive,
+            Family::Fantasy,
+        ] {
+            assert!(
+                fonts
+                    .query(&Query {
+                        families: &[generic],
+                        ..Query::default()
+                    })
+                    .is_some(),
+                "{generic:?} must resolve to an available face"
+            );
+        }
+
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180">
+<rect width="240" height="180" fill="#ffffff"/>
+<g font-size="20" fill="#000000">
+<text x="12" y="26" font-family="sans-serif">Alpha</text>
+<text x="12" y="56" font-family="serif">Alpha</text>
+<text x="12" y="86" font-family="monospace">Alpha</text>
+<text x="12" y="116" font-family="cursive">Alpha</text>
+<text x="12" y="146" font-family="fantasy">Alpha</text>
+<text x="12" y="176" font-family="fm-absent-named-family">Alpha</text>
+</g></svg>"##;
+        let (bytes, _, _) = svg_to_png_with_fonts(svg, None, None, Arc::new(fonts))
+            .expect("rasterize using repaired generic aliases");
+        let image = resvg::tiny_skia::Pixmap::decode_png(&bytes).expect("decode PNG");
+        for row in 0..6 {
+            let ink = (row * 30..(row + 1) * 30)
+                .flat_map(|y| (8..230).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = image.pixel(x, y).unwrap();
+                    pixel.red() < 100 && pixel.green() < 100 && pixel.blue() < 100
+                })
+                .count();
+            assert!(
+                ink > 40,
+                "font-family row {row} lost its text: {ink} dark pixels"
+            );
+        }
     }
 
     #[test]
-    fn png_rasterization_applies_var_fallback_with_parentheses() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect fill="var(--fm-missing, rgb(18, 52, 86))" x="0" y="0" width="40" height="20"/></svg>"##;
+    fn png_export_preserves_authored_css_fallback_text_and_title() {
+        const LABEL: &str = "var(--fm-text-color, red)";
+        const TITLE: &str = "var(--fm-title, rgb(18, 52, 86))";
+        let mut ir = fm_parser::parse(&format!("flowchart LR\nA[\"{LABEL}\"] --> B[Ready]\n")).ir;
+        ir.meta.title = Some(TITLE.to_owned());
+        ir.meta.title_from_front_matter = true;
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("textColor".into(), "#f1e2d3".into());
+        let layout = fm_layout::layout_diagram(&ir);
 
-        let resolved = resolve_svg_custom_properties_for_rasterization(svg);
-        assert!(resolved.contains("rgb(18, 52, 86)"));
-        assert!(!resolved.contains("var(--fm-missing"));
+        for backend in [
+            fm_render_svg::SvgBackend::LegacyLayout,
+            fm_render_svg::SvgBackend::Scene,
+        ] {
+            // Start with the browser profile so this also exercises PNG's automatic
+            // portable conversion, including literal resolution of generated paints.
+            let base_config = SvgRenderConfig {
+                backend,
+                preserve_labels: true,
+                ..SvgRenderConfig::default()
+            };
+            let mut portable_config =
+                build_svg_render_config(&base_config, "dark", Some(18.0), false);
+            portable_config.make_portable();
+            let svg = render_svg_with_layout(&ir, &layout, &portable_config);
+            assert!(svg.contains(LABEL), "{backend:?}: missing authored label");
+            assert!(svg.contains(TITLE), "{backend:?}: missing authored title");
+            assert!(svg.contains("fill=\"#f1e2d3\""));
+            assert!(
+                !svg.replace(LABEL, "").replace(TITLE, "").contains("var("),
+                "{backend:?}: generated paints must be resolved before rasterization"
+            );
+
+            let (expected_bytes, expected_width, expected_height) =
+                svg_to_png(&svg, None, None).expect("rasterize untouched portable SVG");
+            let expected = resvg::tiny_skia::Pixmap::decode_png(&expected_bytes).unwrap();
+            let (actual_bytes, width, height, _) = render_format(
+                &ir,
+                &layout,
+                OutputFormat::Png,
+                RenderSurfaceOptions {
+                    theme: "dark",
+                    font_size: Some(18.0),
+                    svg_base_config: base_config,
+                    term_base_config: TermRenderConfig::rich(),
+                    show_back_edges: true,
+                    show_minimap: false,
+                    embed_source_spans: false,
+                    dimensions: (None, None),
+                    degradation: fm_core::MermaidDegradationPlan::default(),
+                },
+                false,
+            )
+            .expect("render PNG through the CLI export path");
+            assert_eq!(
+                (width, height),
+                (Some(expected_width), Some(expected_height))
+            );
+            let actual = resvg::tiny_skia::Pixmap::decode_png(&actual_bytes).unwrap();
+            assert!(
+                actual.data() == expected.data(),
+                "{backend:?}: PNG export changed the authored text"
+            );
+
+            // Each string must affect visible pixels, not just accessibility metadata.
+            // These controls reproduce the old whole-document fallback substitution.
+            for (literal, fallback) in [(LABEL, "red"), (TITLE, "rgb(18, 52, 86)")] {
+                let changed_svg = svg.replace(literal, fallback);
+                let (changed_bytes, _, _) = svg_to_png(&changed_svg, None, None).unwrap();
+                let changed = resvg::tiny_skia::Pixmap::decode_png(&changed_bytes).unwrap();
+                assert!(
+                    changed.data() != expected.data(),
+                    "{backend:?}: {literal} must be visible in the regression fixture"
+                );
+            }
+        }
     }
 }
 
@@ -8814,7 +9064,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         layout_algorithm,
-        layout_config,
+        layout_config.clone(),
         layout_guardrails,
     );
     let layout_time = layout_start.elapsed();
@@ -8848,7 +9098,11 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
-    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
+    diagnostics.extend(collect_layout_diagnostics(
+        &parsed.ir,
+        &traced_layout,
+        layout_config,
+    ));
     diagnostics.extend(collect_render_diagnostics(&svg_output));
 
     // FNX structural analysis (when feature is enabled)
@@ -9157,7 +9411,11 @@ fn collect_fnx_diagnostics(results: &FnxAnalysisResults) -> Vec<ValidationDiagno
     diagnostics
 }
 
-fn collect_layout_diagnostics(traced: &TracedLayout) -> Vec<ValidationDiagnostic> {
+fn collect_layout_diagnostics(
+    ir: &fm_core::MermaidDiagramIr,
+    traced: &TracedLayout,
+    layout_config: LayoutConfig,
+) -> Vec<ValidationDiagnostic> {
     let mut diagnostics = Vec::new();
     let layout = &traced.layout;
     let dispatch = traced.trace.dispatch;
@@ -9234,6 +9492,59 @@ fn collect_layout_diagnostics(traced: &TracedLayout) -> Vec<ValidationDiagnostic
                     "Consider tuning cycle strategy when preserving edge direction is important"
                         .to_string(),
                 ),
+            },
+        });
+    }
+
+    if layout_config.constraint_solver != fm_layout::ConstraintSolverMode::Disabled
+        && !ir.constraints.is_empty()
+        && let Some((report, message)) = fm_layout::diagnose_constraint_infeasibility(
+            ir,
+            &layout.nodes,
+            fm_layout::LayoutSpacing::default(),
+            layout_config.constraint_solver_wall_clock_valve_ms,
+        )
+    {
+        let span = report.first_conflicting_span(&ir.constraints);
+        let (source_line, source_column) = span
+            .map(|s| (Some(s.start.line as usize), Some(s.start.col as usize)))
+            .unwrap_or((None, None));
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/warn/layout-constraints-infeasible".to_string(),
+                severity: "warning".to_string(),
+                message,
+                span,
+                source_line,
+                source_column,
+                rule_id: Some("layout.constraints.infeasible".to_string()),
+                confidence: None,
+                remediation_hint: Some(
+                    "Relax or remove one of the mutually conflicting layout constraints"
+                        .to_string(),
+                ),
+            },
+        });
+    }
+
+    for violation in layout.geometry_violations() {
+        diagnostics.push(ValidationDiagnostic {
+            stage: "layout".to_string(),
+            payload: StructuredDiagnostic {
+                error_code: "mermaid/error/layout-geometry-invariant".to_string(),
+                severity: "error".to_string(),
+                message: violation.to_string(),
+                span: None,
+                source_line: None,
+                source_column: None,
+                rule_id: Some("layout.geometry.invariant".to_string()),
+                confidence: None,
+                remediation_hint: Some(format!(
+                    "Inspect {} ({}) for non-finite or negative layout extents",
+                    violation.site,
+                    violation.kind.as_str()
+                )),
             },
         });
     }
@@ -9648,6 +9959,58 @@ mod validate_tests {
                 .iter()
                 .any(|diag| diag.payload.severity == "warning")
         );
+    }
+
+    #[test]
+    fn collect_layout_diagnostics_reports_infeasible_constraints() {
+        let source = "%%{init: {'constraints': {'pin': [{'node': 'A', 'x': 10, 'y': 20}, {'node': 'A', 'x': 300, 'y': 400}]}}}%%\nflowchart TD\nA --> B\n";
+        let parsed = parse(source);
+        assert_eq!(parsed.ir.constraints.len(), 2);
+        let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        let diagnostics = super::collect_layout_diagnostics(
+            &parsed.ir,
+            &traced,
+            fm_layout::LayoutConfig::default(),
+        );
+        let infeasible_diag = diagnostics
+            .iter()
+            .find(|d| d.payload.rule_id.as_deref() == Some("layout.constraints.infeasible"))
+            .expect("expected layout.constraints.infeasible diagnostic");
+        assert_eq!(infeasible_diag.stage, "layout");
+        assert_eq!(infeasible_diag.payload.severity, "warning");
+        assert!(
+            infeasible_diag
+                .payload
+                .message
+                .contains("A pinned to (10, 20)")
+        );
+        assert!(
+            infeasible_diag
+                .payload
+                .message
+                .contains("A pinned to (300, 400)")
+        );
+    }
+
+    #[test]
+    fn collect_layout_diagnostics_reports_geometry_invariant_violations() {
+        let parsed = parse("flowchart LR\nA --> B\n");
+        let mut traced = fm_layout::layout_diagram_traced(&parsed.ir);
+        std::sync::Arc::make_mut(&mut traced.layout).nodes[0]
+            .bounds
+            .width = -5.0;
+        let diagnostics = super::collect_layout_diagnostics(
+            &parsed.ir,
+            &traced,
+            fm_layout::LayoutConfig::default(),
+        );
+        let invariant_diag = diagnostics
+            .iter()
+            .find(|d| d.payload.rule_id.as_deref() == Some("layout.geometry.invariant"))
+            .expect("expected layout.geometry.invariant diagnostic");
+        assert_eq!(invariant_diag.stage, "layout");
+        assert_eq!(invariant_diag.payload.severity, "error");
+        assert!(invariant_diag.payload.message.contains("negative-extent"));
     }
 }
 
@@ -10143,6 +10506,46 @@ mod config_tests {
         )
         .expect("parse config");
         assert!(!resolve_show_back_edges(&config));
+    }
+
+    #[test]
+    fn all_layout_algorithms_roundtrip_cli_and_toml_config() {
+        use clap::ValueEnum;
+        let expected = [
+            ("auto", fm_layout::LayoutAlgorithm::Auto),
+            ("sugiyama", fm_layout::LayoutAlgorithm::Sugiyama),
+            ("force", fm_layout::LayoutAlgorithm::Force),
+            ("tree", fm_layout::LayoutAlgorithm::Tree),
+            ("radial", fm_layout::LayoutAlgorithm::Radial),
+            ("sequence", fm_layout::LayoutAlgorithm::Sequence),
+            ("timeline", fm_layout::LayoutAlgorithm::Timeline),
+            ("gantt", fm_layout::LayoutAlgorithm::Gantt),
+            ("xychart", fm_layout::LayoutAlgorithm::XyChart),
+            ("sankey", fm_layout::LayoutAlgorithm::Sankey),
+            ("kanban", fm_layout::LayoutAlgorithm::Kanban),
+            ("grid", fm_layout::LayoutAlgorithm::Grid),
+            ("pie", fm_layout::LayoutAlgorithm::Pie),
+            ("quadrant", fm_layout::LayoutAlgorithm::Quadrant),
+            ("gitgraph", fm_layout::LayoutAlgorithm::GitGraph),
+            ("packet", fm_layout::LayoutAlgorithm::Packet),
+            ("architecture", fm_layout::LayoutAlgorithm::Architecture),
+            ("treemap", fm_layout::LayoutAlgorithm::Treemap),
+            ("radar", fm_layout::LayoutAlgorithm::Radar),
+        ];
+
+        for (name, algo) in expected {
+            let cli_arg = LayoutAlgorithmArg::from_str(name, true)
+                .unwrap_or_else(|err| panic!("CLI ValueEnum rejected '{name}': {err}"));
+            assert_eq!(cli_arg.to_layout(), algo);
+
+            let toml_src = format!("[layout]\nalgorithm = \"{name}\"\n");
+            let config: FrankenmermaidConfigFile =
+                toml::from_str(&toml_src).expect("parse layout algorithm config");
+            assert_eq!(
+                resolve_layout_algorithm(None, &config).expect("resolve TOML algorithm"),
+                algo
+            );
+        }
     }
 }
 
@@ -10753,12 +11156,13 @@ fn interactive_help_line(hints: &InteractiveKeyHints) -> String {
     }
 }
 
-fn build_interactive_snapshot(
+fn build_interactive_snapshot_with_selection(
     source: &str,
     parse_mode: MermaidParseMode,
     parser_config: ParserConfig,
     preview_width: usize,
     preview_height: usize,
+    selected_node: Option<usize>,
 ) -> InteractiveSnapshot {
     let start = Instant::now();
     let parsed = parse_with_mode_and_config(source, parse_mode, &parser_config);
@@ -10770,13 +11174,25 @@ fn build_interactive_snapshot(
     );
     let mut diagnostics = collect_parse_diagnostics(&parsed);
     diagnostics.extend(collect_structural_diagnostics(&parsed));
-    diagnostics.extend(collect_layout_diagnostics(&traced_layout));
+    diagnostics.extend(collect_layout_diagnostics(
+        &parsed.ir,
+        &traced_layout,
+        LayoutConfig::default(),
+    ));
     sort_diagnostics(&mut diagnostics);
+
+    let term_config = match selected_node.filter(|&idx| idx < parsed.ir.nodes.len()) {
+        Some(idx) => {
+            let selection = fm_render_term::SelectionState::from_selected(idx, &parsed.ir);
+            TermRenderConfig::rich().with_selection(&selection)
+        }
+        None => TermRenderConfig::rich(),
+    };
 
     let result = render_term_with_layout_and_config(
         &parsed.ir,
         &traced_layout.layout,
-        &TermRenderConfig::rich(),
+        &term_config,
         preview_width.max(16),
         preview_height.max(4),
     );
@@ -11032,18 +11448,20 @@ fn cmd_interactive(
     let mut buffer = InteractiveBuffer::from_source(&source);
     let save_path = (input != "-" && Path::new(input).exists()).then_some(input.to_string());
     let mut theme_index = resolve_interactive_theme_index(theme);
+    let mut selected_node: Option<usize> = None;
     let mut stdout = io::stdout();
     let _guard = InteractiveTerminalGuard::enter(&mut stdout)?;
 
     loop {
         let (cols, rows) = terminal::size().unwrap_or((120, 32));
         let layout = interactive_layout(cols, rows);
-        let snapshot = build_interactive_snapshot(
+        let snapshot = build_interactive_snapshot_with_selection(
             &buffer.to_source(),
             parse_mode,
             parser_config,
             layout.preview_width,
             layout.content_height,
+            selected_node,
         );
         draw_interactive_ui(
             &mut stdout,
@@ -11079,6 +11497,16 @@ fn cmd_interactive(
                 code: KeyCode::Tab, ..
             }) => {
                 theme_index = cycle_interactive_theme(theme_index);
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::BackTab,
+                ..
+            }) => {
+                selected_node = match selected_node {
+                    None if snapshot.node_count > 0 => Some(0),
+                    Some(idx) if idx + 1 < snapshot.node_count => Some(idx + 1),
+                    _ => None,
+                };
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,

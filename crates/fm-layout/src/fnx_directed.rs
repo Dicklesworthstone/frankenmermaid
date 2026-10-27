@@ -9,17 +9,16 @@
 //!
 //! All outputs are sorted/ordered deterministically for reproducible layout decisions.
 
-use fm_core::{IrEndpoint, IrNodeId, MermaidDiagramIr};
+use fm_core::{IrEndpoint, MermaidDiagramIr};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// Extract node index from an IrEndpoint, if it's a Node variant.
-/// Returns None for Unresolved or Port endpoints.
+/// Resolve both node and port endpoints through the shared IR contract.
+/// Invalid references and unresolved endpoints do not contribute graph edges.
 #[inline]
-fn endpoint_node_index(endpoint: &IrEndpoint) -> Option<usize> {
-    match endpoint {
-        IrEndpoint::Node(IrNodeId(idx)) => Some(*idx),
-        _ => None,
-    }
+fn endpoint_node_index(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<usize> {
+    ir.resolve_endpoint_node(endpoint)
+        .map(|node| node.0)
+        .filter(|&index| index < ir.nodes.len())
 }
 
 // ============================================================================
@@ -74,8 +73,8 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
 
     for edge in &ir.edges {
         let (Some(from_idx), Some(to_idx)) = (
-            endpoint_node_index(&edge.from),
-            endpoint_node_index(&edge.to),
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
         ) else {
             continue;
         };
@@ -96,71 +95,56 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
     let mut stack: Vec<usize> = Vec::new();
     let mut sccs: Vec<Vec<usize>> = Vec::new();
 
-    #[allow(clippy::too_many_arguments)] // Tarjan's algorithm state is necessarily coupled
-    fn strongconnect(
-        v: usize,
-        adj: &[BTreeSet<usize>],
-        index_counter: &mut usize,
-        indices: &mut [Option<usize>],
-        lowlinks: &mut [usize],
-        on_stack: &mut [bool],
-        stack: &mut Vec<usize>,
-        sccs: &mut Vec<Vec<usize>>,
-    ) {
-        indices[v] = Some(*index_counter);
-        lowlinks[v] = *index_counter;
-        *index_counter += 1;
-        stack.push(v);
-        on_stack[v] = true;
-
-        // Visit successors in sorted order (BTreeSet guarantees this)
-        for &w in &adj[v] {
-            if indices[w].is_none() {
-                strongconnect(
-                    w,
-                    adj,
-                    index_counter,
-                    indices,
-                    lowlinks,
-                    on_stack,
-                    stack,
-                    sccs,
-                );
-                lowlinks[v] = lowlinks[v].min(lowlinks[w]);
-            } else if on_stack[w] {
-                lowlinks[v] = lowlinks[v].min(indices[w].unwrap());
-            }
+    // Keep DFS frames on the heap. A valid long chain must not abort the process by
+    // exhausting a native thread's stack (or the smaller stack available in WASM).
+    // Each frame retains its sorted successor iterator, exactly as recursive Tarjan
+    // would, so discovery order and lowlink propagation remain deterministic.
+    let mut traversal = Vec::new();
+    for root in 0..n {
+        if indices[root].is_some() {
+            continue;
         }
+        indices[root] = Some(index_counter);
+        lowlinks[root] = index_counter;
+        index_counter += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        traversal.push((root, adj[root].iter()));
 
-        // If v is a root node, pop stack and generate SCC
-        if lowlinks[v] == indices[v].unwrap() {
-            let mut scc = Vec::new();
-            loop {
-                let w = stack.pop().unwrap();
-                on_stack[w] = false;
-                scc.push(w);
-                if w == v {
-                    break;
+        while let Some((v, successors)) = traversal.last_mut() {
+            let v = *v;
+            if let Some(&w) = successors.next() {
+                if let Some(index) = indices[w] {
+                    if on_stack[w] {
+                        lowlinks[v] = lowlinks[v].min(index);
+                    }
+                } else {
+                    indices[w] = Some(index_counter);
+                    lowlinks[w] = index_counter;
+                    index_counter += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    traversal.push((w, adj[w].iter()));
                 }
+                continue;
             }
-            scc.sort_unstable(); // Deterministic ordering
-            sccs.push(scc);
-        }
-    }
 
-    // Process nodes in sorted order for deterministic SCC discovery
-    for v in 0..n {
-        if indices[v].is_none() {
-            strongconnect(
-                v,
-                &adj,
-                &mut index_counter,
-                &mut indices,
-                &mut lowlinks,
-                &mut on_stack,
-                &mut stack,
-                &mut sccs,
-            );
+            traversal.pop();
+            if indices[v] == Some(lowlinks[v]) {
+                let mut scc = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                scc.sort_unstable();
+                sccs.push(scc);
+            }
+            if let Some((parent, _)) = traversal.last() {
+                lowlinks[*parent] = lowlinks[*parent].min(lowlinks[v]);
+            }
         }
     }
 
@@ -191,12 +175,30 @@ pub fn compute_scc(ir: &MermaidDiagramIr) -> SccResult {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::fnx_budget::record_budget_work((n + ir.edges.len()).max(1) as u64);
+
     SccResult {
         components,
         non_trivial_count,
         max_component_size,
         node_to_component,
     }
+}
+
+/// Compute Strongly Connected Components under an explicit [`crate::fnx_budget::AnalysisBudget`].
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn compute_scc_with_budget(
+    ir: &MermaidDiagramIr,
+    budget: crate::fnx_budget::AnalysisBudget,
+) -> crate::fnx_budget::BudgetResult<SccResult> {
+    let mut executor = crate::fnx_budget::BudgetExecutor::new(budget);
+    executor.execute_with_progress(|exec| {
+        let work_units = (ir.nodes.len() + ir.edges.len()).max(1) as u64;
+        exec.record_work(work_units);
+        compute_scc(ir)
+    })
 }
 
 // ============================================================================
@@ -247,8 +249,8 @@ pub fn compute_wcc(ir: &MermaidDiagramIr) -> WccResult {
 
     for edge in &ir.edges {
         let (Some(from_idx), Some(to_idx)) = (
-            endpoint_node_index(&edge.from),
-            endpoint_node_index(&edge.to),
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
         ) else {
             continue;
         };
@@ -322,7 +324,8 @@ pub struct DirectedCycle {
     /// Node indices forming the cycle, in cycle order.
     /// The cycle goes from nodes[0] -> nodes[1] -> ... -> nodes[n-1] -> nodes[0].
     pub nodes: Vec<usize>,
-    /// Edge indices participating in this cycle.
+    /// Edge indices in cycle order: `edges[i]` connects `nodes[i]` to the next
+    /// node, with the final edge returning to `nodes[0]`.
     pub edges: Vec<usize>,
 }
 
@@ -364,8 +367,8 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
 
     for (edge_idx, edge) in ir.edges.iter().enumerate() {
         let (Some(from_idx), Some(to_idx)) = (
-            endpoint_node_index(&edge.from),
-            endpoint_node_index(&edge.to),
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
         ) else {
             continue;
         };
@@ -394,32 +397,38 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
     let mut cyclic_nodes = BTreeSet::new();
     let mut cyclic_edges = BTreeSet::new();
 
-    #[allow(clippy::too_many_arguments)] // DFS state is necessarily coupled
-    fn dfs_visit(
-        v: usize,
-        adj: &[Vec<(usize, usize)>],
-        color: &mut [Color],
-        parent: &mut [Option<usize>],
-        parent_edge: &mut [Option<usize>],
-        cycles: &mut Vec<DirectedCycle>,
-        cyclic_nodes: &mut BTreeSet<usize>,
-        cyclic_edges: &mut BTreeSet<usize>,
-    ) {
-        color[v] = Color::Gray;
+    // Explicit DFS frames preserve the recursive traversal's successor order without
+    // tying the largest supported graph to the caller's thread-stack limit.
+    let mut traversal = Vec::new();
+    for root in 0..n {
+        if color[root] != Color::White {
+            continue;
+        }
+        color[root] = Color::Gray;
+        traversal.push((root, 0));
 
-        for &(w, edge_idx) in &adj[v] {
+        while let Some((v, next_neighbor)) = traversal.last_mut() {
+            let v = *v;
+            let Some(&(w, edge_idx)) = adj[v].get(*next_neighbor) else {
+                color[v] = Color::Black;
+                traversal.pop();
+                continue;
+            };
+            *next_neighbor += 1;
             if color[w] == Color::Gray {
-                // Back edge found - extract cycle
-                let mut cycle_nodes = vec![w];
+                // A gray successor is an ancestor on this traversal. Walk back to it
+                // and reverse both lists so edges[i] connects nodes[i] to the next
+                // node, including the closing back edge.
+                let mut cycle_nodes = vec![v];
                 let mut cycle_edges = vec![edge_idx];
                 let mut curr = v;
 
                 while curr != w {
-                    cycle_nodes.push(curr);
                     if let Some(pe) = parent_edge[curr] {
                         cycle_edges.push(pe);
                     }
                     curr = parent[curr].unwrap_or(w);
+                    cycle_nodes.push(curr);
                 }
 
                 cycle_nodes.reverse();
@@ -439,35 +448,9 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
             } else if color[w] == Color::White {
                 parent[w] = Some(v);
                 parent_edge[w] = Some(edge_idx);
-                dfs_visit(
-                    w,
-                    adj,
-                    color,
-                    parent,
-                    parent_edge,
-                    cycles,
-                    cyclic_nodes,
-                    cyclic_edges,
-                );
+                color[w] = Color::Gray;
+                traversal.push((w, 0));
             }
-        }
-
-        color[v] = Color::Black;
-    }
-
-    // Start DFS from each unvisited node (in sorted order)
-    for v in 0..n {
-        if color[v] == Color::White {
-            dfs_visit(
-                v,
-                &adj,
-                &mut color,
-                &mut parent,
-                &mut parent_edge,
-                &mut cycles,
-                &mut cyclic_nodes,
-                &mut cyclic_edges,
-            );
         }
     }
 
@@ -521,8 +504,8 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
 
     for edge in &ir.edges {
         let (Some(from_idx), Some(to_idx)) = (
-            endpoint_node_index(&edge.from),
-            endpoint_node_index(&edge.to),
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
         ) else {
             continue;
         };
@@ -588,6 +571,31 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
     }
 }
 
+/// Complete directed topology summary combining SCC, WCC, directed cycle detection,
+/// and reachability analysis (`bd-l93qp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectedTopologySummary {
+    /// Strongly connected components (Tarjan's algorithm).
+    pub scc: SccResult,
+    /// Weakly connected components (undirected BFS).
+    pub wcc: WccResult,
+    /// Detected directed cycles and participating nodes/edges.
+    pub cycles: DirectedCycleResult,
+    /// Forward/backward reachability sets and source/sink nodes.
+    pub reachability: ReachabilityResult,
+}
+
+/// Compute a complete [`DirectedTopologySummary`] for a diagram (`bd-l93qp`).
+#[must_use]
+pub fn analyze_directed_topology(ir: &MermaidDiagramIr) -> DirectedTopologySummary {
+    DirectedTopologySummary {
+        scc: compute_scc(ir),
+        wcc: compute_wcc(ir),
+        cycles: detect_directed_cycles(ir),
+        reachability: compute_reachability(ir),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -595,7 +603,7 @@ pub fn compute_reachability(ir: &MermaidDiagramIr) -> ReachabilityResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_core::{DiagramType, IrEdge, IrNode};
+    use fm_core::{DiagramType, IrEdge, IrNode, IrNodeId, IrPort, IrPortId};
 
     fn make_test_ir_with_edges(edges: &[(usize, usize)]) -> MermaidDiagramIr {
         let max_node = edges.iter().map(|&(a, b)| a.max(b)).max().unwrap_or(0);
@@ -883,5 +891,183 @@ mod tests {
         let result1 = detect_directed_cycles(&ir);
         let result2 = detect_directed_cycles(&ir);
         assert_eq!(result1, result2, "Cycle detection must be deterministic");
+    }
+
+    #[test]
+    fn directed_analysis_preserves_port_connectivity_and_ignores_invalid_endpoints() {
+        // Two SCCs, a source, a sink, an isolated self-loop and a parallel edge.
+        let nodes = make_test_ir_with_edges(&[
+            (0, 1),
+            (1, 2),
+            (2, 1),
+            (2, 3),
+            (3, 4),
+            (4, 3),
+            (4, 5),
+            (6, 6),
+            (0, 1),
+        ]);
+        let expected = analyze_directed_topology(&nodes);
+        assert_eq!(expected.scc.non_trivial_count, 3);
+        assert_eq!(expected.wcc.components.len(), 2);
+        assert_eq!(
+            expected.reachability.reachable_from[&0],
+            BTreeSet::from([1, 2, 3, 4, 5])
+        );
+
+        let mut ports = nodes.clone();
+        ports.ports = (0..ports.nodes.len())
+            .map(|node| IrPort {
+                node: IrNodeId(node),
+                name: format!("port-{node}"),
+                ..Default::default()
+            })
+            .collect();
+        for (index, edge) in ports.edges.iter_mut().enumerate() {
+            let IrEndpoint::Node(from) = edge.from else {
+                unreachable!()
+            };
+            let IrEndpoint::Node(to) = edge.to else {
+                unreachable!()
+            };
+            edge.from = IrEndpoint::Port(IrPortId(from.0));
+            // Exercise mixed node/port edges as well as port/port edges.
+            if index % 2 == 0 {
+                edge.to = IrEndpoint::Port(IrPortId(to.0));
+            }
+        }
+        assert_eq!(analyze_directed_topology(&ports), expected);
+
+        let invalid_port = ports.ports.len();
+        ports.ports.push(IrPort {
+            node: IrNodeId(usize::MAX),
+            ..Default::default()
+        });
+        for invalid in [
+            IrEndpoint::Unresolved,
+            IrEndpoint::Node(IrNodeId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(usize::MAX)),
+            IrEndpoint::Port(IrPortId(invalid_port)),
+        ] {
+            ports.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(5)),
+                to: invalid,
+                ..Default::default()
+            });
+            ports.edges.push(IrEdge {
+                from: invalid,
+                to: IrEndpoint::Node(IrNodeId(0)),
+                ..Default::default()
+            });
+        }
+        assert_eq!(analyze_directed_topology(&ports), expected);
+    }
+
+    #[test]
+    fn directed_components_and_cycle_witnesses_match_transitive_closure() {
+        // Exhaust every directed graph on three vertices, including self-loops.
+        // Floyd-Warshall is an independent oracle for the DFS/lowlink algorithms.
+        const N: usize = 3;
+        for mask in 0_u16..(1 << (N * N)) {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.nodes = (0..N)
+                .map(|node| IrNode {
+                    id: format!("N{node}"),
+                    ..Default::default()
+                })
+                .collect();
+            let mut reachable = [[false; N]; N];
+            for (from, row) in reachable.iter_mut().enumerate() {
+                for (to, connected) in row.iter_mut().enumerate() {
+                    if mask & (1 << (from * N + to)) != 0 {
+                        *connected = true;
+                        ir.edges.push(IrEdge {
+                            from: IrEndpoint::Node(IrNodeId(from)),
+                            to: IrEndpoint::Node(IrNodeId(to)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            for intermediate in 0..N {
+                for from in 0..N {
+                    for to in 0..N {
+                        reachable[from][to] |=
+                            reachable[from][intermediate] && reachable[intermediate][to];
+                    }
+                }
+            }
+
+            let scc = compute_scc(&ir);
+            for from in 0..N {
+                for to in 0..N {
+                    assert_eq!(
+                        scc.node_to_component[&from] == scc.node_to_component[&to],
+                        from == to || (reachable[from][to] && reachable[to][from]),
+                        "component mismatch for mask {mask}, {from} and {to}"
+                    );
+                }
+                let component = &scc.components[scc.node_to_component[&from]];
+                assert_eq!(component.is_trivial, !reachable[from][from]);
+            }
+
+            let cycles = detect_directed_cycles(&ir);
+            assert_eq!(cycles.has_cycles, (0..N).any(|node| reachable[node][node]));
+            for cycle in &cycles.cycles {
+                assert_eq!(cycle.edges.len(), cycle.nodes.len());
+                assert!(!cycle.nodes.is_empty());
+                for (index, &edge_index) in cycle.edges.iter().enumerate() {
+                    let edge = &ir.edges[edge_index];
+                    assert_eq!(edge.from, IrEndpoint::Node(IrNodeId(cycle.nodes[index])));
+                    assert_eq!(
+                        edge.to,
+                        IrEndpoint::Node(IrNodeId(cycle.nodes[(index + 1) % cycle.nodes.len()]))
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn directed_depth_is_not_limited_by_the_thread_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                const N: usize = 20_000;
+                let edges: Vec<_> = (0..N - 1).map(|node| (node, node + 1)).collect();
+                let mut ir = make_test_ir_with_edges(&edges);
+                let chain = compute_scc(&ir);
+                assert_eq!(chain.components.len(), N);
+                assert_eq!(chain.non_trivial_count, 0);
+                assert!(!detect_directed_cycles(&ir).has_cycles);
+
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(N - 1)),
+                    to: IrEndpoint::Node(IrNodeId(0)),
+                    ..Default::default()
+                });
+                let ring = compute_scc(&ir);
+                assert_eq!(ring.components.len(), 1);
+                assert_eq!(ring.components[0].nodes.len(), N);
+                assert_eq!(ring.non_trivial_count, 1);
+                let cycles = detect_directed_cycles(&ir);
+                assert_eq!(cycles.cycles.len(), 1);
+                assert_eq!(cycles.cycles[0].nodes.len(), N);
+                assert_eq!(cycles.cycles[0].edges.len(), N);
+            })
+            .expect("start a thread with a deliberately small stack")
+            .join()
+            .expect("directed analysis must complete without recursion");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn compute_scc_with_budget_enforces_work_limit() {
+        let ir = make_test_ir_with_edges(&[(0, 1), (1, 2), (2, 0)]);
+        let tight = crate::fnx_budget::AnalysisBudget::default().with_work_budget(1);
+        let result = compute_scc_with_budget(&ir, tight);
+        assert!(result.is_cancelled());
+        assert_eq!(result.into_value().unwrap().non_trivial_count, 1);
     }
 }

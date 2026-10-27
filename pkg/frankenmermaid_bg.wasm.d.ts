@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_diagram_free: (a: number, b: number) => void;
 export const acquireWebGpuCanvasContext: (a: number, b: number) => void;
+export const applyIrLensEdit: (a: number, b: number, c: number, d: number) => void;
 export const applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
 export const applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
@@ -31,6 +32,7 @@ export const diagram_redraw: (a: number, b: number) => void;
 export const diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
 export const diagram_selectAt: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const diagram_selectNode: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const diagram_selectedNodeId: (a: number, b: number) => void;
 export const diagram_selectionState: (a: number, b: number) => void;
 export const diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
 export const hitRegions: (a: number, b: number, c: number, d: number) => void;

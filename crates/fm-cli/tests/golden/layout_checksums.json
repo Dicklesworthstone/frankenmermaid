@@ -423,13 +423,13 @@
     },
     "timeline_basic": {
       "edge_count": 6,
-      "edges_checksum": "59d92c9902f80585",
+      "edges_checksum": "875a0876a4995d36",
       "layout_algorithm": "auto",
-      "layout_checksum": "127cef8b70d61866",
-      "layout_height": 422.5,
-      "layout_width": 674.324951,
+      "layout_checksum": "862861708f847902",
+      "layout_height": 274.5,
+      "layout_width": 514.325012,
       "node_count": 7,
-      "nodes_checksum": "e5b096c2b47f1619"
+      "nodes_checksum": "89b198f8870ab5cb"
     },
     "treemap_basic": {
       "edge_count": 0,

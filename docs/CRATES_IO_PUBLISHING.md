@@ -84,7 +84,7 @@ For each crate:
 
 ```toml
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.95"
@@ -135,7 +135,7 @@ cargo publish -p frankenmermaid-cli
 ## Post-Publish Actions
 
 1. Update README.md with `cargo install frankenmermaid-cli` instructions
-2. Tag release in git: `git tag v0.1.0 && git push origin v0.1.0`
+2. Tag release in git: `git tag v0.3.0 && git push origin v0.3.0`
 3. Create GitHub release with changelog
 4. Verify docs.rs builds for all crates
 

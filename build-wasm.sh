@@ -259,7 +259,19 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpa
 # -Oz --converge, LTO, one codegen unit, and immediate-abort std. 792K is the smallest
 # whole-KiB ceiling fitting this output, with 675 bytes headroom. Correctness and
 # artifact/source freshness gates remain unchanged. See evidence/mindmap_browser_validation.json.
-MAX_GZIP_BYTES=$((792 * 1024))
+#
+# Raised 792K -> 935K on 2026-10-24 while harmonizing local main with origin/main.
+# Same tools, measured `gzip -c pkg/frankenmermaid_bg.wasm | wc -c`:
+#   810310 gzip  origin/main blob (inside 811008)
+#   717642 gzip  local main blob
+#   957153 gzip / 2455470 raw  rebuilt from the merged Rust source
+# The 146843 gzip bytes over origin are local behavior that stayed reachable from
+# fm-wasm after the union (parse lens, selectedNodeId, layout/parser/canvas helpers
+# origin does not implement) on top of origin's newer diagram families. Default
+# features still exclude fnx-integration. No shrink that would drop that behavior
+# was applied. 935K is the smallest whole-KiB ceiling that fits 957153, with 287
+# bytes of headroom. Correctness and artifact/source freshness gates are unchanged.
+MAX_GZIP_BYTES=$((935 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

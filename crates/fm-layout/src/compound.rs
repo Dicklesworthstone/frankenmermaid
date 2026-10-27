@@ -182,13 +182,20 @@ fn place(
                 .filter_map(|child| child.cluster)
                 .filter_map(|id| nested.iter().find(|cluster| cluster.cluster_index == id.0))
                 .map(|cluster| cluster.bounds);
-            let title = subgraph
-                .cluster
-                .and_then(|id| ir.clusters.get(id.0))
+            let cluster = subgraph.cluster.and_then(|id| ir.clusters.get(id.0));
+            let title = cluster
                 .map_or(subgraph.title, |cluster| cluster.title)
                 .and_then(|label| ir.labels.get(label.0))
                 .map(|label| label.text.as_str());
-            let bounds = cluster_bounds_for_content(content, children, title, spacing, metrics);
+            let boundary_type = cluster.and_then(|cluster| cluster.c4_boundary_type.as_deref());
+            let bounds = cluster_bounds_for_content(
+                content,
+                children,
+                title,
+                boundary_type,
+                spacing,
+                metrics,
+            );
             PlacedCluster {
                 members,
                 boxes,

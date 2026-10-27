@@ -8,13 +8,13 @@ use fm_render_canvas::{NavigationDirection, SelectionContainment, SelectionMode}
 use serde::Serialize;
 
 #[cfg(target_arch = "wasm32")]
-use fm_render_canvas::selection::SelectionRegion;
+use super::{Diagram, WasmHitRegion, WebCanvas2dContext, js_error, to_js_value};
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::SelectionBox;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
+use fm_render_canvas::selection::SelectionRegion;
 #[cfg(target_arch = "wasm32")]
-use super::{Diagram, WebCanvas2dContext, WasmHitRegion, js_error, to_js_value};
+use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +38,9 @@ impl SelectionState {
         Self {
             selected_node_ids: session.selected_node_ids().map(str::to_owned).collect(),
             primary_node_id: session.selected_node_id().map(str::to_owned),
-            active_gesture: session.active_selection_gesture().map(|token| token.to_string()),
+            active_gesture: session
+                .active_selection_gesture()
+                .map(|token| token.to_string()),
             frame_available,
         }
     }
@@ -91,7 +93,10 @@ fn lasso_points(values: &[f64]) -> Result<Vec<(f64, f64)>, &'static str> {
     if !valid_lasso_length(values.len()) {
         return Err("lasso needs 3 to 4096 x/y pairs in a Float64Array");
     }
-    if values.iter().any(|value| !value.is_finite() || value.abs() > 1.0e100) {
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 1.0e100)
+    {
         return Err("lasso coordinates must be finite with magnitude at most 1e100");
     }
     // No polygon interpretation here: repeated points, closure and even-odd fill are native.
@@ -124,11 +129,8 @@ impl Diagram {
             self.session.invalidate();
             return None;
         }
-        let mut context = WebCanvas2dContext::new(
-            self.canvas_width,
-            self.canvas_height,
-            self.context.clone(),
-        );
+        let mut context =
+            WebCanvas2dContext::new(self.canvas_width, self.canvas_height, self.context.clone());
         self.session.redraw(&mut context).cloned()
     }
 }
@@ -189,7 +191,9 @@ impl Diagram {
         self.ensure_alive()?;
         let direction = navigation(direction).map_err(js_error)?;
         self.sync_canvas_size();
-        Ok(self.session.navigate_selection_with_extension(direction, extend.unwrap_or(false)))
+        Ok(self
+            .session
+            .navigate_selection_with_extension(direction, extend.unwrap_or(false)))
     }
 
     /// Clear selection and revoke the current drag. A delayed cancellation cannot restore it.
@@ -211,7 +215,10 @@ impl Diagram {
         let mode = selection_mode(mode.as_deref()).map_err(js_error)?;
         let policy = containment(policy.as_deref()).map_err(js_error)?;
         let size = self.sync_canvas_size();
-        Ok(self.session.begin_selection_gesture(size, mode, policy).map(|token| token.to_string()))
+        Ok(self
+            .session
+            .begin_selection_gesture(size, mode, policy)
+            .map(|token| token.to_string()))
     }
 
     /// Preview a marquee from its pointer-down selection, not the previous preview.
@@ -262,14 +269,18 @@ impl Diagram {
         let count = values.length();
         let length = usize::try_from(count).map_err(|_| js_error("lasso is too large"))?;
         if !valid_lasso_length(length) {
-            return Err(js_error("lasso needs 3 to 4096 x/y pairs in a Float64Array"));
+            return Err(js_error(
+                "lasso needs 3 to 4096 x/y pairs in a Float64Array",
+            ));
         }
         // Do not re-read a caller-owned length inside to_vec(): a typed-array subclass may
         // override its length getter. Only the admitted number of scalar reads is performed.
         let coordinates: Vec<f64> = (0..count).map(|index| values.get_index(index)).collect();
         let points = lasso_points(&coordinates).map_err(js_error)?;
         let size = self.sync_canvas_size();
-        Ok(self.session.preview_selection_gesture(token, SelectionRegion::Lasso(&points), size))
+        Ok(self
+            .session
+            .preview_selection_gesture(token, SelectionRegion::Lasso(&points), size))
     }
 
     /// Commit the latest accepted preview. True means committed, not selection-changed.
@@ -297,7 +308,10 @@ impl Diagram {
     pub fn hit_test_interaction(&mut self, x: f64, y: f64) -> Result<JsValue, JsValue> {
         self.ensure_alive()?;
         let size = self.sync_canvas_size();
-        let region = self.session.hit_test_interaction(x, y, size).map(WasmHitRegion::from);
+        let region = self
+            .session
+            .hit_test_interaction(x, y, size)
+            .map(WasmHitRegion::from);
         to_js_value(&region)
     }
 }
@@ -319,8 +333,8 @@ export type DiagramSelectionContainment = "intersects" | "contains";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fm_render_canvas::{CanvasRenderConfig, DrawOperation, MockCanvas2dContext};
     use fm_render_canvas::selection::{SelectionBox, SelectionRegion};
+    use fm_render_canvas::{CanvasRenderConfig, DrawOperation, MockCanvas2dContext};
     use std::sync::Arc;
 
     fn drawn_session() -> (CanvasSession, MockCanvas2dContext) {
@@ -338,20 +352,27 @@ mod tests {
     fn selection_wire_policies_are_exact_and_have_explicit_defaults() {
         assert_eq!(selection_mode(None), Ok(SelectionMode::Replace));
         for (name, expected) in [
-            ("replace", SelectionMode::Replace), ("add", SelectionMode::Add),
-            ("remove", SelectionMode::Remove), ("toggle", SelectionMode::Toggle),
+            ("replace", SelectionMode::Replace),
+            ("add", SelectionMode::Add),
+            ("remove", SelectionMode::Remove),
+            ("toggle", SelectionMode::Toggle),
         ] {
             assert_eq!(selection_mode(Some(name)), Ok(expected));
         }
         assert_eq!(containment(None), Ok(SelectionContainment::Intersects));
-        assert_eq!(containment(Some("contains")), Ok(SelectionContainment::Contains));
+        assert_eq!(
+            containment(Some("contains")),
+            Ok(SelectionContainment::Contains)
+        );
         for bad in ["", "ADD", " replace", "unknown"] {
             assert!(selection_mode(Some(bad)).is_err());
             assert!(containment(Some(bad)).is_err());
         }
         for (name, expected) in [
-            ("left", NavigationDirection::Left), ("right", NavigationDirection::Right),
-            ("up", NavigationDirection::Up), ("down", NavigationDirection::Down),
+            ("left", NavigationDirection::Left),
+            ("right", NavigationDirection::Right),
+            ("up", NavigationDirection::Up),
+            ("down", NavigationDirection::Down),
         ] {
             assert_eq!(navigation(name), Ok(expected));
         }
@@ -360,11 +381,28 @@ mod tests {
 
     #[test]
     fn tokens_preserve_the_full_u64_range_without_number_rounding() {
-        for token in [1_u64, 9_007_199_254_740_992, 9_007_199_254_740_993, u64::MAX] {
+        for token in [
+            1_u64,
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+            u64::MAX,
+        ] {
             assert_eq!(gesture_token(&token.to_string()), Ok(token));
         }
-        for bad in ["", "0", "01", "-1", "+1", " 1", "1\n", "1.0", "1e3", "１",
-            "18446744073709551616", "999999999999999999999"] {
+        for bad in [
+            "",
+            "0",
+            "01",
+            "-1",
+            "+1",
+            " 1",
+            "1\n",
+            "1.0",
+            "1e3",
+            "１",
+            "18446744073709551616",
+            "999999999999999999999",
+        ] {
             assert!(gesture_token(bad).is_err(), "accepted {bad:?}");
         }
     }
@@ -372,15 +410,35 @@ mod tests {
     #[test]
     fn lasso_decoder_bounds_allocation_and_preserves_pair_order() {
         let coordinates = [-20.5, 1.0, 0.0, 30.0, 40.0, 1.0, -20.5, 1.0];
-        assert_eq!(lasso_points(&coordinates).unwrap(),
-            [(-20.5, 1.0), (0.0, 30.0), (40.0, 1.0), (-20.5, 1.0)]);
-        for length in [0, 4, 5, 7, MAX_LASSO_POINTS * 2 + 1, MAX_LASSO_POINTS * 2 + 2] {
+        assert_eq!(
+            lasso_points(&coordinates).unwrap(),
+            [(-20.5, 1.0), (0.0, 30.0), (40.0, 1.0), (-20.5, 1.0)]
+        );
+        for length in [
+            0,
+            4,
+            5,
+            7,
+            MAX_LASSO_POINTS * 2 + 1,
+            MAX_LASSO_POINTS * 2 + 2,
+        ] {
             assert!(!valid_lasso_length(length));
             assert!(lasso_points(&vec![0.0; length]).is_err());
         }
         assert!(valid_lasso_length(MAX_LASSO_POINTS * 2));
-        assert_eq!(lasso_points(&vec![0.0; MAX_LASSO_POINTS * 2]).unwrap().len(), MAX_LASSO_POINTS);
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.1e100, -1.1e100] {
+        assert_eq!(
+            lasso_points(&vec![0.0; MAX_LASSO_POINTS * 2])
+                .unwrap()
+                .len(),
+            MAX_LASSO_POINTS
+        );
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.1e100,
+            -1.1e100,
+        ] {
             assert!(lasso_points(&[0.0, 0.0, 1.0, 1.0, bad, 2.0]).is_err());
         }
         assert!(lasso_points(&[0.0, 0.0, 1.0e100, 1.0, 2.0, -1.0e100]).is_ok());
@@ -391,8 +449,13 @@ mod tests {
         let (mut session, _) = drawn_session();
         session.select_node("B");
         session.select_node_with_mode("A", selection_mode(Some("add")).unwrap());
-        let token = session.begin_selection_gesture([800.0, 400.0],
-            selection_mode(None).unwrap(), containment(None).unwrap()).unwrap();
+        let token = session
+            .begin_selection_gesture(
+                [800.0, 400.0],
+                selection_mode(None).unwrap(),
+                containment(None).unwrap(),
+            )
+            .unwrap();
         let state = SelectionState::from_session(&session, [800.0, 400.0]);
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["selectedNodeIds"], serde_json::json!(["A", "B"]));
@@ -407,18 +470,31 @@ mod tests {
     fn decoded_lasso_preview_rolls_back_and_cannot_reuse_a_retired_token() {
         let (mut session, _) = drawn_session();
         session.select_node("B");
-        let token = session.begin_selection_gesture([800.0, 400.0],
-            selection_mode(Some("replace")).unwrap(), containment(None).unwrap()).unwrap();
+        let token = session
+            .begin_selection_gesture(
+                [800.0, 400.0],
+                selection_mode(Some("replace")).unwrap(),
+                containment(None).unwrap(),
+            )
+            .unwrap();
         let wire = token.to_string();
         let points = lasso_points(&[-1.0, -1.0, 801.0, -1.0, 801.0, 401.0, -1.0, 401.0]).unwrap();
-        assert!(session.preview_selection_gesture(gesture_token(&wire).unwrap(),
-            SelectionRegion::Lasso(&points), [800.0, 400.0]));
+        assert!(session.preview_selection_gesture(
+            gesture_token(&wire).unwrap(),
+            SelectionRegion::Lasso(&points),
+            [800.0, 400.0]
+        ));
         assert_eq!(session.selected_node_ids().collect::<Vec<_>>(), ["A", "B"]);
         assert!(session.cancel_selection_gesture(gesture_token(&wire).unwrap()));
         assert_eq!(session.selected_node_ids().collect::<Vec<_>>(), ["B"]);
         assert_eq!(session.selected_node_id(), Some("B"));
-        let next = session.begin_selection_gesture([800.0, 400.0],
-            SelectionMode::Replace, SelectionContainment::Intersects).unwrap();
+        let next = session
+            .begin_selection_gesture(
+                [800.0, 400.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
         assert_ne!(next, token);
         assert!(!session.commit_selection_gesture(gesture_token(&wire).unwrap(), [800.0, 400.0]));
         assert_eq!(session.active_selection_gesture(), Some(next));
@@ -434,8 +510,18 @@ mod tests {
         context.clear();
         session.redraw(&mut context).unwrap();
         assert_eq!(&context.operations()[..original.len()], original.as_slice());
-        assert_eq!(context.operations().iter().filter(|op| matches!(op, DrawOperation::StrokeRect(..))).count(),
-            original.iter().filter(|op| matches!(op, DrawOperation::StrokeRect(..))).count() + 4);
+        assert_eq!(
+            context
+                .operations()
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::StrokeRect(..)))
+                .count(),
+            original
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::StrokeRect(..)))
+                .count()
+                + 4
+        );
         session.clear_selection();
         context.clear();
         session.redraw(&mut context).unwrap();
@@ -446,11 +532,21 @@ mod tests {
     fn invalidation_reports_no_frame_and_keeps_committed_not_preview_selection() {
         let (mut session, _) = drawn_session();
         session.select_node("B");
-        let token = session.begin_selection_gesture([800.0, 400.0],
-            SelectionMode::Replace, SelectionContainment::Intersects).unwrap();
-        session.preview_selection_gesture(token, SelectionRegion::Box(SelectionBox {
-            start: (-1.0, -1.0), end: (801.0, 401.0),
-        }), [800.0, 400.0]);
+        let token = session
+            .begin_selection_gesture(
+                [800.0, 400.0],
+                SelectionMode::Replace,
+                SelectionContainment::Intersects,
+            )
+            .unwrap();
+        session.preview_selection_gesture(
+            token,
+            SelectionRegion::Box(SelectionBox {
+                start: (-1.0, -1.0),
+                end: (801.0, 401.0),
+            }),
+            [800.0, 400.0],
+        );
         assert_eq!(session.selected_node_ids().count(), 2);
         session.invalidate();
         let state = SelectionState::from_session(&session, [800.0, 400.0]);

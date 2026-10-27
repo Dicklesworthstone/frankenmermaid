@@ -56,6 +56,9 @@ pub struct CanvasRenderConfig {
     /// times; a renderer that called `now()` would make every canvas op-stream test depend on the
     /// day it ran. The default is `None`, so nothing about an existing render changes.
     pub gantt_today: Option<String>,
+    /// Whether to draw diagnostic debug overlays (dashed node bounding boxes and HUD stats)
+    /// onto the Canvas2D context (`bd-0l1x2`).
+    pub debug_overlay: bool,
 }
 
 impl CanvasRenderConfig {
@@ -105,6 +108,7 @@ impl Default for CanvasRenderConfig {
             semantic_colors: true,
             auto_fit: true,
             gantt_today: None,
+            debug_overlay: false,
         }
     }
 }
@@ -168,17 +172,16 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
     ctx: &mut C,
     config: &CanvasRenderConfig,
 ) -> Option<CanvasEdgeLabelLayout> {
-    if !matches!(
-        ir.diagram_type,
-        DiagramType::Flowchart | DiagramType::Class | DiagramType::State | DiagramType::Er
-    ) || !layout.edges.iter().any(|path| {
-        !path.bundled
-            && path.points.len() >= 2
-            && ir.edges.get(path.edge_index).is_some_and(|edge| {
-                edge.arrow != ArrowType::Invisible
-                    && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
-            })
-    }) {
+    if !fm_layout::edge_labels::uses_graph_edge_labels(ir.diagram_type)
+        || !layout.edges.iter().any(|path| {
+            !path.bundled
+                && path.points.len() >= 2
+                && ir.edges.get(path.edge_index).is_some_and(|edge| {
+                    edge.arrow != ArrowType::Invisible
+                        && edge.label.is_some_and(|id| ir.labels.get(id.0).is_some())
+                })
+        })
+    {
         return None;
     }
 
@@ -226,17 +229,8 @@ fn measure_graph_edge_labels<C: Canvas2dContext>(
             height,
             line_height,
         });
-        let left = result.bounds.x.min(position.x - width as f32 / 2.0);
-        let top = result.bounds.y.min(position.y - height as f32 / 2.0);
-        let right = (result.bounds.x + result.bounds.width).max(position.x + width as f32 / 2.0);
-        let bottom = (result.bounds.y + result.bounds.height).max(position.y + height as f32 / 2.0);
-        result.bounds = fm_layout::LayoutRect {
-            x: left,
-            y: top,
-            width: right - left,
-            height: bottom - top,
-        };
     }
+    result.bounds = placer.bounds();
     ctx.restore();
     Some(result)
 }
@@ -390,11 +384,35 @@ impl Canvas2dRenderer {
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
         self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        // Timeline bands tint the whole section frame. Keep the same background submission
+        // order as the GPU, then paint its one cluster caption above the tint.
+        if ir.diagram_type == DiagramType::Timeline {
+            let mut cluster_label_font = None;
+            for cluster_box in &layout.clusters {
+                let opacity = resolve_cluster_opacity(ir, cluster_box.cluster_index);
+                if let Some(alpha) = opacity {
+                    ctx.set_global_alpha(alpha);
+                }
+                self.paint_cluster_caption(
+                    cluster_box,
+                    ir,
+                    ctx,
+                    (offset_x, offset_y),
+                    &mut cluster_label_font,
+                );
+                if opacity.is_some() {
+                    ctx.set_global_alpha(1.0);
+                }
+            }
+        }
         // Treemap tiles and the radar wheel (bd-dw450): both families keep their whole
         // diagram in a layout extension only fm-render-svg read, so the canvas drew nothing
         // at all for them. Both calls return immediately for every other diagram type.
         self.draw_treemap(ir, layout, ctx, offset_x, offset_y);
         self.draw_radar(ir, layout, ctx, offset_x, offset_y);
+        if ir.diagram_type == DiagramType::Info {
+            self.draw_info_version(ctx, offset_x, offset_y, &mut labels_drawn);
+        }
 
         // Draw extension-provided axis labels, such as gantt dates.
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
@@ -440,11 +458,38 @@ impl Canvas2dRenderer {
         // Draw nodes
         let nodes_drawn = self.draw_nodes(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
+        if let Some(journey) = &layout.extensions.journey {
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            for row in journey.title.iter().chain(&journey.legend) {
+                let center = row.bounds.center();
+                ctx.set_font(&format!("{}px {}", row.font_size, self.config.font_family));
+                ctx.fill_text(
+                    &row.text,
+                    f64::from(center.x) + offset_x,
+                    f64::from(center.y) + offset_y,
+                );
+                self.draw_calls += 1;
+                labels_drawn += 1;
+            }
+        }
+
+        if self.config.debug_overlay {
+            self.draw_debug_overlay_world(layout, ctx, offset_x, offset_y);
+        }
+
         ctx.restore();
-        if self.draw_generic_diagram_title(ctx, ir, canvas_width) {
+        if layout.extensions.journey.is_none()
+            && self.draw_generic_diagram_title(ctx, ir, canvas_width)
+        {
             labels_drawn += 1;
         }
         labels_drawn += self.draw_c4_legend(ctx, ir, canvas_width, canvas_height);
+        if self.config.debug_overlay {
+            self.draw_debug_overlay_hud(layout, ctx, canvas_height);
+            labels_drawn += 1;
+        }
 
         // The public entrypoint folds the original layout origin into this viewport. Account
         // here only for the extra origin shift introduced by labels outside that layout, so
@@ -463,6 +508,55 @@ impl Canvas2dRenderer {
             // describe a different picture than the one on screen.
             hit_regions: crate::interaction::hit_regions(ir, layout),
         }
+    }
+
+    fn draw_debug_overlay_world<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        ctx.save();
+        ctx.set_stroke_style("#ef4444");
+        ctx.set_line_width(1.0);
+        ctx.set_line_dash(&[3.0, 2.0]);
+        for node in &layout.nodes {
+            ctx.stroke_rect(
+                f64::from(node.bounds.x) + offset_x,
+                f64::from(node.bounds.y) + offset_y,
+                f64::from(node.bounds.width),
+                f64::from(node.bounds.height),
+            );
+            self.draw_calls += 1;
+        }
+        ctx.set_line_dash(&[]);
+        ctx.restore();
+    }
+
+    fn draw_debug_overlay_hud<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        canvas_height: f64,
+    ) {
+        let rank_count = layout.nodes.iter().map(|n| n.rank + 1).max().unwrap_or(0);
+        let hud = format!(
+            "debug: nodes={} edges={} ranks={} crossings={} cycles={}",
+            layout.nodes.len(),
+            layout.edges.len(),
+            rank_count,
+            layout.stats.crossing_count,
+            layout.stats.cycle_count,
+        );
+        ctx.save();
+        ctx.set_fill_style("#ef4444");
+        ctx.set_font("10px monospace");
+        ctx.set_text_align(TextAlign::Left);
+        ctx.set_text_baseline(TextBaseline::Bottom);
+        ctx.fill_text(&hud, 8.0, (canvas_height - 6.0).max(12.0));
+        self.draw_calls += 1;
+        ctx.restore();
     }
 
     fn draw_generic_diagram_title<C: Canvas2dContext>(
@@ -846,6 +940,7 @@ impl Canvas2dRenderer {
             IrTextBaseline::Top => TextBaseline::Top,
             IrTextBaseline::Middle => TextBaseline::Middle,
             IrTextBaseline::Bottom => TextBaseline::Bottom,
+            IrTextBaseline::Alphabetic => TextBaseline::Alphabetic,
         });
 
         let lines: Vec<&str> = text.text.lines().collect();
@@ -859,7 +954,7 @@ impl Canvas2dRenderer {
                 IrTextBaseline::Middle => {
                     current_y -= (total_height - line_height) / 2.0;
                 }
-                IrTextBaseline::Bottom => {
+                IrTextBaseline::Bottom | IrTextBaseline::Alphabetic => {
                     current_y -= total_height - line_height;
                 }
             }
@@ -1057,55 +1152,14 @@ impl Canvas2dRenderer {
             }
             self.draw_calls += 2;
 
-            // Draw cluster label if present
-            let title_text = cluster_box.title.as_deref().or_else(|| {
-                ir.clusters
-                    .get(cluster_box.cluster_index)
-                    .and_then(|ir_cluster| ir_cluster.title)
-                    .and_then(|title_id| ir.labels.get(title_id.0))
-                    .map(|label| label.text.as_str())
-            });
-
-            if let Some(title_text) = title_text {
-                let declared_title_color =
-                    resolve_cluster_text_color(ir, cluster_box.cluster_index);
-                let title_color = declared_title_color
-                    .as_deref()
-                    .and_then(sanitize_canvas_paint);
-                ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
-                ctx.set_font(cluster_label_font.get_or_insert_with(|| {
-                    format!(
-                        "{}px {}",
-                        self.config.font_size * 0.9,
-                        self.config.font_family
-                    )
-                }));
-                ctx.set_text_align(TextAlign::Left);
-                ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(title_text, x + 8.0, y + 4.0);
-                self.draw_calls += 1;
-
-                // THE C4 BOUNDARY TYPE ROW, which mermaid draws beneath the label and the SVG arm
-                // already draws. Nested inside the title branch on purpose: mermaid emits the type
-                // only as the second row of a captioned boundary, so a boundary with no label to
-                // sit under should not show a bracketed type floating on its own.
-                //
-                // The IR stores mermaid's bare token and each renderer adds the brackets, exactly
-                // as mermaid does — its `drawInsideBoundary` rewrites `l.type.text` to
-                // `"[" + l.type.text + "]"` before `drawBoundary` draws it.
-                if let Some(boundary_type) = ir
-                    .clusters
-                    .get(cluster_box.cluster_index)
-                    .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
-                    .filter(|value| !value.is_empty())
-                {
-                    ctx.fill_text(
-                        &format!("[{boundary_type}]"),
-                        x + 8.0,
-                        y + 4.0 + self.config.font_size * 1.25,
-                    );
-                    self.draw_calls += 1;
-                }
+            if ir.diagram_type != DiagramType::Timeline {
+                self.paint_cluster_caption(
+                    cluster_box,
+                    ir,
+                    ctx,
+                    (offset_x, offset_y),
+                    &mut cluster_label_font,
+                );
             }
 
             if cluster_opacity.is_some() {
@@ -1116,6 +1170,61 @@ impl Canvas2dRenderer {
         }
 
         count
+    }
+
+    /// Paint the caption independently so a later section tint cannot cover its lettering.
+    fn paint_cluster_caption<C: Canvas2dContext>(
+        &mut self,
+        cluster_box: &fm_layout::LayoutClusterBox,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset: (f64, f64),
+        cluster_label_font: &mut Option<String>,
+    ) {
+        let title_text = cluster_box.title.as_deref().or_else(|| {
+            ir.clusters
+                .get(cluster_box.cluster_index)
+                .and_then(|ir_cluster| ir_cluster.title)
+                .and_then(|title_id| ir.labels.get(title_id.0))
+                .map(|label| label.text.as_str())
+        });
+        let Some(title_text) = title_text else {
+            return;
+        };
+        let x = f64::from(cluster_box.bounds.x) + offset.0;
+        let y = f64::from(cluster_box.bounds.y) + offset.1;
+        let declared_title_color = resolve_cluster_text_color(ir, cluster_box.cluster_index);
+        let title_color = declared_title_color
+            .as_deref()
+            .and_then(sanitize_canvas_paint);
+        ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
+        ctx.set_font(cluster_label_font.get_or_insert_with(|| {
+            format!(
+                "{}px {}",
+                self.config.font_size * 0.9,
+                self.config.font_family
+            )
+        }));
+        ctx.set_text_align(TextAlign::Left);
+        ctx.set_text_baseline(TextBaseline::Top);
+        ctx.fill_text(title_text, x + 8.0, y + 4.0);
+        self.draw_calls += 1;
+
+        // C4 boundary types are the second row of a captioned boundary, so a boundary
+        // without a title must not gain a bracketed type floating on its own.
+        if let Some(boundary_type) = ir
+            .clusters
+            .get(cluster_box.cluster_index)
+            .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
+            .filter(|value| !value.is_empty())
+        {
+            ctx.fill_text(
+                &format!("[{boundary_type}]"),
+                x + 8.0,
+                y + 4.0 + self.config.font_size * 1.25,
+            );
+            self.draw_calls += 1;
+        }
     }
 
     /// Draw layout extension bands (sequence lifelines, gantt sections, etc.).
@@ -1405,6 +1514,28 @@ impl Canvas2dRenderer {
             self.draw_calls += 1;
         }
         ctx.set_line_width(1.0);
+    }
+
+    /// Draw an `info` diagram: a single centred version string matching `fm-render-svg` (bd-cfigc).
+    fn draw_info_version<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+    ) {
+        let font = format!("32px {}", self.config.font_family);
+        ctx.set_font(&font);
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_text_align(TextAlign::Center);
+        ctx.set_text_baseline(TextBaseline::Middle);
+        ctx.fill_text(
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            100.0 + offset_x,
+            40.0 + offset_y,
+        );
+        self.draw_calls += 1;
+        *labels_drawn += 1;
     }
 }
 
@@ -1746,7 +1877,9 @@ impl Canvas2dRenderer {
                     // diagram type instead, which is what actually decides the meaning: in a
                     // sequence diagram a Lane IS a lifeline and its name is already drawn as a
                     // head/foot header.
-                    if !band.label.is_empty() && diagram_type != fm_core::DiagramType::Sequence {
+                    if !band.label.is_empty()
+                        && !matches!(diagram_type, DiagramType::Sequence | DiagramType::Journey)
+                    {
                         ctx.set_fill_style(&self.config.label_color);
                         ctx.set_font(section_label_font.get_or_insert_with(|| {
                             format!(
@@ -1765,7 +1898,9 @@ impl Canvas2dRenderer {
                     // Gantt section: light background band.
                     ctx.set_fill_style("rgba(226,232,240,0.3)");
                     ctx.fill_rect(x, y, w, h);
-                    if !band.label.is_empty() {
+                    // Timeline sections have a titled cluster at these same bounds. The band
+                    // supplies decoration; its metadata is retained for terminal rendering.
+                    if !band.label.is_empty() && diagram_type != DiagramType::Timeline {
                         ctx.set_fill_style(&self.config.label_color);
                         ctx.set_font(section_label_font.get_or_insert_with(|| {
                             format!(
@@ -2190,11 +2325,10 @@ impl Canvas2dRenderer {
                 // began 6 left of its reserved margin and 8.8 below it, pushing the last line toward
                 // an overflow the box was never sized to hold.
                 //
-                // Line SPACING was already right, by coincidence of two different formulas: the SVG
-                // uses `font_size * 0.8 * line_height(1.5)` and this uses `font_size * 1.2`, both
-                // 16.8 at the default 14. Left alone rather than "unified" -- they agree, and the
-                // two configs are not shared.
-                let line_height = self.config.font_size * 1.2;
+                // Layout reserves each row at the note font size and the configured line height.
+                // Keep that spacing when the caller chooses a non-default line-height multiplier.
+                let line_height =
+                    self.config.font_size * 0.8 * f64::from(self.config.resolved_line_height());
                 for (row, line) in note.text.lines().enumerate() {
                     let line_y = y + STATE_NOTE_PAD_Y + line_height * row as f64;
                     // The layout sized the box to fit, so this guard is unreachable for a note the
@@ -2448,6 +2582,26 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) -> usize {
+        let count = self.draw_edge_pass(layout, ir, ctx, offset_x, offset_y, labels_drawn, false);
+        if self.edge_label_layout.is_some() {
+            // Shared corridors can carry several labels. Paint every connector first so a
+            // later route cannot cross the opaque plate and glyphs of an earlier label.
+            self.draw_edge_pass(layout, ir, ctx, offset_x, offset_y, labels_drawn, true);
+        }
+        count
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_edge_pass<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+        labels_only: bool,
+    ) -> usize {
         let mut count = 0;
         let mut edge_label_font = None;
         let sankey_widest = fm_layout::sankey_widest_flow(ir);
@@ -2512,164 +2666,71 @@ impl Canvas2dRenderer {
                 ctx.set_global_alpha(alpha);
             }
 
-            ctx.set_stroke_style(stroke);
-            ctx.set_line_width(stroke_width);
-            ctx.set_line_dash(dash);
+            if !labels_only {
+                ctx.set_stroke_style(stroke);
+                ctx.set_line_width(stroke_width);
+                ctx.set_line_dash(dash);
 
-            // Draw the same bounded connector geometry as SVG and the shared scene. Native
-            // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
-            // chart paths retain their polylines through the shared diagram-family policy.
-            ctx.begin_path();
-            let path_endpoints =
-                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
-                    self.emit_path_commands(
-                        ctx,
-                        std::slice::from_ref(&command),
-                        offset_x,
-                        offset_y,
-                    );
-                });
-            ctx.stroke();
-            self.draw_calls += 1;
+                // Draw the same bounded connector geometry as SVG and the shared scene. Native
+                // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
+                // chart paths retain their polylines through the shared diagram-family policy.
+                ctx.begin_path();
+                let path_endpoints = fm_layout::edge_paths::emit_diagram_edge_path(
+                    ir,
+                    edge_path.edge_index,
+                    points,
+                    |command| {
+                        self.emit_path_commands(
+                            ctx,
+                            std::slice::from_ref(&command),
+                            offset_x,
+                            offset_y,
+                        );
+                    },
+                );
+                ctx.stroke();
+                self.draw_calls += 1;
 
-            // ER crow's-foot cardinality (bd-hh0o7), BEFORE the UML marker path and not through it.
-            //
-            // ⚠️ `legacy_uml_markers` IS KEYED ON `ArrowType`, and ER cardinality is not an
-            // ArrowType — it lives in `edge.er_notation()`. Adding the eight glyphs to
-            // `draw_marker_primitive` alone therefore left them as DEAD CODE: nothing on this
-            // surface ever asked for an `Er*` variant, and a draw-call test still passed because an
-            // ER diagram has plenty of other things to draw. Caught by disarming the arm and
-            // watching nothing fail.
-            //
-            // The start/end kinds come from `parse_er_cardinality_forms` + `MarkerKind::er_pair` —
-            // the same pair fm-render-svg and the GPU plan select with, not a second table.
-            if let Some(notation) = ir_edge.and_then(fm_core::IrEdge::er_notation)
-                && let Some(endpoints) = path_endpoints
-            {
-                let (left, right) = fm_core::parse_er_cardinality_forms(notation);
-                let start = endpoints.start;
-                let end = endpoints.end;
-                let placements = [
-                    (
-                        left.map(|form| MarkerKind::er_pair(form).0),
-                        f64::from(start.point.x) + offset_x,
-                        f64::from(start.point.y) + offset_y,
-                        f64::from(start.tangent.y).atan2(f64::from(start.tangent.x)),
-                    ),
-                    (
-                        right.map(|form| MarkerKind::er_pair(form).1),
-                        f64::from(end.point.x) + offset_x,
-                        f64::from(end.point.y) + offset_y,
-                        f64::from(end.tangent.y).atan2(f64::from(end.tangent.x)),
-                    ),
-                ];
-                for (kind, mx, my, angle) in placements {
-                    let Some(kind) = kind else {
-                        continue;
-                    };
-                    self.draw_calls += draw_er_cardinality_marker(
-                        ctx,
-                        kind,
-                        mx,
-                        my,
-                        angle,
-                        &self.config.node_fill,
-                        stroke,
-                    );
+                if let Some(endpoints) = path_endpoints {
+                    let (marker_start, marker_end) = ir_edge
+                        .map_or((MarkerKind::None, MarkerKind::Arrow), |edge| {
+                            fm_layout::edge_marker_kinds(edge, edge_path.reversed)
+                        });
+                    // A dashed connector still has solid endpoint glyphs. Retaining the path's
+                    // dash here can erase an entire short stick or cardinality bar.
+                    ctx.set_line_dash(&[]);
+                    for (marker, endpoint, at_start) in [
+                        (marker_start, endpoints.start, true),
+                        (marker_end, endpoints.end, false),
+                    ] {
+                        if marker == MarkerKind::None {
+                            continue;
+                        }
+                        let angle =
+                            f64::from(endpoint.tangent.y).atan2(f64::from(endpoint.tangent.x));
+                        self.draw_calls += draw_marker_primitive(
+                            ctx,
+                            marker,
+                            f64::from(endpoint.point.x) + offset_x,
+                            f64::from(endpoint.point.y) + offset_y,
+                            if at_start {
+                                start_marker_angle(marker, angle)
+                            } else {
+                                angle
+                            },
+                            &self.config.node_fill,
+                            stroke,
+                        );
+                    }
                 }
             }
-
-            let uml_markers = if edge_path.reversed {
-                None
-            } else {
-                // A RELATION MARKED AT BOTH ENDS is two `ArrowType`s, not one (bd-f9t0r): the
-                // primary carries the source-end marker and `co_arrow` the target-end one, each
-                // named by the `ArrowType` that already draws it there. So the SAME derivation runs
-                // twice and the results merge — no second marker table to drift out of sync with
-                // this one.
-                let primary = legacy_uml_markers(arrow);
-                let co = ir_edge
-                    .and_then(fm_core::IrEdge::co_arrow)
-                    .and_then(legacy_uml_markers);
-                merge_uml_markers(primary, co)
-            };
-            if let Some((marker_start, marker_end)) = uml_markers
-                && let Some(endpoints) = path_endpoints
-            {
-                let start = endpoints.start;
-                let end = endpoints.end;
-
-                if marker_start != MarkerKind::None {
-                    let sx = f64::from(start.point.x) + offset_x;
-                    let sy = f64::from(start.point.y) + offset_y;
-                    let angle = f64::from(start.tangent.y).atan2(f64::from(start.tangent.x));
-                    let marker_calls = draw_marker_primitive(
-                        ctx,
-                        marker_start,
-                        sx,
-                        sy,
-                        start_marker_angle(marker_start, angle),
-                        &self.config.node_fill,
-                        stroke,
-                    );
-                    self.draw_calls += marker_calls;
+            if !labels_only && self.edge_label_layout.is_some() {
+                ctx.set_line_dash(&[]);
+                if edge_opacity.is_some() {
+                    ctx.set_global_alpha(1.0);
                 }
-
-                if marker_end != MarkerKind::None {
-                    let ex = f64::from(end.point.x) + offset_x;
-                    let ey = f64::from(end.point.y) + offset_y;
-                    let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
-                    let marker_calls = draw_marker_primitive(
-                        ctx,
-                        marker_end,
-                        ex,
-                        ey,
-                        angle,
-                        &self.config.node_fill,
-                        stroke,
-                    );
-                    self.draw_calls += marker_calls;
-                }
-            } else if let Some(endpoints) = path_endpoints {
-                let end = endpoints.end;
-                let angle = f64::from(end.tangent.y).atan2(f64::from(end.tangent.x));
-
-                let ex = f64::from(end.point.x) + offset_x;
-                let ey = f64::from(end.point.y) + offset_y;
-
-                match arrow {
-                    ArrowType::Line => {}
-                    ArrowType::Circle => {
-                        draw_circle_marker(ctx, ex, ey, 4.0, Some(&self.config.node_fill), stroke);
-                        self.draw_calls += 1;
-                    }
-                    ArrowType::Cross => {
-                        draw_cross_marker(ctx, ex, ey, 8.0, stroke);
-                        self.draw_calls += 1;
-                    }
-                    // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
-                    _ => {
-                        draw_arrowhead(ctx, ex, ey, angle, 10.0, stroke);
-                        self.draw_calls += 1;
-                    }
-                }
-
-                // Draw arrowhead at start for double arrows
-                if matches!(
-                    arrow,
-                    ArrowType::DoubleArrow
-                        | ArrowType::DoubleThickArrow
-                        | ArrowType::DoubleDottedArrow
-                ) {
-                    let start = endpoints.start;
-                    let start_angle =
-                        f64::from(-start.tangent.y).atan2(f64::from(-start.tangent.x));
-                    let sx = f64::from(start.point.x) + offset_x;
-                    let sy = f64::from(start.point.y) + offset_y;
-
-                    draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
-                    self.draw_calls += 1;
-                }
+                count += 1;
+                continue;
             }
 
             // CLASS cardinalities reach the canvas (bd-rk14).
@@ -2731,7 +2792,34 @@ impl Canvas2dRenderer {
 
             // A Sankey edge label stores its quantity. The ribbon width and node totals
             // communicate that value; SVG likewise omits a separate number on each link.
-            if ir.diagram_type != DiagramType::Sankey
+            if let Some(message) = layout.extensions.sequence_message(edge_path.edge_index) {
+                let bounds = message.bounds;
+                ctx.set_fill_style(&self.config.node_fill);
+                ctx.fill_rect(
+                    f64::from(bounds.x) + offset_x,
+                    f64::from(bounds.y) + offset_y,
+                    f64::from(bounds.width),
+                    f64::from(bounds.height),
+                );
+                self.draw_calls += 1;
+                ctx.set_fill_style(edge_label_fill);
+                ctx.set_font(&format!(
+                    "{}px {}",
+                    message.font_size, self.config.font_family
+                ));
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for (row, text) in message.text.split('\n').enumerate() {
+                    let center = message.line_center(row);
+                    ctx.fill_text(
+                        text,
+                        f64::from(center.x) + offset_x,
+                        f64::from(center.y) + offset_y,
+                    );
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                }
+            } else if ir.diagram_type != DiagramType::Sankey
                 && let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
                 && points.len() >= 2
@@ -2890,6 +2978,11 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) -> usize {
+        // Pie parser nodes retain slice labels for layout; their circles are not chart marks.
+        // The specialized wedge pass already paints each sector and its percentage label.
+        if ir.diagram_type == DiagramType::Pie {
+            return 0;
+        }
         let mut count = 0;
         let mut class_compartment_fonts = None;
         let mut standard_label_font = None;
@@ -2909,6 +3002,11 @@ impl Canvas2dRenderer {
                     .collect(),
             )
         };
+        let gantt_task_by_node: Option<std::collections::HashMap<usize, &fm_core::IrGanttTask>> =
+            ir.gantt_meta
+                .as_ref()
+                .filter(|_| ir.diagram_type == DiagramType::Gantt)
+                .map(|meta| meta.tasks.iter().map(|task| (task.node.0, task)).collect());
 
         for node_box in &layout.nodes {
             // Referenced composite states share their cluster's box. The cluster was already
@@ -2918,6 +3016,14 @@ impl Canvas2dRenderer {
             }
             let ir_node = ir.nodes.get(node_box.node_index);
             let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+            let gantt_task = gantt_task_by_node
+                .as_ref()
+                .and_then(|tasks| tasks.get(&node_box.node_index))
+                .copied();
+            let gantt_label = gantt_label_by_node
+                .as_ref()
+                .and_then(|placements| placements.get(&node_box.node_index))
+                .copied();
 
             let x = f64::from(node_box.bounds.x) + offset_x;
             let y = f64::from(node_box.bounds.y) + offset_y;
@@ -2933,6 +3039,14 @@ impl Canvas2dRenderer {
             // `style_refs` 11; this crate read all three ZERO times.
             let (fill, stroke) =
                 resolve_node_colors_with_defaults(ir, node_box.node_index, &self.config);
+            let (fill, stroke) = if let Some(task) = gantt_task {
+                (
+                    fill.or_else(|| Some(fm_layout::gantt_task_fill(task.flags).to_owned())),
+                    stroke.or_else(|| task.flags.crit.then(|| "#dc2626".to_owned())),
+                )
+            } else {
+                (fill, stroke)
+            };
             // Resolved ONCE for the whole node: the four label sites below (plain label, class
             // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
             // node, so they must agree about its colour. Resolving per-site would let a later
@@ -2946,13 +3060,33 @@ impl Canvas2dRenderer {
             let text_color = declared_text_color
                 .as_deref()
                 .and_then(sanitize_canvas_paint);
-            let label_fill = text_color.as_deref().unwrap_or(&self.config.label_color);
+            let label_fill = text_color.as_deref().unwrap_or_else(|| {
+                if ir.diagram_type == DiagramType::Journey
+                    || (gantt_task.is_some()
+                        && gantt_label.is_none_or(|entry| {
+                            entry.placement == fm_layout::GanttLabelPlacement::Inside
+                        }))
+                {
+                    fm_core::readable_label_color(
+                        fill.as_deref().unwrap_or(&self.config.node_fill),
+                        &self.config.label_color,
+                        &self.config.node_fill,
+                    )
+                } else {
+                    &self.config.label_color
+                }
+            });
             // The border WIDTH is the third channel of the same declaration and was the last one
             // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
             // half landed, while every node border was drawn at the config width whatever the
             // author wrote. `unwrap_or` keeps the theme default when nothing was declared.
-            let stroke_width = resolve_node_stroke_width(ir, node_box.node_index)
-                .unwrap_or(self.config.node_stroke_width);
+            let default_stroke_width = if gantt_task.is_some_and(|task| task.flags.crit) {
+                2.0
+            } else {
+                self.config.node_stroke_width
+            };
+            let stroke_width =
+                resolve_node_stroke_width(ir, node_box.node_index).unwrap_or(default_stroke_width);
             // The BORDER DASH is the fourth channel, and the only one that has to be UNDONE.
             // `lineDash` is canvas STATE, not a draw argument: it persists until something sets it
             // again, so a dashed node would leave every later shape dashed too. Set only when the
@@ -2999,21 +3133,45 @@ impl Canvas2dRenderer {
             }
             let is_state_terminal =
                 ir.diagram_type == DiagramType::State && shape == NodeShape::DoubleCircle;
-            draw_shape(
-                ctx,
-                if is_state_terminal {
-                    NodeShape::Circle
+            if let Some(task) = gantt_task {
+                // Task bounds encode calendar time. A milestone is an instant centered on that
+                // date, so its glyph must not turn the layout's hit box into a duration bar.
+                let commands = if task.flags.milestone {
+                    let center = node_box.bounds.center();
+                    let radius = node_box.bounds.width.min(node_box.bounds.height) * 0.4;
+                    fm_layout::shapes::diamond_path(fm_layout::LayoutRect {
+                        x: center.x - radius,
+                        y: center.y - radius,
+                        width: radius * 2.0,
+                        height: radius * 2.0,
+                    })
                 } else {
-                    shape
-                },
-                x,
-                y,
-                w,
-                h,
-                fill.as_deref().unwrap_or(&self.config.node_fill),
-                stroke.as_deref().unwrap_or(&self.config.node_stroke),
-                stroke_width,
-            );
+                    fm_layout::shapes::rounded_rect_path(node_box.bounds, 3.0)
+                };
+                ctx.set_fill_style(fill.as_deref().unwrap_or(&self.config.node_fill));
+                ctx.set_stroke_style(stroke.as_deref().unwrap_or(&self.config.node_stroke));
+                ctx.set_line_width(stroke_width);
+                ctx.begin_path();
+                self.emit_path_commands(ctx, &commands, offset_x, offset_y);
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                draw_shape(
+                    ctx,
+                    if is_state_terminal {
+                        NodeShape::Circle
+                    } else {
+                        shape
+                    },
+                    x,
+                    y,
+                    w,
+                    h,
+                    fill.as_deref().unwrap_or(&self.config.node_fill),
+                    stroke.as_deref().unwrap_or(&self.config.node_stroke),
+                    stroke_width,
+                );
+            }
             if is_state_terminal {
                 // Draw the solid terminal disc once; ordinary double circles keep a hollow ring.
                 let radius = w.min(h) / 2.0;
@@ -3034,125 +3192,128 @@ impl Canvas2dRenderer {
             }
             self.draw_calls += 1;
 
+            if let Some(task) = gantt_task
+                && !task.flags.milestone
+                && let Some(progress) = task
+                    .progress
+                    .filter(|value| value.is_finite() && *value > 0.0)
+            {
+                // The current path is the task bar. Clip the quantitative overlay to its rounded
+                // outline, multiply the node opacity, then restore every paint state for its label.
+                ctx.save();
+                ctx.clip();
+                ctx.set_fill_style("#0f172a");
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.22);
+                ctx.fill_rect(x, y, w * f64::from(progress.min(1.0)), h);
+                ctx.restore();
+                self.draw_calls += 1;
+            }
+
+            if let Some(step) = layout
+                .extensions
+                .journey
+                .as_ref()
+                .and_then(|journey| journey.step(node_box.node_index))
+            {
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for row in &step.rows {
+                    let center = row.bounds.center();
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(row.font_size),
+                        None,
+                        &self.config.font_family,
+                    ));
+                    ctx.fill_text(
+                        &row.text,
+                        f64::from(center.x) + offset_x,
+                        f64::from(center.y) + offset_y,
+                    );
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                }
             // Check for class diagram three-compartment rendering.
-            if let Some(node) = ir_node
+            } else if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
                 && meta.has_compartments()
             {
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
-
-                ctx.set_fill_style(label_fill);
-                ctx.set_text_baseline(TextBaseline::Middle);
-
-                // Header: class name centered + bold.
                 let class_name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let display_name = meta.display_header(class_name);
-
-                let class_fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.0.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-
-                // STEREOTYPE above the name, where fm-render-svg puts it (bd-rk14).
-                //
-                // Measured SVG vs canvas: an `interface` stereotype drew in the SVG and not on the
-                // canvas. Same gap the terminal had (bd-039t) — the compartment path drew name,
-                // attributes and methods and skipped `meta.stereotype`. Mapping mirrors
-                // fm-render-svg, including Enum rendering as `enumeration` and a Custom stereotype
-                // written verbatim.
-                if let Some(stereotype) = &meta.stereotype {
-                    let stereo_text = stereotype.label();
-                    ctx.fill_text(&stereo_text, x + w / 2.0, cursor_y);
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let compartments = fm_core::ClassCompartmentLayout::with_font_size_override(
+                    meta,
+                    class_name,
+                    self.config.font_size as f32,
+                    self.config.resolved_line_height(),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let border = stroke.as_deref().unwrap_or(&self.config.node_stroke);
+                if fill.is_none() && w > 2.0 && h > 2.0 {
+                    ctx.set_fill_style(&fm_core::mindmap::branch_fill(
+                        &self.config.node_fill,
+                        border,
+                        false,
+                    ));
+                    ctx.fill_rect(
+                        x + 0.75,
+                        y + 0.75,
+                        w - 1.5,
+                        f64::from(compartments.header_height).min(h) - 0.75,
+                    );
                     self.draw_calls += 1;
-                    *labels_drawn += 1;
-                    cursor_y += line_h * 0.8;
                 }
-
-                ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
-                // Separator line.
-                ctx.begin_path();
-                ctx.move_to(x, cursor_y);
-                ctx.line_to(x + w, cursor_y);
-                ctx.stroke();
-                self.draw_calls += 1;
-                cursor_y += member_font * 0.5;
-
-                // Attributes.
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.1.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Left);
-                for attr in &meta.attributes {
-                    if cursor_y > y + h - line_h * 0.5 {
-                        break;
-                    }
-                    let text = class_member_row(attr, false);
-                    ctx.fill_text(&text, x + padding, cursor_y);
-                    self.draw_calls += 1;
-                    *labels_drawn += 1;
-                    cursor_y += member_font * 1.2;
-                }
-
-                // Separator before methods.
-                if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+                ctx.set_stroke_style(border);
+                ctx.set_line_width(0.75);
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.65);
+                for separator_y in compartments.separator_ys {
                     ctx.begin_path();
-                    ctx.move_to(x, cursor_y);
-                    ctx.line_to(x + w, cursor_y);
+                    ctx.move_to(x + 0.75, y + f64::from(separator_y));
+                    ctx.line_to(x + w - 0.75, y + f64::from(separator_y));
                     ctx.stroke();
                     self.draw_calls += 1;
-                    cursor_y += member_font * 0.5;
                 }
-
-                // Methods.
-                let base_member_font = match declared_member_font.as_deref() {
-                    Some(font) => font.to_string(),
-                    None => class_fonts.1.clone(),
-                };
-                for method in &meta.methods {
-                    if cursor_y > y + h - member_font * 0.5 {
-                        break;
-                    }
-                    let text = class_member_row(method, true);
-                    // ⚠️ THE CLASSIFIER IS A STYLE HERE TOO (bd-r2gll). `class_member_row` no longer
-                    // puts `$`/`*` in the text, so this backend has to draw the marker or the
-                    // static/abstract distinction is simply LOST — which is worse than the literal
-                    // character it replaced. Canvas2D has no `text-decoration`, so the underline is
-                    // a measured rule; italic goes through the font string.
-                    let classifier =
-                        fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
-                    if classifier == Some("font-style:italic") {
-                        ctx.set_font(&format!("italic {base_member_font}"));
-                    }
-                    ctx.fill_text(&text, x + padding, cursor_y);
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0));
+                ctx.set_fill_style(label_fill);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                for row in compartments.rows {
+                    let font = declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::ClassCompartmentRowKind::Name).then_some("600"),
+                        &self.config.font_family,
+                    );
+                    ctx.set_font(&if row.italic && declared_parts.style.is_none() {
+                        format!("italic {font}")
+                    } else {
+                        font
+                    });
+                    ctx.set_text_align(if row.centered() {
+                        TextAlign::Center
+                    } else {
+                        TextAlign::Left
+                    });
+                    let text_x = if row.centered() {
+                        x + w * 0.5
+                    } else {
+                        x + f64::from(fm_core::ClassCompartmentLayout::PADDING_X)
+                    };
+                    let text_y = y + f64::from(row.center_y);
+                    ctx.fill_text(&row.text, text_x, text_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
-                    if classifier == Some("font-style:italic") {
-                        ctx.set_font(&base_member_font);
-                    } else if classifier == Some("text-decoration:underline") {
-                        let width = ctx.measure_text(&text).width;
-                        let baseline = cursor_y + member_font * 0.15;
+                    if row.underline {
+                        let width = ctx.measure_text(&row.text).width;
+                        let baseline = text_y + f64::from(row.font_size) * 0.5;
+                        ctx.set_stroke_style(label_fill);
                         ctx.begin_path();
-                        ctx.move_to(x + padding, baseline);
-                        ctx.line_to(x + padding + width, baseline);
+                        ctx.move_to(text_x, baseline);
+                        ctx.line_to(text_x + width, baseline);
                         ctx.stroke();
                         self.draw_calls += 1;
                     }
-                    cursor_y += member_font * 1.2;
                 }
             } else if let Some(node) = ir_node.filter(|n| !n.members.is_empty()) {
                 // ER entities get the SAME compartment treatment as classes (bd-rk14).
@@ -3350,56 +3511,45 @@ impl Canvas2dRenderer {
             } else if let Some((node, meta)) =
                 ir_node.and_then(|n| n.c4_meta.as_deref().map(|m| (n, m)))
             {
-                // C4 type / technology / description (bd-rk14) — canvas twin of the bd-039t fix.
-                // Measured: `Person(a, "Alice", "A user")` drew `A user` in the SVG and not on the
-                // canvas. Decorations match fm-render-svg.
-                let line_h = self.config.font_size * 1.3;
-                let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
-
+                // Layout and SVG consume these same wrapped rows. Reconstructing a separate
+                // cursor here previously made descriptions single, unbounded lines and dropped
+                // metadata when its independently guessed height did not fit.
                 ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.set_text_align(TextAlign::Center);
                 let name = node
                     .label
                     .and_then(|lid| ir.labels.get(lid.0))
                     .map(|l| l.text.as_str())
                     .unwrap_or(&node.id);
-                let fonts = class_compartment_fonts
-                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                match declared_heading_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.0.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Center);
-                let mut cursor_y = y + line_h;
-                ctx.fill_text(name, x + w / 2.0, cursor_y);
-                self.draw_calls += 1;
-                *labels_drawn += 1;
-                cursor_y += line_h * 0.5;
-
-                match declared_member_font.as_deref() {
-                    Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(fonts.1.as_str()),
-                }
-                ctx.set_text_align(TextAlign::Left);
-                let mut rows: Vec<String> = Vec::with_capacity(3);
-                if !meta.element_type.is_empty() {
-                    rows.push(format!("<<{}>>", meta.element_type));
-                }
-                if let Some(technology) = meta.technology.as_deref().filter(|t| !t.is_empty()) {
-                    rows.push(format!("[{technology}]"));
-                }
-                if let Some(description) = meta.description.as_deref().filter(|d| !d.is_empty()) {
-                    rows.push(description.to_string());
-                }
-                for text in rows {
-                    if cursor_y > y + h - member_font * 0.5 {
-                        break;
-                    }
-                    ctx.fill_text(&text, x + padding, cursor_y);
+                let declared = ir.resolved_node_style(node_box.node_index);
+                let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    preset: fm_core::FontPreset::from_family(
+                        declared_parts
+                            .family
+                            .as_deref()
+                            .unwrap_or(&self.config.font_family),
+                    ),
+                    ..self.config.font_metrics().config().clone()
+                });
+                let card = fm_core::C4CardLayout::new(
+                    meta,
+                    name,
+                    node.shape,
+                    &metrics,
+                    Some(w as f32),
+                    declared.get("font-size").map(String::as_str),
+                );
+                let top = y + ((h - f64::from(card.height)) * 0.5).max(0.0);
+                for row in card.rows {
+                    ctx.set_font(&declared_parts.compose(
+                        f64::from(row.font_size),
+                        (row.kind == fm_core::C4CardRowKind::Name).then_some("600"),
+                        &self.config.font_family,
+                    ));
+                    ctx.fill_text(&row.text, x + w / 2.0, top + f64::from(row.center_y));
                     self.draw_calls += 1;
                     *labels_drawn += 1;
-                    cursor_y += member_font * 1.2;
                 }
             } else {
                 // Standard single-label rendering.
@@ -3425,10 +3575,7 @@ impl Canvas2dRenderer {
                     // no arithmetic of its own and cannot drift from the SVG arm: OutsideRight is
                     // "start", OutsideLeft is "end", Inside is "middle" -- the exact three values the
                     // SVG writer uses.
-                    let gantt = gantt_label_by_node
-                        .as_ref()
-                        .and_then(|map| map.get(&node_box.node_index));
-                    let (cx, align) = match gantt {
+                    let (cx, align) = match gantt_label {
                         Some(entry) => (
                             f64::from(entry.x) + offset_x,
                             match entry.placement {
@@ -3633,12 +3780,22 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_circle_marker(ctx, x, y, 4.0, Some(node_fill), stroke_color);
             1
         }
-        // The lollipop socket is HOLLOW and slightly larger than the filled `--o` terminator above,
-        // matching the r=6 circle mermaid declares against that marker's r=5 (bd-lkm9i). Both slots
-        // draw the same glyph: a circle is symmetric under rotation, so unlike the triangle pair
-        // below neither needs an angle flip.
+        // The socket sits beyond the path endpoint, so the shaft meets its circumference rather
+        // than crossing its hollow interior. SVG encodes the same offsets with refX 13/1.
         MarkerKind::Lollipop | MarkerKind::LollipopStart => {
-            draw_circle_marker(ctx, x, y, 6.0, None, stroke_color);
+            let offset = if marker == MarkerKind::LollipopStart {
+                -6.0
+            } else {
+                6.0
+            };
+            draw_circle_marker(
+                ctx,
+                x + offset * angle.cos(),
+                y + offset * angle.sin(),
+                6.0,
+                None,
+                stroke_color,
+            );
             1
         }
         MarkerKind::Cross => {
@@ -3661,15 +3818,47 @@ fn draw_marker_primitive<C: Canvas2dContext>(
             draw_open_triangle_marker(ctx, x, y, angle + std::f64::consts::PI, 10.0, stroke_color);
             1
         }
-        MarkerKind::Arrow
-        | MarkerKind::ThickArrow
-        | MarkerKind::DottedArrow
-        | MarkerKind::Open
+        MarkerKind::Arrow | MarkerKind::ThickArrow | MarkerKind::DottedArrow => {
+            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::Open
         | MarkerKind::HalfArrowTop
         | MarkerKind::HalfArrowBottom
         | MarkerKind::StickArrowTop
         | MarkerKind::StickArrowBottom => {
-            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            // Half arrows occupy only their authored side of the shaft. A stick or open arrow
+            // remains an unfilled stroke; filling it changes the sequence-message semantics.
+            let bottom = matches!(
+                marker,
+                MarkerKind::HalfArrowBottom | MarkerKind::StickArrowBottom
+            );
+            let filled = matches!(
+                marker,
+                MarkerKind::HalfArrowTop | MarkerKind::HalfArrowBottom
+            );
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            ctx.set_line_dash(&[]);
+            ctx.set_stroke_style(stroke_color);
+            ctx.set_fill_style(stroke_color);
+            ctx.set_line_width(1.2);
+            ctx.begin_path();
+            ctx.move_to(-10.0, if bottom { 5.0 } else { -5.0 });
+            ctx.line_to(0.0, 0.0);
+            if marker == MarkerKind::Open {
+                ctx.line_to(-10.0, 5.0);
+            } else if filled {
+                ctx.line_to(-10.0, 0.0);
+                ctx.close_path();
+            }
+            if filled {
+                ctx.fill();
+            } else {
+                ctx.stroke();
+            }
+            ctx.restore();
             1
         }
     }
@@ -3692,7 +3881,12 @@ pub(crate) fn start_marker_angle(marker: MarkerKind, angle: f64) -> f64 {
             | MarkerKind::StickArrowTop
             | MarkerKind::StickArrowBottom
     ) {
-        angle + std::f64::consts::PI
+        let reversed = angle + std::f64::consts::PI;
+        if reversed > std::f64::consts::PI {
+            reversed - std::f64::consts::TAU
+        } else {
+            reversed
+        }
     } else {
         angle
     }
@@ -3896,29 +4090,7 @@ fn merged_edge_style(
     ir: &MermaidDiagramIr,
     edge_index: usize,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-
-    for style_ref in &ir.style_refs {
-        if matches!(style_ref.target, fm_core::IrStyleTarget::LinkDefault) {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    for style_ref in &ir.style_refs {
-        if let fm_core::IrStyleTarget::Link(target) = style_ref.target
-            && target == edge_index
-        {
-            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-        }
-    }
-
-    if let Some(edge) = ir.edges.get(edge_index)
-        && let Some(inline) = edge.inline_style.as_ref()
-    {
-        merged.extend(inline.properties.clone());
-    }
-
-    merged
+    fm_layout::edge_labels::edge_label_style(ir, edge_index)
 }
 
 /// The author's declared EDGE LABEL colour, if any (bd-lvj3).
@@ -4052,6 +4224,12 @@ pub(crate) fn resolve_node_colors_with_defaults(
     config: &CanvasRenderConfig,
 ) -> (Option<String>, Option<String>) {
     let (fill, stroke) = resolve_node_colors(ir, node_index);
+    if ir.diagram_type == DiagramType::Journey {
+        return (
+            fill.or_else(|| fm_layout::journey_score_fill(ir, node_index).map(str::to_owned)),
+            stroke,
+        );
+    }
     if config.semantic_colors
         && ir.diagram_type == DiagramType::Flowchart
         && ir.meta.theme_overrides.theme.as_deref().is_none_or(|name| {
@@ -4305,12 +4483,19 @@ fn resolve_edge_label_font(
     edge_index: usize,
     config: &CanvasRenderConfig,
 ) -> Option<String> {
+    resolve_edge_label_font_size(ir, edge_index)
+        .map(|size| format!("{size}px {}", config.font_family))
+}
+
+pub(crate) fn resolve_edge_label_font_size(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> Option<f64> {
     parse_declared_font_size(
         merged_edge_style(ir, edge_index)
             .get("font-size")
             .map(String::as_str),
     )
-    .map(|size| format!("{size}px {}", config.font_family))
 }
 
 /// A CSS `font-weight` this renderer is willing to put in a canvas font string.
@@ -4493,52 +4678,30 @@ pub(crate) fn resolve_node_stroke_width(ir: &MermaidDiagramIr, node_index: usize
 
 pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
     match arrow {
-        ArrowType::ThickArrow => (2.5, &[]),
-        ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),
+        ArrowType::ThickArrow
+        | ArrowType::ThickLine
+        | ArrowType::DoubleThickArrow
+        | ArrowType::ThickCircle
+        | ArrowType::ThickCross
+        | ArrowType::ThickCircleBoth
+        | ArrowType::ThickCrossBoth => (2.5, &[]),
+        ArrowType::DottedArrow
+        | ArrowType::DottedLine
+        | ArrowType::DottedOpenArrow
+        | ArrowType::DottedCross
+        | ArrowType::DoubleDottedArrow
+        | ArrowType::DottedCircle
+        | ArrowType::DottedCircleBoth
+        | ArrowType::DottedCrossBoth
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::HalfArrowTopReverseDotted
+        | ArrowType::HalfArrowBottomReverseDotted
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::StickArrowTopReverseDotted
+        | ArrowType::StickArrowBottomReverseDotted => (1.5, &LEGACY_DOTTED_EDGE_DASH),
         _ => (default_width, &[]),
-    }
-}
-
-/// Combine a primary marker pair with a co-arrow's, each contributing only the end it marks.
-///
-/// ⚠️ THE CO-ARROW FILLS AN EMPTY SLOT, IT NEVER OVERWRITES ONE. A co-arrow is the `*Reverse`
-/// (target-end) counterpart of a forward primary, so its start slot is always `None` and the
-/// primary's end slot always is too; taking the co-arrow's value unconditionally would work today
-/// and collapse both markers onto one end the moment that stopped holding. Preferring the
-/// already-set slot states the invariant instead of relying on it.
-const fn merge_uml_markers(
-    primary: Option<(MarkerKind, MarkerKind)>,
-    co: Option<(MarkerKind, MarkerKind)>,
-) -> Option<(MarkerKind, MarkerKind)> {
-    match (primary, co) {
-        (Some((ps, pe)), Some((cs, ce))) => Some((
-            if matches!(ps, MarkerKind::None) {
-                cs
-            } else {
-                ps
-            },
-            if matches!(pe, MarkerKind::None) {
-                ce
-            } else {
-                pe
-            },
-        )),
-        (Some(pair), None) | (None, Some(pair)) => Some(pair),
-        (None, None) => None,
-    }
-}
-
-const fn legacy_uml_markers(arrow: ArrowType) -> Option<(MarkerKind, MarkerKind)> {
-    match arrow {
-        ArrowType::Aggregation => Some((MarkerKind::DiamondOpen, MarkerKind::None)),
-        ArrowType::AggregationReverse => Some((MarkerKind::None, MarkerKind::DiamondOpen)),
-        ArrowType::Composition => Some((MarkerKind::Diamond, MarkerKind::None)),
-        ArrowType::CompositionReverse => Some((MarkerKind::None, MarkerKind::Diamond)),
-        ArrowType::Inheritance => Some((MarkerKind::TriangleOpenStart, MarkerKind::None)),
-        ArrowType::InheritanceReverse => Some((MarkerKind::None, MarkerKind::TriangleOpen)),
-        ArrowType::Lollipop => Some((MarkerKind::LollipopStart, MarkerKind::None)),
-        ArrowType::LollipopReverse => Some((MarkerKind::None, MarkerKind::Lollipop)),
-        _ => None,
     }
 }
 
@@ -4550,47 +4713,6 @@ fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> 
         let converted: Vec<f64> = dash.iter().copied().map(f64::from).collect();
         use_dash(&converted)
     }
-}
-
-fn class_vis_symbol(vis: fm_core::ClassVisibility) -> &'static str {
-    match vis {
-        fm_core::ClassVisibility::Unmarked => "",
-        fm_core::ClassVisibility::Public => "+",
-        fm_core::ClassVisibility::Private => "-",
-        fm_core::ClassVisibility::Protected => "#",
-        fm_core::ClassVisibility::Package => "~",
-    }
-}
-
-/// The text of one class compartment row: `{vis}{name}{*|$}{": " return_type}` (bd-9wdra).
-///
-/// ONE function for attributes and methods because the row is one contract, not two. The canvas used
-/// to build the two lines separately and inline, and both had quietly diverged from the other
-/// backends: neither drew a member's type, and the methods line drew no abstract/static classifier
-/// at all — `is_abstract` and `is_static` were referenced ZERO times in this crate, against two in
-/// fm-render-svg and one in fm-render-term.
-///
-/// This mirrors `fm_layout::class_member_row_width`, which builds the SAME string to MEASURE the box
-/// this text is drawn into, and whose doc comment already claimed to mirror "the renderer's row
-/// text". The box was therefore always sized for the fuller row; the canvas simply declined to draw
-/// it. That is why this fix cannot move any geometry.
-///
-/// `is_method` gates the classifier, not the type: mermaid writes `*`/`$` on methods only, and SVG's
-/// attribute path likewise appends a type but never a suffix.
-fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String {
-    let mut row = String::with_capacity(member.name.len() + 8);
-    row.push_str(class_vis_symbol(member.visibility));
-    row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
-    // ⚠️ NO CLASSIFIER CHARACTER (bd-r2gll); it is a STYLE, and the caller applies it. Keeping the
-    // byte here would also disagree with `fm_layout::class_member_row_width`, which this function's
-    // own doc comment promises to mirror and which sizes the box this text is drawn into.
-    if let Some(ref return_type) = member.return_type {
-        // ` : `, as mermaid draws it and as `fm_layout::class_member_row_width` measures it
-        // (bd-ci658).
-        row.push_str(" : ");
-        row.push_str(&fm_core::parse_generic_types(return_type));
-    }
-    row
 }
 
 fn standard_node_font(config: &CanvasRenderConfig) -> String {
@@ -4694,8 +4816,29 @@ mod tests {
         default_width: f64,
     ) -> (f64, Option<Vec<f64>>) {
         match arrow {
-            ArrowType::ThickArrow => (2.5, None),
-            ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
+            ArrowType::ThickArrow
+            | ArrowType::ThickLine
+            | ArrowType::DoubleThickArrow
+            | ArrowType::ThickCircle
+            | ArrowType::ThickCross
+            | ArrowType::ThickCircleBoth
+            | ArrowType::ThickCrossBoth => (2.5, None),
+            ArrowType::DottedArrow
+            | ArrowType::DottedLine
+            | ArrowType::DottedOpenArrow
+            | ArrowType::DottedCross
+            | ArrowType::DoubleDottedArrow
+            | ArrowType::DottedCircle
+            | ArrowType::DottedCircleBoth
+            | ArrowType::DottedCrossBoth
+            | ArrowType::HalfArrowTopDotted
+            | ArrowType::HalfArrowBottomDotted
+            | ArrowType::HalfArrowTopReverseDotted
+            | ArrowType::HalfArrowBottomReverseDotted
+            | ArrowType::StickArrowTopDotted
+            | ArrowType::StickArrowBottomDotted
+            | ArrowType::StickArrowTopReverseDotted
+            | ArrowType::StickArrowBottomReverseDotted => (1.5, Some(vec![5.0, 5.0])),
             _ => (default_width, None),
         }
     }
@@ -4730,6 +4873,123 @@ mod tests {
         );
         assert_eq!(hex_fill_with_opacity("red", 0.5), None);
         assert_eq!(hex_fill_with_opacity("#ggg", 0.5), None);
+    }
+
+    #[test]
+    fn canvas_half_and_open_markers_keep_their_authored_geometry() {
+        for (marker, filled, top, bottom) in [
+            (MarkerKind::HalfArrowTop, true, true, false),
+            (MarkerKind::HalfArrowBottom, true, false, true),
+            (MarkerKind::StickArrowTop, false, true, false),
+            (MarkerKind::StickArrowBottom, false, false, true),
+            (MarkerKind::Open, false, true, true),
+        ] {
+            let operations = marker_operations(marker);
+            let fills = operations
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Fill))
+                .count();
+            assert_eq!(
+                fills,
+                usize::from(filled),
+                "{marker:?} lost its fill semantics"
+            );
+            let strokes = operations
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::Stroke))
+                .count();
+            assert_eq!(
+                strokes,
+                usize::from(!filled),
+                "{marker:?} lost its outline semantics"
+            );
+            let vertices: Vec<_> = operations
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                vertices.contains(&(0.0, 0.0)),
+                "the tip must meet the connector"
+            );
+            assert_eq!(vertices.iter().any(|(_, y)| *y < 0.0), top, "{marker:?}");
+            assert_eq!(vertices.iter().any(|(_, y)| *y > 0.0), bottom, "{marker:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_parsed_edge_markers_preserve_plain_lines_both_ends_and_stroke_weight() {
+        for (link, fills, arcs, dashed, thick) in [
+            ("---", 0, 0, false, false),
+            ("-.-", 0, 0, true, false),
+            ("===", 0, 0, false, true),
+            ("<-->", 2, 0, false, false),
+            ("<-.->", 2, 0, true, false),
+            ("<==>", 2, 0, false, true),
+            ("o--o", 2, 2, false, false),
+            ("o-.-o", 2, 2, true, false),
+            ("o==o", 2, 2, false, true),
+            ("x--x", 0, 0, false, false),
+        ] {
+            let source = format!("flowchart LR\nA {link} B");
+            let ir = fm_parser::parse(&source).ir;
+            assert_eq!(ir.edges.len(), 1, "{source}");
+            let mut layout = layout_diagram(&ir);
+            layout.edges[0].points = [(10.0, 20.0), (110.0, 20.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(150.0, 60.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let operations = ctx.operations();
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Fill))
+                    .count(),
+                fills,
+                "{link}"
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|op| matches!(op, DrawOperation::Arc(..)))
+                    .count(),
+                arcs,
+                "{link}"
+            );
+            assert_eq!(
+                operations.iter().any(
+                    |op| matches!(op, DrawOperation::SetLineDash(pattern) if !pattern.is_empty())
+                ),
+                dashed,
+                "{link}"
+            );
+            assert_eq!(operations.iter().any(|op| matches!(op, DrawOperation::SetLineWidth(width) if (*width - 2.5).abs() < 1e-6)), thick, "{link}");
+            if arcs > 0 {
+                let centers: Vec<_> = operations
+                    .iter()
+                    .filter_map(|op| match op {
+                        DrawOperation::Arc(x, y, ..) => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(centers, [(10.0, 20.0), (110.0, 20.0)], "{link}");
+            }
+            if link == "x--x" {
+                assert_eq!(
+                    operations
+                        .iter()
+                        .filter(|op| matches!(op, DrawOperation::Stroke))
+                        .count(),
+                    5,
+                    "both crosses need two arms in addition to the connector"
+                );
+            }
+        }
     }
 
     fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
@@ -4902,6 +5162,69 @@ mod tests {
                 actual,
                 "scene diverged for {source}"
             );
+        }
+    }
+
+    #[test]
+    fn per_edge_curve_hints_preserve_native_scene_and_gpu_geometry() {
+        for (source, smoothed) in [
+            ("flowchart LR\nA e1@--> B\ne1@{ curve: linear }", false),
+            ("flowchart LR\nA e1@--> B\ne1@{ curve: stepAfter }", false),
+            (
+                "flowchart LR\nA e1@--> B\nlinkStyle default interpolate basis\ne1@{ curve: step }",
+                false,
+            ),
+            (
+                "flowchart LR\nA e1@--> B\nlinkStyle default interpolate linear\ne1@{ curve: basis }",
+                true,
+            ),
+            (
+                "flowchart LR\nA --> B\nlinkStyle default interpolate linear",
+                false,
+            ),
+            ("flowchart LR\nA --> B", true),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let mut layout = layout_diagram(&ir);
+            layout.edges[0].points = [(0.0, 0.0), (60.0, 0.0), (60.0, 80.0), (120.0, 80.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let native = first_stroked_path(ctx.operations());
+            assert_eq!(
+                native.iter().any(|command| matches!(
+                    command,
+                    PathCmd::QuadTo { .. } | PathCmd::CubicTo { .. }
+                )),
+                smoothed,
+                "{source}: {native:?}"
+            );
+            let scene = build_render_scene(&ir, &layout);
+            assert_eq!(scene_edge_path(&scene.root, 0).unwrap(), native, "{source}");
+
+            let plan = crate::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            let segments: Vec<_> = plan
+                .edge_segments
+                .iter()
+                .filter(|segment| segment.edge_index == 0)
+                .collect();
+            assert_eq!(segments.first().unwrap().from, [0.0, 0.0]);
+            assert_eq!(segments.last().unwrap().to, [120.0, 80.0]);
+            if smoothed {
+                assert!(
+                    segments.len() > 3,
+                    "GPU flattened away the requested bends: {source}"
+                );
+            } else {
+                assert_eq!(segments.len(), 3, "GPU resmoothed a linear edge: {source}");
+                for (segment, pair) in segments.iter().zip(layout.edges[0].points.windows(2)) {
+                    assert_eq!(segment.from, [pair[0].x, pair[0].y]);
+                    assert_eq!(segment.to, [pair[1].x, pair[1].y]);
+                }
+            }
         }
     }
 
@@ -6203,6 +6526,842 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Debug)]
+    struct GanttCanvasPaint {
+        fill: String,
+        stroke: String,
+        line_width: f64,
+        alpha: f64,
+        dash: Vec<f64>,
+        font: String,
+        align: TextAlign,
+        baseline: TextBaseline,
+        clipped: bool,
+    }
+
+    #[derive(Debug)]
+    struct GanttCanvasFill {
+        paint: GanttCanvasPaint,
+        bounds: [f64; 4],
+        vertices: usize,
+    }
+
+    #[derive(Debug)]
+    struct GanttCanvasText {
+        paint: GanttCanvasPaint,
+        text: String,
+        x: f64,
+        y: f64,
+    }
+
+    fn record_gantt_canvas_paint(
+        operations: &[DrawOperation],
+    ) -> (Vec<GanttCanvasFill>, Vec<GanttCanvasText>) {
+        let mut paint = GanttCanvasPaint {
+            fill: String::new(),
+            stroke: String::new(),
+            line_width: 1.0,
+            alpha: 1.0,
+            dash: Vec::new(),
+            font: String::new(),
+            align: TextAlign::Left,
+            baseline: TextBaseline::Alphabetic,
+            clipped: false,
+        };
+        let mut stack = Vec::new();
+        let mut points = Vec::new();
+        let mut fills = Vec::new();
+        let mut text = Vec::new();
+        for operation in operations {
+            match operation {
+                DrawOperation::Save => stack.push(paint.clone()),
+                DrawOperation::Restore => paint = stack.pop().expect("balanced canvas state"),
+                DrawOperation::SetFillStyle(value) => paint.fill.clone_from(value),
+                DrawOperation::SetStrokeStyle(value) => paint.stroke.clone_from(value),
+                DrawOperation::SetLineWidth(value) => paint.line_width = *value,
+                DrawOperation::SetGlobalAlpha(value) => paint.alpha = *value,
+                DrawOperation::SetLineDash(value) => paint.dash.clone_from(value),
+                DrawOperation::SetFont(value) => paint.font.clone_from(value),
+                DrawOperation::SetTextAlign(value) => paint.align = *value,
+                DrawOperation::SetTextBaseline(value) => paint.baseline = *value,
+                DrawOperation::Clip => paint.clipped = true,
+                DrawOperation::BeginPath => points.clear(),
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => {
+                    points.extend([(*cx, *cy), (*x, *y)])
+                }
+                DrawOperation::Rect(x, y, w, h) => points.extend([(*x, *y), (*x + *w, *y + *h)]),
+                DrawOperation::Fill if !points.is_empty() => {
+                    let min_x = points
+                        .iter()
+                        .map(|point| point.0)
+                        .fold(f64::INFINITY, f64::min);
+                    let min_y = points
+                        .iter()
+                        .map(|point| point.1)
+                        .fold(f64::INFINITY, f64::min);
+                    let max_x = points
+                        .iter()
+                        .map(|point| point.0)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let max_y = points
+                        .iter()
+                        .map(|point| point.1)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    fills.push(GanttCanvasFill {
+                        paint: paint.clone(),
+                        bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
+                        vertices: points.len(),
+                    });
+                }
+                DrawOperation::FillRect(x, y, w, h) => fills.push(GanttCanvasFill {
+                    paint: paint.clone(),
+                    bounds: [*x, *y, *w, *h],
+                    vertices: 4,
+                }),
+                DrawOperation::FillText(value, x, y) => text.push(GanttCanvasText {
+                    paint: paint.clone(),
+                    text: value.clone(),
+                    x: *x,
+                    y: *y,
+                }),
+                _ => {}
+            }
+        }
+        assert!(stack.is_empty());
+        (fills, text)
+    }
+
+    #[test]
+    fn canvas_gantt_tasks_preserve_status_milestones_progress_and_labels() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n\
+             Release :milestone, release, after build, 0d, 80%\n\
+             Critical review :crit, review, after build, 2d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 5);
+        assert_eq!(layout.edges.len(), 4);
+        layout.nodes.reverse();
+        for dark in [false, true] {
+            let mut config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            if dark {
+                config.node_fill = "#111827".to_owned();
+                config.label_color = "#f8fafc".to_owned();
+            }
+            let mut ctx = MockCanvas2dContext::new(1600.0, 1000.0);
+            let result = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            assert_eq!((result.nodes_drawn, result.edges_drawn), (5, 4));
+            let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+            crate::render_to_canvas_with_layout(&ir, &layout, &mut repeated, &config);
+            assert_eq!(ctx.operations(), repeated.operations());
+            let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+            for (index, color) in ["#86efac", "#94a3b8", "#c4b5fd", "#fca5a5", "#93c5fd"]
+                .into_iter()
+                .enumerate()
+            {
+                let fill = fills
+                    .iter()
+                    .find(|fill| fill.paint.fill == color)
+                    .expect("status-colored task");
+                let node = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == index)
+                    .unwrap();
+                let [x, y, w, h] = fill.bounds;
+                assert_eq!(fill.paint.alpha, 1.0);
+                assert!(
+                    (x + w / 2.0 + f64::from(layout.bounds.x) - f64::from(node.bounds.center().x))
+                        .abs()
+                        < 0.002
+                );
+                assert!(
+                    (y + h / 2.0 + f64::from(layout.bounds.y) - f64::from(node.bounds.center().y))
+                        .abs()
+                        < 0.002
+                );
+                if index == 2 {
+                    assert_eq!(
+                        fill.vertices, 4,
+                        "a milestone is a diamond, not a duration bar"
+                    );
+                    assert!((w - h).abs() < 0.002);
+                    assert!(
+                        (w - f64::from(node.bounds.width.min(node.bounds.height) * 0.8)).abs()
+                            < 0.002
+                    );
+                } else {
+                    assert!((w - f64::from(node.bounds.width)).abs() < 0.002);
+                    assert!((h - f64::from(node.bounds.height)).abs() < 0.002);
+                }
+                if index == 0 || index == 3 {
+                    assert_eq!(fill.paint.stroke, "#dc2626");
+                    assert_eq!(fill.paint.line_width, 2.0);
+                }
+            }
+            let progress: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == "#0f172a")
+                .collect();
+            assert_eq!(progress.len(), 2, "milestones have no duration to fill");
+            for (index, fraction) in [(0, 0.5), (1, 0.25)] {
+                let node = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == index)
+                    .unwrap();
+                let overlay = progress
+                    .iter()
+                    .find(|fill| {
+                        (fill.bounds[1] + f64::from(layout.bounds.y) - f64::from(node.bounds.y))
+                            .abs()
+                            < 0.002
+                    })
+                    .unwrap();
+                assert!(
+                    (overlay.bounds[2] / f64::from(node.bounds.width) - fraction).abs() < 0.002
+                );
+                assert_eq!(overlay.paint.alpha, 0.22);
+                assert!(
+                    overlay.paint.clipped,
+                    "progress must stay inside the task outline"
+                );
+            }
+            assert_eq!(
+                text.iter()
+                    .filter(|entry| entry.text == "Release schedule")
+                    .count(),
+                1
+            );
+            for placement in &layout.extensions.gantt_task_labels {
+                let label = ir.node_display_text(&ir.nodes[placement.node_index]);
+                let entry = text
+                    .iter()
+                    .find(|entry| entry.text == label)
+                    .expect("complete task name");
+                let expected_align = match placement.placement {
+                    fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
+                    fm_layout::GanttLabelPlacement::OutsideLeft => TextAlign::Right,
+                    fm_layout::GanttLabelPlacement::OutsideRight => TextAlign::Left,
+                };
+                assert_eq!(entry.paint.align, expected_align);
+                assert_eq!(entry.paint.baseline, TextBaseline::Middle);
+                assert!(
+                    (entry.x + f64::from(layout.bounds.x) - f64::from(placement.x)).abs() < 0.002
+                );
+                let expected_color =
+                    if dark && placement.placement == fm_layout::GanttLabelPlacement::Inside {
+                        &config.node_fill
+                    } else {
+                        &config.label_color
+                    };
+                assert_eq!(&entry.paint.fill, expected_color);
+            }
+            for axis in &layout.extensions.gantt_axis_rows {
+                for tick in &layout.extensions.axis_ticks {
+                    assert!(text.iter().any(|entry| {
+                        entry.text == tick.label
+                            && (entry.x + f64::from(layout.bounds.x)
+                                - f64::from(tick.position + 3.0))
+                            .abs()
+                                < 0.002
+                            && (entry.y + f64::from(layout.bounds.y) - f64::from(axis.y)).abs()
+                                < 0.002
+                            && entry.paint.baseline == TextBaseline::Alphabetic
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_gantt_tasks_preserve_declared_styles_and_isolate_progress_opacity() {
+        let mut ir = fm_parser::parse(
+            "gantt\n dateFormat YYYY-MM-DD\n section Delivery\n\
+             Styled :crit, done, styled, 2026-01-01, 4d, 50%\n\
+             Untouched :plain, after styled, 2d\n\
+             Marker :milestone, marker, after plain, 0d, 75%\n",
+        )
+        .ir;
+        let styled_index = ir.gantt_meta.as_ref().unwrap().tasks[0].node.0;
+        ir.nodes[styled_index].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:#123456;fill-opacity:0.6;stroke:#abcdef;stroke-width:4px;stroke-dasharray:7 3;opacity:0.4;color:#ff00ff;font-size:19px",
+        )));
+        let layout = layout_diagram(&ir);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            node_stroke: "#fedcba".to_owned(),
+            node_stroke_width: 3.25,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+        let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+        let styled = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "rgba(18, 52, 86, 0.6)")
+            .expect("authored fill and fill opacity");
+        assert_eq!(styled.paint.stroke, "#abcdef");
+        assert_eq!(styled.paint.line_width, 4.0);
+        assert_eq!(styled.paint.dash, [7.0, 3.0]);
+        assert_eq!(styled.paint.alpha, 0.4);
+        let overlay = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#0f172a")
+            .expect("visible progress on an authored fill");
+        assert!((overlay.paint.alpha - 0.088).abs() < 0.0001);
+        assert!(overlay.paint.clipped);
+        assert!((overlay.bounds[2] / styled.bounds[2] - 0.5).abs() < 0.002);
+        let label = text.iter().find(|entry| entry.text == "Styled").unwrap();
+        assert_eq!(label.paint.fill, "#ff00ff");
+        assert_eq!(label.paint.alpha, 0.4);
+        assert!(label.paint.font.contains("19px"));
+        assert!(
+            !label.paint.clipped,
+            "the task's clip must not trim an outside name"
+        );
+        let untouched = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#93c5fd")
+            .unwrap();
+        assert_eq!(untouched.paint.alpha, 1.0);
+        assert_eq!(untouched.paint.stroke, "#fedcba");
+        assert_eq!(untouched.paint.line_width, 3.25);
+        assert!(untouched.paint.dash.is_empty());
+        let milestone = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#c4b5fd")
+            .unwrap();
+        assert_eq!(milestone.paint.stroke, "#fedcba");
+        assert_eq!(milestone.paint.line_width, 3.25);
+        let following_label = text.iter().find(|entry| entry.text == "Untouched").unwrap();
+        assert_eq!(following_label.paint.alpha, 1.0);
+        assert!(!following_label.paint.font.contains("19px"));
+
+        for value in [f32::NAN, f32::INFINITY, -0.2, 0.0, 2.0] {
+            ir.gantt_meta.as_mut().unwrap().tasks[0].progress = Some(value);
+            let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+            crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            let (fills, _) = record_gantt_canvas_paint(ctx.operations());
+            let overlays: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == "#0f172a")
+                .collect();
+            if value == 2.0 {
+                assert_eq!(overlays.len(), 1);
+                assert!((overlays[0].bounds[2] - styled.bounds[2]).abs() < 0.002);
+            } else {
+                assert!(
+                    overlays.is_empty(),
+                    "invalid/empty progress painted: {value}"
+                );
+            }
+        }
+
+        let mut graph = fm_parser::parse("flowchart LR\nA[Ordinary]-->B[Unchanged]\n").ir;
+        let graph_layout = layout_diagram(&graph);
+        let mut before = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas_with_layout(&graph, &graph_layout, &mut before, &config);
+        graph.gantt_meta = ir.gantt_meta;
+        let mut after = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas_with_layout(&graph, &graph_layout, &mut after, &config);
+        assert_eq!(
+            before.operations(),
+            after.operations(),
+            "a foreign chart's metadata must not restyle a flowchart"
+        );
+    }
+
+    #[test]
+    fn canvas_scene_preserves_gantt_schedule_status_and_date_axes() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n section Delivery\n\
+             Release :milestone, release, after build, 0d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 3);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        let scene = build_render_scene(&ir, &layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1600.0, 1000.0);
+        let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+        assert_eq!((result.nodes_drawn, result.edges_drawn), (4, 3));
+        let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+        crate::render_scene_to_canvas(&scene, &mut repeated, &config);
+        assert_eq!(ctx.operations(), repeated.operations());
+
+        let mut baseline = TextBaseline::Alphabetic;
+        let mut align = TextAlign::Left;
+        let mut text = Vec::new();
+        let mut color = String::new();
+        let mut alpha = 1.0;
+        let mut points = Vec::new();
+        let mut fills = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetTextBaseline(value) => baseline = *value,
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::FillText(label, x, y) => {
+                    text.push((label.as_str(), *x, *y, align, baseline));
+                }
+                DrawOperation::SetFillStyle(value) => color.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::BeginPath => points.clear(),
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => {
+                    points.extend([(*cx, *cy), (*x, *y)])
+                }
+                DrawOperation::BezierCurveTo(cx1, cy1, cx2, cy2, x, y) => {
+                    points.extend([(*cx1, *cy1), (*cx2, *cy2), (*x, *y)]);
+                }
+                DrawOperation::Fill => fills.push((color.clone(), alpha, points.clone())),
+                _ => {}
+            }
+        }
+        for label in [
+            "Release schedule",
+            "Design",
+            "Build",
+            "Release",
+            "Verification with a deliberately long name",
+        ] {
+            assert_eq!(
+                text.iter().filter(|entry| entry.0 == label).count(),
+                1,
+                "{label}"
+            );
+        }
+        assert_eq!(text.iter().filter(|entry| entry.0 == "Delivery").count(), 2);
+        for axis in &layout.extensions.gantt_axis_rows {
+            for tick in &layout.extensions.axis_ticks {
+                assert!(
+                    text.iter().any(|(label, x, y, align, baseline)| {
+                        *label == tick.label
+                            && (*x + f64::from(scene.bounds.x) - f64::from(tick.position + 3.0))
+                                .abs()
+                                < 0.002
+                            && (*y + f64::from(scene.bounds.y) - f64::from(axis.y)).abs() < 0.002
+                            && *align == TextAlign::Left
+                            && *baseline == TextBaseline::Alphabetic
+                    }),
+                    "date tick must share the layout's baseline and day position"
+                );
+            }
+        }
+        for placement in &layout.extensions.gantt_task_labels {
+            let label = ir.node_display_text(&ir.nodes[placement.node_index]);
+            let expected = match placement.placement {
+                fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
+                fm_layout::GanttLabelPlacement::OutsideLeft => TextAlign::Right,
+                fm_layout::GanttLabelPlacement::OutsideRight => TextAlign::Left,
+            };
+            assert!(text.iter().any(|entry| entry.0 == label
+                && entry.3 == expected
+                && (entry.1 + f64::from(scene.bounds.x) - f64::from(placement.x)).abs() < 0.002));
+        }
+        let extent = |points: &[(f64, f64)]| {
+            let left = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::INFINITY, f64::min);
+            let right = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let top = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::INFINITY, f64::min);
+            let bottom = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::NEG_INFINITY, f64::max);
+            (left, top, right - left, bottom - top)
+        };
+        for (index, color) in ["#86efac", "#94a3b8", "#c4b5fd", "#93c5fd"]
+            .into_iter()
+            .enumerate()
+        {
+            let (_, alpha, points) = fills
+                .iter()
+                .find(|fill| fill.0 == color)
+                .expect("task status fill");
+            assert_eq!(*alpha, 1.0);
+            let actual = extent(points);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == index)
+                .unwrap();
+            if index == 2 {
+                assert_eq!(points.len(), 4, "milestone requires four diamond vertices");
+                assert!((actual.2 - actual.3).abs() < 0.002);
+                assert!(
+                    (actual.0 + actual.2 / 2.0 + f64::from(scene.bounds.x)
+                        - f64::from(node.bounds.center().x))
+                    .abs()
+                        < 0.002
+                );
+            } else {
+                assert!((actual.2 - f64::from(node.bounds.width)).abs() < 0.002);
+                assert!((actual.3 - f64::from(node.bounds.height)).abs() < 0.002);
+            }
+        }
+        let progress: Vec<_> = fills.iter().filter(|fill| fill.0 == "#0f172a").collect();
+        assert_eq!(progress.len(), 2);
+        for (fill, fraction) in progress.iter().zip([0.5, 0.25]) {
+            assert!((fill.1 - 0.22).abs() < 0.001);
+            let bounds = extent(&fill.2);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| {
+                    (f64::from(node.bounds.y) - bounds.1 - f64::from(scene.bounds.y)).abs() < 0.002
+                })
+                .expect("progress must cover its own bar");
+            assert!((bounds.2 / f64::from(node.bounds.width) - fraction).abs() < 0.002);
+        }
+        assert!(
+            ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::SetStrokeStyle(color) if color == "#dc2626")
+            }),
+            "completed critical tasks retain their critical border"
+        );
+    }
+
+    #[test]
+    fn canvas_scene_draws_xychart_data_and_matches_direct_axis_labels() {
+        fn text_operations(ctx: &MockCanvas2dContext) -> Vec<(String, f64, f64, TextBaseline)> {
+            let mut baseline = TextBaseline::Alphabetic;
+            let mut labels = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetTextBaseline(value) => baseline = *value,
+                    DrawOperation::FillText(text, x, y) => {
+                        labels.push((text.clone(), *x, *y, baseline))
+                    }
+                    _ => {}
+                }
+            }
+            labels
+        }
+
+        for horizontal in [false, true] {
+            let source = format!(
+                "xychart-beta{}\n title Quarterly movement\n\
+                 x-axis Quarter [Q1, Q2, Q3]\n y-axis Dollars -10 --> 20\n\
+                 bar [-10, 0, 20]\n line [0, 10, -10]\n area [-5, 15, -5]\n",
+                if horizontal { " horizontal" } else { "" },
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let mut direct_ctx = MockCanvas2dContext::new(1000.0, 800.0);
+            let direct =
+                crate::render_to_canvas_with_layout(&ir, &layout, &mut direct_ctx, &config);
+            let mut scene_ctx = MockCanvas2dContext::new(1000.0, 800.0);
+            let result = crate::render_scene_to_canvas(&scene, &mut scene_ctx, &config);
+            assert_eq!(result.nodes_drawn, 9);
+            assert_eq!(result.edges_drawn, 4);
+            assert_eq!(result.nodes_drawn, direct.nodes_drawn);
+            assert_eq!(result.edges_drawn, direct.edges_drawn);
+            let direct_labels = text_operations(&direct_ctx);
+            let scene_labels = text_operations(&scene_ctx);
+            assert_eq!(scene_labels.len(), direct_labels.len());
+            for ((direct_text, dx, dy, direct_baseline), (scene_text, sx, sy, scene_baseline)) in
+                direct_labels.iter().zip(&scene_labels)
+            {
+                assert_eq!(scene_text, direct_text);
+                // The scene can expand its clip for long labels. Compare in original layout
+                // coordinates so this test also catches a second origin translation.
+                assert!(
+                    (sx + f64::from(scene.bounds.x) - dx - f64::from(layout.bounds.x)).abs()
+                        < 0.002,
+                    "x for {scene_text}"
+                );
+                assert!(
+                    (sy + f64::from(scene.bounds.y) - dy - f64::from(layout.bounds.y)).abs()
+                        < 0.002,
+                    "y for {scene_text}"
+                );
+                assert_eq!(scene_baseline, direct_baseline);
+            }
+            let mut alpha = 1.0_f64;
+            let mut area_fills = 0;
+            let mut bar_fills = 0;
+            for operation in scene_ctx.operations() {
+                match operation {
+                    DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                    DrawOperation::Fill if (alpha - 0.16).abs() < 0.0001 => area_fills += 1,
+                    DrawOperation::Fill if (alpha - 0.78).abs() < 0.0001 => bar_fills += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                area_fills, 1,
+                "area series must paint its quantitative extent"
+            );
+            assert_eq!(
+                bar_fills, 3,
+                "each bar must retain its own filled rectangle"
+            );
+            assert!(scene_ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::SetLineDash(dash) if dash == &[4.0, 4.0])
+            }));
+        }
+    }
+
+    #[test]
+    fn canvas_scene_draws_sequence_geometry_and_notes_in_layout_coordinates() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\n\
+             sequenceDiagram\n\
+             box rgb(230,240,250) Workers\n\
+             participant Alice\n\
+             participant Bob\n\
+             end\n\
+             rect rgb(250,240,220)\n\
+             Alice->>+Bob: request\n\
+             alt allowed\n\
+             Note right of Bob: Check<br/>Audit\n\
+             Bob-->>Alice: accept\n\
+             else denied\n\
+             Note over Alice,Bob: wait\n\
+             end\n\
+             Bob-->>-Alice: done\n\
+             end\n\
+             destroy Bob\n\
+             Bob->>Alice: bye\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.sequence_notes.len(), 2);
+        assert_eq!(layout.extensions.activation_bars.len(), 1);
+        assert_eq!(layout.extensions.sequence_lifecycle_markers.len(), 1);
+        assert_eq!(
+            layout.extensions.sequence_mirror_headers.len(),
+            ir.nodes.len(),
+            "the fixture must reserve one footer header per participant"
+        );
+        let scene = build_render_scene(&ir, &layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1200.0, 1600.0);
+        let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+        let operations = ctx.operations();
+        let has_segment = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            let expected = [
+                f64::from(x0 - layout.bounds.x),
+                f64::from(y0 - layout.bounds.y),
+                f64::from(x1 - layout.bounds.x),
+                f64::from(y1 - layout.bounds.y),
+            ];
+            operations
+                .windows(2)
+                .any(|pair| match (&pair[0], &pair[1]) {
+                    (DrawOperation::MoveTo(a, b), DrawOperation::LineTo(c, d))
+                    | (DrawOperation::LineTo(a, b), DrawOperation::LineTo(c, d)) => {
+                        [*a, *b, *c, *d]
+                            .iter()
+                            .zip(expected)
+                            .all(|(actual, expected)| (actual - expected).abs() < 0.001)
+                    }
+                    _ => false,
+                })
+        };
+        for band in &layout.extensions.bands {
+            let x = band.bounds.center().x;
+            assert!(has_segment(
+                x,
+                band.bounds.y,
+                x,
+                band.bounds.y + band.bounds.height
+            ));
+        }
+        let activation = &layout.extensions.activation_bars[0].bounds;
+        assert!(has_segment(
+            activation.x,
+            activation.y,
+            activation.x + activation.width,
+            activation.y,
+        ));
+        assert!(has_segment(
+            activation.x + activation.width,
+            activation.y,
+            activation.x + activation.width,
+            activation.y + activation.height,
+        ));
+        let expected_corners = [
+            (activation.x, activation.y),
+            (activation.x + activation.width, activation.y),
+            (
+                activation.x + activation.width,
+                activation.y + activation.height,
+            ),
+            (activation.x, activation.y + activation.height),
+        ]
+        .map(|(x, y)| {
+            (
+                f64::from(x - layout.bounds.x),
+                f64::from(y - layout.bounds.y),
+            )
+        });
+        assert!(
+            operations.windows(5).any(|window| {
+                let corners = match window {
+                    [
+                        DrawOperation::MoveTo(x0, y0),
+                        DrawOperation::LineTo(x1, y1),
+                        DrawOperation::LineTo(x2, y2),
+                        DrawOperation::LineTo(x3, y3),
+                        DrawOperation::ClosePath,
+                    ] => [(*x0, *y0), (*x1, *y1), (*x2, *y2), (*x3, *y3)],
+                    _ => return false,
+                };
+                corners
+                    .iter()
+                    .zip(expected_corners)
+                    .all(|(&(x, y), (expected_x, expected_y))| {
+                        (x - expected_x).abs() < 0.001 && (y - expected_y).abs() < 0.001
+                    })
+            }),
+            "the activation must trace all four square corners and close its left edge"
+        );
+        let alternative = layout
+            .extensions
+            .sequence_fragments
+            .iter()
+            .find(|fragment| fragment.kind == fm_core::FragmentKind::Alt)
+            .expect("alt geometry");
+        let divider_y = alternative.branch_tops[0];
+        assert!(
+            has_segment(
+                alternative.bounds.x,
+                divider_y,
+                alternative.bounds.x + alternative.bounds.width,
+                divider_y,
+            ),
+            "the note-only branch retains its own divider row"
+        );
+        let destroyed = &layout.extensions.sequence_lifecycle_markers[0];
+        let half = destroyed.size / 2.0;
+        assert!(has_segment(
+            destroyed.center.x - half,
+            destroyed.center.y - half,
+            destroyed.center.x + half,
+            destroyed.center.y + half,
+        ));
+        assert!(has_segment(
+            destroyed.center.x + half,
+            destroyed.center.y - half,
+            destroyed.center.x - half,
+            destroyed.center.y + half,
+        ));
+
+        let labels: Vec<&str> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DrawOperation::FillText(text, _, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for label in [
+            "Workers",
+            "alt",
+            "[allowed]",
+            "[denied]",
+            "Check",
+            "Audit",
+            "wait",
+        ] {
+            assert_eq!(
+                labels.iter().filter(|drawn| **drawn == label).count(),
+                1,
+                "{label}"
+            );
+        }
+        for participant in ["Alice", "Bob"] {
+            assert_eq!(
+                labels.iter().filter(|drawn| **drawn == participant).count(),
+                2
+            );
+        }
+        let background = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::SetFillStyle(color) if color == "rgb(250,240,220)")
+        }).expect("author's background color");
+        let lifeline = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::SetLineDash(dash) if dash == &[6.0, 4.0])
+        }).expect("dashed lifeline");
+        let note = operations.iter().position(|operation| {
+            matches!(operation, DrawOperation::FillText(text, _, _) if text == "Check")
+        }).expect("note body");
+        assert!(background < lifeline && lifeline < note);
+        assert_eq!(result.nodes_drawn, ir.nodes.len());
+        assert_eq!(result.edges_drawn, ir.edges.len());
+        assert_eq!(result.clusters_drawn, 1);
+    }
+
+    #[test]
+    fn canvas_scene_keeps_single_headers_when_sequence_mirroring_is_disabled() {
+        for directive in [
+            "",
+            "%%{init: {\"sequence\": {\"mirrorActors\": false}}}%%\n",
+        ] {
+            let ir = fm_parser::parse(&format!(
+                "{directive}sequenceDiagram\nparticipant Alice\nparticipant Bob\nAlice->>Bob: hello\n"
+            ))
+            .ir;
+            let layout = layout_diagram(&ir);
+            assert!(layout.extensions.sequence_mirror_headers.is_empty());
+            let scene = build_render_scene(&ir, &layout);
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            let result =
+                crate::render_scene_to_canvas(&scene, &mut ctx, &CanvasRenderConfig::default());
+            for participant in ["Alice", "Bob"] {
+                assert_eq!(
+                    ctx.operations()
+                        .iter()
+                        .filter(|operation| {
+                            matches!(operation, DrawOperation::FillText(text, _, _) if text == participant)
+                        })
+                        .count(),
+                    1,
+                    "{participant} must have one header with directive {directive:?}"
+                );
+            }
+            assert_eq!(result.nodes_drawn, ir.nodes.len());
+        }
+    }
+
     #[test]
     fn render_scene_draws_path_markers() {
         let scene = RenderScene {
@@ -6282,13 +7441,469 @@ mod tests {
                     ),
                     "canvas (scene: {use_scene}) lost the complete generic heading"
                 );
-                if !use_scene && !members.is_empty() {
+                if !members.is_empty() {
                     assert!(ctx.operations().iter().any(
                         |operation| matches!(operation, DrawOperation::FillText(text, _, _)
                             if text == "+go()")
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn measured_sequence_captions_share_geometry_across_graphical_backends() {
+        let source = "sequenceDiagram\nparticipant Client\nparticipant Server\nClient->>Server: Authenticate the incoming request with a signed identity token that includes the resource owner and permission scope before continuing\nServer->>Server: persist session<br/>write audit record<br/>return result\nServer-->>Client: complete\n";
+        let ir = fm_parser::parse(source).ir;
+        for font_size in [15.0, 28.0] {
+            let config = CanvasRenderConfig {
+                font_size,
+                line_height: 1.5,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let messages = &layout.extensions.sequence_messages;
+            assert_eq!(messages.len(), 3);
+            assert!(messages[0].text.contains('\n'), "long captions must wrap");
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                for message in messages {
+                    for (row, text) in message.text.split('\n').enumerate() {
+                        let center = message.line_center(row);
+                        let (offset_x, offset_y) = if use_scene {
+                            (-scene.bounds.x, -scene.bounds.y)
+                        } else {
+                            (-layout.bounds.x, -layout.bounds.y)
+                        };
+                        let mut font = String::new();
+                        let drawn: Vec<_> = ctx
+                            .operations()
+                            .iter()
+                            .filter_map(|op| match op {
+                                DrawOperation::SetFont(value) => {
+                                    font.clone_from(value);
+                                    None
+                                }
+                                DrawOperation::FillText(value, x, y) if value == text => {
+                                    Some((*x, *y, font.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(drawn.len(), 1, "scene={use_scene}, row={text}");
+                        assert!((drawn[0].0 - f64::from(center.x + offset_x)).abs() < 0.01);
+                        assert!((drawn[0].1 - f64::from(center.y + offset_y)).abs() < 0.01);
+                        let size = drawn[0]
+                            .2
+                            .split_whitespace()
+                            .find_map(|part| {
+                                part.strip_suffix("px")
+                                    .and_then(|size| size.parse::<f32>().ok())
+                            })
+                            .unwrap();
+                        assert!((size - message.font_size).abs() < 0.01);
+                    }
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            for message in messages {
+                let runs: Vec<_> = plan
+                    .text_runs
+                    .iter()
+                    .filter(|run| {
+                        run.source == crate::gpu_plan::GpuTextSource::Edge
+                            && run.node_index as usize == message.edge_index
+                    })
+                    .collect();
+                let rows: Vec<_> = message
+                    .text
+                    .split('\n')
+                    .enumerate()
+                    .filter(|(_, line)| !line.is_empty())
+                    .collect();
+                assert_eq!(
+                    runs.len(),
+                    rows.len(),
+                    "every visible message row needs a GPU run"
+                );
+                for (run, (row, text)) in runs.iter().zip(rows) {
+                    let quads = &plan.text_quads
+                        [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                    assert_eq!(
+                        quads.len(),
+                        text.chars().filter(|ch| !ch.is_control()).count()
+                    );
+                    assert!(quads.iter().all(|quad| {
+                        (quad.half_extent[1] * 2.0 - message.font_size).abs() < 0.01
+                            && (quad.center[1] - message.line_center(row).y).abs() < 0.01
+                    }));
+                }
+            }
+            for backend in [
+                fm_render_svg::SvgBackend::LegacyLayout,
+                fm_render_svg::SvgBackend::Scene,
+            ] {
+                let svg_config = fm_render_svg::SvgRenderConfig {
+                    backend,
+                    font_size: font_size as f32,
+                    line_height: 1.5,
+                    ..Default::default()
+                };
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
+                for message in messages {
+                    for line in message.text.split('\n') {
+                        assert!(
+                            svg.contains(&format!(">{line}<")),
+                            "{backend:?}: lost caption row {line}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    svg,
+                    fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c4_card_rows_share_svg_canvas_scene_and_gpu_geometry() {
+        let description = "Stores customer profiles, billing preferences, and a complete audit trail for every account change.";
+        for constructor in ["Container", "ContainerDb", "ContainerQueue"] {
+            for (font_size, declared_font_size) in [
+                (15.0, None),
+                (26.0, None),
+                (15.0, Some("30px")),
+                (15.0, Some("900px")),
+                (15.0, Some("24pt")),
+            ] {
+                let source = format!(
+                    "C4Container\n{constructor}(db, \"Customer records\", \"Rust and PostgreSQL\", \"{description}\")"
+                );
+                let mut ir = fm_parser::parse(&source).ir;
+                assert_eq!(ir.nodes.len(), 1);
+                if let Some(size) = declared_font_size {
+                    ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs(
+                        [("font-size".to_owned(), size.to_owned())],
+                    )));
+                }
+                let node = &ir.nodes[0];
+                let config = CanvasRenderConfig {
+                    font_size,
+                    padding: 0.0,
+                    auto_fit: false,
+                    ..Default::default()
+                };
+                let metrics = config.font_metrics();
+                let layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        font_metrics: Some(metrics.clone()),
+                        ..Default::default()
+                    },
+                );
+                let bounds = layout.nodes[0].bounds;
+                let card = fm_core::C4CardLayout::new(
+                    node.c4_meta.as_deref().unwrap(),
+                    "Customer records",
+                    node.shape,
+                    &metrics,
+                    Some(bounds.width),
+                    declared_font_size,
+                );
+                let name_font = card
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == fm_core::C4CardRowKind::Name)
+                    .unwrap()
+                    .font_size;
+                assert!(bounds.width <= name_font * 21.0);
+                assert!(card.rows.len() >= 6, "a real wrapped paragraph is required");
+                let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+                for use_scene in [false, true] {
+                    let mut ctx = MockCanvas2dContext::new(2000.0, 2000.0);
+                    let mut renderer = Canvas2dRenderer::new(config.clone());
+                    let (offset_x, offset_y) = if use_scene {
+                        renderer.render_scene(&scene, &mut ctx);
+                        (-scene.bounds.x, -scene.bounds.y)
+                    } else {
+                        renderer.render(&layout, &ir, &mut ctx);
+                        (-layout.bounds.x, -layout.bounds.y)
+                    };
+                    let mut font = String::new();
+                    let drawn: Vec<_> = ctx
+                        .operations()
+                        .iter()
+                        .filter_map(|op| match op {
+                            DrawOperation::SetFont(value) => {
+                                font.clone_from(value);
+                                None
+                            }
+                            DrawOperation::FillText(text, x, y) => {
+                                Some((text.as_str(), *x, *y, font.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        drawn.len(),
+                        card.rows.len(),
+                        "scene={use_scene}: dropped C4 metadata"
+                    );
+                    for ((text, x, y, font), row) in drawn.iter().zip(&card.rows) {
+                        assert_eq!(*text, row.text);
+                        assert!(
+                            (*x - f64::from(bounds.x + bounds.width * 0.5 + offset_x)).abs() < 0.01
+                        );
+                        assert!((*y - f64::from(bounds.y + row.center_y + offset_y)).abs() < 0.01);
+                        let size = font
+                            .split_whitespace()
+                            .find_map(|part| part.strip_suffix("px")?.parse::<f32>().ok())
+                            .unwrap();
+                        assert!((size - row.font_size).abs() < 0.01);
+                        let local_y = *y as f32 - bounds.y - offset_y;
+                        let (top, bottom) = if constructor == "ContainerDb" {
+                            (bounds.height * 0.2, bounds.height * 0.9)
+                        } else {
+                            (0.0, bounds.height)
+                        };
+                        assert!(local_y - size * 0.5 > top && local_y + size * 0.5 < bottom);
+                    }
+                    let paragraph = drawn
+                        .iter()
+                        .zip(&card.rows)
+                        .filter(|(_, row)| row.kind == fm_core::C4CardRowKind::Description)
+                        .map(|(drawn, _)| drawn.0)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert_eq!(paragraph, description, "every authored word must survive");
+                }
+                let plan =
+                    crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+                let runs: Vec<_> = plan
+                    .text_runs
+                    .iter()
+                    .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Node)
+                    .collect();
+                assert_eq!(runs.len(), card.rows.len(), "GPU omitted C4 metadata");
+                for (run, row) in runs.iter().zip(&card.rows) {
+                    let quads = &plan.text_quads
+                        [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                    assert_eq!(
+                        quads.len(),
+                        row.text.chars().filter(|ch| !ch.is_control()).count()
+                    );
+                    assert!(
+                        quads
+                            .iter()
+                            .all(|quad| (quad.center[1] - bounds.y - row.center_y).abs() < 0.01)
+                    );
+                }
+                for backend in [
+                    fm_render_svg::SvgBackend::LegacyLayout,
+                    fm_render_svg::SvgBackend::Scene,
+                ] {
+                    let svg = fm_render_svg::render_svg_with_layout(
+                        &ir,
+                        &layout,
+                        &fm_render_svg::SvgRenderConfig {
+                            font_size: font_size as f32,
+                            backend,
+                            ..Default::default()
+                        },
+                    );
+                    for row in &card.rows {
+                        let escaped = row.text.replace('&', "&amp;").replace('<', "&lt;");
+                        assert!(
+                            svg.contains(&format!(">{escaped}<")),
+                            "{backend:?}: missing C4 row {}",
+                            row.text
+                        );
+                        if declared_font_size.is_some() {
+                            assert!(
+                                svg.contains(&format!("font-size:{}px!important", row.font_size)),
+                                "{backend:?}: CSS must use the measured row size"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_card_rows_share_canvas_scene_and_gpu_geometry() {
+        let source = "classDiagram\nclass Repository~T~ {\n<<interface>>\n+String identifier\n+fetch() List~T~\n+save()$\n}\n";
+        for (font_size, line_height, style) in [
+            (15.0, 1.5, ""),
+            (24.0, 1.8, ""),
+            (
+                15.0,
+                1.5,
+                "classDef default font-size:24px\nstyle Repository font-size:40px\n",
+            ),
+        ] {
+            let ir = fm_parser::parse(&format!("{source}{style}")).ir;
+            let node = &ir.nodes[0];
+            let meta = node.class_meta.as_deref().expect("class metadata");
+            assert_eq!(meta.attributes.len(), 1);
+            assert_eq!(meta.methods.len(), 2);
+            let config = CanvasRenderConfig {
+                font_size,
+                line_height,
+                padding: 0.0,
+                auto_fit: false,
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(metrics.clone()),
+                    ..Default::default()
+                },
+            );
+            let bounds = layout.nodes[0].bounds;
+            let name = node
+                .label
+                .and_then(|id| ir.labels.get(id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            let declared = ir.resolved_node_style(0);
+            let card = fm_core::ClassCompartmentLayout::with_font_size_override(
+                meta,
+                name,
+                font_size as f32,
+                line_height as f32,
+                declared.get("font-size").map(String::as_str),
+            );
+            if !style.is_empty() {
+                assert!(card.rows.iter().all(|row| row.font_size == 40.0));
+                for rows in card.rows.windows(2) {
+                    assert!(rows[0].center_y + 20.0 < rows[1].center_y - 20.0);
+                }
+            }
+            let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &metrics);
+            for use_scene in [false, true] {
+                let mut ctx = MockCanvas2dContext::new(1600.0, 1200.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                if use_scene {
+                    renderer.render_scene(&scene, &mut ctx);
+                } else {
+                    renderer.render(&layout, &ir, &mut ctx);
+                }
+                for row in &card.rows {
+                    let mut font = String::new();
+                    let positions: Vec<_> = ctx
+                        .operations()
+                        .iter()
+                        .filter_map(|operation| match operation {
+                            DrawOperation::SetFont(value) => {
+                                font.clone_from(value);
+                                None
+                            }
+                            DrawOperation::FillText(text, x, y) if text == &row.text => {
+                                Some((*x, *y, font.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        positions.len(),
+                        1,
+                        "scene={use_scene}: missing or duplicated {}",
+                        row.text
+                    );
+                    let expected_x = if row.centered() {
+                        bounds.x + bounds.width * 0.5
+                    } else {
+                        bounds.x + fm_core::ClassCompartmentLayout::PADDING_X
+                    };
+                    let offset_x = if use_scene {
+                        -scene.bounds.x
+                    } else {
+                        -layout.bounds.x
+                    };
+                    let offset_y = if use_scene {
+                        -scene.bounds.y
+                    } else {
+                        -layout.bounds.y
+                    };
+                    assert!((positions[0].0 - f64::from(expected_x + offset_x)).abs() < 0.01);
+                    assert!(
+                        (positions[0].1 - f64::from(bounds.y + row.center_y + offset_y)).abs()
+                            < 0.01
+                    );
+                    let rendered_font = positions[0]
+                        .2
+                        .split_whitespace()
+                        .find_map(|part| {
+                            part.strip_suffix("px")
+                                .and_then(|size| size.parse::<f64>().ok())
+                        })
+                        .expect("canvas row font size");
+                    assert!(
+                        (rendered_font - f64::from(row.font_size)).abs() < 0.01,
+                        "scene={use_scene}: {} uses the wrong font: {}",
+                        row.text,
+                        positions[0].2
+                    );
+                }
+            }
+            let plan =
+                crate::gpu_plan::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Node)
+                .collect();
+            assert_eq!(runs.len(), card.rows.len());
+            for (run, row) in runs.into_iter().zip(&card.rows) {
+                let quads = &plan.text_quads
+                    [run.first_quad as usize..(run.first_quad + run.quad_count) as usize];
+                assert_eq!(quads.len(), row.text.chars().count());
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.center[1] - bounds.y - row.center_y).abs() < 0.01)
+                );
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.half_extent[1] * 2.0 - row.font_size).abs() < 0.01)
+                );
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| quad.center[1] - quad.half_extent[1] >= bounds.y
+                            && quad.center[1] + quad.half_extent[1] <= bounds.y + bounds.height)
+                );
+            }
+            assert!(
+                plan.node_border_segments.len() >= 3,
+                "two dividers and static underline must be drawn"
+            );
+            assert_eq!(
+                plan.node_instances.len(),
+                2,
+                "class body and header must both be drawn"
+            );
         }
     }
 
@@ -6490,6 +8105,436 @@ mod tests {
                 _ => None,
             })
             .expect("edge text needs its backing plate")
+    }
+
+    const CYCLIC_STATE_LABEL_REPRO: &str = concat!(
+        "stateDiagram-v2\n[*] --> Idle\n",
+        "Idle --> Starting: Space down / tap\nStarting --> Idle: closed\n",
+        "Starting --> Recording: opened\nStarting --> Releasing: Space up, focus lost\n",
+        "Recording --> Idle: closed\nRecording --> Stopping: Space up, focus lost / tap\n",
+        "Releasing --> Idle: closed\nReleasing --> Stopping: opened / tap\n",
+        "Stopping --> Settling: closed\nSettling --> Idle: quiet 1 s\n",
+        "Settling --> Stopping: opened / tap\n",
+    );
+
+    #[test]
+    fn reported_cyclic_state_labels_are_clear_across_graphical_renderers() {
+        use crate::gpu_plan::rendered_label_gap;
+        fn clear(a: LayoutRect, b: LayoutRect) -> bool {
+            a.x + a.width <= b.x + 0.02
+                || b.x + b.width <= a.x + 0.02
+                || a.y + a.height <= b.y + 0.02
+                || b.y + b.height <= a.y + 0.02
+        }
+        fn number(element: &str, attr: &str) -> f32 {
+            element
+                .split_once(&format!("{attr}=\""))
+                .unwrap()
+                .1
+                .split_once('"')
+                .unwrap()
+                .0
+                .parse()
+                .unwrap()
+        }
+        fn svg_path(tag: &str) -> Vec<PathCmd> {
+            let data = tag.split_once("d=\"").unwrap().1.split_once('"').unwrap().0;
+            let mut separated = String::new();
+            for character in data.chars() {
+                if matches!(character, 'M' | 'L' | 'Q' | 'C' | 'Z') {
+                    separated.push(' ');
+                    separated.push(character);
+                    separated.push(' ');
+                } else {
+                    separated.push(if character == ',' { ' ' } else { character });
+                }
+            }
+            let mut tokens = separated.split_whitespace();
+            let mut commands = Vec::new();
+            while let Some(operation) = tokens.next() {
+                let mut n = || tokens.next().unwrap().parse::<f32>().unwrap();
+                commands.push(match operation {
+                    "M" => PathCmd::MoveTo { x: n(), y: n() },
+                    "L" => PathCmd::LineTo { x: n(), y: n() },
+                    "Q" => PathCmd::QuadTo {
+                        cx: n(),
+                        cy: n(),
+                        x: n(),
+                        y: n(),
+                    },
+                    "C" => PathCmd::CubicTo {
+                        c1x: n(),
+                        c1y: n(),
+                        c2x: n(),
+                        c2y: n(),
+                        x: n(),
+                        y: n(),
+                    },
+                    "Z" => PathCmd::Close,
+                    other => panic!("unexpected connector command {other}"),
+                });
+            }
+            commands
+        }
+        fn scene_route(group: &RenderGroup, index: usize) -> Option<&fm_layout::RenderPath> {
+            group.children.iter().find_map(|item| match item {
+                RenderItem::Group(child) => scene_route(child, index),
+                RenderItem::Path(path)
+                    if path.source == RenderSource::Edge(index) && path.stroke.is_some() =>
+                {
+                    Some(path)
+                }
+                _ => None,
+            })
+        }
+        fn scene_plates(group: &RenderGroup, plates: &mut Vec<LayoutRect>) {
+            for item in &group.children {
+                match item {
+                    RenderItem::Group(child) => scene_plates(child, plates),
+                    RenderItem::Path(path)
+                        if matches!(path.source, RenderSource::Edge(_))
+                            && path.stroke.is_none()
+                            && path.fill.is_some() =>
+                    {
+                        let mut left = f32::INFINITY;
+                        let mut top = f32::INFINITY;
+                        let mut right = f32::NEG_INFINITY;
+                        let mut bottom = f32::NEG_INFINITY;
+                        for command in &path.commands {
+                            let (PathCmd::MoveTo { x, y }
+                            | PathCmd::LineTo { x, y }
+                            | PathCmd::QuadTo { x, y, .. }
+                            | PathCmd::CubicTo { x, y, .. }) = *command
+                            else {
+                                continue;
+                            };
+                            left = left.min(x);
+                            right = right.max(x);
+                            top = top.min(y);
+                            bottom = bottom.max(y);
+                        }
+                        plates.push(LayoutRect {
+                            x: left,
+                            y: top,
+                            width: right - left,
+                            height: bottom - top,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for direction in [fm_core::GraphDirection::TB, fm_core::GraphDirection::LR] {
+            for routing in [
+                fm_layout::EdgeRouting::Orthogonal,
+                fm_layout::EdgeRouting::Spline,
+            ] {
+                let mut ir = fm_parser::parse(CYCLIC_STATE_LABEL_REPRO).ir;
+                ir.direction = direction;
+                let layout = fm_layout::layout_diagram_with_config(
+                    &ir,
+                    fm_layout::LayoutConfig {
+                        edge_routing: routing,
+                        ..Default::default()
+                    },
+                );
+                let check = |surface: &str,
+                             plates: &[LayoutRect],
+                             nodes: &[fm_layout::LayoutNodeBox]| {
+                    assert_eq!(
+                        plates.len(),
+                        11,
+                        "{surface}: all 55 label pairs must be checked"
+                    );
+                    for (index, plate) in plates.iter().enumerate() {
+                        assert!(plate.width > 0.0 && plate.height > 0.0);
+                        for previous in &plates[..index] {
+                            assert!(
+                                clear(*plate, *previous),
+                                "{surface} {direction:?}/{routing:?}: overlapping {plate:?}, {previous:?}"
+                            );
+                        }
+                        for node in nodes {
+                            assert!(
+                                clear(*plate, node.bounds),
+                                "{surface}: label {index} covers {}",
+                                node.node_id
+                            );
+                        }
+                    }
+                };
+                let config = CanvasRenderConfig {
+                    auto_fit: false,
+                    padding: 0.0,
+                    ..Default::default()
+                };
+                let mut context = MockCanvas2dContext::new(1600.0, 1000.0);
+                let mut renderer = Canvas2dRenderer::new(config.clone());
+                assert_eq!(renderer.render(&layout, &ir, &mut context).edges_drawn, 12);
+                let frame = renderer.edge_label_layout.as_ref().unwrap().bounds;
+                let mut canvas = Vec::new();
+                let mut latest_plate = None;
+                for op in context.operations() {
+                    match op {
+                        DrawOperation::FillRect(x, y, width, height) => {
+                            latest_plate = Some(LayoutRect {
+                                x: *x as f32 + frame.x,
+                                y: *y as f32 + frame.y,
+                                width: *width as f32,
+                                height: *height as f32,
+                            })
+                        }
+                        DrawOperation::FillText(text, _, _)
+                            if ir.edges.iter().any(|edge| {
+                                edge.label.is_some_and(|id| ir.labels[id.0].text == *text)
+                            }) =>
+                        {
+                            canvas.push(
+                                latest_plate
+                                    .take()
+                                    .expect("whole caption has one backing plate"),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                check("Canvas", &canvas, &layout.nodes);
+                let mut strokes = Vec::new();
+                let mut start = 0;
+                let mut stroke_width = 1.0;
+                let mut saved_widths = Vec::new();
+                for (index, operation) in context.operations().iter().enumerate() {
+                    match operation {
+                        DrawOperation::Save => saved_widths.push(stroke_width),
+                        DrawOperation::Restore => {
+                            stroke_width = saved_widths.pop().expect("balanced canvas state");
+                        }
+                        DrawOperation::SetLineWidth(width) => stroke_width = *width as f32,
+                        DrawOperation::BeginPath => start = index,
+                        // Connector paths use only the outer viewport save. Hollow feedback
+                        // markers add their own save/transform and stroke; they are not routes.
+                        DrawOperation::Stroke if saved_widths.len() == 1 => strokes.push((
+                            first_stroked_path(&context.operations()[start..=index]),
+                            stroke_width,
+                        )),
+                        DrawOperation::FillText(_, _, _) => break,
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    strokes.len(),
+                    12,
+                    "all transitions precede caption painting"
+                );
+                let mut label_index = 0;
+                for (edge, (path, stroke)) in layout.edges.iter().zip(&strokes) {
+                    if ir.edges[edge.edge_index].label.is_none() {
+                        continue;
+                    }
+                    let mut plate = canvas[label_index];
+                    label_index += 1;
+                    plate.x -= frame.x;
+                    plate.y -= frame.y;
+                    let gap = rendered_label_gap(path, plate, 0.0, *stroke);
+                    assert!(
+                        gap <= 1.5,
+                        "Canvas {direction:?}/{routing:?} edge {} is {gap}px detached; plate={plate:?}, frame={frame:?}, path={path:?}, route={:?}, planned={:?}, font={}",
+                        edge.edge_index,
+                        edge.points,
+                        renderer.edge_label_layout.as_ref().unwrap().labels[edge.edge_index],
+                        config.font_size,
+                    );
+                }
+                let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+                Canvas2dRenderer::new(config).render(&layout, &ir, &mut repeated);
+                assert_eq!(context.operations(), repeated.operations());
+
+                let svg_config = fm_render_svg::SvgRenderConfig::default();
+                let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
+                assert_eq!(
+                    svg,
+                    fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config)
+                );
+                let mut svg_plates = Vec::new();
+                for (index, edge) in ir
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, edge)| edge.label.is_some())
+                {
+                    let group = svg
+                        .split_once(&format!("id=\"fm-edge-{index}\""))
+                        .unwrap()
+                        .1
+                        .split_once("</g>")
+                        .unwrap()
+                        .0;
+                    let rect = group
+                        .split_once("<rect ")
+                        .unwrap()
+                        .1
+                        .split_once("/>")
+                        .unwrap()
+                        .0;
+                    let plate = LayoutRect {
+                        x: number(rect, "x"),
+                        y: number(rect, "y"),
+                        width: number(rect, "width"),
+                        height: number(rect, "height"),
+                    };
+                    let path = group
+                        .split_once("<path ")
+                        .unwrap()
+                        .1
+                        .split_once("/>")
+                        .unwrap()
+                        .0;
+                    let gap = rendered_label_gap(
+                        &svg_path(path),
+                        plate,
+                        number(rect, "rx"),
+                        number(path, "stroke-width"),
+                    );
+                    assert!(
+                        gap <= 1.5,
+                        "SVG {direction:?}/{routing:?} edge {index} is {gap}px detached"
+                    );
+                    svg_plates.push(plate);
+                    assert!(group.contains(&ir.labels[edge.label.unwrap().0].text));
+                }
+                check("SVG", &svg_plates, &[]);
+                let scene = fm_layout::build_render_scene(&ir, &layout);
+                let mut plates = Vec::new();
+                scene_plates(&scene.root, &mut plates);
+                check("Scene", &plates, &layout.nodes);
+                for (edge, plate) in layout
+                    .edges
+                    .iter()
+                    .filter(|edge| ir.edges[edge.edge_index].label.is_some())
+                    .zip(&plates)
+                {
+                    let path = scene_route(&scene.root, edge.edge_index).unwrap();
+                    let gap = rendered_label_gap(
+                        &path.commands,
+                        *plate,
+                        3.0,
+                        path.stroke.as_ref().unwrap().width,
+                    );
+                    assert!(
+                        gap <= 1.5,
+                        "Scene {direction:?}/{routing:?} edge {} is {gap}px detached",
+                        edge.edge_index
+                    );
+                }
+
+                let gpu = crate::gpu_plan::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+                assert_eq!(
+                    gpu,
+                    crate::gpu_plan::GpuRenderPlan::from_layout(&ir, &layout, 1.5)
+                );
+                let mut gpu_plates = Vec::new();
+                for run in gpu
+                    .text_runs
+                    .iter()
+                    .filter(|run| run.source == crate::gpu_plan::GpuTextSource::Edge)
+                {
+                    let text = &ir.labels[ir.edges[run.node_index as usize].label.unwrap().0].text;
+                    assert_eq!(run.quad_count as usize, text.chars().count());
+                    let first = gpu.text_quads[run.first_quad as usize];
+                    let font = first.half_extent[1] * 2.0;
+                    let advance = crate::gpu_plan::run_advance(text, font);
+                    let center = first.center[0]
+                        - crate::gpu_plan::glyph_advance(text.chars().next().unwrap(), font) / 2.0
+                        + advance / 2.0;
+                    let width = advance + font + 8.0;
+                    let height = (font * 1.2).max(18.0) + 4.0;
+                    let plate = LayoutRect {
+                        x: center - width / 2.0,
+                        y: first.center[1] - height / 2.0,
+                        width,
+                        height,
+                    };
+                    assert!(
+                        plate.x >= gpu.bounds.x - 0.02
+                            && plate.x + width <= gpu.bounds.x + gpu.bounds.width + 0.02
+                    );
+                    assert!(
+                        plate.y >= gpu.bounds.y - 0.02
+                            && plate.y + height <= gpu.bounds.y + gpu.bounds.height + 0.02
+                    );
+                    let gap = gpu
+                        .edge_segments
+                        .iter()
+                        .filter(|segment| segment.edge_index == run.node_index)
+                        .map(|segment| {
+                            rendered_label_gap(
+                                &[
+                                    PathCmd::MoveTo {
+                                        x: segment.from[0],
+                                        y: segment.from[1],
+                                    },
+                                    PathCmd::LineTo {
+                                        x: segment.to[0],
+                                        y: segment.to[1],
+                                    },
+                                ],
+                                plate,
+                                0.0,
+                                segment.width,
+                            )
+                        })
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(
+                        gap <= 1.5,
+                        "GPU {direction:?}/{routing:?} edge {} is {gap}px detached",
+                        run.node_index
+                    );
+                    gpu_plates.push(plate);
+                }
+                check("GPU", &gpu_plates, &layout.nodes);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_corridor_connectors_are_painted_before_every_label() {
+        let ir = fm_parser::parse("flowchart LR\nA -->|first| B\nA -->|second| B\n").ir;
+        let mut layout = layout_diagram(&ir);
+        layout.nodes.clear();
+        layout.bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 160.0,
+        };
+        for edge in &mut layout.edges {
+            edge.points = [
+                fm_layout::LayoutPoint { x: 20.0, y: 80.0 },
+                fm_layout::LayoutPoint { x: 480.0, y: 80.0 },
+            ]
+            .into_iter()
+            .collect();
+        }
+        let mut context = MockCanvas2dContext::new(500.0, 160.0);
+        Canvas2dRenderer::new(CanvasRenderConfig::default()).render(&layout, &ir, &mut context);
+        let first_label = context
+            .operations()
+            .iter()
+            .position(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == "first"))
+            .unwrap();
+        assert!(
+            !context.operations()[first_label..]
+                .iter()
+                .any(|op| matches!(op, DrawOperation::Stroke))
+        );
+        let a = drawn_edge_plate(&context, "first");
+        let b = drawn_edge_plate(&context, "second");
+        assert!(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1);
+        assert_eq!(
+            a.1 + a.3 / 2.0,
+            b.1 + b.3 / 2.0,
+            "captions should slide along their shared route"
+        );
     }
 
     #[test]
@@ -7166,10 +9211,31 @@ mod tests {
     /// the relationship rather than a snapshot of today's layout.
     #[test]
     fn a_state_note_draws_its_text_at_the_reserved_padding() {
+        assert_state_note_text_fits_reserved_rows(&CanvasRenderConfig::default());
+    }
+
+    #[test]
+    fn state_note_spacing_tracks_configured_line_height() {
+        for (font_size, line_height) in [(24.0, 2.0), (18.0, 1.25), (18.0, f64::NAN)] {
+            assert_state_note_text_fits_reserved_rows(&CanvasRenderConfig {
+                font_size,
+                line_height,
+                ..Default::default()
+            });
+        }
+    }
+
+    fn assert_state_note_text_fits_reserved_rows(config: &CanvasRenderConfig) {
         let src = "stateDiagram-v2\n  A --| B\n  note right of A\n    alpha line\n                       beta line\n  end note\n"
             .replace("--|", "-->");
         let ir = fm_parser::parse(&src).ir;
-        let layout = fm_layout::layout_diagram(&ir);
+        let layout = fm_layout::layout_diagram_with_config(
+            &ir,
+            fm_layout::LayoutConfig {
+                font_metrics: Some(config.font_metrics()),
+                ..Default::default()
+            },
+        );
 
         let note = layout
             .extensions
@@ -7184,12 +9250,7 @@ mod tests {
         );
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
-        let _ = crate::render_to_canvas_with_layout(
-            &ir,
-            &layout,
-            &mut ctx,
-            &CanvasRenderConfig::default(),
-        );
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, config);
 
         let mut lines: Vec<(f64, f64)> = Vec::new();
         for op in ctx.operations() {
@@ -7199,10 +9260,10 @@ mod tests {
                 lines.push((*x, *y));
             }
         }
-        assert!(
-            lines.len() >= 2,
-            "expected every note line to be drawn, got {}",
-            lines.len()
+        assert_eq!(
+            lines.len(),
+            note.text.lines().count(),
+            "every note line must be drawn"
         );
 
         // THE AUTO-FIT OFFSET COMES FROM THE BOX, NOT FROM AN INSET UNDER TEST. Deriving it from
@@ -7242,11 +9303,52 @@ mod tests {
              box at {box_y}, text at {first_y}, expected {}",
             box_y + STATE_NOTE_PAD_Y
         );
+        let expected_line_height = (f64::from(note.bounds.height) - 2.0 * STATE_NOTE_PAD_Y)
+            / note.text.lines().count() as f64;
         assert!(
-            (second_y - first_y - 16.8).abs() < 0.01,
-            "line spacing must stay at the SVG's 16.8 (font_size * 0.8 * 1.5): got {}",
+            (second_y - first_y - expected_line_height).abs() < 0.01,
+            "line spacing must use the {expected_line_height}px rows reserved by layout: got {}",
             second_y - first_y
         );
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig {
+                font_family: config.font_family.clone(),
+                font_size: config.font_size as f32,
+                line_height: config.resolved_line_height(),
+                ..Default::default()
+            },
+        );
+        let note_text = svg
+            .split_once("class=\"fm-state-note-text\"")
+            .unwrap()
+            .1
+            .split_once("</text>")
+            .unwrap()
+            .0;
+        let row_offsets: Vec<f64> = note_text
+            .split("<tspan ")
+            .skip(1)
+            .map(|row| {
+                row.split_once("dy=\"")
+                    .unwrap()
+                    .1
+                    .split_once('"')
+                    .unwrap()
+                    .0
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(row_offsets.len(), lines.len());
+        assert_eq!(row_offsets[0], 0.0);
+        for (pair, offset) in lines.windows(2).zip(row_offsets.iter().skip(1)) {
+            assert!(
+                (pair[1].1 - pair[0].1 - offset).abs() < 0.01,
+                "Canvas note rows must match the font and spacing actually emitted by SVG"
+            );
+        }
     }
 
     /// The canvas gantt axis agrees with the SVG arm, tick marks included (bd-c7ijh).
@@ -7858,6 +9960,32 @@ mod tests {
             vertical_segments(flowchart, Some("2026-01-03")),
             vertical_segments(flowchart, None),
             "supplying a today date altered a flowchart render"
+        );
+    }
+
+    #[test]
+    fn debug_overlay_draws_node_bboxes_and_hud_text_when_enabled() {
+        let parsed = fm_parser::parse("flowchart TD\n  a[Alpha] --> b[Beta]\n");
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        let mut base_ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut base_renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+        let base_res = base_renderer.render(&layout, &parsed.ir, &mut base_ctx);
+
+        let mut debug_ctx = MockCanvas2dContext::new(800.0, 600.0);
+        let mut debug_renderer = Canvas2dRenderer::new(CanvasRenderConfig {
+            debug_overlay: true,
+            ..CanvasRenderConfig::default()
+        });
+        let debug_res = debug_renderer.render(&layout, &parsed.ir, &mut debug_ctx);
+
+        assert!(debug_res.draw_calls > base_res.draw_calls);
+        assert_eq!(debug_res.labels_drawn, base_res.labels_drawn + 1);
+        assert!(
+            debug_ctx
+                .operations()
+                .iter()
+                .any(|op| matches!(op, DrawOperation::FillText(t, _, _) if t.starts_with("debug: nodes=2 edges=1")))
         );
     }
 }

@@ -4,6 +4,71 @@ use fm_core::DiagramType;
 use fm_parser::{ClassParseLens, ClassParseLensError, parse};
 use proptest::prelude::*;
 
+#[test]
+fn attach_relationship_labels_preserves_cardinality_members_and_repeated_edits() {
+    let source = concat!(
+        "classDiagram\r\n  A[Account]\r\n  A : +String name\r\n  A : +send() bool\r\n",
+        "  %% retained comment\r\n  A \"1\" *-- \"many\" B\r\n  note for A \"Retain this note\"\r\n",
+    );
+    let lens = ClassParseLens::parse(source).unwrap();
+    let original = lens.ir();
+    assert!(original.edges[0].label.is_none());
+    let mut edited = original.clone();
+    let label = fm_core::IrLabelId(edited.labels.len());
+    edited.labels.push(fm_core::IrLabel {
+        text: "Owns naïve 🦀".to_owned(),
+        span: original.edges[0].span,
+    });
+    edited.edges[0].label = Some(label);
+    let updated = lens.put(&edited).unwrap();
+    assert_eq!(
+        updated,
+        source.replace(
+            "A \"1\" *-- \"many\" B",
+            "A \"1\" *-- \"many\" B: \"Owns naïve 🦀\""
+        )
+    );
+    let actual = parse(&updated);
+    assert_eq!(actual.warnings, parse(source).warnings);
+    assert_eq!(actual.ir.edges[0].extras, original.edges[0].extras);
+    assert_eq!(actual.ir.nodes[0].class_meta, original.nodes[0].class_meta);
+    assert_eq!(actual.ir.state_notes[0].text, original.state_notes[0].text);
+    let next = ClassParseLens::parse(&updated).unwrap();
+    let mut renamed = next.ir().clone();
+    renamed.labels[renamed.edges[0].label.unwrap().0].text = "Uses".to_owned();
+    assert_eq!(
+        next.put(&renamed).unwrap(),
+        updated.replace("Owns naïve 🦀", "Uses")
+    );
+}
+
+#[test]
+fn relationship_attachments_reject_ambiguous_empty_colons_and_other_changes() {
+    for source in ["classDiagram\nA --> B:\n", "classDiagram\nA --> B\n"] {
+        let lens = ClassParseLens::parse(source).unwrap();
+        let mut edited = lens.ir().clone();
+        let label = fm_core::IrLabelId(edited.labels.len());
+        edited.labels.push(fm_core::IrLabel {
+            text: "Owns".to_owned(),
+            span: edited.edges[0].span,
+        });
+        assert!(lens.put(&edited).is_err(), "unused appended label");
+        edited.edges[0].label = Some(label);
+        if source.contains("B:") {
+            assert!(
+                lens.put(&edited).is_err(),
+                "the parser treats the existing colon as node-label text"
+            );
+        } else {
+            edited.labels[label.0].text = "changed\"\nC --> D".to_owned();
+            assert!(lens.put(&edited).is_err());
+            edited.labels[label.0].text = "Owns".to_owned();
+            edited.nodes[0].classes.push("unrequested".to_owned());
+            assert!(lens.put(&edited).is_err());
+        }
+    }
+}
+
 fn collect_mmd_sources(directory: &Path, sources: &mut Vec<String>) {
     for entry in fs::read_dir(directory).expect("fixture directory is readable") {
         let path = entry.expect("fixture entry").path();

@@ -6,23 +6,29 @@
 
 /// A 2D point for canvas operations.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[allow(dead_code)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[allow(dead_code)]
 impl Point {
     #[must_use]
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
+
+    /// Convert a layout-space point into a `f64` canvas [`Point`] (`bd-24t2w`).
+    #[must_use]
+    pub fn from_layout(point: fm_layout::LayoutPoint) -> Self {
+        Self {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        }
+    }
 }
 
 /// A color representation for canvas operations.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -30,7 +36,6 @@ pub struct Color {
     pub a: f64,
 }
 
-#[allow(dead_code)]
 impl Color {
     #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
@@ -51,7 +56,7 @@ impl Color {
         }
     }
 
-    /// Parse a CSS color string (basic support).
+    /// Parse a CSS color string (`#rgb`, `#rrggbb`, `rgb(r,g,b)`, or `rgba(r,g,b,a)`).
     #[must_use]
     pub fn from_css(s: &str) -> Option<Self> {
         let s = s.trim();
@@ -65,6 +70,31 @@ impl Color {
             let g = u8::from_str_radix(&s[2..3], 16).ok()? * 17;
             let b = u8::from_str_radix(&s[3..4], 16).ok()? * 17;
             Some(Self::rgb(r, g, b))
+        } else if let Some(inner) = s.strip_prefix("rgb(").and_then(|v| v.strip_suffix(')')) {
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            if parts.len() == 3 {
+                let r = parts[0].parse::<u8>().ok()?;
+                let g = parts[1].parse::<u8>().ok()?;
+                let b = parts[2].parse::<u8>().ok()?;
+                Some(Self::rgb(r, g, b))
+            } else {
+                None
+            }
+        } else if let Some(inner) = s.strip_prefix("rgba(").and_then(|v| v.strip_suffix(')')) {
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            if parts.len() == 4 {
+                let r = parts[0].parse::<u8>().ok()?;
+                let g = parts[1].parse::<u8>().ok()?;
+                let b = parts[2].parse::<u8>().ok()?;
+                let a = parts[3].parse::<f64>().ok()?;
+                if a.is_finite() {
+                    Some(Self::rgba(r, g, b, a.clamp(0.0, 1.0)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         }

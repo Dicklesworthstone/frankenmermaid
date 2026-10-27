@@ -98,3 +98,279 @@ fn a_one_day_task_still_spans_two_ticks() {
         "a one-day task spans its start and its end boundary"
     );
 }
+
+fn parse_and_layout(source: &str) -> (fm_core::MermaidDiagramIr, fm_layout::DiagramLayout) {
+    let parsed = fm_parser::parse(source);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    (parsed.ir, layout)
+}
+
+fn assert_task_dates(
+    ir: &fm_core::MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
+    task_index: usize,
+    start: &str,
+    end: &str,
+) {
+    let task = &ir.gantt_meta.as_ref().unwrap().tasks[task_index];
+    let node = layout
+        .nodes
+        .iter()
+        .find(|node| node.node_index == task.node.0)
+        .expect("task node is laid out");
+    let axis = layout.extensions.gantt_day_axis.expect("calendar axis");
+    let expected_start = axis
+        .x_for_day(fm_layout::parse_iso_day_number(start).unwrap())
+        .expect("start is on chart");
+    let expected_end = axis
+        .x_for_day(fm_layout::parse_iso_day_number(end).unwrap())
+        .expect("end is on chart");
+    assert!(
+        (node.bounds.x - expected_start).abs() < 0.01,
+        "task {} must start on {start}: {:?}, axis {axis:?}",
+        node.node_id,
+        node.bounds
+    );
+    assert!(
+        (node.bounds.x + node.bounds.width - expected_end).abs() < 0.01,
+        "task {} must end on {end}: {:?}, axis {axis:?}",
+        node.node_id,
+        node.bounds
+    );
+}
+
+#[test]
+fn gantt_fan_in_waits_for_all_case_sensitive_forward_dependencies() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\n\
+         Release :Release, after Build Test, 2026-03-12\n\
+         Test :Test, after Design, 5d\n\
+         Design :Design, 2026-03-02, 2d\n\
+         Build :Build, after Design, 3d\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-03-09", "2026-03-12");
+    assert_task_dates(&ir, &layout, 1, "2026-03-04", "2026-03-09");
+    assert_task_dates(&ir, &layout, 2, "2026-03-02", "2026-03-04");
+    assert_task_dates(&ir, &layout, 3, "2026-03-04", "2026-03-07");
+    assert_eq!(ir.edges.len(), 4);
+    assert_eq!(layout.edges.len(), 4);
+    assert_eq!(
+        layout.extensions.axis_ticks.last().unwrap().label,
+        "2026-03-12"
+    );
+}
+
+#[test]
+fn gantt_exclusions_extend_bars_and_the_axis_to_the_resolved_end() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\nexcludes weekends, 2026-02-09\n\
+         Build :Build, 2026-02-06, 2d\nShip :Ship, after Build, 1d\n",
+    );
+    // Friday and Tuesday are the two working days: Saturday/Sunday and Monday's holiday
+    // remain inside the continuous bar, whose right edge and successor both land on Wednesday.
+    assert_task_dates(&ir, &layout, 0, "2026-02-06", "2026-02-11");
+    assert_task_dates(&ir, &layout, 1, "2026-02-11", "2026-02-12");
+    assert_eq!(layout.nodes[0].bounds.width, 5.0 * 48.0);
+    assert_eq!(
+        layout.extensions.axis_ticks.last().unwrap().label,
+        "2026-02-12"
+    );
+}
+
+#[test]
+fn gantt_calendar_deadlines_after_dependencies_are_not_workday_durations() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ninclusiveEndDates\nexcludes weekends\n\
+         Prep :Prep, 2026-02-05, 1d\n\
+         Delivery :Delivery, after Prep, 2026-02-09\n\
+         Follow :Follow, after Delivery, 1d\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-02-05", "2026-02-06");
+    assert_task_dates(&ir, &layout, 1, "2026-02-06", "2026-02-10");
+    assert_task_dates(&ir, &layout, 2, "2026-02-10", "2026-02-11");
+}
+
+#[test]
+fn gantt_until_uses_the_earliest_forward_start_and_keeps_exact_boundaries() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ninclusiveEndDates\n\
+         Prep :Prep, 2026-03-02, 2d\n\
+         Wait :Wait, after Prep, until Late Early\n\
+         Late :Late, 2026-03-12, 2d\n\
+         Early :Early, 2026-03-09, 3d\n\
+         Follow :Follow, after Wait, 1d\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-03-02", "2026-03-04");
+    assert_task_dates(&ir, &layout, 1, "2026-03-04", "2026-03-09");
+    assert_task_dates(&ir, &layout, 4, "2026-03-09", "2026-03-10");
+    assert_eq!(ir.edges.len(), 4);
+    let again = fm_layout::layout_diagram(&ir);
+    assert_eq!(layout.nodes, again.nodes);
+    assert_eq!(layout.extensions.axis_ticks, again.extensions.axis_ticks);
+}
+
+#[test]
+fn gantt_until_needs_target_starts_without_waiting_for_target_ends() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\nA :A, 2026-03-01, until B\n\
+         B :B, 2026-03-05, until C\nC :C, after A, 1d\n",
+    );
+    // The tasks form a cycle if start and end are collapsed into one dependency vertex.
+    // Their dates do not: B's known start resolves A's end, then C's start resolves B's end.
+    assert_task_dates(&ir, &layout, 0, "2026-03-01", "2026-03-05");
+    assert_task_dates(&ir, &layout, 2, "2026-03-05", "2026-03-06");
+    let axis = layout.extensions.gantt_day_axis.unwrap();
+    let instant = axis
+        .x_for_day(fm_layout::parse_iso_day_number("2026-03-05").unwrap())
+        .unwrap();
+    assert!((layout.nodes[1].bounds.center().x - instant).abs() < 0.01);
+}
+
+#[test]
+fn gantt_until_observes_a_targets_resolved_working_day_start() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\ninclusiveEndDates\nweekend friday\nexcludes weekends, monday\n\
+         Hold :Hold, 2026-02-05, until Gate\n\
+         Gate :Gate, 2026-02-06, 2d\nFollow :Follow, after Hold, 1d\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-02-05", "2026-02-08");
+    assert_task_dates(&ir, &layout, 1, "2026-02-08", "2026-02-11");
+    assert_task_dates(&ir, &layout, 2, "2026-02-08", "2026-02-09");
+}
+
+#[test]
+fn gantt_named_weekdays_and_grouped_holidays_extend_one_consistent_schedule() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\nexcludes weekends, monday\nexcludes wednesday, 2026-03-03\n\
+         Work :Work, 2026-03-02, 3d\nFollow :Follow, after Work, 1d\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-03-05", "2026-03-11");
+    assert_task_dates(&ir, &layout, 1, "2026-03-12", "2026-03-13");
+    assert_eq!(
+        layout.extensions.axis_ticks.last().unwrap().label,
+        "2026-03-13"
+    );
+}
+
+#[test]
+fn gantt_weekend_configuration_is_independent_of_the_axis_weekday() {
+    for (weekend_directive, end) in [("", "2026-02-07"), ("weekend friday\n", "2026-02-09")] {
+        let (ir, layout) = parse_and_layout(&format!(
+            "gantt\nweekday friday\n{weekend_directive}excludes weekends\n\
+             Work :Work, 2026-02-05, 2d\nFollow :Follow, after Work, 1d\n"
+        ));
+        assert_task_dates(&ir, &layout, 0, "2026-02-05", end);
+        assert_task_dates(&ir, &layout, 1, "2026-02-09", "2026-02-10");
+    }
+}
+
+#[test]
+fn gantt_until_cycle_and_impossible_workweek_recovery_are_bounded() {
+    let source = "gantt\nexcludes sunday monday tuesday wednesday thursday friday saturday\n\
+                  A :A, 2026-03-01, until B\nB :B, after A, 1d\n";
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let parsed = fm_parser::parse(source);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        sender.send((parsed, layout)).unwrap();
+    });
+    let (parsed, layout) = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("an impossible calendar or cyclic dates must not loop");
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("excludes every weekday"))
+    );
+    assert_task_dates(&parsed.ir, &layout, 0, "2026-03-01", "2026-03-02");
+    assert_task_dates(&parsed.ir, &layout, 1, "2026-03-02", "2026-03-03");
+    let again = fm_layout::layout_diagram(&parsed.ir);
+    assert_eq!(layout.nodes, again.nodes);
+    assert_eq!(layout.extensions.axis_ticks, again.extensions.axis_ticks);
+}
+
+#[test]
+fn gantt_implicit_starts_continue_across_sections_and_accept_absolute_ends() {
+    let (ir, layout) = parse_and_layout(
+        "gantt\nsection First\nBase :Base, 2026-03-01, 2d\n\
+         section Second\nImplicit :3d\nDeadline :2026-03-10\n",
+    );
+    assert_task_dates(&ir, &layout, 0, "2026-03-01", "2026-03-03");
+    assert_task_dates(&ir, &layout, 1, "2026-03-03", "2026-03-06");
+    assert_task_dates(&ir, &layout, 2, "2026-03-06", "2026-03-10");
+}
+
+#[test]
+fn gantt_duplicate_section_captions_finish_and_keep_separate_bands_in_source_order() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = parse_and_layout(
+            "gantt\nsection Build\nFirst :First, 2026-03-02, 2d\n\
+             section Audit\nSecond :Second, after First, 1d\n\
+             section Build\nThird :Third, after Second, 1d\n",
+        );
+        sender.send(result).unwrap();
+    });
+    let (ir, layout) = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("repeated section labels must not cause an unbounded map-growth loop");
+    let bands = &layout.extensions.bands;
+    let captions: Vec<_> = bands.iter().map(|band| band.label.as_str()).collect();
+    assert_eq!(captions, ["Build", "Audit", "Build"]);
+    assert!(
+        bands
+            .windows(2)
+            .all(|pair| { pair[0].bounds.y + pair[0].bounds.height <= pair[1].bounds.y })
+    );
+    assert_task_dates(&ir, &layout, 2, "2026-03-05", "2026-03-06");
+}
+
+#[test]
+fn gantt_cycle_recovery_is_deterministic_and_independent_of_unrelated_task_count() {
+    let source = "gantt\nA :A, after B, 1d\nB :B, after A, 1d\n\
+                  Anchor :Anchor, 2026-01-01, 1d\n";
+    for suffix in ["", "Unrelated :Other, 2026-01-01, 1d\n"] {
+        let (ir, layout) = parse_and_layout(&format!("{source}{suffix}"));
+        assert_task_dates(&ir, &layout, 0, "2026-01-01", "2026-01-02");
+        assert_task_dates(&ir, &layout, 1, "2026-01-02", "2026-01-03");
+        let again = fm_layout::layout_diagram(&ir);
+        assert_eq!(layout.nodes, again.nodes);
+        assert_eq!(layout.extensions.axis_ticks, again.extensions.axis_ticks);
+    }
+}
+
+#[test]
+fn gantt_large_duration_bounds_tick_work_without_truncating_the_date_axis() {
+    for (interval, start) in [
+        ("1day", "1969-12-26"),
+        ("1day", "1970-01-01"),
+        ("1week", "1970-01-01"),
+        ("1month", "1970-01-01"),
+        ("1quarter", "1970-01-01"),
+        ("1year", "1970-01-01"),
+    ] {
+        let (_, layout) = parse_and_layout(&format!(
+            "gantt\nexcludes weekends\ntickInterval {interval}\n\
+             Large :Large, {start}, 4294967295d\n"
+        ));
+        let axis = layout.extensions.gantt_day_axis.expect("date axis");
+        assert_eq!(
+            axis.first_day,
+            fm_layout::parse_iso_day_number(start).unwrap()
+        );
+        assert_eq!(axis.last_day, i32::MAX);
+        assert!(axis.x_for_day(i32::MAX).unwrap().is_finite());
+        assert!(!layout.extensions.axis_ticks.is_empty());
+        assert!(layout.extensions.axis_ticks.len() <= 4096);
+        assert!(layout.bounds.width.is_finite());
+        assert!(
+            layout
+                .extensions
+                .axis_ticks
+                .iter()
+                .all(|tick| tick.position.is_finite())
+        );
+    }
+}

@@ -165,6 +165,10 @@ export class Diagram {
      */
     selectNode(id: string, mode?: string | null): boolean;
     /**
+     * Return the currently selected node ID from the interactive [`fm_render_canvas::CanvasSession`] (`bd-g7sx9`).
+     */
+    selectedNodeId(): string | undefined;
+    /**
      * Stable author IDs, primary keyboard anchor, active token and usable-frame availability.
      */
     selectionState(): any;
@@ -179,6 +183,14 @@ export class Diagram {
  * without a duplicate, unstable Rust binding layer.
  */
 export function acquireWebGpuCanvasContext(canvas: HTMLCanvasElement): any;
+
+/**
+ * Apply a complete edited IR through the semantic family lens and return fresh source bindings.
+ *
+ * Unlike source-span replacement, this validates graph meaning before returning an edit. The
+ * `edited_ir` object has the same shape as `parseLens(input).parsed.ir`.
+ */
+export function applyIrLensEdit(input: string, edited_ir: any): any;
 
 export function applyLensEdit(input: string, element_id: string, replacement: string): any;
 
@@ -303,6 +315,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
     readonly acquireWebGpuCanvasContext: (a: number, b: number) => void;
+    readonly applyIrLensEdit: (a: number, b: number, c: number, d: number) => void;
     readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
@@ -331,6 +344,7 @@ export interface InitOutput {
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_selectAt: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly diagram_selectNode: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly diagram_selectedNodeId: (a: number, b: number) => void;
     readonly diagram_selectionState: (a: number, b: number) => void;
     readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
     readonly hitRegions: (a: number, b: number, c: number, d: number) => void;

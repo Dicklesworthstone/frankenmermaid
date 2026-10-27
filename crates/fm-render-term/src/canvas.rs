@@ -273,6 +273,64 @@ impl Canvas {
         }
     }
 
+    /// Draw a circle after independent horizontal and vertical scaling.
+    /// Both axis scans keep steep and shallow parts of the outline connected.
+    pub fn draw_ellipse(&mut self, cx: isize, cy: isize, radius_x: isize, radius_y: isize) {
+        if radius_x < 0 || radius_y < 0 {
+            return;
+        }
+        if radius_x == radius_y {
+            self.draw_circle(cx, cy, radius_x);
+            return;
+        }
+        if radius_x == 0 || radius_y == 0 {
+            self.draw_line(cx - radius_x, cy - radius_y, cx + radius_x, cy + radius_y);
+            return;
+        }
+        let mut plot = |x, y| {
+            for (px, py) in [
+                (cx + x, cy + y),
+                (cx - x, cy + y),
+                (cx + x, cy - y),
+                (cx - x, cy - y),
+            ] {
+                if px >= 0 && py >= 0 {
+                    self.set_pixel(px as usize, py as usize);
+                }
+            }
+        };
+        for y in 0..=radius_y {
+            let ratio = y as f64 / radius_y as f64;
+            let x = (radius_x as f64 * (1.0 - ratio * ratio).max(0.0).sqrt()).round() as isize;
+            plot(x, y);
+        }
+        for x in 0..=radius_x {
+            let ratio = x as f64 / radius_x as f64;
+            let y = (radius_y as f64 * (1.0 - ratio * ratio).max(0.0).sqrt()).round() as isize;
+            plot(x, y);
+        }
+    }
+
+    /// Fill a circle after independent horizontal and vertical scaling.
+    pub fn fill_ellipse(&mut self, cx: isize, cy: isize, radius_x: isize, radius_y: isize) {
+        if radius_x < 0 || radius_y < 0 {
+            return;
+        }
+        if radius_x == radius_y {
+            self.fill_circle(cx, cy, radius_x);
+            return;
+        }
+        if radius_x == 0 || radius_y == 0 {
+            self.draw_line(cx - radius_x, cy - radius_y, cx + radius_x, cy + radius_y);
+            return;
+        }
+        for y in -radius_y..=radius_y {
+            let ratio = y as f64 / radius_y as f64;
+            let x = (radius_x as f64 * (1.0 - ratio * ratio).max(0.0).sqrt()) as isize;
+            self.draw_line(cx - x, cy + y, cx + x, cy + y);
+        }
+    }
+
     /// Render the canvas to a string of terminal characters.
     #[must_use]
     pub fn render(&self) -> String {
@@ -502,6 +560,29 @@ mod tests {
         canvas.set_pixel(5, 10);
         canvas.clear();
         assert!(!canvas.get_pixel(5, 10));
+    }
+
+    #[test]
+    fn collapsed_and_clipped_ellipses_remain_visible() {
+        for (rx, ry) in [(0, 0), (0, 4), (4, 0)] {
+            let mut outline = Canvas::new(20, 20, MermaidRenderMode::CellOnly);
+            let mut filled = outline.clone();
+            outline.draw_ellipse(8, 8, rx, ry);
+            filled.fill_ellipse(8, 8, rx, ry);
+            for y in 0..20 {
+                for x in 0..20 {
+                    let expected = (8 - rx..=8 + rx).contains(&(x as isize))
+                        && (8 - ry..=8 + ry).contains(&(y as isize));
+                    assert_eq!(outline.get_pixel(x, y), expected);
+                    assert_eq!(filled.get_pixel(x, y), expected);
+                }
+            }
+        }
+        let mut clipped = Canvas::new(8, 8, MermaidRenderMode::CellOnly);
+        clipped.draw_ellipse(-2, 3, 4, 2);
+        assert!(clipped.get_pixel(2, 3));
+        clipped.fill_ellipse(-2, 3, 4, 2);
+        assert!(clipped.get_pixel(0, 3));
     }
 
     #[test]

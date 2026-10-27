@@ -62,7 +62,6 @@ mod thresholds {
     pub const MIN_CROSSING_IMPROVEMENT: i32 = 1;
 
     /// Output hash may differ (FNX adds classes) but structure must be stable.
-    #[allow(dead_code)] // Reserved for future hash-comparison checks
     pub const ALLOW_OUTPUT_HASH_DIFFERENCE: bool = true;
 }
 
@@ -90,7 +89,6 @@ impl std::fmt::Display for DeltaClassification {
 
 /// Metrics captured for a single scenario run.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used in Debug output and JSON serialization
 struct ScenarioMetrics {
     scenario_id: String,
     fnx_mode: String,
@@ -108,7 +106,6 @@ struct ScenarioMetrics {
 
 /// Differential report for a single scenario comparing FNX-on vs FNX-off.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used in Debug output and JSON serialization
 struct DifferentialReport {
     scenario_id: String,
     input_hash: String,
@@ -407,6 +404,12 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
             thresholds::MAX_BOUNDS_DELTA_PCT
         ));
     }
+    if !thresholds::ALLOW_OUTPUT_HASH_DIFFERENCE && fnx_off.output_hash != fnx_on.output_hash {
+        failure_reasons.push(format!(
+            "output_hash_mismatch: {} vs {}",
+            fnx_off.output_hash, fnx_on.output_hash
+        ));
+    }
 
     let passes_correctness_gate = failure_reasons.is_empty();
 
@@ -569,9 +572,12 @@ fn differential_evidence_log_emitted() {
 
         let entry = serde_json::json!({
             "report_version": DIFFERENTIAL_REPORT_VERSION,
-            "scenario_id": case_id,
+            "scenario_id": report.scenario_id,
             "input_hash": report.input_hash,
             "fnx_off": {
+                "scenario_id": report.fnx_off.scenario_id,
+                "fnx_mode": report.fnx_off.fnx_mode,
+                "parse_us": report.fnx_off.parse_us,
                 "layout_us": report.fnx_off.layout_us,
                 "render_us": report.fnx_off.render_us,
                 "output_hash": report.fnx_off.output_hash,
@@ -579,9 +585,13 @@ fn differential_evidence_log_emitted() {
                 "edge_count": report.fnx_off.edge_count,
                 "layout_width": report.fnx_off.layout_width,
                 "layout_height": report.fnx_off.layout_height,
+                "warning_count": report.fnx_off.warning_count,
                 "edge_crossings": report.fnx_off.edge_crossings,
             },
             "fnx_on": {
+                "scenario_id": report.fnx_on.scenario_id,
+                "fnx_mode": report.fnx_on.fnx_mode,
+                "parse_us": report.fnx_on.parse_us,
                 "layout_us": report.fnx_on.layout_us,
                 "render_us": report.fnx_on.render_us,
                 "output_hash": report.fnx_on.output_hash,
@@ -589,6 +599,7 @@ fn differential_evidence_log_emitted() {
                 "edge_count": report.fnx_on.edge_count,
                 "layout_width": report.fnx_on.layout_width,
                 "layout_height": report.fnx_on.layout_height,
+                "warning_count": report.fnx_on.warning_count,
                 "edge_crossings": report.fnx_on.edge_crossings,
             },
             "deltas": {

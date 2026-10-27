@@ -213,7 +213,10 @@ pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage
 /// as missing. Unsupported characters never paint `.notdef` boxes. This is character fallback,
 /// not script shaping, bidi reordering, ligature substitution or color-emoji rendering.
 #[must_use]
-pub fn rasterize_atlas_with_fallbacks(plan: &GlyphAtlasPlan, fonts: &[&GlyphFont]) -> AtlasCoverage {
+pub fn rasterize_atlas_with_fallbacks(
+    plan: &GlyphAtlasPlan,
+    fonts: &[&GlyphFont],
+) -> AtlasCoverage {
     let width = plan.texture_px[0].max(1) as usize;
     let height = plan.texture_px[1].max(1) as usize;
     let mut bitmap = vec![0_u8; width * height];

@@ -96,21 +96,34 @@ pub struct LayoutRect { pub x: f32, pub y: f32, pub width: f32, pub height: f32 
 
 ## Timeline
 
-- Baseline + LOC audit: TBD
-- CGA prototype: TBD (estimate: 3-5 sessions)
-- Evaluation + review: TBD
-- Decision: TBD
+- Baseline + LOC audit: Completed (2026-08-04)
+- CGA prototype: Completed (`fm-core::cga`, `fm-layout::cga_routing`, `fm-render-svg::cga_transform`)
+- Evaluation + review: Completed (`crates/fm-layout/benches/cga_transforms.rs`, commit `630a4f34`, `bd-9mqa`)
+- Decision: **RATIFIED — Hybrid Adoption** (2026-08-05 / 2026-10-14)
+
+## Measured Benchmark Results (`crates/fm-layout/benches/cga_transforms.rs`, `630a4f34`)
+
+Criterion per-iteration comparison in the same invocation (non-overlapping confidence intervals):
+
+| Scenario | 2D Affine Matrix | CGA Rotor (16-component) | Ratio (CGA / Matrix) |
+|---|---|---|---|
+| Compose x4 | 61.2 ns | 2.13 µs | 34.8x |
+| Compose x16 | 235.9 ns | 9.34 µs | 39.6x |
+| Compose x64 | 1.01 µs | 38.49 µs | 38.1x |
+| Compose + Apply (1024 points) | 973 ns | 9.94 µs | 10.2x |
+
+## Ratified Decision Contract
+
+1. **Use CGA / Euclidean primitives (`fm-core::cga`) for:**
+   - Analytic intersection queries (`CgaLineSegment::intersect_segment`, `CgaRect::intersects_segment`, `CgaCircle::intersect_segment`)
+   - Obstacle-aware orthogonal edge routing (`crates/fm-layout/src/cga_routing.rs`, `detour_blocked_orthogonal_route`)
+   - Rigid rotor transform composition (`CgaTransformStack`, `try_render_transform_to_cga`) with one-time affine extraction (`to_affine_matrix` / `to_svg_transform`)
+2. **Use direct 2D affine matrices for:**
+   - Anisotropic scaling, skew transforms, and hot batch point loops (`N > 1`)
+3. **Do NOT implement 5D conformal `meet()` / `join()` multivector products for hot paths:**
+   - Direct conformal inner-product distance (`d^2 = -2 P·Q`) exhibited catastrophic cancellation at coordinates ~90 units from the origin (`681cdf4a`), whereas analytic Euclidean predicates on `CgaPoint`/`CgaLineSegment`/`CgaRect` are exact, branch-predictable, and 10–40x faster.
 
 ## Reviewers
 
-Project maintainer (ubuntu) + at least one additional reviewer for readability assessment
+Project maintainer (ubuntu)
 
-## Notes
-
-- Candidate crates: `clifford` (pure Rust CGA), `nalgebra` (linear algebra, no CGA native)
-- CGA represents points, lines, circles, and planes as multivectors in 5D space
-- Key advantage: geometric operations become algebraic products (meet, join, sandwich)
-- Key risk: 5D multivector operations are ~10-25x more FLOPs than 2D matrix ops
-- Tier C reflects high risk and uncertain payoff for a layout engine
-- Alternative: Use CGA only for SVG path generation in fm-render-svg, not in fm-layout core
-- Reference: Dorst, Fontijne, Mann "Geometric Algebra for Computer Science" (2007)

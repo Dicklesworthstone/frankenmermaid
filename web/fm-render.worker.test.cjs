@@ -340,6 +340,21 @@ function loadPlayground(options = {}) {
     clearTimeout: (id) => timers.delete(id),
     addEventListener: (name, fn) => { listeners[name] = fn; },
     __import: async (url) => {
+      if (String(url).startsWith("./fm-")) {
+        return {
+          mountDocumentWorkspace: () => ({ sourceChanged() {}, dispose() {} }),
+          mountShareControls: () => ({ sourceChanged() {}, dispose() {} }),
+          mountImageExport: () => ({ sourceChanged() {}, dispose() {} }),
+          createSourceEditorBackend: () => ({
+            target: "SVG worker",
+            renderSource: async () => "",
+            cancel() {},
+            dispose() {},
+          }),
+          mountSourceEditor: () => ({ render: async () => {}, dispose() {} }),
+          mountDeckEditor: () => ({ open: async () => {}, sourceChanged() {}, dispose() {} }),
+        };
+      }
       imports.push(url);
       if (options.importModule) return options.importModule(module);
       return module;

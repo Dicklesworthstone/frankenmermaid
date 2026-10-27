@@ -10,3 +10,4 @@ cc b4b909f81a6c88e24baa8d0483dbf174c65c154861b12a0e29db93659fd154c7 # shrinks to
 cc c77a13a4b8cee8c75b129bea68b499ba5b0f5223b913406229708c890e201bda # shrinks to node_count = 9, edge_seed = 297
 cc 298fed62091d8c26661b93c72656731e5ac87bc404a5d22a7e1012cba1c9a1b5 # shrinks to operations = [(157, 44, 33), (19, 13, 208), (55, 59, 4), (73, 34, 4), (125, 41, 86), (19, 74, 166), (7, 152, 151)]
 cc 71472e7625224a2fe31917ec9e4b1944913f3aea4343c4a14adbd7785c9dcc98 # shrinks to operations = [(10, 13, 66), (175, 76, 1), (83, 11, 140)]
+cc 01b6299ef5635c842e78c9ea1e2b9430a5872cc99c0adb35b6de851f59d74a6a # shrinks to node_count = 19, edge_seed = 24

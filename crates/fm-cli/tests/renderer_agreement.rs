@@ -312,6 +312,23 @@ const CASES: &[(&str, &str, &str)] = &[
         "timeline\n  title Hist\n  section Age\n    2001 : Alpha\n",
         "Age",
     ),
+    // ── fourth widening (bd-cfigc): treemap, radar-beta, and info so all 27 diagram families are
+    // represented in the three-way renderer agreement corpus.
+    (
+        "treemap_leaf",
+        "treemap\n\"Root\"\n  \"Alpha\": 40\n  \"Beta\": 60\n",
+        "Alpha",
+    ),
+    (
+        "radar_axis",
+        "radar-beta\n  axis A[\"Alpha\"], B[\"Beta\"], C[\"Gamma\"]\n  curve c1[\"Series\"]{1, 2, 3}\n",
+        "Alpha",
+    ),
+    (
+        "info_version",
+        "info\n  showInfo\n",
+        concat!("v", env!("CARGO_PKG_VERSION")),
+    ),
 ];
 
 /// `(case, renderer, bead)` — pairs known to disagree, each naming the bead that tracks it.

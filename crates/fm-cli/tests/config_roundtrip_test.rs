@@ -147,6 +147,93 @@ fn explicit_config_controls_svg_effects_and_accessibility() {
 }
 
 #[test]
+fn portable_svg_is_available_from_cli_config_and_batch() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = "flowchart LR\naccTitle: Export example\nA[Alpha] -->|transfer| B[Beta]\n";
+    let default = run_cli_in_dir(temp.path(), &["render", "-"], source);
+    assert!(default.status.success(), "{}", stderr_text(&default));
+    assert!(stdout_text(&default).contains("var(--fm-"));
+
+    let portable = run_cli_in_dir(temp.path(), &["render", "-", "--portable"], source);
+    assert!(portable.status.success(), "{}", stderr_text(&portable));
+    let svg = stdout_text(&portable);
+    assert!(
+        !svg.contains("var("),
+        "portable SVG must resolve theme colors"
+    );
+    assert!(!svg.contains("width=\"100%\""));
+    let (width, height) = extract_viewbox_dimensions(&svg);
+    let root = svg.split('>').next().expect("SVG root element");
+    assert!(root.contains(&format!("width=\"{width}\"")));
+    assert!(root.contains(&format!("height=\"{height}\"")));
+    assert!(!svg.contains("@media"));
+    assert!(!svg.contains("@keyframes"));
+    assert!(svg.contains("Alpha") && svg.contains("Beta") && svg.contains("transfer"));
+    assert!(svg.contains("<title>Export example</title>"));
+    assert!(svg.contains("<desc>A flowchart diagram with 2 nodes and 1 edge."));
+    assert!(svg.contains("role=\"graphics-document document\""));
+    assert!(svg.contains("aria-label=\"Alpha\"") && svg.contains("aria-label=\"Beta\""));
+    assert!(svg.contains("class=\"fm-edge"));
+    assert!(
+        svg.contains("stroke=\"#"),
+        "edges must retain explicit strokes"
+    );
+
+    let config = write_config(&temp, "portable.toml", "[svg]\nportable = true\n");
+    let configured = run_cli_in_dir(temp.path(), &["--config", &config, "render", "-"], source);
+    assert!(configured.status.success(), "{}", stderr_text(&configured));
+    assert_eq!(stdout_text(&configured), svg);
+
+    fs::write(temp.path().join("diagram.mmd"), source).expect("write diagram");
+    let batch = run_cli_in_dir(
+        temp.path(),
+        &[
+            "render-batch",
+            "diagram.mmd",
+            "--out-dir",
+            "out",
+            "--portable",
+        ],
+        "",
+    );
+    assert!(batch.status.success(), "{}", stderr_text(&batch));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("out/diagram.svg")).unwrap(),
+        svg
+    );
+
+    // Switching profiles must invalidate the persistent batch output cache.
+    let browser_batch = run_cli_in_dir(
+        temp.path(),
+        &["render-batch", "diagram.mmd", "--out-dir", "out"],
+        "",
+    );
+    assert!(
+        browser_batch.status.success(),
+        "{}",
+        stderr_text(&browser_batch)
+    );
+    let browser_svg = fs::read_to_string(temp.path().join("out/diagram.svg")).unwrap();
+    assert!(browser_svg.contains("var(--fm-"));
+    assert_ne!(browser_svg, svg);
+}
+
+#[test]
+fn portable_flag_rejects_non_svg_outputs() {
+    let temp = TempDir::new().expect("tempdir");
+    for format in ["png", "term", "ascii"] {
+        let output = run_cli_in_dir(
+            temp.path(),
+            &["render", "-", "--portable", "--format", format],
+            "flowchart LR\nA-->B\n",
+        );
+        assert!(!output.status.success());
+        assert!(stderr_text(&output).contains("--portable requires --format svg"));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn explicit_config_enables_svg_effects_and_accessibility() {
     let temp = TempDir::new().expect("tempdir");
     let config_path = write_config(

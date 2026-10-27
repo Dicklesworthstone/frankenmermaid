@@ -10,9 +10,9 @@ use fm_core::{
     GraphDirection, IrAttributeKey, IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy,
     IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId,
     IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MERMAID_CONFIG_SCHEMA_VERSION,
-    MermaidConfigError, MermaidConfigValidation, MermaidParseMode, MermaidSupportLevel, NodeShape,
-    Position, Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
-    validate_mermaid_config_value,
+    MermaidConfigError, MermaidConfigValidation, MermaidEdgeRoutingHint, MermaidParseMode,
+    MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
+    parse_mermaid_js_config_value, to_init_parse, validate_mermaid_config_value,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
@@ -496,8 +496,8 @@ enum ClassStatement {
 
 /// Parse mermaid input with auto-detection. Convenience entry point for external callers
 /// and reproduction scripts.
+#[inline]
 #[must_use]
-#[allow(dead_code)]
 pub fn parse_mermaid(input: &str) -> ParseResult {
     let detection = crate::detect_type_with_confidence(input);
     parse_mermaid_with_detection_and_config(
@@ -509,8 +509,8 @@ pub fn parse_mermaid(input: &str) -> ParseResult {
 }
 
 /// Parse mermaid input with pre-computed detection results.
+#[inline]
 #[must_use]
-#[allow(dead_code)] // Used by crate-level tests through the private module path.
 pub fn parse_mermaid_with_detection(
     input: &str,
     detection: DetectedType,
@@ -519,7 +519,7 @@ pub fn parse_mermaid_with_detection(
     parse_mermaid_with_detection_and_config(input, detection, parse_mode, &ParserConfig::default())
 }
 
-/// Parse mermaid input with pre-computed detection results and explicit parser behavior config./// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
+/// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
 #[must_use]
 pub fn parse_mermaid_with_detection_and_config(
     input: &str,
@@ -658,6 +658,7 @@ pub fn parse_mermaid_with_detection_and_config(
     // Semantic deck validation (bd-m2qzi): resolve every selector against the finished
     // diagram, purely for diagnostics — resolution results are never stored.
     validate_deck_semantics(&mut builder);
+    validate_constraint_semantics(&mut builder);
 
     // A treemap holds its whole diagram in `treemap_meta` and declares no nodes or edges, so the
     // generic emptiness check would report every valid treemap as unparseable. Keyed on the meta
@@ -665,7 +666,10 @@ pub fn parse_mermaid_with_detection_and_config(
     // An `info` diagram declares no nodes and no edges by construction — its whole content is
     // the renderer's version, resolved at render time — so the generic emptiness check below would
     // report every valid one as unparseable.
-    let carried_by_meta = diagram_type == DiagramType::Info
+    // A Kanban board's named columns are clusters. They remain meaningful content even when
+    // every column is empty; only a board with no columns and no cards should warn here.
+    let has_non_graph_content = diagram_type == DiagramType::Info
+        || (diagram_type == DiagramType::Kanban && !builder.ir_mut().clusters.is_empty())
         || builder
             .ir_mut()
             .treemap_meta
@@ -676,7 +680,7 @@ pub fn parse_mermaid_with_detection_and_config(
             .radar_meta
             .as_ref()
             .is_some_and(|meta| !meta.axes.is_empty());
-    if builder.node_count() == 0 && builder.edge_count() == 0 && !carried_by_meta {
+    if builder.node_count() == 0 && builder.edge_count() == 0 && !has_non_graph_content {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
         // lib.rs already names those at DETECTION, and its warning reaches this builder through the
         // `detection.warnings` loop above — so a second, differently-worded message from this site
@@ -717,14 +721,10 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
             parse_flowchart(content, builder);
         }
         MermaidParseMode::Recover => {
-            builder.add_diagnostic(
-                Diagnostic::warning(
-                    "Unable to detect diagram family; falling back to flowchart-style recovery",
-                )
-                .with_category(DiagnosticCategory::Recovery)
-                .with_suggestion(
-                    "Add an explicit Mermaid header to reduce recovery guesswork".to_string(),
-                ),
+            builder.add_recovery_warning(
+                "Unable to detect diagram family; falling back to flowchart-style recovery",
+                None,
+                Some("Add an explicit Mermaid header to reduce recovery guesswork".to_string()),
             );
             builder.add_warning(
                 "Unable to detect diagram type; using recovery-mode flowchart salvage",
@@ -734,7 +734,20 @@ fn apply_unknown_contract(content: &str, builder: &mut IrBuilder, parse_mode: Me
     }
 }
 
-#[allow(dead_code)] // Reserved for future detectible diagram families that still need fallback handling.
+/// Parse Mermaid content against the declared support-level contract for `diagram_type` (`bd-hcg6p`).
+#[inline]
+#[must_use]
+pub fn parse_with_support_contract(
+    content: &str,
+    diagram_type: DiagramType,
+    parse_mode: MermaidParseMode,
+) -> ParseResult {
+    let mut builder = IrBuilder::new(diagram_type);
+    builder.set_parse_mode(parse_mode);
+    apply_support_contract(content, &mut builder, diagram_type, parse_mode);
+    builder.finish(1.0, crate::DetectionMethod::ExactKeyword)
+}
+
 fn apply_support_contract(
     content: &str,
     builder: &mut IrBuilder,
@@ -815,7 +828,6 @@ fn apply_support_contract(
 /// Intermediate AST node produced by the chumsky flowchart parser.
 /// Lowered to IR via [`lower_flowchart`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Subgraph variant used in future expansion
 enum FlowAst {
     Direction(GraphDirection),
     Node(FlowAstNode),
@@ -839,14 +851,21 @@ enum FlowAst {
         link_target: Option<String>,
         is_callback: bool,
     },
-    /// `edgeId@{ animate: … }` — a march speed for an ALREADY-DECLARED edge.
+    /// `edgeId@{ animate: …, curve: … }` — properties of an already-declared edge.
     ///
     /// A statement, not a field on [`FlowAst::Edge`], because upstream applies it by id lookup
     /// after the fact: measured against the pinned 11.15.0 bundle, the same metadata written one
     /// line EARLIER than its edge animates nothing at all.
-    EdgeAnimation {
+    EdgeMetadata {
         id: String,
-        animation: EdgeAnimation,
+        animation: Option<EdgeAnimation>,
+        routing: Option<MermaidEdgeRoutingHint>,
+    },
+    /// The optional `interpolate` clause is applied during lowering, in source order with edge
+    /// metadata. CSS is still resolved by the existing post-lowering style pass.
+    LinkRouting {
+        targets: Vec<String>,
+        routing: MermaidEdgeRoutingHint,
     },
     StyleOrLinkStyle,
     ClassDef,
@@ -1261,13 +1280,12 @@ fn flow_statement_parser<'a>()
 
     // -- style/linkStyle/classDef (skip) ------------------------------------
     let skip_directive = choice((
-        just("style ").to(()),
-        just("linkStyle ").to(()),
-        just("classDef ").to(()),
+        just("style ").to(FlowAst::StyleOrLinkStyle),
+        just("linkStyle ").to(FlowAst::StyleOrLinkStyle),
+        just("classDef ").to(FlowAst::ClassDef),
     ))
-    .then(any().repeated())
-    .then_ignore(end())
-    .to(FlowAst::StyleOrLinkStyle);
+    .then_ignore(any().repeated())
+    .then_ignore(end());
 
     // -- Statement: try edge first (more specific), then directives, then node
     choice((
@@ -1372,8 +1390,39 @@ fn lower_flow_ast(
                 span,
             );
         }
-        FlowAst::EdgeAnimation { id, animation } => {
-            builder.set_edge_animation(id, *animation);
+        FlowAst::EdgeMetadata {
+            id,
+            animation,
+            routing,
+        } => {
+            if let Some(animation) = animation {
+                builder.set_edge_animation(id, *animation);
+            }
+            if let Some(routing) = routing {
+                builder.set_edge_routing_by_id(id, *routing);
+            }
+        }
+        FlowAst::LinkRouting { targets, routing } => {
+            for target in targets {
+                if target.eq_ignore_ascii_case("default") {
+                    builder.set_default_link_routing(*routing);
+                } else if let Ok(index) = target.parse::<usize>() {
+                    let edge_count = builder.edge_count();
+                    if index < edge_count {
+                        builder.set_link_routing(index, *routing);
+                    } else {
+                        builder.add_warning(format!(
+                            "linkStyle index {index} is out of bounds; the diagram has \
+                             {edge_count} link(s), so valid indices are 0..{}",
+                            edge_count.saturating_sub(1)
+                        ));
+                    }
+                } else {
+                    builder.add_warning(format!(
+                        "linkStyle target `{target}` is not a link index or `default`; it was ignored"
+                    ));
+                }
+            }
         }
         FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
             // Intentionally skipped — same as the hand-written parser
@@ -1630,7 +1679,8 @@ fn flow_ast_declares_content(ast: &FlowAst) -> bool {
         FlowAst::Direction(_)
         | FlowAst::ClassAssign { .. }
         | FlowAst::ClickDirective { .. }
-        | FlowAst::EdgeAnimation { .. }
+        | FlowAst::EdgeMetadata { .. }
+        | FlowAst::LinkRouting { .. }
         | FlowAst::StyleOrLinkStyle
         | FlowAst::ClassDef => false,
     }
@@ -1655,7 +1705,8 @@ fn flow_body_first_node_id<'a>(body: &'a [FlowDocumentItem<'a>]) -> Option<&'a s
                         FlowAst::Direction(_)
                         | FlowAst::ClassAssign { .. }
                         | FlowAst::ClickDirective { .. }
-                        | FlowAst::EdgeAnimation { .. }
+                        | FlowAst::EdgeMetadata { .. }
+                        | FlowAst::LinkRouting { .. }
                         | FlowAst::StyleOrLinkStyle
                         | FlowAst::ClassDef => {}
                     }
@@ -2691,6 +2742,52 @@ fn find_triple_colon(s: &str) -> Option<usize> {
     None
 }
 
+/// Split a leading `interpolate <curve>` clause from the CSS that follows it.
+/// The same boundary is used by source-order routing and the later style pass.
+fn split_link_style_interpolation(style: &str) -> Option<(&str, &str)> {
+    let keyword_len = "interpolate".len();
+    let head = style.get(..keyword_len)?;
+    let tail = style.get(keyword_len..)?;
+    if !head.eq_ignore_ascii_case("interpolate")
+        || (!tail.is_empty() && !tail.starts_with(char::is_whitespace))
+    {
+        return None;
+    }
+    let after_keyword = tail.trim_start();
+    Some(
+        after_keyword
+            .split_once(char::is_whitespace)
+            .map_or((after_keyword, ""), |(curve, style)| (curve, style.trim())),
+    )
+}
+
+fn unsupported_edge_curve_warning(curve: &str) -> String {
+    format!("edge curve '{curve}' is not a supported routing family; the previous routing was kept")
+}
+
+fn parse_link_routing_ast(statement: &str, warnings: &mut Vec<String>) -> Option<FlowAst> {
+    let rest = statement.strip_prefix("linkStyle ")?.trim();
+    let (targets, style) = rest.split_once(char::is_whitespace)?;
+    let (curve, _) = split_link_style_interpolation(style.trim())?;
+    let Some(routing) = MermaidEdgeRoutingHint::from_mermaid_curve(curve) else {
+        warnings.push(if curve.is_empty() {
+            "linkStyle `interpolate` needs a curve name (for example `interpolate basis`); the clause was ignored".to_string()
+        } else {
+            unsupported_edge_curve_warning(curve)
+        });
+        return Some(FlowAst::StyleOrLinkStyle);
+    };
+    Some(FlowAst::LinkRouting {
+        targets: targets
+            .split(',')
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(str::to_string)
+            .collect(),
+        routing,
+    })
+}
+
 fn parse_flowchart_statement_asts(
     statement: &str,
     line_number: usize,
@@ -2699,6 +2796,9 @@ fn parse_flowchart_statement_asts(
     config: &ParserConfig,
 ) -> Option<Vec<FlowAst>> {
     if let Some(ast) = parse_fast_simple_flowchart_statement_ast(statement) {
+        return Some(vec![ast]);
+    }
+    if let Some(ast) = parse_link_routing_ast(statement, warnings) {
         return Some(vec![ast]);
     }
 
@@ -2814,8 +2914,16 @@ fn parse_flowchart_statement_asts(
         // the directive text (bd-yrxu).
         return Some(match handled {
             FlowMetadata::Node(node) => vec![FlowAst::Node(*node)],
-            FlowMetadata::EdgeAnimation { id, animation } => {
-                vec![FlowAst::EdgeAnimation { id, animation }]
+            FlowMetadata::Edge {
+                id,
+                animation,
+                routing,
+            } => {
+                vec![FlowAst::EdgeMetadata {
+                    id,
+                    animation,
+                    routing,
+                }]
             }
             FlowMetadata::Nothing => Vec::new(),
         });
@@ -3205,10 +3313,11 @@ fn shape_warning_against(name: &str, unimplemented: &[&str]) -> String {
 enum FlowMetadata {
     /// The statement declared a node.
     Node(Box<FlowAstNode>),
-    /// The statement named an edge and asked it to march.
-    EdgeAnimation {
+    /// The statement named an edge and configured its animation or routing.
+    Edge {
         id: String,
-        animation: EdgeAnimation,
+        animation: Option<EdgeAnimation>,
+        routing: Option<MermaidEdgeRoutingHint>,
     },
     /// Recognised `@{…}` metadata that declares nothing and addresses nothing.
     Nothing,
@@ -3252,6 +3361,8 @@ struct FlowMetadataBody {
     animation: Option<EdgeAnimation>,
     /// An `animate:`/`animation:` key was present, even one that set no speed.
     saw_animation_key: bool,
+    /// A supported per-edge `curve:` family, independent of animation settings.
+    routing: Option<MermaidEdgeRoutingHint>,
 }
 
 /// Read an `@{ … }` body over a base shape/label.
@@ -3273,6 +3384,7 @@ fn scan_flowchart_metadata_body(
         saw_node_key: false,
         animation: None,
         saw_animation_key: false,
+        routing: None,
     };
     for pair in split_metadata_pairs(body) {
         let Some((key, value)) = pair.split_once(':') else {
@@ -3314,6 +3426,13 @@ fn scan_flowchart_metadata_body(
                     }
                 }
             }
+            "curve" => {
+                if let Some(routing) = MermaidEdgeRoutingHint::from_mermaid_curve(value) {
+                    out.routing = Some(routing);
+                } else if let Some(sink) = warnings.as_deref_mut() {
+                    sink.push(unsupported_edge_curve_warning(value));
+                }
+            }
             _ => {}
         }
     }
@@ -3349,9 +3468,10 @@ fn parse_flowchart_node_metadata(
         saw_node_key,
         animation,
         saw_animation_key,
+        routing,
     } = scanned;
 
-    // A node key WINS over an animation key on the same statement. `animate:` addresses the edge
+    // A node key wins over edge metadata on the same statement. `animate:`/`curve:` address the edge
     // namespace, so on a statement that also declares a node the id is a node id, which no edge
     // can be registered under — routing it to the edge map could only ever miss.
     if saw_node_key {
@@ -3363,10 +3483,11 @@ fn parse_flowchart_node_metadata(
             classes: base.classes,
         })));
     }
-    if saw_animation_key && let Some(animation) = animation {
-        return Some(FlowMetadata::EdgeAnimation {
+    if (saw_animation_key && animation.is_some()) || routing.is_some() {
+        return Some(FlowMetadata::Edge {
             id: id.to_string(),
             animation,
+            routing,
         });
     }
     Some(FlowMetadata::Nothing)
@@ -10475,7 +10596,7 @@ const TIMELINE_SECTION_CLASSES: [&str; 8] = [
 
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
     let mut previous_period: Option<IrNodeId> = None;
-    let mut current_period: Option<IrNodeId> = None;
+    let mut current_period: Option<(IrNodeId, Option<usize>, Option<usize>)> = None;
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
@@ -10531,10 +10652,12 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         if let Some(section_name) = trimmed.strip_prefix("section ") {
             let section_name = section_name.trim();
             let span = span_for(line_number, line);
-            current_section = builder.ensure_cluster(section_name, Some(section_name), span);
+            // A section declaration opens a new run of periods, even when its caption repeats.
+            let section_key = format!("timeline-section-{line_number}");
+            current_section = builder.ensure_cluster(&section_key, Some(section_name), span);
             current_section_subgraph = current_section.and_then(|section_idx| {
                 builder.ensure_subgraph(
-                    section_name,
+                    &section_key,
                     section_name,
                     Some(section_name),
                     span,
@@ -10550,15 +10673,15 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         // Check if this is a continuation event (starts with :)
         if let Some(continuation) = trimmed.strip_prefix(':') {
             // This is a continuation event for the current period
-            if let Some(period_id) = current_period {
+            if let Some((period_id, period_section, period_subgraph)) = current_period {
                 let events_text = continuation.trim();
                 parse_timeline_events(
                     events_text,
                     period_id,
                     line_number,
                     line,
-                    current_section,
-                    current_section_subgraph,
+                    period_section,
+                    period_subgraph,
                     builder,
                 );
             } else {
@@ -10569,96 +10692,49 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // This should be a time period line: {period} : {event1} : {event2} ...
-        if let Some(colon_pos) = trimmed.find(':') {
-            let period_text = trimmed[..colon_pos].trim();
-            let events_text = trimmed[colon_pos + 1..].trim();
+        // Captions are content, not identifiers. Each source occurrence is a distinct period;
+        // reusing a caption must not merge it with a previous period or an event of the same name.
+        let (period_text, events_text) = trimmed
+            .split_once(':')
+            .map_or((trimmed, ""), |(period, events)| {
+                (period.trim(), events.trim())
+            });
+        let period_id = format!("timeline-period-{line_number}");
+        let period_label = replace_br_with_newlines(period_text);
+        let period_node =
+            builder.intern_node(&period_id, Some(&period_label), NodeShape::Rect, span);
+        current_period = period_node.map(|id| (id, current_section, current_section_subgraph));
+        let Some(period_node_id) = period_node else {
+            continue;
+        };
 
-            if period_text.is_empty() {
-                builder.add_warning(format!("Line {line_number}: empty time period: {trimmed}"));
-                continue;
-            }
+        builder.add_class_to_node_id(period_node_id, "timeline-period");
+        if let Some(section_idx) = current_section {
+            builder.add_class_to_node_id(
+                period_node_id,
+                TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
+            );
+            builder.add_node_to_cluster(section_idx, period_node_id);
+        }
+        if let Some(subgraph_idx) = current_section_subgraph {
+            builder.add_node_to_subgraph(subgraph_idx, period_node_id);
+        }
 
-            // Create time period node
-            let period_id = normalize_identifier(period_text);
-            if period_id.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: could not derive identifier for time period: {period_text}"
-                ));
-                continue;
-            }
+        if let Some(prev_id) = previous_period {
+            builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
+        }
+        previous_period = Some(period_node_id);
 
-            let period_node =
-                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
-
-            if let Some(period_node_id) = period_node {
-                builder.add_class_to_node_id(period_node_id, "timeline-period");
-                // Section color class for background band differentiation.
-                if let Some(section_idx) = current_section {
-                    builder.add_class_to_node_id(
-                        period_node_id,
-                        TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
-                    );
-                }
-
-                // Add to current section if any
-                if let Some(section_idx) = current_section {
-                    builder.add_node_to_cluster(section_idx, period_node_id);
-                }
-                if let Some(subgraph_idx) = current_section_subgraph {
-                    builder.add_node_to_subgraph(subgraph_idx, period_node_id);
-                }
-
-                // Link to previous period (timeline sequence)
-                if let Some(prev_id) = previous_period {
-                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
-                }
-
-                previous_period = Some(period_node_id);
-                current_period = Some(period_node_id);
-
-                // Parse events for this period
-                if !events_text.is_empty() {
-                    parse_timeline_events(
-                        events_text,
-                        period_node_id,
-                        line_number,
-                        line,
-                        current_section,
-                        current_section_subgraph,
-                        builder,
-                    );
-                }
-            }
-        } else {
-            // Line without colon - treat as a time period with no events
-            let period_text = trimmed;
-            let period_id = normalize_identifier(period_text);
-            if period_id.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: unsupported timeline syntax: {trimmed}"
-                ));
-                continue;
-            }
-
-            let period_node =
-                builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
-
-            if let Some(period_node_id) = period_node {
-                if let Some(section_idx) = current_section {
-                    builder.add_node_to_cluster(section_idx, period_node_id);
-                }
-                if let Some(subgraph_idx) = current_section_subgraph {
-                    builder.add_node_to_subgraph(subgraph_idx, period_node_id);
-                }
-
-                if let Some(prev_id) = previous_period {
-                    builder.push_edge(prev_id, period_node_id, ArrowType::Arrow, None, span);
-                }
-
-                previous_period = Some(period_node_id);
-                current_period = Some(period_node_id);
-            }
+        if !events_text.is_empty() {
+            parse_timeline_events(
+                events_text,
+                period_node_id,
+                line_number,
+                line,
+                current_section,
+                current_section_subgraph,
+                builder,
+            );
         }
     }
 }
@@ -10676,20 +10752,20 @@ fn parse_timeline_events(
     let span = span_for(line_number, source_line);
 
     // Events can be separated by colons
-    for event_text in events_text.split(':') {
+    for (event_index, event_text) in events_text.split(':').enumerate() {
         let event_text_trimmed = event_text.trim();
         if event_text_trimmed.is_empty() {
             continue;
         }
 
-        let event_id = normalize_identifier(event_text);
-        if event_id.is_empty() {
-            continue;
-        }
+        // Include the occurrence within the line so repeated inline and continuation events
+        // remain separate, including captions whose normalized spellings would collide.
+        let event_id = format!("timeline-event-{line_number}-{event_index}");
 
-        // Create event node and link to period. Entity codes decode here as in every other label
-        // position (bd-j06n2); the pinned mermaid-11.15.0 draws `#35;` as `#` in a timeline event.
-        let event_label = decode_mermaid_entities(event_text);
+        // Normalize display text after splitting the authored events: a line break stays in
+        // its event, and an entity-encoded colon must not create another event. Store the same
+        // newline text that layout measures so renderers never draw the break tag literally.
+        let event_label = decode_mermaid_entities(&replace_br_with_newlines(event_text));
         if let Some(event_node_id) =
             builder.intern_node(&event_id, Some(&event_label), NodeShape::Rounded, span)
         {
@@ -11285,11 +11361,28 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
 
         if let Some(excludes) = trimmed.strip_prefix("excludes ") {
-            gantt_meta.excludes = parse_gantt_excludes(excludes, gantt_meta.date_format.as_deref());
-            if gantt_meta.excludes.is_empty() {
+            let (exclusions, invalid) =
+                parse_gantt_excludes(excludes, gantt_meta.date_format.as_deref());
+            if exclusions.is_empty() && invalid.is_empty() {
                 builder.add_warning(format!(
                     "Line {line_number}: gantt excludes directive is empty"
                 ));
+            }
+            for token in invalid {
+                builder.add_warning(format!(
+                    "Line {line_number}: unsupported gantt exclusion '{token}'"
+                ));
+            }
+            gantt_meta.excludes.extend(exclusions);
+            continue;
+        }
+
+        if let Some(weekend) = trimmed.strip_prefix("weekend ") {
+            match parse_gantt_weekday(weekend) {
+                Some(day @ (5 | 6)) => gantt_meta.weekend_start = Some(day),
+                _ => builder.add_warning(format!(
+                    "Line {line_number}: gantt weekend must start on friday or saturday: {weekend}"
+                )),
             }
             continue;
         }
@@ -11388,7 +11481,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
                 .entry(task_id_ref.clone())
                 .or_insert_with(|| task_id.clone());
         }
-        if let Some(after_task_id) = parsed_meta.depends_on.first() {
+        for after_task_id in &parsed_meta.depends_on {
             if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
                 pending_dependencies.push(PendingGanttDependency::Resolved { node, from, span });
             } else {
@@ -11438,6 +11531,32 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
     }
 
+    // An `until` reference constrains this task's end to the other task's START. Resolve after
+    // every declaration so forward references and case-sensitive ids behave like `after`.
+    for task in &gantt_meta.tasks {
+        let Some(GanttDate::UntilTasks(targets)) = task.end.as_ref() else {
+            continue;
+        };
+        if targets.is_empty() {
+            builder.add_warning("Gantt 'until' requires at least one task id".to_string());
+        }
+        let span = builder.ir().nodes[task.node.0].span_primary;
+        for target in targets {
+            if let Some(&node) = task_ids_to_nodes.get(target) {
+                builder.push_edge(task.node, node, ArrowType::Arrow, None, span);
+            } else {
+                builder.add_warning(format!("Unresolved gantt dependency 'until {target}'"));
+            }
+        }
+    }
+
+    if gantt_meta.excluded_weekday_mask() == 0x7f {
+        builder.add_warning(
+            "Gantt calendar excludes every weekday; recurring exclusions are ignored to keep scheduling finite"
+                .to_string(),
+        );
+    }
+
     for warning in click_warnings {
         builder.add_warning(warning);
     }
@@ -11484,6 +11603,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         || gantt_meta.date_format.is_some()
         || gantt_meta.axis_format.is_some()
         || gantt_meta.tick_interval.is_some()
+        || gantt_meta.weekend_start.is_some()
         || !gantt_meta.excludes.is_empty()
     {
         builder.set_gantt_meta(gantt_meta);
@@ -11506,6 +11626,7 @@ struct ParsedGanttTaskMeta {
 
 fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> ParsedGanttTaskMeta {
     let mut parsed = ParsedGanttTaskMeta::default();
+    let mut scheduling_tokens = Vec::new();
 
     for token in raw_meta
         .split(',')
@@ -11535,12 +11656,50 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             continue;
         }
 
-        // `after <task>` dependency: match the prefix case-insensitively, then lowercase ONLY the
-        // reference (as the old whole-token `to_ascii_lowercase` did before `strip_prefix("after ")`).
-        if token.len() >= 6 && token.as_bytes()[..6].eq_ignore_ascii_case(b"after ") {
-            let after = token[6..].to_ascii_lowercase();
-            let dependency = normalize_compound_identifier(&after);
-            if !dependency.is_empty() {
+        if let Some(progress) = parse_gantt_progress(token) {
+            parsed.progress.get_or_insert(progress);
+            continue;
+        }
+        scheduling_tokens.push(token);
+    }
+
+    // With one scheduling item Mermaid specifies an end, using the preceding task's end as
+    // the start. In particular, a lone absolute date is not an explicit start date. The permissive
+    // `id, end` form follows the same rule when its first item cannot be a start expression.
+    let end_only = scheduling_tokens.len() == 1
+        || (scheduling_tokens.len() == 2
+            && parse_gantt_absolute_date_checked(scheduling_tokens[0], date_format).is_none()
+            && !scheduling_tokens[0]
+                .split_once(char::is_whitespace)
+                .is_some_and(|(keyword, _)| keyword.eq_ignore_ascii_case("after")));
+    let scheduling_token_count = scheduling_tokens.len();
+    for (token_index, token) in scheduling_tokens.into_iter().enumerate() {
+        let (keyword, references) = token.split_once(char::is_whitespace).unwrap_or((token, ""));
+        if keyword.eq_ignore_ascii_case("until")
+            && (!references.is_empty() || token_index + 1 == scheduling_token_count)
+        {
+            let mut targets = Vec::new();
+            for target in references
+                .split_whitespace()
+                .map(normalize_compound_identifier)
+            {
+                if !target.is_empty() && !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            parsed.end.get_or_insert(GanttDate::UntilTasks(targets));
+            continue;
+        }
+
+        if let Some((keyword, after)) = token.split_once(char::is_whitespace)
+            && keyword.eq_ignore_ascii_case("after")
+        {
+            // Task identifiers are case-sensitive. Each whitespace-separated reference is a
+            // separate predecessor; joining them would invent a task named `Build_Test`.
+            for dependency in after.split_whitespace().map(normalize_compound_identifier) {
+                if dependency.is_empty() || parsed.depends_on.contains(&dependency) {
+                    continue;
+                }
                 if parsed.start.is_none() {
                     parsed.start = Some(GanttDate::AfterTask(dependency.clone()));
                 }
@@ -11549,7 +11708,8 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
             continue;
         }
 
-        if parsed.start.is_none()
+        if !end_only
+            && parsed.start.is_none()
             && let Some((date, fallback)) = parse_gantt_absolute_date_checked(token, date_format)
         {
             if fallback {
@@ -11573,13 +11733,6 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
                 parsed.date_format_mismatches.push(token.to_string());
             }
             parsed.end = Some(GanttDate::Absolute(date));
-            continue;
-        }
-
-        if parsed.progress.is_none()
-            && let Some(progress) = parse_gantt_progress(token)
-        {
-            parsed.progress = Some(progress);
             continue;
         }
 
@@ -11735,7 +11888,7 @@ fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
         return days.trim().parse::<u32>().ok();
     }
     if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
-        return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
+        return weeks.trim().parse::<u32>().ok()?.checked_mul(7);
     }
     None
 }
@@ -11757,21 +11910,36 @@ fn parse_gantt_tick_interval(token: &str) -> Option<GanttTickInterval> {
     }
 }
 
-fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclude> {
+fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> (Vec<GanttExclude>, Vec<String>) {
     let mut excludes = Vec::new();
     let mut dates = Vec::new();
+    let mut invalid = Vec::new();
 
-    for token in raw
+    for item in raw
         .split(',')
         .map(trim_fast)
-        .filter(|token| !token.is_empty())
+        .filter(|item| !item.is_empty())
     {
-        if token.eq_ignore_ascii_case("weekends") {
-            excludes.push(GanttExclude::Weekends);
-        } else {
-            dates.push(
-                parse_gantt_absolute_date(token, date_format).unwrap_or_else(|| token.to_string()),
-            );
+        // A numeric date may itself contain spaces (`dateFormat DD MM YYYY`). Keep each
+        // complete comma-delimited date before splitting whitespace-separated keywords.
+        // The date normalizer accepts arbitrary separators, so never feed it a keyword list:
+        // `weekends monday 10/03/2026` would otherwise silently lose both exclusions.
+        if !item.chars().any(|ch| ch.is_ascii_alphabetic())
+            && let Some(date) = parse_gantt_absolute_date(item, date_format)
+        {
+            dates.push(date);
+            continue;
+        }
+        for token in item.split_whitespace() {
+            if token.eq_ignore_ascii_case("weekends") {
+                excludes.push(GanttExclude::Weekends);
+            } else if let Some(weekday) = parse_gantt_weekday(token) {
+                excludes.push(GanttExclude::Weekday(weekday));
+            } else if let Some(date) = parse_gantt_absolute_date(token, date_format) {
+                dates.push(date);
+            } else {
+                invalid.push(token.to_string());
+            }
         }
     }
 
@@ -11779,7 +11947,7 @@ fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclud
         excludes.push(GanttExclude::Dates(dates));
     }
 
-    excludes
+    (excludes, invalid)
 }
 
 fn parse_gantt_weekday(token: &str) -> Option<u8> {
@@ -12243,8 +12411,17 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             .as_deref()
             .filter(|name| !name.is_empty())
             .unwrap_or(series_kind);
-        let base_id = normalize_compound_identifier(base_name);
-        let use_fresh_nodes = seen_base_ids.insert(base_id.clone());
+        // Every statement is a separate series, even when it has the same name or kind.
+        // Reusing point IDs aliases its geometry to an earlier series and loses one series
+        // when renderers index layout boxes by node ID. Keep descriptive first-use IDs,
+        // then reserve collision-safe bases without changing the author's visible labels.
+        let normalized_base = normalize_compound_identifier(base_name);
+        let mut base_id = normalized_base.clone();
+        let mut discriminator = xy_chart_meta.series.len() + 1;
+        while !seen_base_ids.insert(base_id.clone()) {
+            base_id = format!("{normalized_base}__{discriminator}");
+            discriminator += 1;
+        }
         let mut previous_node = None;
         let mut series_nodes = Vec::with_capacity(values.len());
 
@@ -12264,12 +12441,9 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
                 "bar" => NodeShape::Rect,
                 _ => NodeShape::Circle,
             };
-            let node = if use_fresh_nodes {
+            let Some(node) =
                 builder.intern_fresh_node_owned_label(node_id, node_label, shape, span)
-            } else {
-                builder.intern_node(&node_id, Some(&node_label), shape, span)
-            };
-            let Some(node) = node else {
+            else {
                 continue;
             };
             series_nodes.push(node);
@@ -12974,7 +13148,6 @@ enum StateStatement {
     RegionSeparator,
     Note {
         target: String,
-        #[allow(dead_code)]
         position: String,
         text: String,
     },
@@ -16602,11 +16775,21 @@ fn parse_xychart_axis(raw: &str) -> IrXyAxis {
     }
 
     if let Some(categories) = bracket_contents(remaining) {
+        if axis.label.is_none()
+            && let Some((label, _)) = remaining.split_once('[')
+        {
+            axis.label = clean_label(Some(label));
+        }
         axis.categories = parse_chart_value_list(categories);
         return axis;
     }
 
-    if let Some((range_start, range_end)) = parse_axis_range(remaining) {
+    if let Some((label, range_start, range_end)) = parse_axis_range(remaining)
+        && (axis.label.is_none() || label.is_empty())
+    {
+        if axis.label.is_none() {
+            axis.label = clean_label(Some(label));
+        }
         axis.min = Some(range_start);
         axis.max = Some(range_end);
         return axis;
@@ -16619,11 +16802,17 @@ fn parse_xychart_axis(raw: &str) -> IrXyAxis {
     axis
 }
 
-fn parse_axis_range(raw: &str) -> Option<(f32, f32)> {
+fn parse_axis_range(raw: &str) -> Option<(&str, f32, f32)> {
     let (start, end) = raw.split_once("-->")?;
-    let start = start.trim().parse::<f32>().ok()?;
+    // An unquoted axis title precedes the lower bound. Split at its last whitespace,
+    // not its first, so titles containing spaces retain their complete text.
+    let (label, start) = start
+        .trim()
+        .rsplit_once(char::is_whitespace)
+        .unwrap_or(("", start.trim()));
+    let start = start.parse::<f32>().ok()?;
     let end = end.trim().parse::<f32>().ok()?;
-    Some((start, end))
+    (start.is_finite() && end.is_finite()).then_some((label.trim(), start, end))
 }
 
 fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
@@ -17865,11 +18054,44 @@ fn parse_layout_constraint_config(
     };
 
     for key in constraints.keys() {
-        if key != "nonOverlap" {
+        if !matches!(
+            key.as_str(),
+            "nonOverlap" | "sameRank" | "orderInRank" | "pin" | "minLength"
+        ) {
             builder.add_warning(format!(
                 "{context}: unsupported layout constraint '{key}' ignored"
             ));
         }
+    }
+
+    if let Some(same_rank) = constraints.get("sameRank") {
+        parse_string_group_constraints(
+            same_rank,
+            context,
+            "sameRank",
+            span,
+            builder,
+            |node_ids, span| IrConstraint::SameRank { node_ids, span },
+        );
+    }
+
+    if let Some(order_in_rank) = constraints.get("orderInRank") {
+        parse_string_group_constraints(
+            order_in_rank,
+            context,
+            "orderInRank",
+            span,
+            builder,
+            |node_ids, span| IrConstraint::OrderInRank { node_ids, span },
+        );
+    }
+
+    if let Some(pin) = constraints.get("pin") {
+        parse_pin_constraints(pin, context, span, builder);
+    }
+
+    if let Some(min_length) = constraints.get("minLength") {
+        parse_min_length_constraints(min_length, context, span, builder);
     }
 
     let Some(non_overlap) = constraints.get("nonOverlap") else {
@@ -17941,6 +18163,170 @@ fn parse_layout_constraint_config(
         span,
     });
 }
+
+fn parse_string_group_constraints(
+    value: &Value,
+    context: &str,
+    field: &str,
+    span: Span,
+    builder: &mut IrBuilder,
+    make_constraint: fn(Vec<String>, Span) -> IrConstraint,
+) {
+    let Some(items) = value.as_array() else {
+        builder.add_warning(format!(
+            "{context}: constraints.{field} must be an array of node IDs or groups"
+        ));
+        return;
+    };
+    if items.iter().all(Value::is_string) {
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if ids.len() < 2 {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} needs at least two node IDs"
+            ));
+            return;
+        }
+        builder.add_constraint(make_constraint(ids, span));
+        return;
+    }
+    for group in items {
+        let Some(arr) = group.as_array() else {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} entries must be arrays of node IDs"
+            ));
+            continue;
+        };
+        let ids: Option<Vec<String>> = arr
+            .iter()
+            .map(Value::as_str)
+            .map(|id| id.map(str::to_string))
+            .collect();
+        let Some(ids) = ids else {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} groups must contain only strings"
+            ));
+            continue;
+        };
+        if ids.len() < 2 {
+            builder.add_warning(format!(
+                "{context}: constraints.{field} needs at least two node IDs"
+            ));
+            continue;
+        }
+        builder.add_constraint(make_constraint(ids, span));
+    }
+}
+
+fn parse_pin_constraints(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    let entries: &[Value] = match value {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => {
+            builder.add_warning(format!(
+                "{context}: constraints.pin must be an object or array of objects"
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            builder.add_warning(format!(
+                "{context}: constraints.pin entry must be an object"
+            ));
+            continue;
+        };
+        let node_id = obj
+            .get("node")
+            .or_else(|| obj.get("nodeId"))
+            .and_then(Value::as_str);
+        let x = obj
+            .get("x")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite());
+        let y = obj
+            .get("y")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite());
+        let (Some(node_id), Some(x), Some(y)) = (node_id, x, y) else {
+            builder.add_warning(format!(
+                "{context}: constraints.pin requires finite 'x', 'y', and string 'node'"
+            ));
+            continue;
+        };
+        builder.add_constraint(IrConstraint::Pin {
+            node_id: node_id.to_string(),
+            x,
+            y,
+            span,
+        });
+    }
+}
+
+fn parse_min_length_constraints(value: &Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    let entries: &[Value] = match value {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength must be an object or array of objects"
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength entry must be an object"
+            ));
+            continue;
+        };
+        let from = obj.get("from").and_then(Value::as_str);
+        let to = obj.get("to").and_then(Value::as_str);
+        let min_len = obj
+            .get("minLen")
+            .or_else(|| obj.get("minLength"))
+            .or_else(|| obj.get("min_length"))
+            .and_then(Value::as_u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|v| *v >= 1);
+        let (Some(from_id), Some(to_id), Some(min_len)) = (from, to, min_len) else {
+            builder.add_warning(format!(
+                "{context}: constraints.minLength requires string 'from', 'to', and integer 'minLen' >= 1"
+            ));
+            continue;
+        };
+        builder.add_constraint(IrConstraint::MinLength {
+            from_id: from_id.to_string(),
+            to_id: to_id.to_string(),
+            min_len,
+            span,
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_constraint_semantics(builder: &mut IrBuilder) {
+    if builder.ir_mut().constraints.is_empty() {
+        return;
+    }
+    let conflicts: Vec<String> = builder
+        .ir_mut()
+        .constraint_set()
+        .conflicts()
+        .iter()
+        .map(|conflict| conflict.description.clone())
+        .collect();
+    for description in conflicts {
+        builder.add_warning(format!("layout constraint conflict: {description}"));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn validate_constraint_semantics(_builder: &mut IrBuilder) {}
 
 fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
     let mut segments = input.split_inclusive('\n');
@@ -19141,8 +19527,15 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
-    for (line_number, raw_line) in byte_lines(input).enumerate() {
-        let line = trim_fast(raw_line);
+    // Use the same statement boundaries as flowchart lowering, so a curve clause on a semicolon
+    // line cannot swallow the next edge-metadata statement into its CSS.
+    for (line_number, raw_line, statement) in
+        byte_lines(input).enumerate().flat_map(|(number, raw)| {
+            split_statements(strip_flowchart_inline_comment(raw))
+                .map(move |statement| (number, raw, statement))
+        })
+    {
+        let line = trim_fast(statement);
         let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = line.strip_prefix("classDef ") {
@@ -19257,10 +19650,6 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("linkStyle ") {
-            saw_style_directive = true;
-            if first_style_span.is_none() {
-                first_style_span = Some(span);
-            }
             // linkStyle 0 stroke:#f00,...
             //
             // The index position is a LIST, not one number. Read out of the pinned mermaid 11.15.0
@@ -19282,58 +19671,28 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             // says why. The `class` directive immediately below has always split on commas; this is
             // that same list handling, applied to the sibling that was missing it.
             let rest = rest.trim();
-            if let Some((index_str, style)) = rest.split_once(' ') {
+            if let Some((index_str, style)) = rest.split_once(char::is_whitespace) {
                 let index_str = index_str.trim();
                 let mut style = style.trim();
+                let mut routing_targets_checked = false;
 
-                // `linkStyle 0 interpolate basis stroke:#f00` — an OPTIONAL curve clause sits
-                // between the index list and the CSS, and it is not CSS. We had no concept of it at
-                // all, so the whole tail became the style string: the link was handed
-                // `"interpolate basis stroke:#f00"` as its declaration, which corrupts a
-                // declaration that was otherwise valid. Worse than dropping it.
-                //
-                // Probed against the pinned bundle rather than guessed, because the shape matters:
-                //   linkStyle 0 interpolate basis            PARSED
-                //   linkStyle 0 interpolate basis stroke:#f00 PARSED
-                //   linkStyle 0 stroke:#f00 interpolate basis ERROR   <- clause must come FIRST
-                //   linkStyle 0 INTERPOLATE basis            PARSED   <- keyword case-insensitive
-                //   linkStyle 0 interpolate                  ERROR    <- the curve is required
-                //   linkStyle 0 interpolate notacurve        PARSED   <- the NAME is not validated
-                //
-                // The curve is parsed off and REPORTED, not stored: nothing in the IR or either
-                // renderer can draw a curve family today, and a field no consumer reads is dead IR
-                // of exactly the kind the field sweep in docs/IR_FIELD_SWEEP.md exists to find.
-                // When an edge-curve consumer lands, this is where the value comes from.
-                let keyword_len = "interpolate".len();
-                if let Some(head) = style.get(..keyword_len)
-                    && head.eq_ignore_ascii_case("interpolate")
-                    && let Some(tail) = style.get(keyword_len..)
-                    && (tail.is_empty() || tail.starts_with(char::is_whitespace))
-                {
-                    let after_keyword = tail.trim_start();
-                    // A bare `interpolate` with no curve is a parse error in mermaid, so the whole
-                    // clause is meaningless here too — but the REST of the line is not, and there is
-                    // no rest in that case, so this only has to say so.
-                    let (curve, remaining_style) = match after_keyword.split_once(' ') {
-                        Some((curve, rest_of_line)) => (curve.trim(), rest_of_line.trim()),
-                        None => (after_keyword, ""),
-                    };
-                    if curve.is_empty() {
-                        builder.add_warning(
-                            "linkStyle `interpolate` needs a curve name (for example \
-                             `interpolate basis`); the clause was ignored"
-                                .to_string(),
-                        );
+                if let Some((curve, remaining_style)) = split_link_style_interpolation(style) {
+                    if builder.ir().diagram_type == DiagramType::Flowchart {
+                        // Already applied in source order; replaying it here would incorrectly
+                        // overwrite an edge's later `@{ curve: ... }` declaration.
+                        routing_targets_checked =
+                            MermaidEdgeRoutingHint::from_mermaid_curve(curve).is_some();
                     } else {
-                        builder.add_warning(format!(
-                            "linkStyle `interpolate {curve}` is parsed but not applied; edge curve \
-                             families are not implemented, so the link keeps the default routing"
-                        ));
+                        builder.add_warning("linkStyle `interpolate` is supported for flowcharts; the curve clause was ignored".to_string());
                     }
                     style = remaining_style;
                 }
 
                 if !style.is_empty() {
+                    saw_style_directive = true;
+                    if first_style_span.is_none() {
+                        first_style_span = Some(span);
+                    }
                     for token in index_str.split(',') {
                         let token = token.trim();
                         if token.is_empty() {
@@ -19368,20 +19727,20 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                             // one calls `edge_count()` itself ten lines later), so a zero here means
                             // a diagram with no edges, not a pass that has not built them yet.
                             let edge_count = builder.edge_count();
-                            if link_index >= edge_count {
+                            if link_index >= edge_count && !routing_targets_checked {
                                 builder.add_warning(format!(
                                     "linkStyle index {link_index} is out of bounds; the diagram has \
                                      {edge_count} link(s), so valid indices are 0..{}",
                                     edge_count.saturating_sub(1)
                                 ));
-                            } else {
+                            } else if link_index < edge_count {
                                 builder.push_style_ref(
                                     fm_core::IrStyleTarget::Link(link_index),
                                     style.to_string(),
                                     span,
                                 );
                             }
-                        } else {
+                        } else if !routing_targets_checked {
                             // mermaid rejects the whole document here (the probe's `linkStyle nope`
                             // returned `Parse error on line 3`). Same divergence as above: the rest
                             // of the diagram is still worth drawing, so this names the bad token and
@@ -22096,6 +22455,69 @@ mod tests {
     }
 
     #[test]
+    fn timeline_line_breaks_preserve_event_count_and_colon_semantics() {
+        for tag in ["<br>", "<br/>", "<br />"] {
+            let parsed = parse_mermaid(&format!(
+                concat!(
+                    "timeline\n",
+                    "  Q{tag}1 : First{tag}Second : Keep #58; colon\n",
+                    "         : Again{tag}Later : Ignore<brx/>marker\n",
+                    "  Q2 : Final\n",
+                ),
+                tag = tag
+            ));
+            assert!(parsed.warnings.is_empty(), "{tag}: {:?}", parsed.warnings);
+            let ir = &parsed.ir;
+            let labels: Vec<_> = ir
+                .nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    "Q\n1",
+                    "First\nSecond",
+                    "Keep : colon",
+                    "Again\nLater",
+                    "Ignore<brx/>marker",
+                    "Q2",
+                    "Final"
+                ],
+                "{tag}: line breaks must remain inside their original period or event"
+            );
+            assert_eq!(
+                ir.nodes.len(),
+                7,
+                "two periods and five events must survive"
+            );
+            let edges: Vec<_> = ir
+                .edges
+                .iter()
+                .map(|edge| {
+                    let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to)
+                    else {
+                        panic!("timeline entries are node endpoints");
+                    };
+                    (from.0, to.0, edge.arrow)
+                })
+                .collect();
+            assert_eq!(
+                edges,
+                [
+                    (0, 1, ArrowType::Line),
+                    (0, 2, ArrowType::Line),
+                    (0, 3, ArrowType::Line),
+                    (0, 4, ArrowType::Line),
+                    (0, 5, ArrowType::Arrow),
+                    (5, 6, ArrowType::Line),
+                ],
+                "{tag}: continuation ownership and colon-separated event identity must stay intact"
+            );
+        }
+    }
+
+    #[test]
     fn timeline_parses_sections() {
         let input = r"timeline
     title Timeline
@@ -22129,15 +22551,169 @@ mod tests {
     #[test]
     fn timeline_events_have_rounded_shape() {
         let parsed = parse_mermaid("timeline\n    2004 : Facebook");
-        let event = parsed.ir.nodes.iter().find(|n| n.id == "Facebook").unwrap();
+        let event = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| parsed.ir.node_display_text(node) == "Facebook")
+            .unwrap();
         assert_eq!(event.shape, NodeShape::Rounded);
     }
 
     #[test]
     fn timeline_periods_have_rect_shape() {
         let parsed = parse_mermaid("timeline\n    2004 : Facebook");
-        let period = parsed.ir.nodes.iter().find(|n| n.id == "2004").unwrap();
+        let period = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| parsed.ir.node_display_text(node) == "2004")
+            .unwrap();
         assert_eq!(period.shape, NodeShape::Rect);
+    }
+
+    #[test]
+    fn timeline_repeated_captions_keep_distinct_occurrences_and_sections() {
+        let source = concat!(
+            "timeline\n",
+            "  section Release\n",
+            "    Q1 : Review : Review\n",
+            "       : Q1\n",
+            "  section Release\n",
+            "    Q1 : Review\n",
+            "       : Review\n",
+            "    Q1\n",
+            "       : Q1\n",
+        );
+        let parsed = parse_mermaid(source);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let ir = &parsed.ir;
+        let labels: Vec<_> = ir
+            .nodes
+            .iter()
+            .map(|node| ir.node_display_text(node).trim())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Q1", "Review", "Review", "Q1", "Q1", "Review", "Review", "Q1", "Q1"
+            ]
+        );
+        let ids: std::collections::BTreeSet<_> = ir.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(
+            ids.len(),
+            labels.len(),
+            "every occurrence needs its own identity"
+        );
+        for (index, node) in ir.nodes.iter().enumerate() {
+            let is_period = [0, 4, 7].contains(&index);
+            assert_eq!(
+                node.shape,
+                if is_period {
+                    NodeShape::Rect
+                } else {
+                    NodeShape::Rounded
+                }
+            );
+            assert!(node.classes.iter().any(|class| class
+                == if is_period {
+                    "timeline-period"
+                } else {
+                    "timeline-event"
+                }));
+        }
+        let edges: Vec<_> = ir
+            .edges
+            .iter()
+            .map(|edge| {
+                let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to) else {
+                    panic!("timeline entries are node endpoints");
+                };
+                (from.0, to.0, edge.arrow)
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                (0, 1, ArrowType::Line),
+                (0, 2, ArrowType::Line),
+                (0, 3, ArrowType::Line),
+                (0, 4, ArrowType::Arrow),
+                (4, 5, ArrowType::Line),
+                (4, 6, ArrowType::Line),
+                (4, 7, ArrowType::Arrow),
+                (7, 8, ArrowType::Line),
+            ]
+        );
+        assert_eq!(ir.clusters.len(), 2);
+        assert_eq!(ir.graph.subgraphs_by_key("Release").len(), 2);
+        let section_members: Vec<Vec<_>> = ir
+            .clusters
+            .iter()
+            .map(|section| section.members.iter().map(|id| id.0).collect())
+            .collect();
+        assert_eq!(section_members, [vec![0, 1, 2, 3], vec![4, 5, 6, 7, 8]]);
+        assert_eq!(
+            parsed.ir,
+            parse_mermaid(source).ir,
+            "source identities must be deterministic"
+        );
+    }
+
+    #[test]
+    fn timeline_caption_normalization_cannot_merge_periods_or_events() {
+        let parsed = parse_mermaid("timeline\n  Q 1 : A B : A_B\n  Q_1 : Q 1 : Q_1\n");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let labels: Vec<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| parsed.ir.node_display_text(node).trim())
+            .collect();
+        assert_eq!(labels, ["Q 1", "A B", "A_B", "Q_1", "Q 1", "Q_1"]);
+        assert_eq!(parsed.ir.edges.len(), 5);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::Rect)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn timeline_continuations_keep_the_owning_period_section() {
+        let parsed = parse_mermaid(concat!(
+            "timeline\n",
+            "  section Earlier\n",
+            "    Old\n",
+            "  section Later\n",
+            "       : Still old\n",
+            "    New : New event\n",
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.ir.nodes.len(), 4);
+        let section_members: Vec<Vec<_>> = parsed
+            .ir
+            .clusters
+            .iter()
+            .map(|section| section.members.iter().map(|id| id.0).collect())
+            .collect();
+        assert_eq!(section_members, [vec![0, 1], vec![2, 3]]);
+        assert!(
+            parsed.ir.nodes[1]
+                .classes
+                .iter()
+                .any(|class| class == "timeline-section-0")
+        );
+        assert!(
+            parsed.ir.nodes[3]
+                .classes
+                .iter()
+                .any(|class| class == "timeline-section-1")
+        );
     }
 
     #[test]
@@ -23539,14 +24115,49 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn kanban_empty_board() {
-        let input = "kanban";
-        let parsed = parse_mermaid(input);
+        for input in [
+            "kanban",
+            "kanban\n  %% No columns yet\n",
+            "kanban\n  @{ wip: 3 }\n",
+        ] {
+            let parsed = parse_mermaid(input);
+            assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
+            assert!(parsed.ir.nodes.is_empty());
+            assert!(parsed.ir.edges.is_empty());
+            assert!(parsed.ir.clusters.is_empty());
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "No kanban columns or cards found"),
+                "{input:?}: a board without any valid columns must warn"
+            );
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "No parseable nodes or edges were found"),
+                "{input:?}: do not suppress the generic warning for unparseable content"
+            );
+        }
+    }
+
+    #[test]
+    fn kanban_named_empty_columns_are_parseable_content() {
+        let parsed = parse_mermaid("kanban\n  Todo\n  progress[In progress]\n  Done\n");
         assert_eq!(parsed.ir.diagram_type, DiagramType::Kanban);
-        assert_eq!(parsed.ir.nodes.len(), 0);
-        assert!(
-            !parsed.warnings.is_empty(),
-            "Should warn about empty kanban"
-        );
+        assert!(parsed.ir.nodes.is_empty());
+        assert!(parsed.ir.edges.is_empty());
+        assert_eq!(parsed.ir.clusters.len(), 3);
+        let titles: Vec<_> = parsed
+            .ir
+            .clusters
+            .iter()
+            .filter_map(|column| column.title.and_then(|id| parsed.ir.labels.get(id.0)))
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(titles, ["Todo", "In progress", "Done"]);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     #[test]
@@ -26321,6 +26932,223 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn gantt_dependencies_preserve_case_and_resolve_every_forward_reference() {
+        let parsed = parse_mermaid(
+            "gantt\nRelease :Ship, after Build TEST Build, 1d\n\
+             Build :Build, 2026-02-02, 2d\nTest :TEST, 2026-02-02, 4d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
+        assert_eq!(meta.tasks[0].depends_on, vec!["Build", "TEST"]);
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::AfterTask("Build".to_string()))
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+        for (edge, predecessor) in parsed.ir.edges.iter().zip(&meta.tasks[1..]) {
+            assert_eq!(edge.from, fm_core::IrEndpoint::Node(predecessor.node));
+            assert_eq!(edge.to, fm_core::IrEndpoint::Node(meta.tasks[0].node));
+        }
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_reports_each_missing_predecessor_without_creating_phantom_tasks() {
+        let parsed = parse_mermaid(
+            "gantt\nBuild :Build, 2026-02-02, 2d\n\
+             Release :Ship, after Build build Missing, 1d\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        for missing in ["build", "Missing"] {
+            assert!(
+                parsed.warnings.iter().any(|warning| {
+                    warning.contains(&format!("Unresolved gantt dependency 'after {missing}'"))
+                }),
+                "{:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn gantt_end_only_metadata_keeps_an_implicit_start() {
+        for metadata in ["2026-02-09", "done, 2026-02-09, 50%", "Ship, 2026-02-09"] {
+            let parsed = super::parse_gantt_task_metadata(metadata, None);
+            assert_eq!(parsed.start, None, "{metadata}");
+            assert_eq!(
+                parsed.end,
+                Some(GanttDate::Absolute("2026-02-09".to_string())),
+                "{metadata}"
+            );
+        }
+        let named_duration = super::parse_gantt_task_metadata("Ship, 2d", None);
+        assert_eq!(named_duration.task_id.as_deref(), Some("Ship"));
+        assert_eq!(named_duration.start, None);
+        assert_eq!(named_duration.end, Some(GanttDate::DurationDays(2)));
+        let explicit = super::parse_gantt_task_metadata("2026-02-06, 2026-02-09", None);
+        assert_eq!(
+            explicit.start,
+            Some(GanttDate::Absolute("2026-02-06".to_string()))
+        );
+        assert_eq!(
+            explicit.end,
+            Some(GanttDate::Absolute("2026-02-09".to_string()))
+        );
+    }
+
+    #[test]
+    fn gantt_until_preserves_all_case_sensitive_forward_targets() {
+        let parsed = parse_mermaid(
+            "gantt\nWait :Wait, 2026-03-01, until Release PATCH Release\n\
+             Release :Release, 2026-03-10, 1d\nPatch :PATCH, 2026-03-08, 1d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("Wait"));
+        assert_eq!(
+            meta.tasks[0].end,
+            Some(GanttDate::UntilTasks(vec![
+                "Release".into(),
+                "PATCH".into()
+            ]))
+        );
+        assert_eq!(parsed.ir.edges.len(), 2);
+        for (edge, target) in parsed.ir.edges.iter().zip(&meta.tasks[1..]) {
+            assert_eq!(edge.from, fm_core::IrEndpoint::Node(meta.tasks[0].node));
+            assert_eq!(edge.to, fm_core::IrEndpoint::Node(target.node));
+        }
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_until_end_only_and_after_forms_keep_their_start_semantics() {
+        for metadata in ["until Release", "Wait, until Release"] {
+            let parsed = super::parse_gantt_task_metadata(metadata, None);
+            assert_eq!(parsed.start, None, "{metadata}");
+            assert_eq!(
+                parsed.end,
+                Some(GanttDate::UntilTasks(vec!["Release".into()])),
+                "{metadata}"
+            );
+        }
+        let parsed = super::parse_gantt_task_metadata("Wait, after Prep, until Release", None);
+        assert_eq!(parsed.start, Some(GanttDate::AfterTask("Prep".into())));
+        assert_eq!(parsed.depends_on, ["Prep"]);
+        assert_eq!(
+            parsed.end,
+            Some(GanttDate::UntilTasks(vec!["Release".into()]))
+        );
+    }
+
+    #[test]
+    fn gantt_until_can_be_a_declared_id_without_becoming_an_empty_end() {
+        let parsed =
+            parse_mermaid("gantt\nPrep :until, 2026-03-01, 2d\nFollow :Follow, after until, 1d\n");
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.tasks[0].task_id.as_deref(), Some("until"));
+        assert_eq!(meta.tasks[0].end, Some(GanttDate::DurationDays(2)));
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_until_reports_missing_and_empty_references_without_phantom_tasks() {
+        let parsed = parse_mermaid(
+            "gantt\nWait :Wait, 2026-03-01, until Release release Missing\n\
+             Empty :Empty, 2026-03-01, until\nRelease :Release, 2026-03-10, 1d\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        for missing in ["release", "Missing"] {
+            assert!(
+                parsed.warnings.iter().any(|warning| {
+                    warning.contains(&format!("Unresolved gantt dependency 'until {missing}'"))
+                }),
+                "{:?}",
+                parsed.warnings
+            );
+        }
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("requires at least one task id"))
+        );
+    }
+
+    #[test]
+    fn gantt_exclusions_accept_weekdays_and_grouped_lines_with_custom_weekends() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat DD/MM/YYYY\nweekday monday\nweekend friday\n\
+             excludes weekends, Monday 10/03/2026\nexcludes wednesday\n\
+             Work :Work, 01/03/2026, 3d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.weekday_start, Some(1));
+        assert_eq!(meta.weekend_start, Some(5));
+        assert_eq!(
+            meta.excludes,
+            [
+                GanttExclude::Weekends,
+                GanttExclude::Weekday(1),
+                GanttExclude::Dates(vec!["2026-03-10".into()]),
+                GanttExclude::Weekday(3),
+            ]
+        );
+        assert_eq!(
+            meta.excluded_weekday_mask(),
+            (1 << 1) | (1 << 3) | (1 << 5) | (1 << 6)
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_exclusions_preserve_space_separated_date_formats() {
+        let parsed = parse_mermaid(
+            "gantt\ndateFormat DD MM YYYY\nexcludes monday, 10 03 2026, weekends\n\
+             Work :Work, 09 03 2026, 2d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(
+            meta.excludes,
+            [
+                GanttExclude::Weekday(1),
+                GanttExclude::Weekends,
+                GanttExclude::Dates(vec!["2026-03-10".into()]),
+            ]
+        );
+        assert_eq!(
+            meta.tasks[0].start,
+            Some(GanttDate::Absolute("2026-03-09".into()))
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn gantt_invalid_calendar_tokens_warn_without_erasing_valid_exclusions() {
+        let parsed = parse_mermaid(
+            "gantt\nweekend friday\nweekend sunday\nexcludes monday, weekdays, 2026-02-30\n\
+             Work :Work, 2026-03-01, 3d\n",
+        );
+        let meta = parsed.ir.gantt_meta.as_ref().expect("gantt metadata");
+        assert_eq!(meta.weekend_start, Some(5));
+        assert_eq!(meta.excludes, [GanttExclude::Weekday(1)]);
+        for token in ["sunday", "weekdays", "2026-02-30"] {
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(token))
+            );
+        }
+    }
+
+    #[test]
+    fn gantt_week_durations_reject_overflow() {
+        assert_eq!(super::parse_gantt_duration_days("2w"), Some(14));
+        assert_eq!(super::parse_gantt_duration_days("4294967295w"), None);
+    }
+
+    #[test]
     fn gantt_parses_extended_directives_into_typed_meta() {
         let input = "gantt\n  dateFormat YYYY-MM-DD\n  axisFormat %Y-%m-%d\n  tickInterval 1month\n  todayMarker stroke-width:5px,stroke:#0f0,opacity:0.5\n  inclusiveEndDates\n  weekday monday\n  excludes weekends, 2026-02-14, 2026-02-15\n  section Alpha\n  Ship :crit, release, 2026-02-10, 2026-02-12";
         let parsed = parse_mermaid(input);
@@ -27271,6 +28099,155 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn xychart_repeated_anonymous_bars_keep_every_value_and_point_identity() {
+        let parsed = parse_mermaid(
+            "xychart-beta\nx-axis [Jan, Feb, Mar]\ny-axis -100 --> 100\n\
+             bar [-80,20,0]\nbar [-40,80,40]",
+        );
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(meta.series.len(), 2);
+        assert_eq!(meta.series[0].values, [-80.0, 20.0, 0.0]);
+        assert_eq!(meta.series[1].values, [-40.0, 80.0, 40.0]);
+        assert_eq!(parsed.ir.nodes.len(), 6);
+        assert!(parsed.ir.edges.is_empty());
+        for series in &meta.series {
+            assert!(series.name.is_none());
+            assert_eq!(series.nodes.len(), 3);
+        }
+        assert!(
+            meta.series[0]
+                .nodes
+                .iter()
+                .all(|node| !meta.series[1].nodes.contains(node))
+        );
+        let label = |series: usize, point: usize| {
+            let node = &parsed.ir.nodes[meta.series[series].nodes[point].0];
+            parsed.ir.labels[node.label.expect("point label").0]
+                .text
+                .as_str()
+        };
+        assert_eq!(label(0, 0), "bar Jan: -80");
+        assert_eq!(label(0, 1), "bar Feb: 20");
+        assert_eq!(label(0, 2), "bar Mar: 0");
+        assert_eq!(label(1, 0), "bar Jan: -40");
+        assert_eq!(label(1, 1), "bar Feb: 80");
+        assert_eq!(label(1, 2), "bar Mar: 40");
+        assert_eq!(parsed.ir.nodes[meta.series[0].nodes[0].0].id, "bar_1");
+    }
+
+    #[test]
+    fn xychart_colliding_line_and_area_names_keep_edges_in_their_own_series() {
+        for kind in ["line", "area"] {
+            for (first_name, second_name) in
+                [("Revenue", "Revenue"), ("\"Net sales\"", "Net_sales")]
+            {
+                let input = format!(
+                    "xychart-beta\nx-axis [Jan, Feb, Mar]\n\
+                     {kind} {first_name} [1,2,3]\n{kind} {second_name} [4,5,6]"
+                );
+                let parsed = parse_mermaid(&input);
+                let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+                assert_eq!(meta.series.len(), 2);
+                assert_eq!(parsed.ir.nodes.len(), 6, "{input}");
+                assert_eq!(parsed.ir.edges.len(), 4, "{input}");
+                assert!(
+                    meta.series[0]
+                        .nodes
+                        .iter()
+                        .all(|node| !meta.series[1].nodes.contains(node))
+                );
+                assert_eq!(
+                    meta.series[0].name.as_deref(),
+                    Some(first_name.trim_matches('"'))
+                );
+                assert_eq!(meta.series[1].name.as_deref(), Some(second_name));
+                for series in &meta.series {
+                    assert_eq!(series.nodes.len(), 3);
+                    for pair in series.nodes.windows(2) {
+                        assert_eq!(
+                            parsed
+                                .ir
+                                .edges
+                                .iter()
+                                .filter(|edge| {
+                                    edge.from == IrEndpoint::Node(pair[0])
+                                        && edge.to == IrEndpoint::Node(pair[1])
+                                })
+                                .count(),
+                            1,
+                            "each line/area segment must belong to exactly one series: {input}"
+                        );
+                    }
+                    let label = parsed.ir.nodes[series.nodes[0].0].label.unwrap();
+                    assert!(
+                        parsed.ir.labels[label.0]
+                            .text
+                            .starts_with(series.name.as_deref().unwrap())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xychart_generated_series_bases_do_not_collide_with_authored_suffix_names() {
+        let input = "xychart-beta\nx-axis [Jan, Feb, Mar]\n\
+                     bar bar__3 [1,2,3]\nbar [4,5,6]\nbar [7,8,9]\nbar bar__4 [10,11,12]";
+        let parsed = parse_mermaid(input);
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+        assert_eq!(meta.series.len(), 4);
+        assert_eq!(parsed.ir.nodes.len(), 12);
+        let point_ids: std::collections::BTreeSet<_> = meta
+            .series
+            .iter()
+            .flat_map(|series| series.nodes.iter().map(|node| node.0))
+            .collect();
+        assert_eq!(
+            point_ids.len(),
+            12,
+            "series must not share point references"
+        );
+        let node_ids: std::collections::BTreeSet<_> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            node_ids.len(),
+            12,
+            "generated suffixes must reserve their own bases"
+        );
+        assert_eq!(parsed.ir.nodes[meta.series[0].nodes[0].0].id, "bar__3_1");
+        assert_eq!(parsed.ir.nodes[meta.series[1].nodes[0].0].id, "bar_1");
+        for (series, expected) in meta.series.iter().zip([
+            "bar__3 Jan: 1",
+            "bar Jan: 4",
+            "bar Jan: 7",
+            "bar__4 Jan: 10",
+        ]) {
+            let label = parsed.ir.nodes[series.nodes[0].0].label.unwrap();
+            assert_eq!(parsed.ir.labels[label.0].text, expected);
+        }
+        let repeated = parse_mermaid(input);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<Vec<_>>(),
+            repeated
+                .ir
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<Vec<_>>(),
+            "series identity allocation must be deterministic"
+        );
+    }
+
+    #[test]
     fn xychart_x_axis_keeps_quoted_label_with_categories() {
         let input = "xychart-beta\n  x-axis \"Quarter\" [Q1, Q2, Q3]\n  bar [10, 20, 30]";
         let parsed = parse_mermaid(input);
@@ -27278,6 +28255,61 @@ Rel_Back(db, app, "Responds")"#,
 
         assert_eq!(xy_meta.x_axis.label.as_deref(), Some("Quarter"));
         assert_eq!(xy_meta.x_axis.categories, vec!["Q1", "Q2", "Q3"]);
+    }
+
+    #[test]
+    fn xychart_axes_keep_unquoted_titles_and_signed_numeric_ranges() {
+        for (category_title, value_title) in [
+            ("Fiscal quarter", "Revenue in USD"),
+            ("\"Fiscal quarter\"", "\"Revenue in USD\""),
+        ] {
+            let input = format!(
+                "xychart-beta\n x-axis {category_title} [Q1, Q2, Q3]\n\
+                 y-axis {value_title} -2.5e-3 --> +5e-3\n line [-0.002, 0, 0.004]"
+            );
+            let parsed = parse_mermaid(&input);
+            let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+            assert_eq!(meta.x_axis.label.as_deref(), Some("Fiscal quarter"));
+            assert_eq!(meta.x_axis.categories, ["Q1", "Q2", "Q3"]);
+            assert_eq!(meta.y_axis.label.as_deref(), Some("Revenue in USD"));
+            assert_eq!(meta.y_axis.min, Some(-0.0025));
+            assert_eq!(meta.y_axis.max, Some(0.005));
+            assert_eq!(meta.series[0].values, [-0.002, 0.0, 0.004]);
+        }
+
+        let parsed = parse_mermaid(
+            "xychart-beta horizontal\n x-axis Financial year 2025 --> 2027\n\
+             y-axis -10 --> 20\n bar [-5, 0, 10]",
+        );
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+        assert_eq!(meta.x_axis.label.as_deref(), Some("Financial year"));
+        assert_eq!(
+            (meta.x_axis.min, meta.x_axis.max),
+            (Some(2025.0), Some(2027.0))
+        );
+        assert_eq!(meta.y_axis.label, None);
+        assert_eq!(
+            (meta.y_axis.min, meta.y_axis.max),
+            (Some(-10.0), Some(20.0))
+        );
+    }
+
+    #[test]
+    fn xychart_axes_reject_non_finite_numeric_bounds() {
+        for range in ["NaN --> 10", "0 --> inf", "-inf --> 1", "0 --> 1e100"] {
+            let parsed = parse_mermaid(&format!(
+                "xychart-beta\n x-axis [A, B]\n y-axis Amount {range}\n bar [2, 4]"
+            ));
+            let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+            assert_eq!(meta.y_axis.min, None, "{range}");
+            assert_eq!(meta.y_axis.max, None, "{range}");
+            assert_eq!(meta.series[0].values, [2.0, 4.0]);
+        }
+        let parsed =
+            parse_mermaid("xychart-beta\n y-axis \"Revenue\" unexpected 0 --> 10\n bar [2, 4]");
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+        assert_eq!(meta.y_axis.label.as_deref(), Some("Revenue"));
+        assert_eq!((meta.y_axis.min, meta.y_axis.max), (None, None));
     }
 
     #[test]
@@ -27853,12 +28885,15 @@ Rel_Back(db, app, "Responds")"#,
             link.style, "stroke:#ff0000",
             "the interpolate clause leaked into the CSS declaration"
         );
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
+        );
     }
 
-    /// The clause on its own leaves nothing to style, and says so rather than inventing a
-    /// declaration out of the curve name.
+    /// A curve-only directive changes routing without inventing a CSS declaration.
     #[test]
-    fn linkstyle_interpolate_alone_styles_nothing_and_warns() {
+    fn linkstyle_interpolate_alone_changes_routing_without_css() {
         let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis");
 
         assert!(
@@ -27870,11 +28905,11 @@ Rel_Back(db, app, "Responds")"#,
             "a curve name was turned into a style declaration: {:?}",
             parsed.ir.style_refs
         );
-        assert!(
-            parsed.warnings.iter().any(|w| w.contains("interpolate")),
-            "the unimplemented curve was dropped in silence: {:?}",
-            parsed.warnings
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
         );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     /// The keyword is case-insensitive in mermaid (`INTERPOLATE basis` parses), so it is here.
@@ -27891,6 +28926,159 @@ Rel_Back(db, app, "Responds")"#,
             .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
             .expect("the link should still be styled");
         assert_eq!(link.style, "stroke:#00ff00");
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
+        );
+    }
+
+    #[test]
+    fn flowchart_edge_curves_share_metadata_without_declaring_nodes() {
+        use fm_core::{EdgeAnimation, MermaidEdgeRoutingHint as Routing};
+        let parsed = parse_mermaid(
+            "flowchart LR\nA e1@--> B\ne1@{ curve: 'BaSiS', animation: slow }\n\
+             missing@{ curve: linear }\ne2@{ curve: linear }\nB e2@--> C\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[0].animation(), Some(EdgeAnimation::Slow));
+        assert_eq!(
+            parsed.ir.edges[1].routing(),
+            None,
+            "metadata cannot configure an undeclared edge"
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+
+        let encoded = serde_json::to_string(&parsed.ir).expect("serialize routing");
+        let decoded: fm_core::MermaidDiagramIr =
+            serde_json::from_str(&encoded).expect("deserialize routing");
+        assert_eq!(decoded.edges, parsed.ir.edges);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_and_linkstyle_follow_source_order() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        for separator in ["\n", "; "] {
+            for (first, last, expected) in [
+                (
+                    "e1@{ curve: basis }",
+                    "linkStyle 0 interpolate linear",
+                    Routing::Orthogonal,
+                ),
+                (
+                    "linkStyle 0 interpolate linear",
+                    "e1@{ curve: basis }",
+                    Routing::Curved,
+                ),
+            ] {
+                let source = format!("flowchart LR\nA e1@--> B\n{first}{separator}{last}\n");
+                let parsed = parse_mermaid(&source);
+                assert_eq!(parsed.ir.edges[0].routing(), Some(expected), "{source}");
+                assert!(
+                    parsed.ir.style_refs.is_empty(),
+                    "curve metadata leaked into CSS: {source}"
+                );
+                assert!(
+                    parsed.warnings.is_empty(),
+                    "{source}: {:?}",
+                    parsed.warnings
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_default_curves_preserve_creation_time_and_explicit_overrides() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "%%{init: {'flowchart': {'curve': 'linear'}}}%%\n\
+             flowchart LR\nA --> B\nlinkStyle default interpolate linear\nB --> C\n\
+             linkStyle default interpolate basis\nC e2@--> D\ne2@{ curve: linear }\n\
+             linkStyle default interpolate basis\nD --> E\n",
+        );
+        assert_eq!(parsed.ir.meta.edge_routing, Some(Routing::Curved));
+        assert_eq!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .map(|edge| edge.routing())
+                .collect::<Vec<_>>(),
+            [
+                None,
+                Some(Routing::Orthogonal),
+                Some(Routing::Orthogonal),
+                Some(Routing::Curved),
+            ]
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_resolve_first_duplicate_id_and_ignore_node_metadata() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "flowchart LR\nA same@--> B\nB same@--> C\nsame@{ curve: natural }\n\
+             A@{ shape: diamond, curve: linear }\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.nodes[0].shape, fm_core::NodeShape::Diamond);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[1].routing(), None);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_recover_unknown_names_and_bad_targets() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "flowchart LR\nA e1@--> B\nB --> C\ne1@{ curve: basis }\n\
+             e1@{ curve: imaginary }\nlinkStyle 0 interpolate imaginary\n\
+             linkStyle 0 interpolate\nlinkStyle 1,9,nope interpolate stepBefore stroke:#abc\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[1].routing(), Some(Routing::Orthogonal));
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("imaginary"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("needs a curve name"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("index 9"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("`nope`"))
+                .count(),
+            1
+        );
+        assert!(
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|style| style.target == fm_core::IrStyleTarget::Link(1)
+                    && style.style == "stroke:#abc")
+        );
     }
 
     /// CONTROL: an ordinary declaration is untouched. The clause is matched as a WHOLE WORD, so
@@ -29159,6 +30347,36 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(style.properties.get("fill").unwrap(), "#f00");
         // classDef stroke preserved since style didn't override it
         assert_eq!(style.properties.get("stroke").unwrap(), "#000");
+    }
+
+    #[test]
+    fn classdef_default_populates_all_nodes_and_cascades() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A[Base] --> B[Classed] --> C[Styled]\n  classDef default fill:#eee,stroke:#333,stroke-width:2px\n  classDef accent fill:#ff0,stroke:#f00\n  class B,C accent\n  style C fill:#0f0",
+        );
+        let node_a = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
+        let style_a = node_a.inline_style.as_ref().expect("A gets default style");
+        assert_eq!(style_a.properties.get("fill").unwrap(), "#eee");
+        assert_eq!(style_a.properties.get("stroke").unwrap(), "#333");
+        assert_eq!(style_a.properties.get("stroke-width").unwrap(), "2px");
+
+        let node_b = parsed.ir.nodes.iter().find(|n| n.id == "B").unwrap();
+        let style_b = node_b
+            .inline_style
+            .as_ref()
+            .expect("B gets accent + default");
+        assert_eq!(style_b.properties.get("fill").unwrap(), "#ff0");
+        assert_eq!(style_b.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_b.properties.get("stroke-width").unwrap(), "2px");
+
+        let node_c = parsed.ir.nodes.iter().find(|n| n.id == "C").unwrap();
+        let style_c = node_c
+            .inline_style
+            .as_ref()
+            .expect("C gets style + accent + default");
+        assert_eq!(style_c.properties.get("fill").unwrap(), "#0f0");
+        assert_eq!(style_c.properties.get("stroke").unwrap(), "#f00");
+        assert_eq!(style_c.properties.get("stroke-width").unwrap(), "2px");
     }
 
     #[test]
@@ -30694,6 +31912,46 @@ Rel_Back(db, app, "Responds")"#,
                 .map(|f| (f.start_bit, f.end_bit))
                 .collect::<Vec<_>>(),
             [(0, 7), (8, 15), (16, 23)]
+        );
+    }
+
+    #[test]
+    fn init_flowchart_direction_applies_unless_overridden_by_header_or_body() {
+        let bare =
+            parse_mermaid("%%{init: {'flowchart': {'rankDir': 'LR'}}}%%\nflowchart\nA --> B");
+        assert_eq!(bare.ir.direction, GraphDirection::LR);
+        assert_eq!(
+            bare.ir.meta.init.config.flowchart_direction,
+            Some(GraphDirection::LR)
+        );
+
+        let header_override =
+            parse_mermaid("%%{init: {'flowchart': {'rankDir': 'LR'}}}%%\nflowchart BT\nA --> B");
+        assert_eq!(header_override.ir.direction, GraphDirection::BT);
+
+        let frontmatter =
+            parse_mermaid("---\nconfig:\n  flowchart:\n    direction: RL\n---\nflowchart\nA --> B");
+        assert_eq!(frontmatter.ir.direction, GraphDirection::RL);
+    }
+
+    #[test]
+    fn layout_constraints_directive_parses_all_variants_and_detects_conflicts() {
+        let parsed = parse_mermaid(
+            "%%{constraints: {sameRank: ['A', 'B'], orderInRank: ['A', 'B'], pin: {node: 'A', x: 10, y: 20}, minLength: {from: 'A', to: 'C', minLen: 2}, nonOverlap: true}}%%\nflowchart TD\nA --> C\nB --> C",
+        );
+        assert_eq!(parsed.ir.constraints.len(), 5);
+        assert!(parsed.ir.constraint_set().conflicts().is_empty());
+
+        let conflicting = parse_mermaid(
+            "%%{constraints: {orderInRank: [['A', 'B'], ['B', 'A']]}}%%\nflowchart TD\nA --> C\nB --> C",
+        );
+        assert!(
+            conflicting
+                .warnings
+                .iter()
+                .any(|w| w.contains("layout constraint conflict")),
+            "expected conflict warning, got {:?}",
+            conflicting.warnings
         );
     }
 }

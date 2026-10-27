@@ -4,9 +4,9 @@ use fm_core::MermaidDiagramIr;
 use fm_layout::{DiagramLayout, LayoutRect, layout_diagram};
 use fm_render_canvas::selection::{MAX_LASSO_POINTS, SelectionRegion};
 use fm_render_canvas::{
-    CanvasRenderConfig, CanvasSelectionStyle, DrawOperation, MockCanvas2dContext,
-    NodeSelectionSet, SelectionBox, SelectionContainment, SelectionMode, Viewport,
-    render_to_canvas_with_layout, render_to_canvas_with_multi_selection,
+    CanvasRenderConfig, CanvasSelectionStyle, DrawOperation, MockCanvas2dContext, NodeSelectionSet,
+    SelectionBox, SelectionContainment, SelectionMode, Viewport, render_to_canvas_with_layout,
+    render_to_canvas_with_multi_selection,
 };
 
 fn fixture() -> (MermaidDiagramIr, DiagramLayout) {
@@ -154,7 +154,9 @@ fn clicks_choose_topmost_box_but_marquee_includes_overlaps() {
             height: 20.0,
         };
     }
-    let top = ir.nodes[layout.nodes.last().unwrap().node_index].id.as_str();
+    let top = ir.nodes[layout.nodes.last().unwrap().node_index]
+        .id
+        .as_str();
     let mut selected = NodeSelectionSet::default();
     assert!(selected.select_at(&ir, &layout, (10.0, 10.0), SelectionMode::Replace));
     assert_eq!(ids(&selected), [top]);
@@ -230,8 +232,7 @@ fn selection_survives_node_reindexing_and_removes_deleted_ids() {
         SelectionMode::Replace,
         SelectionContainment::Contains,
     );
-    let replacement =
-        fm_parser::parse("flowchart LR\n M[Moved]\n A[Renamed label]\n B[New]\n").ir;
+    let replacement = fm_parser::parse("flowchart LR\n M[Moved]\n A[Renamed label]\n B[New]\n").ir;
     let replacement_layout = layout_diagram(&replacement);
     assert!(selected.reconcile(&replacement, &replacement_layout));
     assert_eq!(ids(&selected), ["A", "M"]);
@@ -279,7 +280,11 @@ fn backing_pixel_marquee_respects_zoom_translation_and_does_not_reapply_dpr() {
 #[test]
 fn selection_rings_append_to_the_real_draw_stream_and_keep_metadata() {
     let (mut ir, layout) = fixture();
-    let node = ir.nodes.iter_mut().find(|node| node.id.as_str() == "A").unwrap();
+    let node = ir
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "A")
+        .unwrap();
     node.interaction_mut().tooltip = Some(String::from("Inspect Alpha"));
     let config = CanvasRenderConfig {
         auto_fit: false,
@@ -348,12 +353,20 @@ fn lasso_accepts_boundary_nodes_closing_points_and_either_winding() {
     points.push(points[0]);
     let mut selected = NodeSelectionSet::default();
     assert!(selected.select_lasso(
-        &ir, &layout, &points, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &points,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert_eq!(ids(&selected), ["A"]);
     points.reverse();
     assert!(!selected.select_lasso(
-        &ir, &layout, &points, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &points,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert_eq!(ids(&selected), ["A"]);
 }
@@ -365,16 +378,28 @@ fn lasso_finds_crossing_strips_and_polygons_wholly_inside_a_node() {
     let mut selected = NodeSelectionSet::default();
     // Neither shape has a corner inside the other: only an edge-crossing test finds this.
     assert!(selected.select_lasso(
-        &ir, &layout, &strip, SelectionMode::Replace, SelectionContainment::Intersects,
+        &ir,
+        &layout,
+        &strip,
+        SelectionMode::Replace,
+        SelectionContainment::Intersects,
     ));
     assert_eq!(ids(&selected), ["A"]);
     assert!(selected.select_lasso(
-        &ir, &layout, &strip, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &strip,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
     let triangle = [(5.0, -1.0), (10.0, 1.0), (15.0, -1.0)];
     assert!(selected.select_lasso(
-        &ir, &layout, &triangle, SelectionMode::Replace, SelectionContainment::Intersects,
+        &ir,
+        &layout,
+        &triangle,
+        SelectionMode::Replace,
+        SelectionContainment::Intersects,
     ));
     assert_eq!(ids(&selected), ["A"]);
 }
@@ -383,17 +408,31 @@ fn lasso_finds_crossing_strips_and_polygons_wholly_inside_a_node() {
 fn lasso_contains_rejects_a_concave_notch_despite_all_four_corners_being_inside() {
     let (ir, layout) = fixture();
     let notch = [
-        (-5.0, -15.0), (25.0, -15.0), (25.0, 15.0), (15.0, 15.0),
-        (15.0, 0.0), (5.0, 0.0), (5.0, 15.0), (-5.0, 15.0),
+        (-5.0, -15.0),
+        (25.0, -15.0),
+        (25.0, 15.0),
+        (15.0, 15.0),
+        (15.0, 0.0),
+        (5.0, 0.0),
+        (5.0, 15.0),
+        (-5.0, 15.0),
     ];
     let mut selected = NodeSelectionSet::default();
     selected.select_node(&ir, &layout, "A", SelectionMode::Replace);
     assert!(selected.select_lasso(
-        &ir, &layout, &notch, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &notch,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
     assert!(selected.select_lasso(
-        &ir, &layout, &notch, SelectionMode::Replace, SelectionContainment::Intersects,
+        &ir,
+        &layout,
+        &notch,
+        SelectionMode::Replace,
+        SelectionContainment::Intersects,
     ));
     assert_eq!(ids(&selected), ["A"]);
 }
@@ -405,18 +444,30 @@ fn self_crossing_lasso_uses_even_odd_fill_instead_of_signed_area() {
     let mut selected = NodeSelectionSet::default();
     selected.select_node(&ir, &layout, "Z", SelectionMode::Replace);
     assert!(selected.select_lasso(
-        &ir, &layout, &bow_tie, SelectionMode::Replace, SelectionContainment::Intersects,
+        &ir,
+        &layout,
+        &bow_tie,
+        SelectionMode::Replace,
+        SelectionContainment::Intersects,
     ));
     assert_eq!(ids(&selected), ["A"]);
     assert!(selected.select_lasso(
-        &ir, &layout, &bow_tie, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &bow_tie,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
     // All corners lie on the stroke, but tracing the same boundary twice cancels its fill.
     let boundary = polygon_box(0.0, -10.0, 20.0, 10.0);
     let twice: Vec<_> = boundary.into_iter().chain(boundary).collect();
     assert!(!selected.select_lasso(
-        &ir, &layout, &twice, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &twice,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
 }
@@ -427,7 +478,11 @@ fn lasso_does_not_lose_a_small_node_on_a_very_long_segment() {
     let strip = polygon_box(-1.0e30, -1.0, 1.0e30, 1.0);
     let mut selected = NodeSelectionSet::default();
     assert!(selected.select_lasso(
-        &ir, &layout, &strip, SelectionMode::Replace, SelectionContainment::Intersects,
+        &ir,
+        &layout,
+        &strip,
+        SelectionMode::Replace,
+        SelectionContainment::Intersects,
     ));
     assert_eq!(ids(&selected), ["A", "M", "Z"]);
 }
@@ -449,13 +504,21 @@ fn invalid_or_oversized_lasso_does_not_mutate_selection() {
     ];
     for points in invalid {
         assert!(!selected.select_lasso(
-            &ir, &layout, &points, SelectionMode::Replace, SelectionContainment::Intersects,
+            &ir,
+            &layout,
+            &points,
+            SelectionMode::Replace,
+            SelectionContainment::Intersects,
         ));
         assert_eq!(ids(&selected), ["M"]);
     }
     let empty = polygon_box(100.0, 100.0, 120.0, 120.0);
     assert!(selected.select_lasso(
-        &ir, &layout, &empty, SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &empty,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
 }
@@ -467,12 +530,20 @@ fn lasso_toggle_deduplicates_layout_instances_and_ignores_draw_order() {
     let points = polygon_box(-50.0, -20.0, 70.0, 20.0);
     let mut selected = NodeSelectionSet::default();
     assert!(selected.select_lasso(
-        &ir, &layout, &points, SelectionMode::Toggle, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &points,
+        SelectionMode::Toggle,
+        SelectionContainment::Contains,
     ));
     assert_eq!(ids(&selected), ["A", "M", "Z"]);
     layout.nodes.reverse();
     assert!(selected.select_lasso(
-        &ir, &layout, &points, SelectionMode::Toggle, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &points,
+        SelectionMode::Toggle,
+        SelectionContainment::Contains,
     ));
     assert!(selected.is_empty());
 }
@@ -505,7 +576,11 @@ fn add_and_remove_drags_restore_nodes_outside_the_current_preview() {
             selected.select_node(&ir, &layout, "Z", SelectionMode::Replace);
         } else {
             selected.select_box(
-                &ir, &layout, all(), SelectionMode::Replace, SelectionContainment::Contains,
+                &ir,
+                &layout,
+                all(),
+                SelectionMode::Replace,
+                SelectionContainment::Contains,
             );
         }
         let gesture = selected.begin_gesture(mode, SelectionContainment::Contains);
@@ -528,7 +603,12 @@ fn invalid_preview_is_noop_and_cancel_does_not_resurrect_deleted_nodes() {
     let gesture = selected.begin_gesture(SelectionMode::Replace, SelectionContainment::Contains);
     gesture.preview(&ir, &layout, &mut selected, SelectionRegion::Box(all()));
     let invalid = [(f64::NAN, 0.0), (20.0, 0.0), (10.0, 20.0)];
-    assert!(!gesture.preview(&ir, &layout, &mut selected, SelectionRegion::Lasso(&invalid)));
+    assert!(!gesture.preview(
+        &ir,
+        &layout,
+        &mut selected,
+        SelectionRegion::Lasso(&invalid)
+    ));
     assert_eq!(ids(&selected), ["A", "M", "Z"]);
     let replacement = fm_parser::parse("flowchart LR\n A[Alpha]\n M[Mike]\n").ir;
     let replacement_layout = layout_diagram(&replacement);
@@ -550,24 +630,43 @@ fn lasso_and_live_preview_use_the_actual_renderer_viewport() {
     let points = polygon_box(59.0, 19.0, 81.0, 41.0);
     let mut selected = NodeSelectionSet::default();
     assert!(selected.select_lasso_canvas(
-        &ir, &layout, &result.viewport, &points,
-        SelectionMode::Replace, SelectionContainment::Contains,
+        &ir,
+        &layout,
+        &result.viewport,
+        &points,
+        SelectionMode::Replace,
+        SelectionContainment::Contains,
     ));
     assert_eq!(ids(&selected), ["A"]);
     selected.clear();
     let gesture = selected.begin_gesture(SelectionMode::Replace, SelectionContainment::Contains);
     assert!(gesture.preview_canvas(
-        &ir, &layout, &result.viewport, &mut selected, SelectionRegion::Lasso(&points),
+        &ir,
+        &layout,
+        &result.viewport,
+        &mut selected,
+        SelectionRegion::Lasso(&points),
     ));
     assert_eq!(ids(&selected), ["A"]);
     for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let invalid = Viewport { zoom, ..result.viewport };
+        let invalid = Viewport {
+            zoom,
+            ..result.viewport
+        };
         assert!(!selected.select_lasso_canvas(
-            &ir, &layout, &invalid, &points,
-            SelectionMode::Replace, SelectionContainment::Contains,
+            &ir,
+            &layout,
+            &invalid,
+            &points,
+            SelectionMode::Replace,
+            SelectionContainment::Contains,
         ));
         assert!(!gesture.preview_canvas(
-            &ir, &layout, &invalid, &mut selected, SelectionRegion::Lasso(&points),
+            &ir,
+            &layout,
+            &invalid,
+            &mut selected,
+            SelectionRegion::Lasso(&points),
         ));
     }
     assert_eq!(ids(&selected), ["A"]);

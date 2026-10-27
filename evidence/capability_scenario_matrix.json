@@ -2,55 +2,62 @@
   "schema_version": 1,
   "artifact": "capability-to-scenario-matrix",
   "project": "frankenmermaid",
-  "generated_by_bead": "bd-2u0.5.2.1",
-  "updated_at": "2026-03-19",
+  "generated_by_bead": "bd-jkmeu",
+  "updated_at": "2026-10-14",
   "sources": [
     "README.md",
     "evidence/demo_strategy.md",
     "evidence/pattern_inventory.md",
     "evidence/capability_matrix.json",
     "frankenmermaid_demo_showcase.html",
-    "crates/fm-cli/tests/golden_svg_test.rs"
+    "crates/fm-cli/tests/golden_svg_test.rs",
+    "crates/fm-cli/tests/frankentui_conformance_cases.json"
   ],
   "feature_families": [
     {
       "id": "parser",
       "label": "Parser and Type Detection",
-      "maturity": "partial",
+      "maturity": "implemented",
       "confidence": {
         "label": "high",
-        "score": 0.82
+        "score": 0.92
       },
-      "summary": "Best-effort parse, fuzzy detection, and IR production are real strengths, but syntax coverage is still uneven across diagram families.",
+      "summary": "Best-effort parse, fuzzy detection, and IR production across all 27 documented diagram families with FrankenTUI conformance coverage.",
       "scenario_ids": [
         "malformed_recovery",
         "flowchart_simple",
         "sequence_basic",
-        "flowchart-1-incident-response-escalation"
+        "flowchart-1-incident-response-escalation",
+        "treemap_basic",
+        "radar_basic",
+        "info_basic"
       ],
       "surface_targets": ["cli", "svg", "wasm"],
       "evidence_refs": [
         "crates/fm-parser/src/lib.rs",
         "crates/fm-cli/src/main.rs",
-        "crates/fm-cli/tests/golden_svg_test.rs"
+        "crates/fm-cli/tests/golden_svg_test.rs",
+        "crates/fm-cli/tests/frankentui_conformance_test.rs"
       ]
     },
     {
       "id": "layout",
       "label": "Deterministic Layout",
-      "maturity": "partial",
+      "maturity": "implemented",
       "confidence": {
         "label": "high",
-        "score": 0.79
+        "score": 0.9
       },
-      "summary": "Deterministic layout and cycle-aware handling exist today, but specialized algorithm depth is still advancing outside the strongest families.",
+      "summary": "Deterministic layout across all 18 concrete layout algorithms plus Auto, with 4 cycle-breaking strategies, e-graph crossing saturation, CGA obstacle routing, and Adapton incremental reuse.",
       "scenario_ids": [
         "flowchart_cycle",
         "flowchart-3-change-approval-pipeline",
         "gantt-1-q2-reliability-hardening",
-        "state-1-security-exception-lifecycle"
+        "state-1-security-exception-lifecycle",
+        "treemap_basic",
+        "radar_basic"
       ],
-      "surface_targets": ["svg", "terminal", "wasm"],
+      "surface_targets": ["svg", "terminal", "canvas", "wasm"],
       "evidence_refs": [
         "crates/fm-layout/src/lib.rs",
         "crates/fm-cli/tests/golden_layout_test.rs",
@@ -60,18 +67,21 @@
     {
       "id": "rendering",
       "label": "Rendering Surfaces",
-      "maturity": "partial",
+      "maturity": "implemented",
       "confidence": {
         "label": "high",
-        "score": 0.8
+        "score": 0.88
       },
-      "summary": "SVG, terminal, canvas, and browser-facing surfaces are all present, but family-by-family visual fidelity is not yet uniformly deep.",
+      "summary": "SVG, terminal, Canvas2D, and WASM surfaces render all 27 diagram families with 23 node shapes, 30 arrow types, 10 theme presets, and optional debug_overlay HUD.",
       "scenario_ids": [
         "flowchart-1-incident-response-escalation",
         "sequence-1-checkout-risk-review",
         "gantt_basic",
         "pie_basic",
-        "gitGraph-1-release-train-alpha"
+        "gitGraph-1-release-train-alpha",
+        "treemap_basic",
+        "radar_basic",
+        "info_basic"
       ],
       "surface_targets": ["svg", "terminal", "canvas", "wasm"],
       "evidence_refs": [
@@ -86,10 +96,10 @@
       "label": "Export and Embedding",
       "maturity": "partial",
       "confidence": {
-        "label": "medium",
-        "score": 0.64
+        "label": "high",
+        "score": 0.82
       },
-      "summary": "CLI export and WASM embedding contracts exist, but the standalone browser package publish path is still not reliably hosted for the showcase.",
+      "summary": "CLI export, WASM embedding, browser drop-in compatibility shims (web/mermaid*.mjs), and Cloudflare Pages bundle validation are live; crates.io and npm publication remain tracked under release beads.",
       "scenario_ids": [
         "flowchart_simple",
         "sequence_basic",
@@ -99,7 +109,8 @@
       "evidence_refs": [
         "crates/fm-cli/src/main.rs",
         "crates/fm-wasm/src/lib.rs",
-        "frankenmermaid_demo_showcase.html"
+        "frankenmermaid_demo_showcase.html",
+        "web/mermaid-compat.mjs"
       ]
     },
     {
@@ -397,6 +408,39 @@
       ],
       "source_refs": ["frankenmermaid_demo_showcase.html"],
       "surfaces": ["showcase", "mermaid-baseline"]
+    },
+    {
+      "id": "treemap_basic",
+      "title": "Treemap Hierarchical Squarified Layout",
+      "kind": "conformance-svg",
+      "diagram_family": "treemap",
+      "source_refs": [
+        "crates/fm-cli/tests/fixtures/frankentui_conformance/treemap_basic.mmd",
+        "crates/fm-cli/tests/frankentui_conformance_cases.json"
+      ],
+      "surfaces": ["cli", "svg", "terminal", "canvas"]
+    },
+    {
+      "id": "radar_basic",
+      "title": "Radar-Beta Multi-Series Polar Chart",
+      "kind": "conformance-svg",
+      "diagram_family": "radar-beta",
+      "source_refs": [
+        "crates/fm-cli/tests/fixtures/frankentui_conformance/radar_basic.mmd",
+        "crates/fm-cli/tests/frankentui_conformance_cases.json"
+      ],
+      "surfaces": ["cli", "svg", "terminal", "canvas"]
+    },
+    {
+      "id": "info_basic",
+      "title": "Info Version Self-Report Diagram",
+      "kind": "conformance-svg",
+      "diagram_family": "info",
+      "source_refs": [
+        "crates/fm-cli/tests/fixtures/frankentui_conformance/info_basic.mmd",
+        "crates/fm-cli/tests/frankentui_conformance_cases.json"
+      ],
+      "surfaces": ["cli", "svg", "terminal", "canvas"]
     }
   ]
 }

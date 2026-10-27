@@ -60,7 +60,7 @@ all seven.
 | **18 layout algorithms plus Auto** | Sugiyama, force-directed, tree, radial, sequence, timeline, gantt, xychart, sankey, kanban, grid, pie, quadrant, gitgraph, packet, architecture, treemap, radar — auto-selected per diagram type |
 | **4 cycle strategies** | Greedy, DFS back-edge, MFAS approximation, full cycle-aware with SCC detection and cluster collapse |
 | **Incremental layout** | Adapton-style self-adjusting computation, a cache-oblivious vEB layout index, and an epoch-based concurrent IR handle skip unchanged subgraphs on re-render |
-| **E-graph crossing minimization** | Egg-based equality saturation explores rank-order rewrites in parallel, with strict node-budget and timeout guards plus Sugiyama fallback |
+| **E-graph crossing minimization** | Bounded e-graph equality saturation (`egraph_crossing.rs`) explores rank-order rewrites with strict node-budget and timeout guards plus Sugiyama fallback |
 | **Conformal Geometric Algebra (CGA)** | Rotor-based transform composition and intersection queries for obstacle-aware edge routing |
 | **High-fidelity SVG** | Responsive `viewBox`, 23 node shapes, 30 arrow variants, gradients, drop shadows, glow effects, CSS animations, custom SVG icons, cluster backgrounds, accessible ARIA markup, 10 theme presets |
 | **Terminal rendering** | Braille (2×4), block (2×2), half-block, and cell-only sub-pixel modes with Unicode box-drawing, ASCII fallback, diff engine, and minimap |
@@ -76,7 +76,7 @@ all seven.
 | Algorithm | Serves | Notes |
 |---|---|---|
 | `auto` | All types | Selection by diagram type and graph topology; sugiyama default in the general selector |
-| `sugiyama` | General graphs (flowchart, class, state, ER, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
+| `sugiyama` | General graphs (flowchart, class, state, ER, C4, requirement, DOT) | Cycle breaking (4 strategies), crossing minimization, Brandes-Kopf coordinate assignment, edge bundling |
 | `force` | General (fallback for dense/cyclic) | Fruchterman-Reingold with Barnes-Hut, cluster cohesion |
 | `tree` | Tree-like graphs | Reingold-Tilford variant with direction support |
 | `radial` | Mindmap | Leaf-weighted angle allocation |
@@ -91,7 +91,7 @@ all seven.
 | `quadrant` | Quadrant charts | 2D scatter on [0,1] axes |
 | `gitgraph` | Git graphs | Lane-based commit positioning |
 | `packet` | Packet-beta | Grid-based field layout |
-| `architecture` | Architecture-beta, C4 (conditional) | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
+| `architecture` | Architecture-beta | Direction-aware placement; engages when the input declares a side (bd-zce4), otherwise the general selector runs |
 | `treemap` | Treemap | Squarified tile allocation |
 | `radar` | Radar-beta | Polar wedges with cardinal-spline rendering |
 | `ishikawa` | Ishikawa | Fishbone: effect head on a horizontal spine, causes alternating above and below on angled bones, sub-causes on nested bones |
@@ -139,7 +139,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 
 1. **Never waste user intent.** Malformed input degrades into best-effort IR + actionable diagnostics, not dead-end errors. If the parser can figure out what you probably meant, it will.
 2. **Determinism is a feature.** Every layout phase uses stable tie-breaking. Node ordering, rank assignment, coordinate computation, edge routing, and even FNX cache keys are deterministic. CI snapshot tests rely on this.
-3. **Layout quality beats minimal correctness.** Four cycle-breaking strategies, barycenter + transpose + sift crossing minimization, optional egg-based equality saturation, Brandes-Köpf coordinate assignment, obstacle-aware orthogonal edge routing, and 15 specialized algorithms.
+3. **Layout quality beats minimal correctness.** Four cycle-breaking strategies, barycenter + transpose + sift crossing minimization, optional e-graph equality saturation, Brandes-Köpf coordinate assignment, obstacle-aware orthogonal edge routing, and 18 concrete layout algorithms plus Auto.
 4. **One IR, many outputs.** A shared `MermaidDiagramIr` feeds SVG, terminal, Canvas2D, and WASM. Parse once, render everywhere. Layout statistics, decision ledgers, and diagnostics travel through the entire pipeline.
 5. **Polish is core product surface.** Typography, spacing, theming, accessibility, gradients, drop shadows, CSS animations, custom icons, and responsive sizing are all part of correctness.
 6. **Make the runtime auditable.** Every render carries a layout decision ledger, optional source-span attributes, an evidence bundle, and a witness block describing what was decided and why.
@@ -152,7 +152,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 | Parser recovery on malformed input | Best-effort with diagnostics | Often strict failure | Upstream behavior |
 | Fuzzy keyword detection | Levenshtein + heuristics | No | No |
 | Cycle-aware layout strategies | 4 strategies + cluster collapse | Basic | Upstream |
-| Specialized layout algorithms | 15 (auto-selected per type) | Varies | Upstream |
+| Specialized layout algorithms | 18 + Auto (auto-selected per type) | Varies | Upstream |
 | Incremental re-layout on small edits | Adapton DCG + epoch IR + cache-oblivious vEB | No | No |
 | E-graph crossing minimization | Yes (with budget + fallback) | No | No |
 | Graph-intelligence integration (centrality, SCC) | FNX (optional) | No | No |
@@ -175,7 +175,7 @@ fm-cli diff before.mmd after.mmd --format terminal
 | Web rendering | SVG + Canvas2D in-browser via WASM | Server-side rendering only (no WASM port) | Server-side rendering only |
 | Terminal rendering | Built-in (braille / block / half-block / cell) | Third-party `dot2tex`-style hacks only | No |
 | Error recovery | Best-effort with diagnostics | Reject on first parse error | Reject on first parse error |
-| Layout algorithms | 15 specialized | `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`, `osage`, `patchwork` | Internal hierarchical / sequence |
+| Layout algorithms | 18 + Auto | `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`, `osage`, `patchwork` | Internal hierarchical / sequence |
 | Theme system | 10 built-in presets + Mermaid `themeVariables` | Attribute-based (no preset themes) | Skin system |
 | Sandbox-friendly | WASM (no FS / network access) | Native binary (sandbox externally) | JVM startup overhead |
 | Embedded incremental layout | Yes (Adapton DCG) | No | No |
@@ -189,7 +189,7 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | Diagram Type | Runtime Status |
 |--------------|----------------|
 | `flowchart` | Implemented |
-| `sequence` | Partial |
+| `sequence` | Implemented |
 | `class` | Implemented |
 | `state` | Implemented |
 | `er` | Implemented |
@@ -290,7 +290,7 @@ Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerl
 
 ### Crates.io status
 
-The workspace is at version `0.2.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.3.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -515,6 +515,7 @@ import {
   applyLensEdit,
   parseLens,
   applyParseLensEdit,
+  applyIrLensEdit,
   Diagram,
 } from '@frankenmermaid/core';
 
@@ -536,13 +537,21 @@ const parsed = parse('classDiagram\nA <|-- B');
 // Generate a human-readable description (for screen readers, alt text)
 const description = describeDiagram('flowchart TD\nA-->B-->C');
 
-// Bidirectional structural lens for editor integrations
-const lens = diagramLens('flowchart LR\nA-->B');
-const edited = applyLensEdit(lens, { /* ... */ });
+// Source-span edits use a binding from the exact source being edited.
+const source = 'flowchart LR\nA[Start]\nA-->B';
+const binding = diagramLens(source).find(entry => entry.sourceId === 'A')!;
+const edited = applyLensEdit(source, binding.elementId, 'A[Begin]');
+const ptEdited = applyParseLensEdit(source, binding.elementId, 'A[Begin]');
+// ptEdited also contains a fresh snapshot with the updated spans.
 
-// Parse-tree-level lens for token-grained edits
-const ptLens = parseLens('flowchart LR\nA-->B');
-const ptEdited = applyParseLensEdit(ptLens, { /* ... */ });
+// Semantic edits validate the complete IR before re-emitting source.
+const sequence = 'sequenceDiagram\nClient->>Server: request';
+const snapshot = parseLens(sequence);
+const editedIr = structuredClone(snapshot.parsed.ir);
+editedIr.labels[editedIr.edges[0].label].text = 'authenticated request';
+const semanticEdit = applyIrLensEdit(sequence, editedIr);
+// semanticEdit.updatedSource preserves the arrow, endpoints, and formatting.
+// semanticEdit.snapshot supplies the next edit's IR and source bindings.
 
 // Imperative Diagram class with Canvas2D (or WebGPU fallback) renderer
 const diagram = new Diagram(
@@ -581,26 +590,39 @@ const overview = renderSvg(source, {
 identifies SVGs with label preservation enabled. Layout budgets and decoration reductions
 remain active independently of this text policy.
 
-The wasm-bindgen surface intentionally stays narrow: ten free functions (`init`, `renderSvg`, `renderDeck`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
+The wasm-bindgen surface includes rendering, parsing, source bindings, and guarded semantic
+editing through `applyIrLensEdit`, plus the interactive `Diagram` class. New exports are generated
+from `fm-wasm` when the WASM package is rebuilt. The capability matrix and source-span artifacts
+are produced by the CLI / Rust library surfaces; for browser-side capability introspection use
+the auto-generated metadata block at the top of this README or load the JSON emitted by
+`fm-cli capabilities`.
 
 The WASM build integrates the same `IncrementalLayoutEngine` used by the CLI, so successive renders of near-identical input skip stages whose dependency-graph inputs have not changed.
 
 ## The lens system — bidirectional editor integration
 
-`diagramLens` / `applyLensEdit` and `parseLens` / `applyParseLensEdit` together form a bidirectional bridge between source text and structured edits. The motivating constraint: when an editor performs a structural action ("rename node `A` to `Start`", "swap participant order", "add a new task to section `Backend`"), the resulting source text should preserve everything else exactly — comments, whitespace, ordering of unrelated declarations, even quote style.
-
-Naive parse → re-emit pipelines lose all of that. The lens system instead:
-
-1. Parses the input into an IR plus a **trivia map** that records the exact original spelling of every token (whitespace, comments, quote style, delimiter choice).
-2. Exposes structural edit operations that operate on the IR while preserving the trivia map for unchanged regions.
-3. Emits the edited source by walking the trivia map and substituting only the changed tokens.
+The lens system retains the original source alongside its IR and source bindings. Editors can
+replace a bound source span, insert or delete a source line, or submit a supported semantic edit.
+Semantic putback preserves unrelated comments, whitespace, quotes, and line endings, then reparses
+the candidate source to verify the complete requested IR before accepting it.
 
 | Function | Use case |
 |---|---|
-| `diagramLens(source)` | Diagram-level structural lens — edits at the node/edge level |
-| `applyLensEdit(lens, edit)` | Apply one structural edit, return the new source |
-| `parseLens(source)` | Lower-level parse lens — gives access to parse-tree node-level edits |
-| `applyParseLensEdit(lens, edit)` | Apply one parse-tree edit |
+| `diagramLens(source)` | Return node, edge, and cluster source bindings. |
+| `applyLensEdit(source, elementId, replacement)` | Replace a bound source span and return an edit receipt with `updatedSource`. |
+| `parseLens(source)` | Return the parsed IR, formatting complement, source map, and bindings. |
+| `applyParseLensEdit(source, elementId, replacement)` | Replace a bound span and return the receipt plus a fresh snapshot. |
+| `applyParseLensDelete(source, elementId)` | Delete the addressed source line and refresh the snapshot. |
+| `applyParseLensInsertLineAfter(source, elementId, text)` | Insert a line using the target's indentation and line ending, then refresh the snapshot. |
+| `applyIrLensEdit(source, editedIr)` | Validate a supported IR edit and return `{ updatedSource, snapshot }`. |
+
+The semantic API supports existing node labels and edge/message labels in flowchart, sequence,
+class, state, and ER diagrams. Flowcharts also support safe permutations of independent node
+declarations through the Rust ordering lens. Label IDs are interned: editing a label changes every
+node or edge referring to that ID. Keep the rest of the IR unchanged, and use the returned snapshot
+for subsequent edits. Topology changes, stale source references, changes to relationship metadata,
+and source forms that cannot be rewritten faithfully return an error. Source-span operations remain
+available when the editor explicitly intends to replace Mermaid syntax.
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
 
@@ -831,12 +853,12 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.2.0)
+├── Cargo.toml                 # Workspace root (version 0.3.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
 │   ├── fm-parser/             # Detection + Mermaid/DOT parsing + recovery + IR builder
-│   ├── fm-layout/             # 15 algorithms, cycle breaking, e-graph, FNX, incremental
+│   ├── fm-layout/             # 18 algorithms + Auto, cycle breaking, e-graph, FNX, incremental
 │   ├── fm-render-svg/         # Zero-dep SVG document/element/path/text/defs + theme system
 │   ├── fm-render-term/        # Terminal rendering (4 fidelity modes) + diff + minimap
 │   ├── fm-render-canvas/      # Canvas2D rendering with mock context for tests
@@ -844,6 +866,7 @@ frankenmermaid/
 │   ├── fm-cli/                # CLI surface (frankenmermaid + fm-cli binaries + evidence)
 │   └── fm-regression-harness/ # Real-world corpus ingestion + HTML thumbnail report
 ├── docs/                      # FNX integration guides + migration + compatibility matrix
+├── ios/                       # Universal iPhone/iPad/Mac Catalyst SwiftUI studio (bd-0fzf5)
 ├── legacy_mermaid_code/       # Reference corpus (gitignored gitlink)
 └── tests/                     # Cross-component integration tests
 ```
@@ -853,8 +876,8 @@ frankenmermaid/
 | Crate | Lines | Responsibility |
 |---|---|---|
 | `fm-core` | ~15,600 | Shared IR, 23 node shapes, 30 arrow types, config, diagnostics, CGA, evidence, canary state machine |
-| `fm-parser` | ~18,000 | 24-type detection + parsing + error recovery + DOT bridge + IR builder + interning |
-| `fm-layout` | ~34,100 | 15 algorithms, 4 cycle strategies, Brandes-Köpf coords, E-graph crossing, CGA routing, Adapton incremental, FNX adapter |
+| `fm-parser` | ~18,000 | 27-type detection + parsing + error recovery + DOT bridge + IR builder + interning |
+| `fm-layout` | ~34,100 | 18 algorithms + Auto, 4 cycle strategies, Brandes-Köpf coords, E-graph crossing, CGA routing, Adapton incremental, FNX adapter |
 | `fm-render-svg` | ~13,800 | Accessible themeable SVG with gradients/shadows/glows/CSS animations/custom icons + 10 theme presets |
 | `fm-render-term` | ~6,500 | Terminal renderer + diff engine + minimap + 4 fidelity modes |
 | `fm-render-canvas` | ~3,500 | Canvas2D rendering with trait-based abstraction and mock context |
@@ -892,7 +915,7 @@ frankenmermaid/
       │  • capability-aware dispatch │  config-aware algorithm selection
       │  • cycle strategy            │  4 modes (greedy/dfs/mfas/cycle-aware)
       │  • Brandes-Köpf coords       │
-      │  • E-graph crossing min      │  egg + budget + Sugiyama fallback
+      │  • E-graph crossing min      │  rewrite rules + budget + Sugiyama fallback
       │  • CGA orthogonal routing    │  obstacle-aware via intersection queries
       │  • incremental (Adapton)     │  dependency-graph cache, skip-on-clean
       │  • [optional] FNX advisory   │  centrality tiers, bridges, SCC/WCC
@@ -1020,6 +1043,9 @@ When `algorithm = "auto"` (the default), a **capability-aware dispatcher** consu
 | **Quadrant** | Quadrant chart | Four-quadrant scatter on `[0,1]` axes |
 | **GitGraph** | Git graph | Branch-lane layout with chronological commit stacking |
 | **Packet** | Packet-beta | Grid-derived packet-lane layout |
+| **Architecture** | Architecture-beta, C4 (conditional) | Direction-aware placement with group containers and junction routing |
+| **Treemap** | Treemap | Squarified hierarchical tile allocation |
+| **Radar** | Radar-beta | Polar axis spokes with closed cardinal-spline / polygon curves |
 
 ### The Sugiyama algorithm
 
@@ -1057,7 +1083,7 @@ The layout stats record `crossing_count_before_refinement` and the final `crossi
 
 ### E-graph equality saturation for crossing minimization
 
-For graphs where greedy barycenter ordering leaves room on the table, `fm-layout` includes an optional **egg-based equality saturation** pass (`fm-layout/src/egraph_crossing.rs`). It explores rank-order rewrites in parallel under a node-budget and timeout, then extracts the lowest-crossing ordering. If the budget is exceeded, the engine falls back to Sugiyama's standard refinement automatically.
+For graphs where greedy barycenter ordering leaves room on the table, `fm-layout` includes an optional **e-graph equality saturation** pass (`fm-layout/src/egraph_crossing.rs`). It explores rank-order rewrites under a node-budget and timeout, then extracts the lowest-crossing ordering. If the budget is exceeded, the engine falls back to Sugiyama's standard refinement automatically.
 
 Hardening includes:
 
@@ -1323,7 +1349,7 @@ When `--embed-source-spans` is passed (or `accessibility = true` in config), eve
 
 ### `classDef` / `style` / `linkStyle`
 
-`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references and applied during SVG rendering. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
+`classDef`, `style`, and `linkStyle` directives are parsed into structured `IrStyle` references. SVG and Canvas2D apply author styling, and GPU node plans share the Canvas node-style resolver. A `classDef default` supplies base styles for ordinary nodes, including nodes with named classes: named classes override individual properties, and direct node styles override those. Edges and subgraph containers keep their separate style channels. Both SVG backends apply node styles, including the scene backend's individual shape and text primitives. Style values pass through a sanitizer that strips disallowed properties (e.g., everything except a whitelist of safe CSS), is case-insensitive to `javascript:` schemes, and handles comment-obfuscated payloads.
 
 ## How terminal rendering works
 
@@ -1371,6 +1397,12 @@ For diagrams that exceed the terminal viewport, the renderer can produce a scale
 ## Canvas2D web rendering
 
 The Canvas2D renderer is an alternative to SVG for browser-based rendering, particularly suited for large diagrams and interactive use.
+
+XY charts have a dedicated Canvas2D path with numeric ticks and gridlines, category and axis
+labels, chart titles, grouped bars, connected line points, and area fills. Vertical and
+horizontal charts share their domains, tick values, and category labels with SVG; data marks
+use the layout's exact rectangles and point centers, including negative values and zero
+baselines. The GPU scene does not yet carry these dedicated XY draws.
 
 ### Trait-based abstraction
 
@@ -1664,18 +1696,23 @@ Greedy word-fit wrapping by default; when a word is wider than the target width 
 
 ```
 node_width  = max(label_width + 72.0, 100.0)
-node_height = max(label_height + 44.0, 52.0)
+node_height = max(label_height + 24.0, 44.0)
 ```
 
-72px horizontal padding (36px per side) and 44px vertical padding (22px per side) give labels breathing room. Minimums (100×52) ensure even empty or single-character nodes are visually meaningful and clickable. Shape does not affect the bounding box; a diamond and a rectangle with the same label get the same allocated space.
+These base dimensions apply to ordinary process boxes. The horizontal allowance protects
+long labels; the shorter height avoids oversized boxes around a single line. Circular and
+diamond shapes grow to contain the text corners. Other shaped nodes and requirement metadata
+retain their larger insets, while icons and class, ER, or C4 content can grow the box further.
 
 ### Spacing constants
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `node_spacing` | 80 px | Horizontal gap between adjacent nodes in the same rank |
-| `rank_spacing` | 120 px | Vertical gap between ranks |
-| `cluster_padding` | 52 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+| `node_spacing` | 40 px | Gap between adjacent nodes in the same rank |
+| `rank_spacing` | 64 px | Gap between ranks, along the diagram's rank direction |
+| `cluster_padding` | 28 px | Padding inside cluster/subgraph boundaries (all 4 sides) |
+
+The default SVG canvas adds a 24 px margin.
 
 ## Security model
 
@@ -2066,7 +2103,7 @@ For richer reporting, the golden harness emits structured JSON evidence per scen
 The WASM API, the lens system, and source-span attributes between them cover the pieces an editor needs: render, structural edit, click-to-source.
 
 ```ts
-import { init, renderSvg, diagramLens, applyLensEdit } from '@frankenmermaid/core';
+import { init, renderSvg, parseLens, applyIrLensEdit } from '@frankenmermaid/core';
 await init();
 
 // Initial render with source spans
@@ -2079,10 +2116,15 @@ container.addEventListener('click', (e) => {
   if (span) editor.revealPosition(parsePosition(span));
 });
 
-// Structural edits via the lens — preserves formatting of unchanged regions
-const lens = diagramLens(source);
-const newSource = applyLensEdit(lens, { kind: 'rename-node', from: 'A', to: 'Start' });
-editor.setValue(newSource);
+// Change A's explicit display label while preserving its identifier and relationships.
+const snapshot = parseLens(source);
+const editedIr = structuredClone(snapshot.parsed.ir);
+const node = editedIr.nodes.find(node => node.id === 'A');
+if (node?.label != null) {
+  editedIr.labels[node.label].text = 'Start';
+  const result = applyIrLensEdit(source, editedIr);
+  editor.setValue(result.updatedSource);
+}
 ```
 
 ### Static-site documentation pipelines
@@ -2226,7 +2268,7 @@ A --> B
 
 - **Sequence diagrams** support participants, messages, activation boxes, notes, fragments (alt/opt/loop/par/critical/break), participant groups, and lifecycle events (create/destroy). Some edge cases in deeply nested fragments may still be refined; the conformance fixture corpus covers the common shapes.
 - **XyChart** has dedicated layout and SVG rendering, including axis ticks, bar/line/area series, and category padding. Mixed-series and dual-axis polish is still evolving.
-- **`classDef` / `style` directives** are fully applied in SVG. Terminal and Canvas backends still use theme defaults (the structured style system is wired into core; backend-specific application is incremental).
+- **`classDef` / `style` directives** apply to SVG and Canvas nodes, including the implicit default class, named-class overrides, and direct styles. GPU node plans use the same resolved node styles. Terminal output does not provide a CSS color channel.
 - **Very large SVGs** (10k+ nodes) can be heavy for browsers. Use the Canvas2D backend via WASM for interactive exploration.
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
 - **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
@@ -2426,7 +2468,7 @@ frankenmermaid borrows heavily from prior graph-drawing research and from the op
 - **Reingold-Tilford tidy tree** — Edward Reingold and John Tilford, *"Tidier Drawings of Trees"* (1981).
 - **Adapton self-adjusting computation** — Matthew Hammer et al., *"Adapton: Composable, Demand-Driven Incremental Computation"* (2014). Our implementation is a deliberately simplified, single-threaded, coarse-grained variant.
 - **Cache-oblivious layout (van Emde Boas)** — Michael Bender, Erik Demaine, and Martin Farach-Colton, *"Cache-Oblivious B-Trees"* (2000). The `build_veb()` BFS-index tree gives good locality at every level of the memory hierarchy without tuning.
-- **Equality saturation / e-graphs** — Max Willsey et al., *"egg: Fast and Extensible Equality Saturation"* (2021), via the [`egg`](https://crates.io/crates/egg) crate.
+- **Equality saturation / e-graphs** — Max Willsey et al., *"egg: Fast and Extensible Equality Saturation"* (2021), implemented as a zero-dependency in-crate e-graph (`crates/fm-layout/src/egraph_crossing.rs`).
 - **Conformal geometric algebra** — Hestenes/Doran/Lasenby's modern geometric algebra. Our rotor-based transform composition follows the textbook construction adapted to 2D screen space.
 - **Minimum feedback arc set heuristics** — Peter Eades, Xuemin Lin, and W.F. Smyth, *"A Fast and Effective Heuristic for the Feedback Arc Set Problem"* (1993).
 

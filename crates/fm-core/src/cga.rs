@@ -26,8 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Grade 2: e12, e1+, e1-, e2+, e2-, e+- (indices 5-10)
 /// Grade 3: e12+, e12-, e1+-, e2+- (indices 11-14)
 /// Grade 4: e12+- (index 15)
-#[allow(dead_code)]
-mod blade {
+pub mod blade {
     pub const SCALAR: usize = 0;
     pub const E1: usize = 1;
     pub const E2: usize = 2;
@@ -73,6 +72,19 @@ impl Multivector {
         Self {
             components: [0.0; 16],
         }
+    }
+
+    /// Read a basis blade component by its [`blade`] index (`bd-hcg6p`).
+    #[inline]
+    #[must_use]
+    pub const fn blade(self, blade_index: usize) -> f64 {
+        self.components[blade_index]
+    }
+
+    /// Set a basis blade component by its [`blade`] index (`bd-hcg6p`).
+    #[inline]
+    pub const fn set_blade(&mut self, blade_index: usize, value: f64) {
+        self.components[blade_index] = value;
     }
 
     /// A scalar multivector.
@@ -3422,5 +3434,31 @@ mod rotor_fault_tests {
              got ({rx}, {ry}). If this changed, the decomposition learned the other order -- \
              update this test and TermTransform's comment together"
         );
+    }
+
+    #[test]
+    fn blade_module_and_multivector_blade_accessors_roundtrip() {
+        let mut mv = Multivector::zero();
+        for idx in [
+            blade::SCALAR,
+            blade::E1,
+            blade::E2,
+            blade::EP,
+            blade::EM,
+            blade::E12,
+            blade::E1P,
+            blade::E1M,
+            blade::E2P,
+            blade::E2M,
+            blade::EPM,
+            blade::E12P,
+            blade::E12M,
+            blade::E1PM,
+            blade::E2PM,
+            blade::E12PM,
+        ] {
+            mv.set_blade(idx, (idx as f64) + 1.5);
+            assert!((mv.blade(idx) - ((idx as f64) + 1.5)).abs() < 1e-12);
+        }
     }
 }
