@@ -31,6 +31,8 @@ type OpenFragment = (
 #[derive(Debug, Clone)]
 struct StateCompositeContext {
     lookup_key: String,
+    /// Pseudo-state identity follows the current concurrent region, when one is open.
+    scope_key: String,
     cluster_index: usize,
     subgraph_index: usize,
     region_count: usize,
@@ -1253,13 +1255,14 @@ impl IrBuilder {
     }
 
     pub(crate) fn begin_state_cluster(&mut self, name: &str, title: Option<&str>, span: Span) {
-        let parent_subgraph = self
-            .state_stack
-            .last()
-            .map(|context| context.subgraph_index);
+        let parent_subgraph = self.state_stack.last().map(|context| {
+            context
+                .current_region_subgraph
+                .unwrap_or(context.subgraph_index)
+        });
         let lookup_key = self.state_stack.last().map_or_else(
             || format!("state/{name}"),
-            |context| format!("{}/{}", context.lookup_key, name),
+            |context| format!("{}/{}", context.scope_key, name),
         );
 
         let Some(cluster_index) = self.ensure_cluster(&lookup_key, title.or(Some(name)), span)
@@ -1278,6 +1281,7 @@ impl IrBuilder {
         };
 
         self.state_stack.push(StateCompositeContext {
+            scope_key: lookup_key.clone(),
             lookup_key,
             cluster_index,
             subgraph_index,
@@ -1291,17 +1295,30 @@ impl IrBuilder {
         self.state_stack.pop().is_some()
     }
 
-    /// Lookup key of the composite state currently being parsed, or `None` at the top level.
+    /// Apply a state direction to the document containing the statement.
+    pub(crate) fn set_state_direction(&mut self, direction: GraphDirection) {
+        if let Some(context) = self.state_stack.last() {
+            let subgraph = context
+                .current_region_subgraph
+                .unwrap_or(context.subgraph_index);
+            self.set_subgraph_direction(subgraph, direction);
+        } else {
+            self.set_direction(direction);
+        }
+    }
+
+    /// Lookup key of the composite or concurrent region being parsed, or `None` at the top level.
     ///
     /// `[*]` is a pseudo-state, and its identity is SCOPED: the `[*]` inside `state Processing { … }`
     /// is a different pseudo-state from the diagram's own. Interning both under one global id merged
     /// them into a single node that then emitted every start transition from both scopes (bd-w5j5).
-    /// Nested composites need the full path, not just the innermost name, so this returns the same
-    /// key `begin_state_cluster` builds its cluster from.
+    /// Each concurrent region has its own start/end as well. The first region keeps the composite's
+    /// original key, because its statements have already been lowered when the first `--` arrives;
+    /// subsequent regions get distinct keys, which their nested composites inherit.
     pub(crate) fn state_scope_key(&self) -> Option<&str> {
         self.state_stack
             .last()
-            .map(|context| context.lookup_key.as_str())
+            .map(|context| context.scope_key.as_str())
     }
 
     pub(crate) fn advance_state_region(&mut self, span: Span) -> bool {
@@ -1324,6 +1341,29 @@ impl IrBuilder {
             for node_id in context.pending_region_members.iter().copied() {
                 self.add_node_to_subgraph(first_region_subgraph, node_id);
             }
+
+            // Before the first separator, the first region looked like the composite's own
+            // document. Move its direction and nested composites into that region now that its
+            // boundary is known. Otherwise a nested composite becomes a sibling of its region,
+            // and compound layout may assign the same contents to two unrelated groups.
+            let direction = self.ir.graph.subgraphs[context.subgraph_index]
+                .direction
+                .take();
+            self.ir.graph.subgraphs[first_region_subgraph].direction = direction;
+            let children =
+                std::mem::take(&mut self.ir.graph.subgraphs[context.subgraph_index].children);
+            self.ir.graph.subgraphs[context.subgraph_index]
+                .children
+                .push(IrSubgraphId(first_region_subgraph));
+            for child in children {
+                if child.0 != first_region_subgraph {
+                    self.ir.graph.subgraphs[child.0].parent =
+                        Some(IrSubgraphId(first_region_subgraph));
+                    self.ir.graph.subgraphs[first_region_subgraph]
+                        .children
+                        .push(child);
+                }
+            }
         }
 
         let next_region_number = context.region_count + 2;
@@ -1344,6 +1384,7 @@ impl IrBuilder {
         self.set_cluster_grid_span(context.cluster_index, total_regions);
         self.set_subgraph_grid_span(context.subgraph_index, total_regions);
         context.current_region_subgraph = Some(next_region_subgraph);
+        context.scope_key = format!("{}/__region_{next_region_number}", context.lookup_key);
         context.pending_region_members.clear();
         self.state_stack.push(context);
         true

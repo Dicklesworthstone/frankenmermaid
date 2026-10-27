@@ -6262,7 +6262,7 @@ fn lower_state_statement(
 ) {
     let span = span_for(line_number, source_line);
     match statement {
-        StateStatement::Direction(direction) => builder.set_direction(direction),
+        StateStatement::Direction(direction) => builder.set_state_direction(direction),
         StateStatement::Declaration(declaration) => {
             let _ = register_state_declaration(&declaration, line_number, source_line, builder);
         }
@@ -6495,7 +6495,7 @@ fn lower_state_node(
     }
 }
 
-/// Pseudo-state id for the composite currently being parsed.
+/// Pseudo-state id for the composite or concurrent region currently being parsed.
 ///
 /// `[*]` is scoped, not global: the one inside `state Processing { … }` is a different pseudo-state
 /// from the diagram's own. Interning both under `__state_start` merged them into ONE node that then
@@ -6531,7 +6531,7 @@ fn state_edge_endpoint<'a>(
         return (Cow::Borrowed(id), label, shape);
     }
 
-    // Scoped per composite — see `scoped_pseudo_state_id` (bd-w5j5).
+    // Scoped per composite and concurrent region — see `scoped_pseudo_state_id` (bd-w5j5).
     if is_source {
         (
             scoped_pseudo_state_id(STATE_START_NODE_ID, scope),
@@ -26713,7 +26713,6 @@ Rel_Back(db, app, "Responds")"#,
             .filter_map(|child_id| parsed.ir.graph.subgraph(*child_id))
             .map(|child| child.key.as_str())
             .collect::<Vec<_>>();
-        assert!(child_keys.contains(&"Worker"));
         assert_eq!(
             child_keys
                 .iter()
@@ -26721,6 +26720,160 @@ Rel_Back(db, app, "Responds")"#,
                 .count(),
             2
         );
+        let worker = parsed.ir.graph.first_subgraph_by_key("Worker").unwrap();
+        let first_region = parsed
+            .ir
+            .graph
+            .first_subgraph_by_key("__state_region_1")
+            .unwrap();
+        assert_eq!(worker.parent, Some(first_region.id));
+        assert!(first_region.children.contains(&worker.id));
+        assert!(!active_subgraph.children.contains(&worker.id));
+    }
+
+    #[test]
+    fn state_directions_are_scoped_to_their_composite_documents() {
+        let parsed = parse_mermaid(concat!(
+            "stateDiagram-v2\ndirection TB\n",
+            "state Outer {\ndirection LR\nA --> B\n",
+            "state Inner {\ndirection BT\nC --> D\n}\n",
+            "B --> Inner\n}\nOutside --> Done\n",
+        ));
+        assert_eq!(parsed.ir.direction, GraphDirection::TB);
+        assert_eq!(parsed.ir.meta.direction, GraphDirection::TB);
+        for (key, direction) in [("Outer", GraphDirection::LR), ("Inner", GraphDirection::BT)] {
+            assert_eq!(
+                parsed
+                    .ir
+                    .graph
+                    .first_subgraph_by_key(key)
+                    .unwrap()
+                    .direction,
+                Some(direction),
+                "the direction statement belongs to {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_concurrent_regions_have_independent_start_and_end_nodes() {
+        // Mermaid 11.15's stateDb.docTranslator creates a separate document for each `--`
+        // region before assigning pseudo-state IDs. Sharing a start/end makes a transition in
+        // one concurrent machine connect to another machine's initial/final state.
+        let source = concat!(
+            "stateDiagram-v2\n[*] --> Active\n",
+            "state Active {\n[*] --> A\nA --> [*]\n",
+            "--\n[*] --> B\nB --> [*]\n",
+            "--\n[*] --> C\nC --> [*]\n}\nActive --> [*]\n",
+        );
+        let parsed = parse_mermaid(source);
+        let ir = &parsed.ir;
+        let mut starts = std::collections::BTreeSet::new();
+        let mut ends = std::collections::BTreeSet::new();
+        for (number, state) in [(1, "A"), (2, "B"), (3, "C")] {
+            let region = ir
+                .graph
+                .first_subgraph_by_key(&format!("__state_region_{number}"))
+                .unwrap();
+            assert_eq!(region.members.len(), 3);
+            let member_with_shape = |shape| {
+                *region
+                    .members
+                    .iter()
+                    .find(|member| ir.nodes[member.0].shape == shape)
+                    .unwrap()
+            };
+            let start = member_with_shape(NodeShape::FilledCircle);
+            let end = member_with_shape(NodeShape::DoubleCircle);
+            assert!(starts.insert(start), "each region needs a distinct start");
+            assert!(ends.insert(end), "each region needs a distinct end");
+            let outgoing = ir
+                .edges
+                .iter()
+                .filter(|edge| ir.resolve_endpoint_node(edge.from) == Some(start))
+                .collect::<Vec<_>>();
+            let incoming = ir
+                .edges
+                .iter()
+                .filter(|edge| ir.resolve_endpoint_node(edge.to) == Some(end))
+                .collect::<Vec<_>>();
+            assert_eq!(outgoing.len(), 1);
+            assert_eq!(incoming.len(), 1);
+            let entry = ir.resolve_endpoint_node(outgoing[0].to).unwrap();
+            let exit = ir.resolve_endpoint_node(incoming[0].from).unwrap();
+            assert_eq!(ir.nodes[entry.0].id, state);
+            assert_eq!(entry, exit);
+        }
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::FilledCircle)
+                .count(),
+            4,
+            "three region starts plus the outer machine start"
+        );
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .filter(|node| node.shape == NodeShape::DoubleCircle)
+                .count(),
+            4
+        );
+        let repeated = parse_mermaid(source);
+        assert_eq!(ir.graph, repeated.ir.graph);
+        assert_eq!(ir.edges, repeated.ir.edges);
+    }
+
+    #[test]
+    fn state_region_documents_preserve_directions_and_nested_composites() {
+        let parsed = parse_mermaid(concat!(
+            "stateDiagram-v2\ndirection TB\nstate Active {\n",
+            "direction LR\n[*] --> Left\n",
+            "state Left {\n[*] --> L\nL --> [*]\n}\nLeft --> [*]\n",
+            "--\ndirection RL\n[*] --> Right\n",
+            "state Right {\n[*] --> R\nR --> [*]\n}\nRight --> [*]\n}\n",
+        ));
+        let graph = &parsed.ir.graph;
+        let active = graph.first_subgraph_by_key("Active").unwrap();
+        assert_eq!(parsed.ir.direction, GraphDirection::TB);
+        assert_eq!(active.direction, None);
+        assert_eq!(active.children.len(), 2);
+        for (key, child_key, direction) in [
+            ("__state_region_1", "Left", GraphDirection::LR),
+            ("__state_region_2", "Right", GraphDirection::RL),
+        ] {
+            let region = graph.first_subgraph_by_key(key).unwrap();
+            let nested = graph.first_subgraph_by_key(child_key).unwrap();
+            assert_eq!(region.parent, Some(active.id));
+            assert_eq!(region.direction, Some(direction));
+            assert_eq!(nested.parent, Some(region.id));
+            assert_eq!(region.children, [nested.id]);
+            assert_eq!(
+                region
+                    .members
+                    .iter()
+                    .filter(|id| { parsed.ir.nodes[id.0].shape == NodeShape::FilledCircle })
+                    .count(),
+                2,
+                "region and nested composite each retain their own initial state"
+            );
+        }
+    }
+
+    #[test]
+    fn state_empty_first_region_does_not_leak_direction_or_membership() {
+        let parsed = parse_mermaid(concat!(
+            "stateDiagram-v2\ndirection TB\nstate Active {\n",
+            "direction LR\n--\ndirection BT\n[*] --> Working\nWorking --> [*]\n}\n",
+        ));
+        let graph = &parsed.ir.graph;
+        let first = graph.first_subgraph_by_key("__state_region_1").unwrap();
+        let second = graph.first_subgraph_by_key("__state_region_2").unwrap();
+        assert!(first.members.is_empty());
+        assert_eq!(first.direction, Some(GraphDirection::LR));
+        assert_eq!(second.members.len(), 3);
+        assert_eq!(second.direction, Some(GraphDirection::BT));
+        assert_eq!(parsed.ir.direction, GraphDirection::TB);
     }
 
     #[test]
