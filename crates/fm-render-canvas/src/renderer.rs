@@ -2675,15 +2675,19 @@ impl Canvas2dRenderer {
                 // quadratic/cubic commands keep elbows smooth at any zoom; specialized messages and
                 // chart paths retain their polylines through the shared diagram-family policy.
                 ctx.begin_path();
-                let path_endpoints =
-                    fm_layout::edge_paths::emit_edge_path(ir.diagram_type, points, |command| {
+                let path_endpoints = fm_layout::edge_paths::emit_diagram_edge_path(
+                    ir,
+                    edge_path.edge_index,
+                    points,
+                    |command| {
                         self.emit_path_commands(
                             ctx,
                             std::slice::from_ref(&command),
                             offset_x,
                             offset_y,
                         );
-                    });
+                    },
+                );
                 ctx.stroke();
                 self.draw_calls += 1;
 
@@ -5100,6 +5104,69 @@ mod tests {
                 actual,
                 "scene diverged for {source}"
             );
+        }
+    }
+
+    #[test]
+    fn per_edge_curve_hints_preserve_native_scene_and_gpu_geometry() {
+        for (source, smoothed) in [
+            ("flowchart LR\nA e1@--> B\ne1@{ curve: linear }", false),
+            ("flowchart LR\nA e1@--> B\ne1@{ curve: stepAfter }", false),
+            (
+                "flowchart LR\nA e1@--> B\nlinkStyle default interpolate basis\ne1@{ curve: step }",
+                false,
+            ),
+            (
+                "flowchart LR\nA e1@--> B\nlinkStyle default interpolate linear\ne1@{ curve: basis }",
+                true,
+            ),
+            (
+                "flowchart LR\nA --> B\nlinkStyle default interpolate linear",
+                false,
+            ),
+            ("flowchart LR\nA --> B", true),
+        ] {
+            let ir = fm_parser::parse(source).ir;
+            let mut layout = layout_diagram(&ir);
+            layout.edges[0].points = [(0.0, 0.0), (60.0, 0.0), (60.0, 80.0), (120.0, 80.0)]
+                .into_iter()
+                .map(|(x, y)| fm_layout::LayoutPoint { x, y })
+                .collect();
+            let mut renderer = Canvas2dRenderer::new(CanvasRenderConfig::default());
+            let mut ctx = MockCanvas2dContext::new(300.0, 200.0);
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut 0);
+            let native = first_stroked_path(ctx.operations());
+            assert_eq!(
+                native.iter().any(|command| matches!(
+                    command,
+                    PathCmd::QuadTo { .. } | PathCmd::CubicTo { .. }
+                )),
+                smoothed,
+                "{source}: {native:?}"
+            );
+            let scene = build_render_scene(&ir, &layout);
+            assert_eq!(scene_edge_path(&scene.root, 0).unwrap(), native, "{source}");
+
+            let plan = crate::GpuRenderPlan::from_layout(&ir, &layout, 1.5);
+            let segments: Vec<_> = plan
+                .edge_segments
+                .iter()
+                .filter(|segment| segment.edge_index == 0)
+                .collect();
+            assert_eq!(segments.first().unwrap().from, [0.0, 0.0]);
+            assert_eq!(segments.last().unwrap().to, [120.0, 80.0]);
+            if smoothed {
+                assert!(
+                    segments.len() > 3,
+                    "GPU flattened away the requested bends: {source}"
+                );
+            } else {
+                assert_eq!(segments.len(), 3, "GPU resmoothed a linear edge: {source}");
+                for (segment, pair) in segments.iter().zip(layout.edges[0].points.windows(2)) {
+                    assert_eq!(segment.from, [pair[0].x, pair[0].y]);
+                    assert_eq!(segment.to, [pair[1].x, pair[1].y]);
+                }
+            }
         }
     }
 

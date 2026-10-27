@@ -7969,7 +7969,7 @@ fn render_gantt_svg(
         let mut dep_svg = String::new();
         for edge_path in &layout.edges {
             if edge_path.points.len() >= 2 {
-                let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+                let path_d = layout_edge_path(ir, edge_path, offset_x, offset_y);
                 dep_svg.push_str("<path d=\"");
                 dep_svg.push_str(&path_d);
                 dep_svg.push_str("\" fill=\"none\" stroke=\"");
@@ -15111,7 +15111,31 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     }
 }
 
-fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: f32) -> String {
+fn uses_smoothed_layout_edge_path(ir: &MermaidDiagramIr, edge_index: usize) -> bool {
+    // The layout-driven SVG backend has always smoothed its connectors, including specialized
+    // diagram dependencies. Preserve that default while honoring an explicitly linear/step edge.
+    fm_layout::edge_paths::edge_routing_hint(ir, edge_index)
+        != Some(fm_core::MermaidEdgeRoutingHint::Orthogonal)
+}
+
+fn layout_edge_path(
+    ir: &MermaidDiagramIr,
+    edge_path: &LayoutEdgePath,
+    offset_x: f32,
+    offset_y: f32,
+) -> String {
+    if !uses_smoothed_layout_edge_path(ir, edge_path.edge_index) {
+        let mut path = PathBuilder::new();
+        for (index, point) in edge_path.points.iter().enumerate() {
+            let (x, y) = (point.x + offset_x, point.y + offset_y);
+            path = if index == 0 {
+                path.move_to(x, y)
+            } else {
+                path.line_to(x, y)
+            };
+        }
+        return path.build();
+    }
     crate::path::build_smooth_path_by(edge_path.points.len(), |index| {
         let point = &edge_path.points[index];
         (point.x + offset_x, point.y + offset_y)
@@ -16091,6 +16115,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     // so the (potentially allocating) lookup only runs once everything cheaper has already passed.
     if arrow == ArrowType::Arrow
         && !is_back_edge
+        && uses_smoothed_layout_edge_path(ir, edge_index)
         && config.embed_theme_css
         && !config.animations_enabled
         // Every fragment writer emits exactly two classes; an animated edge carries a third.
@@ -16129,7 +16154,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
     // Only the slower paths below need the materialized `d` String (the whole-edge fast path streamed it
     // straight into its fragment above and returned).
-    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+    let path_str = layout_edge_path(ir, edge_path, offset_x, offset_y);
 
     // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
     // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
@@ -16640,7 +16665,7 @@ fn render_edge_body_into(
         let labeled_stroke_width =
             sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(1.8);
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
-            let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+            let path_str = layout_edge_path(ir, edge_path, offset_x, offset_y);
             if a11y {
                 let (from_label, to_label) =
                     edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
@@ -17092,6 +17117,7 @@ fn render_edge_body_into(
     // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
     // slow `Element` path, exactly as before — a raw fragment cannot express "role but no tabindex".
     if !edge_path.reversed
+        && uses_smoothed_layout_edge_path(ir, edge_index)
         && config.embed_theme_css
         && !config.animations_enabled
         // THE SIXTH AND LAST FRAGMENT PATH. This is the one the default config actually takes for a
@@ -19683,6 +19709,223 @@ mod tests {
             bundled: false,
         };
         (ir, edge_path)
+    }
+
+    #[test]
+    fn svg_edge_routing_preserves_corners_in_both_edge_writers() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+
+        let colors = ThemeColors::default();
+        let configs = [
+            SvgRenderConfig::default(),
+            SvgRenderConfig {
+                a11y: A11yConfig::none(),
+                accessible: false,
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                a11y: A11yConfig::minimal(),
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                include_source_spans: true,
+                ..Default::default()
+            },
+            SvgRenderConfig {
+                embed_theme_css: false,
+                ..Default::default()
+            },
+        ];
+        for global in [None, Some(Routing::Orthogonal), Some(Routing::Curved)] {
+            for local in [None, Some(Routing::Orthogonal), Some(Routing::Curved)] {
+                let should_curve = local.or(global) != Some(Routing::Orthogonal);
+                for arrow in [
+                    ArrowType::Arrow,
+                    ArrowType::DottedArrow,
+                    ArrowType::DoubleArrow,
+                    ArrowType::Line,
+                ] {
+                    for labeled in [false, true] {
+                        let (mut ir, edge_path) = single_edge_fixture(arrow);
+                        ir.meta.edge_routing = global;
+                        ir.edges[0].extras_mut().routing = local;
+                        if labeled {
+                            ir.labels.push(IrLabel {
+                                text: "Approval <&>".to_string(),
+                                ..Default::default()
+                            });
+                            ir.edges[0].label = Some(IrLabelId(0));
+                        }
+                        for config in &configs {
+                            let context = EdgeRenderContext {
+                                ir: &ir,
+                                offset_x: 1.5,
+                                offset_y: -2.0,
+                                config,
+                                detail: resolve_detail_profile(800.0, 600.0, config),
+                                colors: &colors,
+                                accessible_node_labels: None,
+                                preserved_label_positions: None,
+                                sequence_messages: &[],
+                                sankey_widest_flow: None,
+                            };
+                            let mut streamed = String::new();
+                            render_edge_into(&mut streamed, &edge_path, &context);
+                            let element = render_edge(&edge_path, &context).render();
+                            assert_eq!(
+                                streamed, element,
+                                "global={global:?}, local={local:?}, {arrow:?}, labeled={labeled}, {config:?}"
+                            );
+                            let path = streamed
+                                .split_once("<path d=\"")
+                                .expect("edge path")
+                                .1
+                                .split_once('"')
+                                .expect("path data end")
+                                .0;
+                            if should_curve {
+                                assert!(
+                                    path.contains('C'),
+                                    "the curved route was flattened: {path}"
+                                );
+                                assert!(path.starts_with("M1.50 -2 "), "{path}");
+                                assert!(path.ends_with("97.50 78"), "{path}");
+                            } else {
+                                assert_eq!(
+                                    path, "M1.50 -2 L33.50 46 L73.50 46 L97.50 78",
+                                    "linear/step routing must retain every supplied vertex"
+                                );
+                            }
+                            if labeled {
+                                assert!(streamed.contains("Approval &lt;&amp;&gt;"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn svg_edge_routing_preserves_parsed_overrides_in_both_backends() {
+        for (global, local, local_curved) in [("basis", "step", false), ("linear", "basis", true)] {
+            for label in ["", "|Keep this relation|"] {
+                let source = format!(
+                    "%%{{init: {{'flowchart': {{'curve': '{global}'}}}}}}%%\n\
+                     flowchart LR\nA selected@-->{label} B\nB inherited@--> C\n\
+                     selected@{{ curve: {local} }}\n"
+                );
+                let parsed = fm_parser::parse(&source);
+                assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+                let ir = parsed.ir;
+                assert_eq!(ir.edges.len(), 2, "{source}");
+                let mut layout = frame_test_layout(0.0, 0.0, 300.0, 240.0);
+                layout.nodes = (0..3)
+                    .map(|index| edge_label_test_node(index, index as f32 * 100.0, 0.0, 40.0, 30.0))
+                    .collect();
+                // Both edges receive the same bent corridor. This makes the rendered policy
+                // observable even when a tiny graph's automatic layout happens to be straight.
+                for edge_index in 0..2 {
+                    let (_, mut edge) = single_edge_fixture(ArrowType::Arrow);
+                    let y = 60.0 + edge_index as f32 * 100.0;
+                    edge.edge_index = edge_index;
+                    edge.points = [
+                        fm_layout::LayoutPoint { x: 10.0, y },
+                        fm_layout::LayoutPoint { x: 50.0, y },
+                        fm_layout::LayoutPoint {
+                            x: 50.0,
+                            y: y + 40.0,
+                        },
+                        fm_layout::LayoutPoint {
+                            x: 100.0,
+                            y: y + 40.0,
+                        },
+                    ]
+                    .into_iter()
+                    .collect();
+                    layout.edges.push(edge);
+                }
+                for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+                    let config = SvgRenderConfig {
+                        backend,
+                        ..Default::default()
+                    };
+                    let svg = render_svg_with_layout(&ir, &layout, &config);
+                    assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+                    for edge_index in 0..2 {
+                        let source_index = format!("data-fm-source-index=\"{edge_index}\"");
+                        let edge_id = format!("data-fm-edge-id=\"{edge_index}\"");
+                        let path_tag = svg
+                            .split("<path ")
+                            .filter_map(|tag| tag.split_once('>').map(|(tag, _)| tag))
+                            .find(|tag| {
+                                tag.contains("marker-end=")
+                                    && match backend {
+                                        SvgBackend::LegacyLayout => tag.contains(&edge_id),
+                                        SvgBackend::Scene => {
+                                            tag.contains("data-fm-source-kind=\"edge\"")
+                                                && tag.contains(&source_index)
+                                        }
+                                    }
+                            })
+                            .expect("sourced connector path with its arrowhead");
+                        let path = path_tag
+                            .split_once("d=\"")
+                            .unwrap()
+                            .1
+                            .split_once('"')
+                            .unwrap()
+                            .0;
+                        let should_curve = if edge_index == 0 {
+                            local_curved
+                        } else {
+                            !local_curved
+                        };
+                        assert_eq!(
+                            path.contains('Q') || path.contains('C'),
+                            should_curve,
+                            "{backend:?}, edge {edge_index}, {source}: {path}"
+                        );
+                        if !should_curve {
+                            assert_eq!(
+                                path.matches('L').count(),
+                                3,
+                                "all routed corners must survive: {path}"
+                            );
+                        }
+                    }
+                    if !label.is_empty() {
+                        assert!(svg.contains("Keep this relation"), "{backend:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn svg_edge_routing_preserves_legacy_smoothing_without_hints() {
+        for family in [
+            DiagramType::Flowchart,
+            DiagramType::Class,
+            DiagramType::Sequence,
+            DiagramType::Gantt,
+            DiagramType::Sankey,
+        ] {
+            let (mut ir, mut edge) = single_edge_fixture(ArrowType::Arrow);
+            ir.diagram_type = family;
+            for point_count in [4, 2, 1, 0] {
+                edge.points.truncate(point_count);
+                let before = crate::path::build_smooth_path_by(edge.points.len(), |index| {
+                    let point = edge.points[index];
+                    (point.x + 1.5, point.y - 2.0)
+                });
+                assert_eq!(
+                    layout_edge_path(&ir, &edge, 1.5, -2.0),
+                    before,
+                    "{family:?}/{point_count}"
+                );
+            }
+        }
     }
 
     /// The lean (`A11yConfig::none()`) edge now streams through the whole-edge fast path instead of

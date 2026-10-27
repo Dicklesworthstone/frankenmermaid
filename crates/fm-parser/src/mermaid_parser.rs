@@ -10,9 +10,9 @@ use fm_core::{
     GraphDirection, IrAttributeKey, IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy,
     IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId,
     IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MERMAID_CONFIG_SCHEMA_VERSION,
-    MermaidConfigError, MermaidConfigValidation, MermaidParseMode, MermaidSupportLevel, NodeShape,
-    Position, Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
-    validate_mermaid_config_value,
+    MermaidConfigError, MermaidConfigValidation, MermaidEdgeRoutingHint, MermaidParseMode,
+    MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
+    parse_mermaid_js_config_value, to_init_parse, validate_mermaid_config_value,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
@@ -851,14 +851,21 @@ enum FlowAst {
         link_target: Option<String>,
         is_callback: bool,
     },
-    /// `edgeId@{ animate: … }` — a march speed for an ALREADY-DECLARED edge.
+    /// `edgeId@{ animate: …, curve: … }` — properties of an already-declared edge.
     ///
     /// A statement, not a field on [`FlowAst::Edge`], because upstream applies it by id lookup
     /// after the fact: measured against the pinned 11.15.0 bundle, the same metadata written one
     /// line EARLIER than its edge animates nothing at all.
-    EdgeAnimation {
+    EdgeMetadata {
         id: String,
-        animation: EdgeAnimation,
+        animation: Option<EdgeAnimation>,
+        routing: Option<MermaidEdgeRoutingHint>,
+    },
+    /// The optional `interpolate` clause is applied during lowering, in source order with edge
+    /// metadata. CSS is still resolved by the existing post-lowering style pass.
+    LinkRouting {
+        targets: Vec<String>,
+        routing: MermaidEdgeRoutingHint,
     },
     StyleOrLinkStyle,
     ClassDef,
@@ -1383,8 +1390,39 @@ fn lower_flow_ast(
                 span,
             );
         }
-        FlowAst::EdgeAnimation { id, animation } => {
-            builder.set_edge_animation(id, *animation);
+        FlowAst::EdgeMetadata {
+            id,
+            animation,
+            routing,
+        } => {
+            if let Some(animation) = animation {
+                builder.set_edge_animation(id, *animation);
+            }
+            if let Some(routing) = routing {
+                builder.set_edge_routing_by_id(id, *routing);
+            }
+        }
+        FlowAst::LinkRouting { targets, routing } => {
+            for target in targets {
+                if target.eq_ignore_ascii_case("default") {
+                    builder.set_default_link_routing(*routing);
+                } else if let Ok(index) = target.parse::<usize>() {
+                    let edge_count = builder.edge_count();
+                    if index < edge_count {
+                        builder.set_link_routing(index, *routing);
+                    } else {
+                        builder.add_warning(format!(
+                            "linkStyle index {index} is out of bounds; the diagram has \
+                             {edge_count} link(s), so valid indices are 0..{}",
+                            edge_count.saturating_sub(1)
+                        ));
+                    }
+                } else {
+                    builder.add_warning(format!(
+                        "linkStyle target `{target}` is not a link index or `default`; it was ignored"
+                    ));
+                }
+            }
         }
         FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
             // Intentionally skipped — same as the hand-written parser
@@ -1641,7 +1679,8 @@ fn flow_ast_declares_content(ast: &FlowAst) -> bool {
         FlowAst::Direction(_)
         | FlowAst::ClassAssign { .. }
         | FlowAst::ClickDirective { .. }
-        | FlowAst::EdgeAnimation { .. }
+        | FlowAst::EdgeMetadata { .. }
+        | FlowAst::LinkRouting { .. }
         | FlowAst::StyleOrLinkStyle
         | FlowAst::ClassDef => false,
     }
@@ -1666,7 +1705,8 @@ fn flow_body_first_node_id<'a>(body: &'a [FlowDocumentItem<'a>]) -> Option<&'a s
                         FlowAst::Direction(_)
                         | FlowAst::ClassAssign { .. }
                         | FlowAst::ClickDirective { .. }
-                        | FlowAst::EdgeAnimation { .. }
+                        | FlowAst::EdgeMetadata { .. }
+                        | FlowAst::LinkRouting { .. }
                         | FlowAst::StyleOrLinkStyle
                         | FlowAst::ClassDef => {}
                     }
@@ -2702,6 +2742,52 @@ fn find_triple_colon(s: &str) -> Option<usize> {
     None
 }
 
+/// Split a leading `interpolate <curve>` clause from the CSS that follows it.
+/// The same boundary is used by source-order routing and the later style pass.
+fn split_link_style_interpolation(style: &str) -> Option<(&str, &str)> {
+    let keyword_len = "interpolate".len();
+    let head = style.get(..keyword_len)?;
+    let tail = style.get(keyword_len..)?;
+    if !head.eq_ignore_ascii_case("interpolate")
+        || (!tail.is_empty() && !tail.starts_with(char::is_whitespace))
+    {
+        return None;
+    }
+    let after_keyword = tail.trim_start();
+    Some(
+        after_keyword
+            .split_once(char::is_whitespace)
+            .map_or((after_keyword, ""), |(curve, style)| (curve, style.trim())),
+    )
+}
+
+fn unsupported_edge_curve_warning(curve: &str) -> String {
+    format!("edge curve '{curve}' is not a supported routing family; the previous routing was kept")
+}
+
+fn parse_link_routing_ast(statement: &str, warnings: &mut Vec<String>) -> Option<FlowAst> {
+    let rest = statement.strip_prefix("linkStyle ")?.trim();
+    let (targets, style) = rest.split_once(char::is_whitespace)?;
+    let (curve, _) = split_link_style_interpolation(style.trim())?;
+    let Some(routing) = MermaidEdgeRoutingHint::from_mermaid_curve(curve) else {
+        warnings.push(if curve.is_empty() {
+            "linkStyle `interpolate` needs a curve name (for example `interpolate basis`); the clause was ignored".to_string()
+        } else {
+            unsupported_edge_curve_warning(curve)
+        });
+        return Some(FlowAst::StyleOrLinkStyle);
+    };
+    Some(FlowAst::LinkRouting {
+        targets: targets
+            .split(',')
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(str::to_string)
+            .collect(),
+        routing,
+    })
+}
+
 fn parse_flowchart_statement_asts(
     statement: &str,
     line_number: usize,
@@ -2710,6 +2796,9 @@ fn parse_flowchart_statement_asts(
     config: &ParserConfig,
 ) -> Option<Vec<FlowAst>> {
     if let Some(ast) = parse_fast_simple_flowchart_statement_ast(statement) {
+        return Some(vec![ast]);
+    }
+    if let Some(ast) = parse_link_routing_ast(statement, warnings) {
         return Some(vec![ast]);
     }
 
@@ -2825,8 +2914,16 @@ fn parse_flowchart_statement_asts(
         // the directive text (bd-yrxu).
         return Some(match handled {
             FlowMetadata::Node(node) => vec![FlowAst::Node(*node)],
-            FlowMetadata::EdgeAnimation { id, animation } => {
-                vec![FlowAst::EdgeAnimation { id, animation }]
+            FlowMetadata::Edge {
+                id,
+                animation,
+                routing,
+            } => {
+                vec![FlowAst::EdgeMetadata {
+                    id,
+                    animation,
+                    routing,
+                }]
             }
             FlowMetadata::Nothing => Vec::new(),
         });
@@ -3216,10 +3313,11 @@ fn shape_warning_against(name: &str, unimplemented: &[&str]) -> String {
 enum FlowMetadata {
     /// The statement declared a node.
     Node(Box<FlowAstNode>),
-    /// The statement named an edge and asked it to march.
-    EdgeAnimation {
+    /// The statement named an edge and configured its animation or routing.
+    Edge {
         id: String,
-        animation: EdgeAnimation,
+        animation: Option<EdgeAnimation>,
+        routing: Option<MermaidEdgeRoutingHint>,
     },
     /// Recognised `@{…}` metadata that declares nothing and addresses nothing.
     Nothing,
@@ -3263,6 +3361,8 @@ struct FlowMetadataBody {
     animation: Option<EdgeAnimation>,
     /// An `animate:`/`animation:` key was present, even one that set no speed.
     saw_animation_key: bool,
+    /// A supported per-edge `curve:` family, independent of animation settings.
+    routing: Option<MermaidEdgeRoutingHint>,
 }
 
 /// Read an `@{ … }` body over a base shape/label.
@@ -3284,6 +3384,7 @@ fn scan_flowchart_metadata_body(
         saw_node_key: false,
         animation: None,
         saw_animation_key: false,
+        routing: None,
     };
     for pair in split_metadata_pairs(body) {
         let Some((key, value)) = pair.split_once(':') else {
@@ -3325,6 +3426,13 @@ fn scan_flowchart_metadata_body(
                     }
                 }
             }
+            "curve" => {
+                if let Some(routing) = MermaidEdgeRoutingHint::from_mermaid_curve(value) {
+                    out.routing = Some(routing);
+                } else if let Some(sink) = warnings.as_deref_mut() {
+                    sink.push(unsupported_edge_curve_warning(value));
+                }
+            }
             _ => {}
         }
     }
@@ -3360,9 +3468,10 @@ fn parse_flowchart_node_metadata(
         saw_node_key,
         animation,
         saw_animation_key,
+        routing,
     } = scanned;
 
-    // A node key WINS over an animation key on the same statement. `animate:` addresses the edge
+    // A node key wins over edge metadata on the same statement. `animate:`/`curve:` address the edge
     // namespace, so on a statement that also declares a node the id is a node id, which no edge
     // can be registered under — routing it to the edge map could only ever miss.
     if saw_node_key {
@@ -3374,10 +3483,11 @@ fn parse_flowchart_node_metadata(
             classes: base.classes,
         })));
     }
-    if saw_animation_key && let Some(animation) = animation {
-        return Some(FlowMetadata::EdgeAnimation {
+    if (saw_animation_key && animation.is_some()) || routing.is_some() {
+        return Some(FlowMetadata::Edge {
             id: id.to_string(),
             animation,
+            routing,
         });
     }
     Some(FlowMetadata::Nothing)
@@ -19417,8 +19527,15 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
-    for (line_number, raw_line) in byte_lines(input).enumerate() {
-        let line = trim_fast(raw_line);
+    // Use the same statement boundaries as flowchart lowering, so a curve clause on a semicolon
+    // line cannot swallow the next edge-metadata statement into its CSS.
+    for (line_number, raw_line, statement) in
+        byte_lines(input).enumerate().flat_map(|(number, raw)| {
+            split_statements(strip_flowchart_inline_comment(raw))
+                .map(move |statement| (number, raw, statement))
+        })
+    {
+        let line = trim_fast(statement);
         let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = line.strip_prefix("classDef ") {
@@ -19533,10 +19650,6 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("linkStyle ") {
-            saw_style_directive = true;
-            if first_style_span.is_none() {
-                first_style_span = Some(span);
-            }
             // linkStyle 0 stroke:#f00,...
             //
             // The index position is a LIST, not one number. Read out of the pinned mermaid 11.15.0
@@ -19558,58 +19671,28 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             // says why. The `class` directive immediately below has always split on commas; this is
             // that same list handling, applied to the sibling that was missing it.
             let rest = rest.trim();
-            if let Some((index_str, style)) = rest.split_once(' ') {
+            if let Some((index_str, style)) = rest.split_once(char::is_whitespace) {
                 let index_str = index_str.trim();
                 let mut style = style.trim();
+                let mut routing_targets_checked = false;
 
-                // `linkStyle 0 interpolate basis stroke:#f00` — an OPTIONAL curve clause sits
-                // between the index list and the CSS, and it is not CSS. We had no concept of it at
-                // all, so the whole tail became the style string: the link was handed
-                // `"interpolate basis stroke:#f00"` as its declaration, which corrupts a
-                // declaration that was otherwise valid. Worse than dropping it.
-                //
-                // Probed against the pinned bundle rather than guessed, because the shape matters:
-                //   linkStyle 0 interpolate basis            PARSED
-                //   linkStyle 0 interpolate basis stroke:#f00 PARSED
-                //   linkStyle 0 stroke:#f00 interpolate basis ERROR   <- clause must come FIRST
-                //   linkStyle 0 INTERPOLATE basis            PARSED   <- keyword case-insensitive
-                //   linkStyle 0 interpolate                  ERROR    <- the curve is required
-                //   linkStyle 0 interpolate notacurve        PARSED   <- the NAME is not validated
-                //
-                // The curve is parsed off and REPORTED, not stored: nothing in the IR or either
-                // renderer can draw a curve family today, and a field no consumer reads is dead IR
-                // of exactly the kind the field sweep in docs/IR_FIELD_SWEEP.md exists to find.
-                // When an edge-curve consumer lands, this is where the value comes from.
-                let keyword_len = "interpolate".len();
-                if let Some(head) = style.get(..keyword_len)
-                    && head.eq_ignore_ascii_case("interpolate")
-                    && let Some(tail) = style.get(keyword_len..)
-                    && (tail.is_empty() || tail.starts_with(char::is_whitespace))
-                {
-                    let after_keyword = tail.trim_start();
-                    // A bare `interpolate` with no curve is a parse error in mermaid, so the whole
-                    // clause is meaningless here too — but the REST of the line is not, and there is
-                    // no rest in that case, so this only has to say so.
-                    let (curve, remaining_style) = match after_keyword.split_once(' ') {
-                        Some((curve, rest_of_line)) => (curve.trim(), rest_of_line.trim()),
-                        None => (after_keyword, ""),
-                    };
-                    if curve.is_empty() {
-                        builder.add_warning(
-                            "linkStyle `interpolate` needs a curve name (for example \
-                             `interpolate basis`); the clause was ignored"
-                                .to_string(),
-                        );
+                if let Some((curve, remaining_style)) = split_link_style_interpolation(style) {
+                    if builder.ir().diagram_type == DiagramType::Flowchart {
+                        // Already applied in source order; replaying it here would incorrectly
+                        // overwrite an edge's later `@{ curve: ... }` declaration.
+                        routing_targets_checked =
+                            MermaidEdgeRoutingHint::from_mermaid_curve(curve).is_some();
                     } else {
-                        builder.add_warning(format!(
-                            "linkStyle `interpolate {curve}` is parsed but not applied; edge curve \
-                             families are not implemented, so the link keeps the default routing"
-                        ));
+                        builder.add_warning("linkStyle `interpolate` is supported for flowcharts; the curve clause was ignored".to_string());
                     }
                     style = remaining_style;
                 }
 
                 if !style.is_empty() {
+                    saw_style_directive = true;
+                    if first_style_span.is_none() {
+                        first_style_span = Some(span);
+                    }
                     for token in index_str.split(',') {
                         let token = token.trim();
                         if token.is_empty() {
@@ -19644,20 +19727,20 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                             // one calls `edge_count()` itself ten lines later), so a zero here means
                             // a diagram with no edges, not a pass that has not built them yet.
                             let edge_count = builder.edge_count();
-                            if link_index >= edge_count {
+                            if link_index >= edge_count && !routing_targets_checked {
                                 builder.add_warning(format!(
                                     "linkStyle index {link_index} is out of bounds; the diagram has \
                                      {edge_count} link(s), so valid indices are 0..{}",
                                     edge_count.saturating_sub(1)
                                 ));
-                            } else {
+                            } else if link_index < edge_count {
                                 builder.push_style_ref(
                                     fm_core::IrStyleTarget::Link(link_index),
                                     style.to_string(),
                                     span,
                                 );
                             }
-                        } else {
+                        } else if !routing_targets_checked {
                             // mermaid rejects the whole document here (the probe's `linkStyle nope`
                             // returned `Parse error on line 3`). Same divergence as above: the rest
                             // of the diagram is still worth drawing, so this names the bad token and
@@ -28802,12 +28885,15 @@ Rel_Back(db, app, "Responds")"#,
             link.style, "stroke:#ff0000",
             "the interpolate clause leaked into the CSS declaration"
         );
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
+        );
     }
 
-    /// The clause on its own leaves nothing to style, and says so rather than inventing a
-    /// declaration out of the curve name.
+    /// A curve-only directive changes routing without inventing a CSS declaration.
     #[test]
-    fn linkstyle_interpolate_alone_styles_nothing_and_warns() {
+    fn linkstyle_interpolate_alone_changes_routing_without_css() {
         let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis");
 
         assert!(
@@ -28819,11 +28905,11 @@ Rel_Back(db, app, "Responds")"#,
             "a curve name was turned into a style declaration: {:?}",
             parsed.ir.style_refs
         );
-        assert!(
-            parsed.warnings.iter().any(|w| w.contains("interpolate")),
-            "the unimplemented curve was dropped in silence: {:?}",
-            parsed.warnings
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
         );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }
 
     /// The keyword is case-insensitive in mermaid (`INTERPOLATE basis` parses), so it is here.
@@ -28840,6 +28926,159 @@ Rel_Back(db, app, "Responds")"#,
             .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
             .expect("the link should still be styled");
         assert_eq!(link.style, "stroke:#00ff00");
+        assert_eq!(
+            parsed.ir.edges[0].routing(),
+            Some(fm_core::MermaidEdgeRoutingHint::Curved)
+        );
+    }
+
+    #[test]
+    fn flowchart_edge_curves_share_metadata_without_declaring_nodes() {
+        use fm_core::{EdgeAnimation, MermaidEdgeRoutingHint as Routing};
+        let parsed = parse_mermaid(
+            "flowchart LR\nA e1@--> B\ne1@{ curve: 'BaSiS', animation: slow }\n\
+             missing@{ curve: linear }\ne2@{ curve: linear }\nB e2@--> C\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[0].animation(), Some(EdgeAnimation::Slow));
+        assert_eq!(
+            parsed.ir.edges[1].routing(),
+            None,
+            "metadata cannot configure an undeclared edge"
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+
+        let encoded = serde_json::to_string(&parsed.ir).expect("serialize routing");
+        let decoded: fm_core::MermaidDiagramIr =
+            serde_json::from_str(&encoded).expect("deserialize routing");
+        assert_eq!(decoded.edges, parsed.ir.edges);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_and_linkstyle_follow_source_order() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        for separator in ["\n", "; "] {
+            for (first, last, expected) in [
+                (
+                    "e1@{ curve: basis }",
+                    "linkStyle 0 interpolate linear",
+                    Routing::Orthogonal,
+                ),
+                (
+                    "linkStyle 0 interpolate linear",
+                    "e1@{ curve: basis }",
+                    Routing::Curved,
+                ),
+            ] {
+                let source = format!("flowchart LR\nA e1@--> B\n{first}{separator}{last}\n");
+                let parsed = parse_mermaid(&source);
+                assert_eq!(parsed.ir.edges[0].routing(), Some(expected), "{source}");
+                assert!(
+                    parsed.ir.style_refs.is_empty(),
+                    "curve metadata leaked into CSS: {source}"
+                );
+                assert!(
+                    parsed.warnings.is_empty(),
+                    "{source}: {:?}",
+                    parsed.warnings
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flowchart_default_curves_preserve_creation_time_and_explicit_overrides() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "%%{init: {'flowchart': {'curve': 'linear'}}}%%\n\
+             flowchart LR\nA --> B\nlinkStyle default interpolate linear\nB --> C\n\
+             linkStyle default interpolate basis\nC e2@--> D\ne2@{ curve: linear }\n\
+             linkStyle default interpolate basis\nD --> E\n",
+        );
+        assert_eq!(parsed.ir.meta.edge_routing, Some(Routing::Curved));
+        assert_eq!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .map(|edge| edge.routing())
+                .collect::<Vec<_>>(),
+            [
+                None,
+                Some(Routing::Orthogonal),
+                Some(Routing::Orthogonal),
+                Some(Routing::Curved),
+            ]
+        );
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_resolve_first_duplicate_id_and_ignore_node_metadata() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "flowchart LR\nA same@--> B\nB same@--> C\nsame@{ curve: natural }\n\
+             A@{ shape: diamond, curve: linear }\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.nodes[0].shape, fm_core::NodeShape::Diamond);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[1].routing(), None);
+    }
+
+    #[test]
+    fn flowchart_edge_curves_recover_unknown_names_and_bad_targets() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        let parsed = parse_mermaid(
+            "flowchart LR\nA e1@--> B\nB --> C\ne1@{ curve: basis }\n\
+             e1@{ curve: imaginary }\nlinkStyle 0 interpolate imaginary\n\
+             linkStyle 0 interpolate\nlinkStyle 1,9,nope interpolate stepBefore stroke:#abc\n",
+        );
+        assert_eq!(parsed.ir.nodes.len(), 3);
+        assert_eq!(parsed.ir.edges[0].routing(), Some(Routing::Curved));
+        assert_eq!(parsed.ir.edges[1].routing(), Some(Routing::Orthogonal));
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("imaginary"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("needs a curve name"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("index 9"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("`nope`"))
+                .count(),
+            1
+        );
+        assert!(
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|style| style.target == fm_core::IrStyleTarget::Link(1)
+                    && style.style == "stroke:#abc")
+        );
     }
 
     /// CONTROL: an ordinary declaration is untouched. The clause is matched as a WHOLE WORD, so

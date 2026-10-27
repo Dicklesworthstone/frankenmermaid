@@ -2093,8 +2093,11 @@ impl GpuRenderPlan {
             // arc length, so a dotted connector keeps its rhythm through both lines and elbows.
             let mut dash_phase = 0.0f32;
             let mut current = None;
-            let endpoints =
-                fm_layout::edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
+            let endpoints = fm_layout::edge_paths::emit_diagram_edge_path(
+                ir,
+                edge.edge_index,
+                &edge.points,
+                |command| {
                     flatten_connector_command(command, &mut current, &mut |from, to| {
                         let dx = to.x - from.x;
                         let dy = to.y - from.y;
@@ -2113,7 +2116,8 @@ impl GpuRenderPlan {
                         });
                         dash_phase += length;
                     })
-                });
+                },
+            );
 
             // Cardinality glyphs use the drawn path's tangents, including a collapsed tiny jog or
             // duplicate terminal points. A degenerate route has no direction and gets no marker.

@@ -3520,6 +3520,12 @@ pub struct IrEdgeExtras {
     /// lives in [`IrEdgeExtras`] rather than inline on [`IrEdge`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<EdgeAnimation>,
+    /// Per-edge routing selected by `edgeId@{ curve: ... }` or `linkStyle ... interpolate ...`.
+    ///
+    /// Names resolve to the same supported routing families as the diagram's global curve hint.
+    /// When absent, layout inherits the diagram or caller's routing mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<MermaidEdgeRoutingHint>,
     /// A C4 relationship's technology, drawn as its OWN row beneath the label.
     ///
     /// ⚠️ A SEPARATE ROW, NOT PART OF THE LABEL. mermaid's `drawRels` emits two text elements: the
@@ -3708,6 +3714,14 @@ impl IrEdge {
     pub const fn animation(&self) -> Option<EdgeAnimation> {
         match &self.extras {
             Some(extras) => extras.animation,
+            None => None,
+        }
+    }
+    /// The routing family selected for this individual edge, if any.
+    #[must_use]
+    pub const fn routing(&self) -> Option<MermaidEdgeRoutingHint> {
+        match &self.extras {
+            Some(extras) => extras.routing,
             None => None,
         }
     }

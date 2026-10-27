@@ -11,9 +11,9 @@ use fm_core::{
     IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment,
     IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange,
     IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph,
-    IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError,
-    MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape,
-    NotePosition, Span,
+    IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidEdgeRoutingHint,
+    MermaidError, MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode,
+    NodeShape, NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -198,6 +198,9 @@ pub struct IrBuilder {
     /// Mermaid edge IDs are lookup keys for directives such as `class edgeId alert`.
     /// Store the first match because Mermaid's `setClass` uses `edges.find(...)`.
     edge_index_by_id: FxHashMap<String, usize>,
+    /// `linkStyle default interpolate` is copied onto edges declared after it, as in Mermaid's
+    /// `addSingleLink`. Earlier edges without a local override inherit the latest diagram default.
+    default_link_routing: Option<MermaidEdgeRoutingHint>,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
     /// Flowchart only: subgraph public id -> the node id an endpoint naming it resolves to, for
@@ -561,6 +564,7 @@ impl IrBuilder {
             ir: _,
             node_id_index,
             edge_index_by_id,
+            default_link_routing,
             cluster_index_by_key,
             subgraph_index_by_key,
             flow_forward_subgraph_members,
@@ -588,6 +592,7 @@ impl IrBuilder {
             .buckets
             .clone_from(&node_id_index.buckets);
         self.edge_index_by_id.clone_from(edge_index_by_id);
+        self.default_link_routing = *default_link_routing;
         self.cluster_index_by_key.clone_from(cluster_index_by_key);
         self.subgraph_index_by_key.clone_from(subgraph_index_by_key);
         self.flow_forward_subgraph_members
@@ -615,6 +620,7 @@ impl IrBuilder {
             ir: MermaidDiagramIr::empty(diagram_type),
             node_id_index: NodeIdIndex::default(),
             edge_index_by_id: FxHashMap::default(),
+            default_link_routing: None,
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
@@ -667,6 +673,7 @@ impl IrBuilder {
             ir,
             node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
             edge_index_by_id: FxHashMap::default(),
+            default_link_routing: None,
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             flow_forward_subgraph_members: FxHashMap::default(),
@@ -2806,7 +2813,12 @@ impl IrBuilder {
             arrow,
             label: label_id,
             span,
-            extras: None,
+            extras: self.default_link_routing.map(|routing| {
+                Box::new(fm_core::IrEdgeExtras {
+                    routing: Some(routing),
+                    ..fm_core::IrEdgeExtras::default()
+                })
+            }),
             inline_style: None,
         });
         self.ir.graph.edges.push(IrGraphEdge {
@@ -2848,6 +2860,32 @@ impl IrBuilder {
         if let Some(edge) = self.ir.edges.get_mut(edge_index) {
             edge.extras_mut().animation = Some(animation);
         }
+    }
+
+    /// Apply curve metadata to the first already-declared edge with this id.
+    pub(crate) fn set_edge_routing_by_id(
+        &mut self,
+        edge_id: &str,
+        routing: MermaidEdgeRoutingHint,
+    ) {
+        if let Some(edge_index) = self.edge_index_by_id(edge_id) {
+            self.set_link_routing(edge_index, routing);
+        }
+    }
+
+    /// Set an existing link's routing without changing any other link or its CSS.
+    pub(crate) fn set_link_routing(&mut self, edge_index: usize, routing: MermaidEdgeRoutingHint) {
+        self.mark_reusable_prefix_edge_dirty(edge_index);
+        if let Some(edge) = self.ir.edges.get_mut(edge_index) {
+            edge.extras_mut().routing = Some(routing);
+        }
+    }
+
+    /// Set the fallback for unconfigured links and the initial routing of subsequently added links.
+    pub(crate) fn set_default_link_routing(&mut self, routing: MermaidEdgeRoutingHint) {
+        self.mark_reusable_prefix_dirty();
+        self.default_link_routing = Some(routing);
+        self.ir.meta.edge_routing = Some(routing);
     }
 
     /// Set the ER cardinality notation on the last-pushed edge.

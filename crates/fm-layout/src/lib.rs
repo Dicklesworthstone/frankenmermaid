@@ -1975,6 +1975,8 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
             || left.arrow != right.arrow
             || left.label != right.label
             || left.span != right.span
+            || left.routing().or(previous.meta.edge_routing)
+                != right.routing().or(current.meta.edge_routing)
         {
             edits.push(LayoutEdit::EdgeRemoved { edge_index });
             edits.push(LayoutEdit::EdgeAdded { edge_index });
@@ -5018,9 +5020,10 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         }
 
         let mut commands = Vec::with_capacity(edge.points.len() * 2);
-        let endpoints = edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
-            commands.push(command);
-        });
+        let endpoints =
+            edge_paths::emit_diagram_edge_path(ir, edge.edge_index, &edge.points, |command| {
+                commands.push(command);
+            });
         if endpoints.is_none() {
             continue;
         }
@@ -9011,8 +9014,22 @@ pub fn try_relayout_directed_path_suffix(
             node_shape_at(ir, source_box),
             node_shape_at(ir, target_box),
         );
-        let points =
-            route_edge_points_with_obstacle_index(source_anchor, target_anchor, true, &[], None);
+        let routing = edge_routing_with_hint(
+            edge_routing_with_source_hints(EdgeRouting::default(), ir),
+            edge.routing(),
+        );
+        let points = match routing {
+            EdgeRouting::Orthogonal => {
+                route_edge_points_with_obstacle_index(source_anchor, target_anchor, true, &[], None)
+            }
+            EdgeRouting::Spline => route_edge_points_spline_with_obstacle_index(
+                source_anchor,
+                target_anchor,
+                true,
+                &[],
+                None,
+            ),
+        };
         layout.edges.push(LayoutEdgePath {
             edge_index,
             span: edge.span,
@@ -19942,7 +19959,14 @@ fn brandes_kopf_secondary_coords(
 /// Same contract as [`spacing_with_source_hints`]: the caller's `LayoutConfig` stands where the
 /// source says nothing.
 fn edge_routing_with_source_hints(routing: EdgeRouting, ir: &MermaidDiagramIr) -> EdgeRouting {
-    match ir.meta.edge_routing {
+    edge_routing_with_hint(routing, ir.meta.edge_routing)
+}
+
+fn edge_routing_with_hint(
+    routing: EdgeRouting,
+    hint: Option<fm_core::MermaidEdgeRoutingHint>,
+) -> EdgeRouting {
+    match hint {
         Some(fm_core::MermaidEdgeRoutingHint::Orthogonal) => EdgeRouting::Orthogonal,
         Some(fm_core::MermaidEdgeRoutingHint::Curved) => EdgeRouting::Spline,
         None => routing,
@@ -22611,9 +22635,11 @@ fn build_directed_path_edge_paths_unchecked(
     highlighted_edge_indexes: &BTreeSet<usize>,
     edge_routing: EdgeRouting,
 ) -> Option<Vec<LayoutEdgePath>> {
+    let edge_routing = edge_routing_with_source_hints(edge_routing, ir);
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let mut paths = Vec::with_capacity(ir.edges.len());
     for (edge_index, edge) in ir.edges.iter().enumerate() {
+        let edge_routing = edge_routing_with_hint(edge_routing, edge.routing());
         let source = endpoint_node_index(ir, edge.from)?;
         let target = endpoint_node_index(ir, edge.to)?;
         let (source_box, target_box) = (nodes.get(source)?, nodes.get(target)?);
@@ -22662,6 +22688,7 @@ fn build_edge_paths_with_orientation(
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
+    let edge_routing = edge_routing_with_source_hints(edge_routing, ir);
     // Track parallel edges: count edges between same (source, target) pair. The map is
     // read by key only (never iterated for output order), so an `FxHashMap` is
     // determinism-safe and turns the O(log n) keyed inserts/lookups — 2 per edge — into
@@ -22778,6 +22805,7 @@ fn build_edge_paths_with_orientation(
         .iter()
         .enumerate()
         .filter_map(|(edge_index, edge)| {
+            let edge_routing = edge_routing_with_hint(edge_routing, edge.routing());
             let source = endpoint_node_index(ir, edge.from)?;
             let target = endpoint_node_index(ir, edge.to)?;
             let source_box = nodes.get(source)?;
@@ -27898,6 +27926,180 @@ mod tests {
             );
         }
         (edited, rerun)
+    }
+
+    #[test]
+    fn per_edge_routing_respects_defaults_in_general_and_directed_path_routers() {
+        use fm_core::MermaidEdgeRoutingHint as Routing;
+        for horizontal in [false, true] {
+            let mut ir = labeled_graph_ir(3, &[(0, 1), (1, 2)]);
+            ir.direction = if horizontal {
+                GraphDirection::LR
+            } else {
+                GraphDirection::TB
+            };
+            ir.meta.edge_routing = Some(Routing::Curved);
+            let nodes: Vec<_> = (0..3)
+                .map(|index| {
+                    let rank = index as f32 * 240.0;
+                    let across = if index == 1 { 100.0 } else { 0.0 };
+                    LayoutNodeBox {
+                        node_index: index,
+                        node_id: ir.nodes[index].id.clone(),
+                        rank: index,
+                        order: 0,
+                        span: Span::default(),
+                        bounds: LayoutRect {
+                            x: if horizontal { rank } else { across },
+                            y: if horizontal { across } else { rank },
+                            width: 80.0,
+                            height: 50.0,
+                        },
+                    }
+                })
+                .collect();
+            let has_diagonal = |path: &LayoutEdgePath| {
+                path.points.windows(2).any(|pair| {
+                    (pair[0].x - pair[1].x).abs() > 0.001 && (pair[0].y - pair[1].y).abs() > 0.001
+                })
+            };
+            let original =
+                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+            assert!(
+                original.iter().all(has_diagonal),
+                "the diagram default must override caller routing"
+            );
+
+            ir.edges[0].extras_mut().routing = Some(Routing::Orthogonal);
+            let mixed =
+                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal);
+            assert!(!has_diagonal(&mixed[0]), "linear edge kept rounded bends");
+            assert!(
+                has_diagonal(&mixed[1]),
+                "an unconfigured edge lost its curved default"
+            );
+            assert_ne!(mixed[0].points, original[0].points);
+            assert_eq!(
+                mixed[1], original[1],
+                "one edge's override changed another edge"
+            );
+            assert_eq!(mixed[0].points.first(), original[0].points.first());
+            assert_eq!(mixed[0].points.last(), original[0].points.last());
+
+            let directed = build_directed_path_edge_paths(
+                &ir,
+                &nodes,
+                &BTreeSet::new(),
+                EdgeRouting::Orthogonal,
+            )
+            .expect("fixture is a directed path");
+            assert_eq!(
+                directed, mixed,
+                "the directed-path specialization dropped local routing"
+            );
+
+            // The opposite override is equally strong: explicit curved routing survives a linear
+            // diagram default, and inherits exactly the same anchors and obstacle checks.
+            ir.meta.edge_routing = Some(Routing::Orthogonal);
+            ir.edges[1].extras_mut().routing = Some(Routing::Curved);
+            assert_eq!(
+                build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Spline),
+                mixed
+            );
+            assert_eq!(
+                build_directed_path_edge_paths(&ir, &nodes, &BTreeSet::new(), EdgeRouting::Spline),
+                Some(mixed)
+            );
+        }
+    }
+
+    #[test]
+    fn per_edge_routing_edits_invalidate_incremental_geometry() {
+        for diagram_default in [false, true] {
+            let mut ir = large_subgraph_dependency_ir();
+            toggle_edge(&mut ir, 5, 7);
+            let edge_index = ir.edges.len() - 1;
+            let edge = &ir.edges[edge_index];
+            ir.graph.edges.push(IrGraphEdge {
+                edge_id: edge_index,
+                from: edge.from,
+                to: edge.to,
+                span: edge.span,
+                ..IrGraphEdge::default()
+            });
+            let mut engine = IncrementalLayoutEngine::default();
+            let config = LayoutConfig::default();
+            let warm = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                config.clone(),
+                LayoutGuardrails::default(),
+            );
+            if diagram_default {
+                // A same-size caption edit must not activate the label-only memo when an inherited
+                // curve changes too. Unconfigured links must be invalidated by the default itself.
+                let metrics = fm_core::FontMetrics::default_metrics();
+                let old_size = super::compute_node_size(&ir, &ir.nodes[5], &metrics, 5);
+                let label = ir.nodes[5].label.unwrap();
+                ir.labels[label.0].text = "Node 6".to_string();
+                assert_eq!(
+                    super::compute_node_size(&ir, &ir.nodes[5], &metrics, 5),
+                    old_size
+                );
+                ir.meta.edge_routing = Some(fm_core::MermaidEdgeRoutingHint::Curved);
+            } else {
+                ir.edges[edge_index].extras_mut().routing =
+                    Some(fm_core::MermaidEdgeRoutingHint::Curved);
+            }
+            let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                config.clone(),
+                LayoutGuardrails::default(),
+            );
+            if !diagram_default {
+                assert_eq!(
+                    rerun.trace.incremental.query_type,
+                    "layout_incremental_subgraph_relayout"
+                );
+            }
+            let before = warm
+                .layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .unwrap();
+            let after = rerun
+                .layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .unwrap();
+            assert_ne!(
+                before.points, after.points,
+                "a curve-only edit reused stale geometry"
+            );
+            assert!(
+                after
+                    .points
+                    .windows(2)
+                    .any(|pair| (pair[0].x - pair[1].x).abs() > 0.001
+                        && (pair[0].y - pair[1].y).abs() > 0.001)
+            );
+            for node in 32..64 {
+                assert_eq!(
+                    warm.layout.nodes[node].bounds,
+                    rerun.layout.nodes[node].bounds
+                );
+            }
+            let repeated = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                config,
+                LayoutGuardrails::default(),
+            );
+            assert_eq!(repeated.layout, rerun.layout);
+        }
     }
 
     #[test]

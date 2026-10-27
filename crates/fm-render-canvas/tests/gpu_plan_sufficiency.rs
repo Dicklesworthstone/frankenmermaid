@@ -58,11 +58,13 @@ fn the_plan_carries_every_edge_segment_and_head() {
     let mut directed = 0;
     for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
         let mut commands = Vec::new();
-        let endpoints =
-            fm_layout::edge_paths::emit_edge_path(ir.diagram_type, &edge.points, |command| {
-                commands.push(command)
-            })
-            .expect("fixture edges must have drawable paths");
+        let endpoints = fm_layout::edge_paths::emit_diagram_edge_path(
+            &ir,
+            edge.edge_index,
+            &edge.points,
+            |command| commands.push(command),
+        )
+        .expect("fixture edges must have drawable paths");
         let segments: Vec<_> = plan
             .edge_segments
             .iter()
