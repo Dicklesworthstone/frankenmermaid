@@ -3503,6 +3503,8 @@ pub enum TextBaseline {
     #[default]
     Middle,
     Bottom,
+    /// Place the alphabetic baseline at `RenderText::y`, as chart axes do on SVG and Canvas.
+    Alphabetic,
 }
 
 /// Text primitive in the shared render IR.
@@ -3529,6 +3531,11 @@ pub enum RenderItem {
 /// Build a target-agnostic render scene from semantic IR and computed layout.
 #[must_use]
 pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderScene {
+    if ir.diagram_type == DiagramType::XyChart
+        && let Some(meta) = ir.xy_chart_meta.as_ref()
+    {
+        return build_xychart_render_scene(ir, meta, layout);
+    }
     let (label_layer, label_bounds) = build_label_layer(ir, layout);
     let bounds = RenderRect::from(label_bounds);
 
@@ -3573,6 +3580,441 @@ pub fn build_render_scene(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Rend
     }
 
     RenderScene { bounds, root }
+}
+
+/// Quantitative charts cannot use the graph scene: their nodes are data marks, their edges
+/// connect samples, and their labels belong on axes rather than inside every mark. Keep the
+/// layout's domain and mark geometry while projecting chart furniture into ordinary primitives.
+fn build_xychart_render_scene(
+    ir: &MermaidDiagramIr,
+    meta: &IrXyChartMeta,
+    layout: &DiagramLayout,
+) -> RenderScene {
+    let font_size = fm_core::FontMetrics::default_metrics().font_size();
+    let plot = xychart_plot_bounds(meta, layout.bounds);
+    let (left, top) = (plot.x, plot.y);
+    let (right, bottom) = (left + plot.width, top + plot.height);
+    let (min, max) = resolve_xychart_y_domain(meta);
+    let mut bounds = layout.bounds;
+    let mut plot_layer = RenderGroup::new(Some(String::from("xychart-plot")));
+    plot_layer.children.push(xychart_scene_path(
+        RenderSource::Diagram,
+        rounded_rect_path(plot, 0.0),
+        Some(FillStyle::Solid {
+            color: String::from("#94a3b8"),
+            opacity: 0.06,
+        }),
+        Some(StrokeStyle {
+            opacity: 0.16,
+            ..StrokeStyle::solid("#94a3b8", 1.0)
+        }),
+    ));
+    let mut axes = RenderGroup::new(Some(String::from("xychart-axes")));
+    let mut labels = RenderGroup::new(Some(String::from("xychart-labels")));
+    for value in xychart_y_ticks(min, max) {
+        let (from, to, tick_end, anchor, align) = if meta.horizontal {
+            let x = xychart_value_to_x(value, min, max, plot);
+            (
+                LayoutPoint { x, y: top },
+                LayoutPoint { x, y: bottom },
+                LayoutPoint { x, y: top - 5.0 },
+                LayoutPoint { x, y: top - 11.0 },
+                TextAlign::Middle,
+            )
+        } else {
+            let y = xychart_value_to_y(value, min, max, plot);
+            (
+                LayoutPoint { x: left, y },
+                LayoutPoint { x: right, y },
+                LayoutPoint { x: left - 5.0, y },
+                LayoutPoint {
+                    x: left - 10.0,
+                    y: y + 4.0,
+                },
+                TextAlign::End,
+            )
+        };
+        axes.children.push(xychart_scene_line(
+            from,
+            to,
+            StrokeStyle {
+                opacity: 0.35,
+                dash_array: vec![4.0, 4.0],
+                ..StrokeStyle::solid("#94a3b8", 1.0)
+            },
+        ));
+        axes.children.push(xychart_scene_line(
+            from,
+            tick_end,
+            StrokeStyle::solid("#1e293b", 1.0),
+        ));
+        append_xychart_scene_label(
+            &mut labels,
+            &mut bounds,
+            &format_xychart_tick_value(value),
+            anchor,
+            (font_size * 0.72).max(8.0),
+            align,
+        );
+    }
+    axes.children.push(xychart_scene_line(
+        LayoutPoint { x: left, y: top },
+        LayoutPoint { x: left, y: bottom },
+        StrokeStyle::solid("#64748b", 1.5),
+    ));
+    let axis_y = if meta.horizontal { top } else { bottom };
+    axes.children.push(xychart_scene_line(
+        LayoutPoint { x: left, y: axis_y },
+        LayoutPoint {
+            x: right,
+            y: axis_y,
+        },
+        StrokeStyle::solid("#64748b", 1.5),
+    ));
+
+    let categories = xychart_categories(meta);
+    let category_font = (font_size * 0.74).max(8.0);
+    let band = if meta.horizontal {
+        plot.height
+    } else {
+        plot.width
+    } / categories.len().max(1) as f32;
+    for (index, category) in categories.iter().enumerate() {
+        let position = band * (index as f32 + 0.5);
+        let (from, to, anchor, align) = if meta.horizontal {
+            let y = top + position;
+            (
+                LayoutPoint { x: left - 5.0, y },
+                LayoutPoint { x: left, y },
+                LayoutPoint {
+                    x: left - 11.0,
+                    y: y + category_font * 0.35,
+                },
+                TextAlign::End,
+            )
+        } else {
+            let x = left + position;
+            (
+                LayoutPoint { x, y: bottom },
+                LayoutPoint { x, y: bottom + 5.0 },
+                LayoutPoint {
+                    x,
+                    y: bottom + 24.0,
+                },
+                TextAlign::Middle,
+            )
+        };
+        axes.children.push(xychart_scene_line(
+            from,
+            to,
+            StrokeStyle::solid("#1e293b", 1.0),
+        ));
+        append_xychart_scene_label(
+            &mut labels,
+            &mut bounds,
+            category,
+            anchor,
+            category_font,
+            align,
+        );
+    }
+    let axis_font = (font_size * 0.76).max(8.0);
+    for (text, anchor, align) in [
+        (
+            meta.y_axis.label.as_deref(),
+            if meta.horizontal {
+                LayoutPoint {
+                    x: left + plot.width / 2.0,
+                    y: top - 34.0,
+                }
+            } else {
+                LayoutPoint {
+                    x: left - 52.0,
+                    y: top - 12.0,
+                }
+            },
+            if meta.horizontal {
+                TextAlign::Middle
+            } else {
+                TextAlign::Start
+            },
+        ),
+        (
+            meta.x_axis.label.as_deref(),
+            if meta.horizontal {
+                LayoutPoint {
+                    x: left - 11.0,
+                    y: top - 34.0,
+                }
+            } else {
+                LayoutPoint {
+                    x: left + plot.width / 2.0,
+                    y: bottom + 48.0,
+                }
+            },
+            if meta.horizontal {
+                TextAlign::End
+            } else {
+                TextAlign::Middle
+            },
+        ),
+    ] {
+        if let Some(text) = text {
+            append_xychart_scene_label(&mut labels, &mut bounds, text, anchor, axis_font, align);
+        }
+    }
+    let mut title = RenderGroup::new(Some(String::from("xychart-title")));
+    if let Some(text) = ir.declared_title_if_drawn() {
+        append_xychart_scene_label(
+            &mut title,
+            &mut bounds,
+            text,
+            LayoutPoint {
+                x: layout.bounds.x + layout.bounds.width / 2.0,
+                y: top - if meta.horizontal { 70.0 } else { 34.0 },
+            },
+            (font_size * 1.18).max(8.0),
+            TextAlign::Middle,
+        );
+    }
+
+    let mut data = build_xychart_scene_data(ir, meta, layout, plot, min, max);
+    let bounds = RenderRect::from(bounds);
+    let mut root = RenderGroup::new(Some(String::from("diagram-root")));
+    root.clip = Some(RenderClip::Rect(bounds));
+    root.children.push(RenderItem::Group(plot_layer));
+    root.children.push(RenderItem::Group(axes));
+    root.children.append(&mut data);
+    root.children.push(RenderItem::Group(labels));
+    if !title.children.is_empty() {
+        root.children.push(RenderItem::Group(title));
+    }
+    RenderScene { bounds, root }
+}
+
+fn xychart_scene_path(
+    source: RenderSource,
+    commands: Vec<PathCmd>,
+    fill: Option<FillStyle>,
+    stroke: Option<StrokeStyle>,
+) -> RenderItem {
+    RenderItem::Path(RenderPath {
+        source,
+        commands,
+        fill,
+        stroke,
+        marker_start: MarkerKind::None,
+        marker_end: MarkerKind::None,
+    })
+}
+
+fn xychart_scene_line(from: LayoutPoint, to: LayoutPoint, stroke: StrokeStyle) -> RenderItem {
+    xychart_scene_path(
+        RenderSource::Diagram,
+        vec![
+            PathCmd::MoveTo {
+                x: from.x,
+                y: from.y,
+            },
+            PathCmd::LineTo { x: to.x, y: to.y },
+        ],
+        None,
+        Some(stroke),
+    )
+}
+
+/// Text can extend beyond the fixed chart margins. Expand the scene clip, not the plot:
+/// recomputing a plot from these enlarged bounds would change the scale under its data marks.
+fn append_xychart_scene_label(
+    layer: &mut RenderGroup,
+    bounds: &mut LayoutRect,
+    text: &str,
+    anchor: LayoutPoint,
+    font_size: f32,
+    align: TextAlign,
+) {
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size,
+        line_height: 1.2,
+        ..Default::default()
+    });
+    for (index, line) in text.lines().enumerate() {
+        let width = metrics.estimate_width(line);
+        let x = match align {
+            TextAlign::Start => anchor.x,
+            TextAlign::Middle => anchor.x - width / 2.0,
+            TextAlign::End => anchor.x - width,
+        };
+        let y = anchor.y + index as f32 * metrics.line_height_px();
+        let left = bounds.x.min(x - 2.0);
+        let top = bounds.y.min(y - font_size - 2.0);
+        let right = (bounds.x + bounds.width).max(x + width + 2.0);
+        let bottom = (bounds.y + bounds.height).max(y + font_size * 0.3 + 2.0);
+        *bounds = LayoutRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        };
+        layer.children.push(RenderItem::Text(RenderText {
+            source: RenderSource::Diagram,
+            text: line.to_owned(),
+            x: anchor.x,
+            y,
+            font_size,
+            align,
+            baseline: TextBaseline::Alphabetic,
+            fill: FillStyle::Solid {
+                color: String::from("#1e293b"),
+                opacity: 1.0,
+            },
+        }));
+    }
+}
+
+fn build_xychart_scene_data(
+    ir: &MermaidDiagramIr,
+    meta: &IrXyChartMeta,
+    layout: &DiagramLayout,
+    plot: LayoutRect,
+    min: f32,
+    max: f32,
+) -> Vec<RenderItem> {
+    let by_index: BTreeMap<_, _> = layout
+        .nodes
+        .iter()
+        .map(|node| (node.node_index, node))
+        .collect();
+    let edge_indices: BTreeMap<_, _> = ir
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edge)| {
+            Some((
+                (
+                    endpoint_node_index(ir, edge.from)?,
+                    endpoint_node_index(ir, edge.to)?,
+                ),
+                index,
+            ))
+        })
+        .collect();
+    let baseline = min.min(0.0).max(max.min(0.0));
+    let baseline_x = xychart_value_to_x(baseline, min, max, plot);
+    let baseline_y = xychart_value_to_y(baseline, min, max, plot);
+    let mut areas = RenderGroup::new(Some(String::from("xychart-areas")));
+    let mut bars = RenderGroup::new(Some(String::from("xychart-bars")));
+    let mut lines = RenderGroup::new(Some(String::from("xychart-lines")));
+    let mut points = RenderGroup::new(Some(String::from("xychart-points")));
+
+    for (series_index, series) in meta.series.iter().enumerate() {
+        let accents = fm_core::mindmap::DEFAULT_BRANCH_ACCENTS;
+        let color = accents[series_index % accents.len()];
+        let nodes: Vec<_> = series
+            .nodes
+            .iter()
+            .filter_map(|node| by_index.get(&node.0).copied())
+            .collect();
+        let Some(first) = nodes.first() else {
+            continue;
+        };
+        if series.kind == IrXySeriesKind::Bar {
+            for node in nodes {
+                bars.children.push(xychart_scene_path(
+                    RenderSource::Node(node.node_index),
+                    rounded_rect_path(node.bounds, 0.0),
+                    Some(FillStyle::Solid {
+                        color: color.to_owned(),
+                        opacity: 0.78,
+                    }),
+                    Some(StrokeStyle::solid(color, 1.0)),
+                ));
+            }
+            continue;
+        }
+
+        if series.kind == IrXySeriesKind::Area {
+            let first = first.bounds.center();
+            let mut last = first;
+            let mut commands = vec![if meta.horizontal {
+                PathCmd::MoveTo {
+                    x: baseline_x,
+                    y: first.y,
+                }
+            } else {
+                PathCmd::MoveTo {
+                    x: first.x,
+                    y: baseline_y,
+                }
+            }];
+            for node in &nodes {
+                last = node.bounds.center();
+                commands.push(PathCmd::LineTo {
+                    x: last.x,
+                    y: last.y,
+                });
+            }
+            commands.push(if meta.horizontal {
+                PathCmd::LineTo {
+                    x: baseline_x,
+                    y: last.y,
+                }
+            } else {
+                PathCmd::LineTo {
+                    x: last.x,
+                    y: baseline_y,
+                }
+            });
+            commands.push(PathCmd::Close);
+            areas.children.push(xychart_scene_path(
+                RenderSource::Diagram,
+                commands,
+                Some(FillStyle::Solid {
+                    color: color.to_owned(),
+                    opacity: 0.16,
+                }),
+                None,
+            ));
+        }
+        for pair in nodes.windows(2) {
+            let from = pair[0].bounds.center();
+            let to = pair[1].bounds.center();
+            let source = edge_indices
+                .get(&(pair[0].node_index, pair[1].node_index))
+                .map_or(RenderSource::Diagram, |&index| RenderSource::Edge(index));
+            lines.children.push(xychart_scene_path(
+                source,
+                vec![
+                    PathCmd::MoveTo {
+                        x: from.x,
+                        y: from.y,
+                    },
+                    PathCmd::LineTo { x: to.x, y: to.y },
+                ],
+                None,
+                Some(StrokeStyle {
+                    line_cap: LineCap::Round,
+                    line_join: LineJoin::Round,
+                    ..StrokeStyle::solid(color, 3.0)
+                }),
+            ));
+        }
+        for node in nodes {
+            points.children.push(xychart_scene_path(
+                RenderSource::Node(node.node_index),
+                node_path(node.bounds, fm_core::NodeShape::Circle),
+                Some(FillStyle::Solid {
+                    color: color.to_owned(),
+                    opacity: 1.0,
+                }),
+                Some(StrokeStyle::solid("#f8fafc", 2.0)),
+            ));
+        }
+    }
+    [areas, bars, lines, points]
+        .into_iter()
+        .map(RenderItem::Group)
+        .collect()
 }
 
 /// Sequence furniture is layout geometry, not graph nodes or edges. Project it into the shared
@@ -28754,6 +29196,218 @@ mod tests {
         let first = build_render_scene(&ir, &layout);
         let second = build_render_scene(&ir, &layout);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn render_scene_xychart_preserves_signed_data_and_axis_meaning() {
+        use super::{FillStyle, MarkerKind, PathCmd, RenderGroup, RenderPath, TextAlign};
+
+        for horizontal in [false, true] {
+            let source = format!(
+                "xychart-beta{}\n title Revenue\n x-axis Quarter [Q1, Q2, Q3]\n\
+                 y-axis Dollars -10 --> 20\n bar [-10, 0, 20]\n bar [5, 10, 15]\n\
+                 line [0, 10, -10]\n area [-5, 15, -5]\n",
+                if horizontal { " horizontal" } else { "" },
+            );
+            let ir = parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            let meta = ir.xy_chart_meta.as_ref().expect("XY metadata");
+            assert_eq!(meta.series.len(), 4, "real mixed-series fixture");
+            let scene = build_render_scene(&ir, &layout);
+            assert_eq!(scene, build_render_scene(&ir, &layout));
+            assert_eq!(scene.root.clip, Some(RenderClip::Rect(scene.bounds)));
+            let group = |id: &str| -> &RenderGroup {
+                scene
+                    .root
+                    .children
+                    .iter()
+                    .find_map(|item| match item {
+                        RenderItem::Group(group) if group.id.as_deref() == Some(id) => Some(group),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing {id}"))
+            };
+            let paths = |group: &RenderGroup| -> Vec<RenderPath> {
+                group
+                    .children
+                    .iter()
+                    .filter_map(|item| match item {
+                        RenderItem::Path(path) => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let bars = paths(group("xychart-bars"));
+            let lines = paths(group("xychart-lines"));
+            let points = paths(group("xychart-points"));
+            let areas = paths(group("xychart-areas"));
+            assert_eq!(bars.len(), 6);
+            assert_eq!(lines.len(), 4);
+            assert_eq!(points.len(), 6);
+            assert_eq!(areas.len(), 1);
+            assert!(scene.root.children.iter().all(|item| {
+                !matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("nodes" | "edges" | "labels")))
+            }), "graph furniture must not overpaint the chart");
+            for path in bars.iter().chain(&lines).chain(&points).chain(&areas) {
+                assert_eq!(path.marker_start, MarkerKind::None);
+                assert_eq!(path.marker_end, MarkerKind::None);
+            }
+            for (path, node) in bars.iter().zip(&layout.nodes[..6]) {
+                assert_eq!(path.source, RenderSource::Node(node.node_index));
+                assert!(
+                    matches!(path.commands.first(), Some(PathCmd::MoveTo { x, y })
+                    if (*x - node.bounds.x).abs() < 0.001 && (*y - node.bounds.y).abs() < 0.001)
+                );
+                assert!(
+                    matches!(path.fill.as_ref(), Some(FillStyle::Solid { opacity, .. })
+                    if (*opacity - 0.78).abs() < 0.001)
+                );
+            }
+            let edge_indices: BTreeSet<_> = lines
+                .iter()
+                .filter_map(|path| match path.source {
+                    RenderSource::Edge(index) => Some(index),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(edge_indices, (0..ir.edges.len()).collect());
+
+            let plot = super::xychart_plot_bounds(meta, layout.bounds);
+            let baseline = if horizontal {
+                plot.x + plot.width / 3.0
+            } else {
+                plot.y + plot.height * 2.0 / 3.0
+            };
+            let area = &areas[0].commands;
+            assert!(matches!(area.first(), Some(PathCmd::MoveTo { x, y })
+                if ((if horizontal { *x } else { *y }) - baseline).abs() < 0.001));
+            assert!(
+                matches!(area.get(area.len() - 2), Some(PathCmd::LineTo { x, y })
+                if ((if horizontal { *x } else { *y }) - baseline).abs() < 0.001)
+            );
+            assert_eq!(area.last(), Some(&PathCmd::Close));
+            let values: Vec<f32> = area[1..area.len() - 2]
+                .iter()
+                .filter_map(|command| match command {
+                    PathCmd::LineTo { x, y } => Some(if horizontal { *x } else { *y }),
+                    _ => None,
+                })
+                .collect();
+            assert!(values.iter().any(|&value| value < baseline));
+            assert!(values.iter().any(|&value| value > baseline));
+
+            let labels: Vec<_> = group("xychart-labels")
+                .children
+                .iter()
+                .filter_map(|item| match item {
+                    RenderItem::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            for expected in ["Q1", "Q2", "Q3", "Quarter", "Dollars", "-10", "0", "20"] {
+                assert_eq!(
+                    labels.iter().filter(|text| text.text == expected).count(),
+                    1,
+                    "{expected}"
+                );
+            }
+            let q1 = labels.iter().find(|text| text.text == "Q1").unwrap();
+            assert_eq!(
+                q1.align,
+                if horizontal {
+                    TextAlign::End
+                } else {
+                    TextAlign::Middle
+                }
+            );
+            if horizontal {
+                assert!(q1.x < plot.x);
+                assert!(labels.iter().find(|text| text.text == "-10").unwrap().y < plot.y);
+            } else {
+                assert!(q1.y > plot.y + plot.height);
+                assert!(labels.iter().find(|text| text.text == "-10").unwrap().x < plot.x);
+            }
+            assert_eq!(group("xychart-title").children.len(), 1);
+        }
+    }
+
+    #[test]
+    fn render_scene_xychart_expands_text_bounds_without_rescaling_marks() {
+        let title = "Revenue and costs across worldwide operations ".repeat(5);
+        let category = "A category name much wider than a narrow plot slot";
+        let source = format!(
+            "xychart-beta\n title {title}\n x-axis [{category}, short]\n y-axis 0 --> 10\n bar [3, 7]"
+        );
+        let ir = parse(&source).ir;
+        let mut layout = layout_diagram(&ir);
+        // Translate a caller-supplied layout. Enlarging the scene for labels must not alter
+        // the plot scale or move its original data marks relative to their axes.
+        layout.bounds.x += 125.0;
+        layout.bounds.y -= 40.0;
+        for node in &mut layout.nodes {
+            node.bounds.x += 125.0;
+            node.bounds.y -= 40.0;
+        }
+        let scene = build_render_scene(&ir, &layout);
+        assert!(scene.bounds.x < layout.bounds.x);
+        assert!(scene.bounds.width > layout.bounds.width);
+        assert_eq!(scene.root.clip, Some(RenderClip::Rect(scene.bounds)));
+        let mut marks = 0;
+        for item in &scene.root.children {
+            let RenderItem::Group(group) = item else {
+                continue;
+            };
+            for item in &group.children {
+                match item {
+                    RenderItem::Text(text) => {
+                        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                            font_size: text.font_size,
+                            ..Default::default()
+                        });
+                        let width = metrics.estimate_width(&text.text);
+                        let left = match text.align {
+                            super::TextAlign::Start => text.x,
+                            super::TextAlign::Middle => text.x - width / 2.0,
+                            super::TextAlign::End => text.x - width,
+                        };
+                        assert!(left >= scene.bounds.x);
+                        assert!(left + width <= scene.bounds.x + scene.bounds.width);
+                        assert!(text.y - text.font_size >= scene.bounds.y);
+                        assert!(text.y < scene.bounds.y + scene.bounds.height);
+                    }
+                    RenderItem::Path(path) => {
+                        if let RenderSource::Node(index) = path.source {
+                            let node = &layout.nodes[index];
+                            assert_eq!(path.commands, super::rounded_rect_path(node.bounds, 0.0));
+                            marks += 1;
+                        }
+                    }
+                    RenderItem::Group(_) => {}
+                }
+            }
+        }
+        assert_eq!(marks, 2);
+    }
+
+    #[test]
+    fn render_scene_xychart_handles_empty_and_single_sample_charts() {
+        for source in [
+            "xychart-beta\n title Empty\n x-axis [Only]\n y-axis 0 --> 1",
+            "xychart-beta horizontal\n x-axis 2026 --> 2026\n area [5]",
+        ] {
+            let ir = parse(source).ir;
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            assert!(scene.bounds.width.is_finite() && scene.bounds.width > 0.0);
+            assert!(scene.bounds.height.is_finite() && scene.bounds.height > 0.0);
+            assert_eq!(scene, build_render_scene(&ir, &layout));
+            assert!(scene.root.children.iter().any(|item| {
+                matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("xychart-axes"))
+            }));
+            assert!(scene.root.children.iter().any(|item| {
+                matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("xychart-lines") && group.children.is_empty())
+            }));
+        }
     }
 
     #[test]

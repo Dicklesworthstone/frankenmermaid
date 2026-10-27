@@ -919,6 +919,7 @@ impl Canvas2dRenderer {
             IrTextBaseline::Top => TextBaseline::Top,
             IrTextBaseline::Middle => TextBaseline::Middle,
             IrTextBaseline::Bottom => TextBaseline::Bottom,
+            IrTextBaseline::Alphabetic => TextBaseline::Alphabetic,
         });
 
         let lines: Vec<&str> = text.text.lines().collect();
@@ -932,7 +933,7 @@ impl Canvas2dRenderer {
                 IrTextBaseline::Middle => {
                     current_y -= (total_height - line_height) / 2.0;
                 }
-                IrTextBaseline::Bottom => {
+                IrTextBaseline::Bottom | IrTextBaseline::Alphabetic => {
                     current_y -= total_height - line_height;
                 }
             }
@@ -6364,6 +6365,93 @@ mod tests {
                 .iter()
                 .any(|operation| matches!(operation, DrawOperation::FillText(_, _, _)))
         );
+    }
+
+    #[test]
+    fn canvas_scene_draws_xychart_data_and_matches_direct_axis_labels() {
+        fn text_operations(ctx: &MockCanvas2dContext) -> Vec<(String, f64, f64, TextBaseline)> {
+            let mut baseline = TextBaseline::Alphabetic;
+            let mut labels = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::SetTextBaseline(value) => baseline = *value,
+                    DrawOperation::FillText(text, x, y) => {
+                        labels.push((text.clone(), *x, *y, baseline))
+                    }
+                    _ => {}
+                }
+            }
+            labels
+        }
+
+        for horizontal in [false, true] {
+            let source = format!(
+                "xychart-beta{}\n title Quarterly movement\n\
+                 x-axis Quarter [Q1, Q2, Q3]\n y-axis Dollars -10 --> 20\n\
+                 bar [-10, 0, 20]\n line [0, 10, -10]\n area [-5, 15, -5]\n",
+                if horizontal { " horizontal" } else { "" },
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = layout_diagram(&ir);
+            let scene = build_render_scene(&ir, &layout);
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let mut direct_ctx = MockCanvas2dContext::new(1000.0, 800.0);
+            let direct =
+                crate::render_to_canvas_with_layout(&ir, &layout, &mut direct_ctx, &config);
+            let mut scene_ctx = MockCanvas2dContext::new(1000.0, 800.0);
+            let result = crate::render_scene_to_canvas(&scene, &mut scene_ctx, &config);
+            assert_eq!(result.nodes_drawn, 9);
+            assert_eq!(result.edges_drawn, 4);
+            assert_eq!(result.nodes_drawn, direct.nodes_drawn);
+            assert_eq!(result.edges_drawn, direct.edges_drawn);
+            let direct_labels = text_operations(&direct_ctx);
+            let scene_labels = text_operations(&scene_ctx);
+            assert_eq!(scene_labels.len(), direct_labels.len());
+            for ((direct_text, dx, dy, direct_baseline), (scene_text, sx, sy, scene_baseline)) in
+                direct_labels.iter().zip(&scene_labels)
+            {
+                assert_eq!(scene_text, direct_text);
+                // The scene can expand its clip for long labels. Compare in original layout
+                // coordinates so this test also catches a second origin translation.
+                assert!(
+                    (sx + f64::from(scene.bounds.x) - dx - f64::from(layout.bounds.x)).abs()
+                        < 0.002,
+                    "x for {scene_text}"
+                );
+                assert!(
+                    (sy + f64::from(scene.bounds.y) - dy - f64::from(layout.bounds.y)).abs()
+                        < 0.002,
+                    "y for {scene_text}"
+                );
+                assert_eq!(scene_baseline, direct_baseline);
+            }
+            let mut alpha = 1.0_f64;
+            let mut area_fills = 0;
+            let mut bar_fills = 0;
+            for operation in scene_ctx.operations() {
+                match operation {
+                    DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                    DrawOperation::Fill if (alpha - 0.16).abs() < 0.0001 => area_fills += 1,
+                    DrawOperation::Fill if (alpha - 0.78).abs() < 0.0001 => bar_fills += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                area_fills, 1,
+                "area series must paint its quantitative extent"
+            );
+            assert_eq!(
+                bar_fills, 3,
+                "each bar must retain its own filled rectangle"
+            );
+            assert!(scene_ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::SetLineDash(dash) if dash == &[4.0, 4.0])
+            }));
+        }
     }
 
     #[test]

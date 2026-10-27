@@ -2073,12 +2073,12 @@ fn render_scene_document_with_ir(
 ) -> String {
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
-    let planned_journey_title = scene.root.children.iter().any(|item| {
-        matches!(item, RenderItem::Group(group) if group.id.as_deref() == Some("journey-title"))
+    let planned_title = scene.root.children.iter().any(|item| {
+        matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title")))
     });
     let visible_title = ir
         .and_then(|diagram_ir| diagram_ir.meta.title.as_deref())
-        .filter(|_| !planned_journey_title);
+        .filter(|_| !planned_title);
     let title_height = if visible_title.is_some() {
         config.font_size + 22.0
     } else {
@@ -2852,7 +2852,9 @@ fn map_text_baseline(baseline: RenderTextBaseline) -> text::DominantBaseline {
     match baseline {
         RenderTextBaseline::Top => text::DominantBaseline::Hanging,
         RenderTextBaseline::Middle => text::DominantBaseline::Middle,
-        RenderTextBaseline::Bottom => text::DominantBaseline::Alphabetic,
+        RenderTextBaseline::Bottom | RenderTextBaseline::Alphabetic => {
+            text::DominantBaseline::Alphabetic
+        }
     }
 }
 
@@ -21142,6 +21144,62 @@ mod tests {
         assert!(scene_svg.starts_with("<svg"));
         assert!(scene_svg.contains("data-type=\"flowchart\""));
         assert!(scene_svg.contains("fm-source-kind=\"node\""));
+    }
+
+    #[test]
+    fn scene_backend_renders_quantitative_xycharts_without_graph_furniture() {
+        for horizontal in [false, true] {
+            let source = format!(
+                "---\ntitle: Quarterly movement\n---\nxychart-beta{}\n\
+                 x-axis Quarter [Q1, Q2, Q3]\n y-axis Dollars -10 --> 20\n\
+                 bar [-10, 0, 20]\n line [0, 10, -10]\n area [-5, 15, -5]\n",
+                if horizontal { " horizontal" } else { "" },
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let config = SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                include_source_spans: true,
+                ..Default::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert_eq!(svg, render_svg_with_config(&ir, &config));
+            let drawn = issue14_drawn_text(&svg);
+            for label in [
+                "Quarterly movement",
+                "Quarter",
+                "Dollars",
+                "Q1",
+                "Q2",
+                "Q3",
+                "-10",
+                "0",
+                "20",
+            ] {
+                assert_eq!(drawn.get(label), Some(&1), "{label:?} in {source}");
+            }
+            assert_eq!(svg.matches("data-fm-source-kind=\"node\"").count(), 9);
+            assert_eq!(svg.matches("data-fm-source-kind=\"edge\"").count(), 4);
+            assert!(!svg.contains(" marker-start="));
+            assert!(!svg.contains(" marker-end="));
+            let position = |id| svg.find(&format!("id=\"{id}\"")).expect("chart layer");
+            assert!(position("xychart-axes") < position("xychart-areas"));
+            assert!(position("xychart-areas") < position("xychart-bars"));
+            assert!(position("xychart-bars") < position("xychart-lines"));
+            assert!(position("xychart-lines") < position("xychart-points"));
+            assert!(position("xychart-points") < position("xychart-labels"));
+            let area = &svg[position("xychart-areas")..position("xychart-bars")];
+            assert!(area.contains("<path") && area.contains("fill-opacity=\"0.16\""));
+            let category = svg
+                .split("<text")
+                .find(|text| text.contains(">Q1<"))
+                .expect("Q1 text");
+            assert!(category.contains(if horizontal {
+                "text-anchor=\"end\""
+            } else {
+                "text-anchor=\"middle\""
+            }));
+            assert!(category.contains("dominant-baseline=\"alphabetic\""));
+        }
     }
 
     #[test]
