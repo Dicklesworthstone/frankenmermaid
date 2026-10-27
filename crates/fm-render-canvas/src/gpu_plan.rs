@@ -1238,7 +1238,7 @@ pub enum GpuTextSource {
     ///
     /// `node_index` is the documented `quadrant_labels` index: Q1, Q2, Q3, then Q4.
     QuadrantLabel,
-    /// A pie-slice percentage label; `node_index` indexes `IrPieMeta::slices`.
+    /// A pie-slice percentage or legend row; `node_index` indexes `IrPieMeta::slices`.
     PieSlice,
 }
 
@@ -2184,41 +2184,87 @@ impl GpuRenderPlan {
             }
         }
 
-        // PIE WEDGES (bd-adabx). The Canvas2D pass uses centre, radius, start angle and sweep;
-        // retaining those primitives lets the GPU tessellate the same sectors without pretending a
-        // curved boundary is an edge. Slice labels are added to the shared text pass below.
+        // Preserve the same measured pie composition as Canvas2D: its legend and title are
+        // already included in the frame, so deriving a radius from that frame would enlarge
+        // and recenter the quantitative marks whenever a legend wraps.
+        let pie_layout = ir
+            .pie_meta
+            .as_ref()
+            .filter(|_| ir.diagram_type == fm_core::DiagramType::Pie)
+            .map(|meta| {
+                fm_layout::PieChartLayout::new(
+                    meta,
+                    ir.meta.title.as_deref().or(meta.title.as_deref()),
+                    &metrics,
+                    8.0,
+                    metrics.avg_char_width(),
+                )
+            });
         let mut pie_wedges = Vec::new();
-        if let Some(pie) = ir.pie_meta.as_ref().filter(|pie| !pie.slices.is_empty()) {
-            const COLORS: [&str; 10] = [
-                "#4c78a8", "#f58518", "#e45756", "#72b7b2", "#54a24b", "#eeca3b", "#b279a2",
-                "#ff9da6", "#9d755d", "#bab0ac",
-            ];
-            let total = pie
-                .slices
-                .iter()
-                .map(|slice| slice.value.max(0.0))
-                .sum::<f32>()
-                .max(f32::EPSILON);
-            let center = [
-                layout.bounds.x + (layout.bounds.width * 0.5),
-                layout.bounds.y + (layout.bounds.height * 0.5),
-            ];
-            let radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
-            let mut angle = -std::f32::consts::FRAC_PI_2;
+        let mut pie_text_blocks = Vec::new();
+        if let Some(pie) = &pie_layout {
+            let panel_fill = parse_paint_rgba(&config.node_fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+            let panel_stroke =
+                parse_paint_rgba(&config.node_stroke).unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+            node_instances.push(xy_node(
+                pie.legend,
+                GpuNodeShape::Rect,
+                panel_fill,
+                panel_stroke,
+                1.0,
+            ));
+            if let Some(title) = &pie.title {
+                pie_text_blocks.push((title, GpuTextSource::DiagramTitle, 0));
+            }
+            let mut leader_color =
+                parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+            leader_color[3] *= 0.45;
+            let palette_len = if config.accents.is_empty() {
+                fm_core::mindmap::DEFAULT_BRANCH_ACCENTS.len()
+            } else {
+                config.accents.len()
+            };
             for (index, slice) in pie.slices.iter().enumerate() {
-                let sweep = (slice.value.max(0.0) / total) * std::f32::consts::TAU;
+                let palette_index = index % palette_len;
+                let fallback_color = config.accents.get(palette_index).map_or(
+                    fm_core::mindmap::DEFAULT_BRANCH_ACCENTS[index % 8],
+                    String::as_str,
+                );
+                let color = ir
+                    .meta
+                    .theme_overrides
+                    .theme_variables
+                    .get(&format!("pie{}", palette_index + 1))
+                    .and_then(|paint| parse_paint_rgba(paint))
+                    .or_else(|| parse_paint_rgba(fallback_color))
+                    .unwrap_or(DEFAULT_NODE_FILL_RGBA);
                 pie_wedges.push(GpuPieWedge {
-                    center,
-                    radius,
-                    start_angle: angle,
-                    sweep_angle: sweep,
-                    fill: parse_paint_rgba(COLORS[index % COLORS.len()])
-                        .unwrap_or(DEFAULT_NODE_FILL_RGBA),
-                    stroke: DEFAULT_NODE_STROKE_RGBA,
-                    stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                    center: [pie.center.x, pie.center.y],
+                    radius: pie.radius,
+                    start_angle: slice.start_angle,
+                    sweep_angle: slice.sweep_angle,
+                    fill: color,
+                    stroke: panel_fill,
+                    stroke_width: 2.0,
                     slice_index: u32::try_from(index).unwrap_or(u32::MAX),
                 });
-                angle += sweep;
+                if let Some(leader) = slice.leader {
+                    for pair in leader.windows(2) {
+                        edge_segments.push(xy_segment(
+                            [pair[0].x, pair[0].y],
+                            [pair[1].x, pair[1].y],
+                            leader_color,
+                            1.0,
+                            [0.0, 0.0],
+                        ));
+                    }
+                }
+                let entry = &pie.entries[index];
+                let mut swatch = xy_node(entry.swatch, GpuNodeShape::Rect, color, [0.0; 4], 0.0);
+                swatch.node_index = u32::try_from(index).unwrap_or(u32::MAX);
+                node_instances.push(swatch);
+                pie_text_blocks.push((&slice.label, GpuTextSource::PieSlice, index));
+                pie_text_blocks.push((&entry.label, GpuTextSource::PieSlice, index));
             }
         }
 
@@ -2552,26 +2598,12 @@ impl GpuRenderPlan {
                 crate::renderer::resolve_edge_label_font_size(ir, edge.edge_index)
                     .map(|size| size as f32)
             }))
+            .chain(pie_text_blocks.iter().map(|(block, _, _)| block.font_size))
             .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
-        let pie_labels: Vec<String> = ir.pie_meta.as_ref().map_or_else(Vec::new, |pie| {
-            let total = pie
-                .slices
-                .iter()
-                .map(|slice| f64::from(slice.value.max(0.0)))
-                .sum::<f64>()
-                .max(f64::EPSILON);
-            pie.slices
-                .iter()
-                .map(|slice| {
-                    let percent = (f64::from(slice.value.max(0.0)) / total) * 100.0;
-                    format!("{}: {percent:.1}%", slice.label)
-                })
-                .collect()
-        });
         let sequence_fragment_labels: Vec<String> = layout
             .extensions
             .sequence_fragments
@@ -2711,7 +2743,9 @@ impl GpuRenderPlan {
                             .map(String::as_str)
                             .filter(|label| !label.is_empty()),
                     )
-                    .chain(pie_labels.iter().map(String::as_str)),
+                    .chain(pie_text_blocks.iter().flat_map(|(block, _, _)| {
+                        block.lines.iter().map(String::as_str)
+                    })),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -3189,28 +3223,34 @@ impl GpuRenderPlan {
             }
         }
 
-        if let Some(pie) = ir.pie_meta.as_ref() {
-            for (index, wedge) in pie_wedges.iter().enumerate() {
-                let angle = wedge.start_angle + (wedge.sweep_angle * 0.5);
-                let label_radius = wedge.radius + 20.0;
-                sink.push_centred_with_font(
-                    pie_labels.get(index).map_or("", String::as_str),
-                    (
-                        wedge.center[0] + label_radius * angle.cos(),
-                        wedge.center[1] + label_radius * angle.sin(),
-                    ),
-                    STATE_NOTE_FONT_SIZE_PX * font_scale,
-                    DEFAULT_LABEL_RGBA,
-                    GpuTextSource::PieSlice,
+        let pie_text_color = parse_paint_rgba(&config.label_color).unwrap_or(DEFAULT_LABEL_RGBA);
+        for (block, source, index) in pie_text_blocks {
+            let align = match block.align {
+                fm_layout::TextAlign::Start => crate::TextAlign::Left,
+                fm_layout::TextAlign::Middle => crate::TextAlign::Center,
+                fm_layout::TextAlign::End => crate::TextAlign::Right,
+            };
+            for (text, point) in block.rows() {
+                sink.push_line(
+                    text,
+                    (point.x, point.y),
+                    block.font_size,
+                    pie_text_color,
+                    source,
                     index,
+                    align,
                 );
             }
-            debug_assert_eq!(pie.slices.len(), pie_wedges.len());
         }
 
-        let mut bounds = graph_label_placer
-            .as_ref()
-            .map_or(layout.bounds, |placer| placer.bounds());
+        let mut bounds = pie_layout.as_ref().map_or_else(
+            || {
+                graph_label_placer
+                    .as_ref()
+                    .map_or(layout.bounds, |placer| placer.bounds())
+            },
+            |pie| pie.bounds,
+        );
         if !graph_label_plates.is_empty() {
             edge_segments = clip_segments_around_labels(&edge_segments, &graph_label_plates);
         }
@@ -4237,7 +4277,7 @@ fn radial_distance(point: vec2<f32>, direction: vec2<f32>, radius: f32) -> f32 {
 // The angular membership test also handles sectors larger than a semicircle and wraparound.
 fn sector_distance(point: vec2<f32>, radius: f32, start: f32, sweep: f32) -> f32 {
     let circle_distance = length(point) - radius;
-    if (sweep >= TAU - 0.000001) {
+    if (sweep >= TAU) {
         return circle_distance;
     }
     let direction_start = vec2<f32>(cos(start), sin(start));
@@ -7172,11 +7212,8 @@ mod tests {
             !pie.slices.is_empty(),
             "CONTROL FAILED: fixture produced no pie slices"
         );
-        let svg = fm_render_svg::render_svg_with_layout(
-            &ir,
-            &layout,
-            &fm_render_svg::SvgRenderConfig::default(),
-        );
+        let svg_config = fm_render_svg::SvgRenderConfig::default();
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &svg_config);
         assert!(
             svg.contains("fm-pie-slice"),
             "SVG golden omitted pie wedges:\n{svg}"
@@ -7191,28 +7228,231 @@ mod tests {
 
         let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
         assert_eq!(plan.pie_wedges.len(), pie.slices.len());
-        let total = pie
-            .slices
-            .iter()
-            .map(|slice| slice.value.max(0.0))
-            .sum::<f32>();
-        let expected_radius =
-            ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+        let metrics = crate::CanvasRenderConfig::default().font_metrics();
+        let measured = fm_layout::PieChartLayout::new(
+            pie,
+            ir.meta.title.as_deref().or(pie.title.as_deref()),
+            &metrics,
+            8.0,
+            metrics.avg_char_width(),
+        );
+        let wedge_element = svg
+            .split('<')
+            .find(|element| {
+                element.starts_with("path ") && element.contains("class=\"fm-pie-slice\"")
+            })
+            .expect("fixture must contain an ordinary SVG wedge");
+        let path = wedge_element
+            .split_once("d=\"")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap();
+        let coordinates: Vec<_> = path.split_whitespace().collect();
+        assert_eq!(coordinates[0], "M");
+        assert_eq!(coordinates[6], "A");
+        let svg_x: f32 = coordinates[1].parse().unwrap();
+        let svg_y: f32 = coordinates[2].parse().unwrap();
+        let svg_radius: f32 = coordinates[7].parse().unwrap();
+        assert!((svg_x - svg_config.padding - measured.center.x).abs() < 0.01);
+        assert!((svg_y - svg_config.padding - measured.center.y).abs() < 0.01);
+        assert!((svg_radius - measured.radius).abs() < 0.01);
         for (index, wedge) in plan.pie_wedges.iter().enumerate() {
             assert_eq!(wedge.slice_index, index as u32);
-            assert!((wedge.radius - expected_radius).abs() < 0.01);
-            assert!(
-                (wedge.sweep_angle
-                    - pie.slices[index].value.max(0.0) / total * std::f32::consts::TAU)
-                    .abs()
-                    < 0.01
-            );
+            assert_eq!(wedge.center, [measured.center.x, measured.center.y]);
+            assert_eq!(wedge.radius, measured.radius);
+            assert_eq!(wedge.start_angle, measured.slices[index].start_angle);
+            assert_eq!(wedge.sweep_angle, measured.slices[index].sweep_angle);
             assert!(
                 plan.text_runs
                     .iter()
                     .any(|run| run.source == super::GpuTextSource::PieSlice
                         && run.node_index == index as u32)
             );
+        }
+    }
+
+    #[test]
+    fn pie_gpu_retains_wrapped_legend_rows_and_measured_positions_at_large_fonts() {
+        let source = format!(
+            "pie showData\n title Quarterly platform allocation\n{}",
+            (0..24)
+                .map(|index| format!(
+                    "\"Customer identity and regional onboarding allocation {index}\": {}",
+                    if index == 0 { 90.25 } else { 1.25 }
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let mut ir = fm_parser::parse(&source).ir;
+        ir.meta
+            .theme_overrides
+            .theme_variables
+            .insert("pie1".into(), "#123456".into());
+        let layout = fm_layout::layout_diagram(&ir);
+        let meta = ir.pie_meta.as_ref().unwrap();
+        assert_eq!(meta.slices.len(), 24);
+        for (font_size, family) in [(15.0, "system-ui"), (36.0, "monospace")] {
+            let config = crate::CanvasRenderConfig {
+                font_size,
+                font_family: family.into(),
+                ..Default::default()
+            };
+            let metrics = config.font_metrics();
+            let measured = fm_layout::PieChartLayout::new(
+                meta,
+                ir.meta.title.as_deref().or(meta.title.as_deref()),
+                &metrics,
+                8.0,
+                metrics.avg_char_width(),
+            );
+            assert!(
+                measured
+                    .entries
+                    .iter()
+                    .any(|entry| entry.label.lines.len() > 1)
+            );
+            let plan = super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            assert_eq!(plan.node_instances.len(), measured.entries.len() + 1);
+            assert_eq!(plan.edge_segments.len(), measured.slices.len() * 2);
+            assert!(
+                plan.edge_segments
+                    .iter()
+                    .all(|segment| segment.edge_index == super::NO_EDGE_INDEX)
+            );
+            assert!(plan.arrowheads.is_empty());
+            assert_eq!(
+                plan.pie_wedges[0].fill,
+                super::parse_paint_rgba("#123456").unwrap()
+            );
+            assert_eq!(plan.node_instances[1].fill, plan.pie_wedges[0].fill);
+            assert!(plan.bounds.x <= measured.bounds.x && plan.bounds.y <= measured.bounds.y);
+            assert!(plan.bounds.x + plan.bounds.width >= measured.bounds.x + measured.bounds.width);
+            assert!(
+                plan.bounds.y + plan.bounds.height >= measured.bounds.y + measured.bounds.height
+            );
+
+            let mut expected_rows = Vec::new();
+            let mut add_rows = |block: &fm_layout::PieTextBlock, source, index| {
+                for (text, point) in block.rows().filter(|(text, _)| !text.is_empty()) {
+                    expected_rows.push((
+                        text.to_owned(),
+                        point,
+                        block.font_size,
+                        block.align,
+                        source,
+                        index,
+                    ));
+                }
+            };
+            if let Some(title) = &measured.title {
+                add_rows(title, super::GpuTextSource::DiagramTitle, 0);
+            }
+            for (index, (slice, entry)) in measured.slices.iter().zip(&measured.entries).enumerate()
+            {
+                add_rows(&slice.label, super::GpuTextSource::PieSlice, index);
+                add_rows(&entry.label, super::GpuTextSource::PieSlice, index);
+            }
+            assert_eq!(plan.text_runs.len(), expected_rows.len());
+            for (run, (expected_text, anchor, row_font_size, align, source, index)) in
+                plan.text_runs.iter().zip(expected_rows)
+            {
+                assert_eq!(run.source, source);
+                assert_eq!(run.node_index, u32::try_from(index).unwrap());
+                let start = run.first_quad as usize;
+                let quads = &plan.text_quads[start..start + run.quad_count as usize];
+                let actual_text: String = quads
+                    .iter()
+                    .map(|quad| {
+                        plan.glyph_atlas
+                            .cells
+                            .iter()
+                            .find(|cell| cell.uv_min == quad.uv_min && cell.uv_max == quad.uv_max)
+                            .expect("every text quad must reference an atlas glyph")
+                            .glyph
+                    })
+                    .collect();
+                assert_eq!(actual_text, expected_text);
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.center[1] - anchor.y).abs() < 0.01)
+                );
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| (quad.half_extent[1] * 2.0 - row_font_size).abs() < 0.01)
+                );
+                let row_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size: row_font_size,
+                    ..metrics.config().clone()
+                });
+                let width = row_metrics.estimate_width(&expected_text);
+                let left = anchor.x
+                    - width
+                        * match align {
+                            fm_layout::TextAlign::Start => 0.0,
+                            fm_layout::TextAlign::Middle => 0.5,
+                            fm_layout::TextAlign::End => 1.0,
+                        };
+                let first_glyph = expected_text.chars().next().unwrap().to_string();
+                let first_advance = row_metrics.estimate_width(&first_glyph);
+                assert!((quads[0].center[0] - first_advance * 0.5 - left).abs() < 0.02);
+            }
+            for (slice, pair) in measured
+                .slices
+                .iter()
+                .zip(plan.edge_segments.as_chunks::<2>().0)
+            {
+                let leader = slice.leader.unwrap();
+                assert_eq!(pair[0].from, [leader[0].x, leader[0].y]);
+                assert_eq!(pair[0].to, [leader[1].x, leader[1].y]);
+                assert_eq!(pair[1].to, [leader[2].x, leader[2].y]);
+            }
+            assert_eq!(
+                plan,
+                super::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+            );
+        }
+    }
+
+    #[test]
+    fn pie_gpu_keeps_tiny_and_zero_slice_quantities() {
+        for values in [
+            vec![0.0_f32],
+            vec![1e-30],
+            vec![1e-30, 3e-30],
+            vec![0.00001, 1.0],
+        ] {
+            let source = format!(
+                "pie\n{}",
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| format!("\"Part {index}\": {value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            assert_eq!(plan.pie_wedges.len(), values.len());
+            let total = values.iter().map(|&value| f64::from(value)).sum::<f64>();
+            for (wedge, &value) in plan.pie_wedges.iter().zip(&values) {
+                let expected = if total > 0.0 {
+                    f64::from(value) / total
+                } else {
+                    0.0
+                };
+                assert!(
+                    (f64::from(wedge.sweep_angle) / std::f64::consts::TAU - expected).abs() < 1e-6
+                );
+                assert_eq!(wedge.sweep_angle > 0.0, value > 0.0);
+                if values.len() > 1 && value > 0.0 {
+                    assert!(wedge.sweep_angle < std::f32::consts::TAU);
+                }
+            }
         }
     }
 
@@ -7481,6 +7721,10 @@ mod tests {
             "draw_packet_field_continuations",
             "draw_quadrant_axis_labels",
             "draw_pie_wedges",
+            // PieChartLayout rows feed pie_text_blocks, the glyph atlas, and TextSink;
+            // pie_gpu_retains_wrapped_legend_rows_and_measured_positions_at_large_fonts
+            // verifies every emitted title, percentage, and wrapped legend row.
+            "draw_pie_text_block",
             "draw_clusters",
             "draw_edges",
             "draw_edge_pass", // Routes, markers, and measured labels already represented above.

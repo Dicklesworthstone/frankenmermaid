@@ -309,10 +309,28 @@ impl Canvas2dRenderer {
         let canvas_width = ctx.width();
         let canvas_height = ctx.height();
         self.edge_label_layout = measure_graph_edge_labels(ir, layout, ctx, &self.config);
-        let render_bounds = self
-            .edge_label_layout
+        let pie = ir
+            .pie_meta
             .as_ref()
-            .map_or(layout.bounds, |labels| labels.bounds);
+            .filter(|_| ir.diagram_type == DiagramType::Pie)
+            .map(|meta| {
+                let metrics = self.config.font_metrics();
+                fm_layout::PieChartLayout::new(
+                    meta,
+                    ir.meta.title.as_deref().or(meta.title.as_deref()),
+                    &metrics,
+                    8.0,
+                    metrics.avg_char_width(),
+                )
+            });
+        let render_bounds = pie.as_ref().map_or_else(
+            || {
+                self.edge_label_layout
+                    .as_ref()
+                    .map_or(layout.bounds, |labels| labels.bounds)
+            },
+            |pie| pie.bounds,
+        );
 
         // Compute viewport to fit diagram
         let mut viewport = if self.config.auto_fit {
@@ -356,6 +374,27 @@ impl Canvas2dRenderer {
                 self.config.padding - f64::from(render_bounds.y),
             )
         };
+
+        if let Some(pie) = &pie {
+            let mut labels_drawn = 0;
+            self.draw_pie_wedges(pie, ir, ctx, offset_x, offset_y, &mut labels_drawn);
+            let mut hit_regions = crate::interaction::hit_regions(ir, layout);
+            for region in &mut hit_regions {
+                if let Some(entry) = pie.entries.get(region.node_index) {
+                    region.bounds = entry.bounds();
+                }
+            }
+            ctx.restore();
+            return CanvasRenderResult {
+                draw_calls: self.draw_calls,
+                nodes_drawn: pie.slices.len(),
+                edges_drawn: 0,
+                clusters_drawn: 0,
+                labels_drawn,
+                viewport,
+                hit_regions,
+            };
+        }
 
         // XY marks are data, not labelled graph nodes. The generic path loses the numeric
         // scale and axis titles, paints every series alike, and never fills area series.
@@ -441,11 +480,6 @@ impl Canvas2dRenderer {
         // Draw sequence notes and fragments.
         self.draw_sequence_fragments(layout, ir, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
-
-        // Draw pie chart wedges if this is a pie diagram.
-        if ir.diagram_type == DiagramType::Pie {
-            self.draw_pie_wedges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
-        }
 
         // Draw quadrant axis labels (bd-59o4).
         if ir.diagram_type == DiagramType::QuadrantChart {
@@ -3580,96 +3614,121 @@ impl Canvas2dRenderer {
     /// Draw pie chart wedges using canvas arc API.
     fn draw_pie_wedges<C: Canvas2dContext>(
         &mut self,
-        layout: &DiagramLayout,
+        pie: &fm_layout::PieChartLayout,
         ir: &MermaidDiagramIr,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
         labels_drawn: &mut usize,
     ) {
-        let Some(pie_meta) = &ir.pie_meta else {
-            return;
-        };
-        if pie_meta.slices.is_empty() {
-            return;
+        let cx = f64::from(pie.center.x) + offset_x;
+        let cy = f64::from(pie.center.y) + offset_y;
+        let radius = f64::from(pie.radius);
+        if let Some(title) = &pie.title {
+            *labels_drawn += self.draw_pie_text_block(title, ctx, offset_x, offset_y, true);
         }
-
-        let total: f64 = pie_meta
-            .slices
-            .iter()
-            .map(|s| f64::from(s.value.max(0.0)))
-            .sum::<f64>()
-            .max(f64::EPSILON);
-
-        let bounds = &layout.bounds;
-        let chart_size = f64::from(bounds.width.min(bounds.height));
-        let cx = f64::from(bounds.x) + f64::from(bounds.width) / 2.0 + offset_x;
-        let cy = f64::from(bounds.y) + f64::from(bounds.height) / 2.0 + offset_y;
-        let radius = (chart_size / 2.0 - 36.0).max(30.0);
-
-        let accent_colors = [
-            "#4c78a8", "#f58518", "#e45756", "#72b7b2", "#54a24b", "#eeca3b", "#b279a2", "#ff9da6",
-            "#9d755d", "#bab0ac",
-        ];
-
-        let mut angle = -std::f64::consts::FRAC_PI_2;
-
-        // Invariant slice-label font, hoisted out of the per-slice loop (byte-identical to the per-slice
-        // `format!("{}px {}", font_size*0.8, font_family)`).
-        let slice_label_font = format!(
-            "{}px {}",
-            self.config.font_size * 0.8,
-            self.config.font_family
+        ctx.set_fill_style(&self.config.node_fill);
+        ctx.fill_rect(
+            f64::from(pie.legend.x) + offset_x,
+            f64::from(pie.legend.y) + offset_y,
+            f64::from(pie.legend.width),
+            f64::from(pie.legend.height),
         );
-
-        for (i, slice) in pie_meta.slices.iter().enumerate() {
-            let value = f64::from(slice.value.max(0.0));
-            let sweep = (value / total) * 2.0 * std::f64::consts::PI;
-            let color = accent_colors[i % accent_colors.len()];
-
-            ctx.begin_path();
-            ctx.move_to(cx, cy);
-            ctx.arc(cx, cy, radius, angle, angle + sweep);
-            ctx.close_path();
-            ctx.set_fill_style(color);
-            ctx.fill();
-            ctx.set_stroke_style(&self.config.node_stroke);
-            ctx.set_line_width(1.5);
-            ctx.stroke();
+        ctx.set_stroke_style(&self.config.node_stroke);
+        ctx.set_line_width(1.0);
+        ctx.stroke_rect(
+            f64::from(pie.legend.x) + offset_x,
+            f64::from(pie.legend.y) + offset_y,
+            f64::from(pie.legend.width),
+            f64::from(pie.legend.height),
+        );
+        self.draw_calls += 2;
+        for (index, slice) in pie.slices.iter().enumerate() {
+            let color = ir
+                .meta
+                .theme_overrides
+                .theme_variables
+                .get(&format!("pie{}", index % self.config.accents.len() + 1))
+                .and_then(|paint| sanitize_canvas_paint(paint))
+                .unwrap_or_else(|| self.config.accents[index % self.config.accents.len()].clone());
+            if slice.sweep_angle > 0.0 {
+                let angle = f64::from(slice.start_angle);
+                let sweep = f64::from(slice.sweep_angle);
+                ctx.begin_path();
+                if slice.sweep_angle < std::f32::consts::TAU {
+                    ctx.move_to(cx, cy);
+                }
+                ctx.arc(cx, cy, radius, angle, angle + sweep);
+                ctx.close_path();
+                ctx.set_fill_style(&color);
+                ctx.fill();
+                ctx.set_stroke_style(&self.config.node_fill);
+                ctx.set_line_width(2.0);
+                ctx.stroke();
+                self.draw_calls += 1;
+            }
+            if let Some(leader) = slice.leader {
+                ctx.begin_path();
+                ctx.move_to(
+                    f64::from(leader[0].x) + offset_x,
+                    f64::from(leader[0].y) + offset_y,
+                );
+                for point in &leader[1..] {
+                    ctx.line_to(f64::from(point.x) + offset_x, f64::from(point.y) + offset_y);
+                }
+                ctx.set_stroke_style(&self.config.label_color);
+                ctx.set_line_width(1.0);
+                ctx.set_global_alpha(0.45);
+                ctx.stroke();
+                ctx.set_global_alpha(1.0);
+                self.draw_calls += 1;
+            }
+            *labels_drawn += self.draw_pie_text_block(&slice.label, ctx, offset_x, offset_y, false);
+            let entry = &pie.entries[index];
+            ctx.set_fill_style(&color);
+            ctx.fill_rect(
+                f64::from(entry.swatch.x) + offset_x,
+                f64::from(entry.swatch.y) + offset_y,
+                f64::from(entry.swatch.width),
+                f64::from(entry.swatch.height),
+            );
             self.draw_calls += 1;
-
-            // Draw percentage label.
-            let mid_angle = angle + sweep / 2.0;
-            let label_r = radius + 20.0;
-            let lx = cx + label_r * mid_angle.cos();
-            let ly = cy + label_r * mid_angle.sin();
-            let pct = (value / total) * 100.0;
-            let label = format!("{}: {pct:.1}%", slice.label);
-
-            ctx.set_fill_style(&self.config.label_color);
-            ctx.set_font(&slice_label_font);
-            ctx.set_text_align(TextAlign::Center);
-            ctx.set_text_baseline(TextBaseline::Middle);
-            ctx.fill_text(&label, lx, ly);
-            self.draw_calls += 1;
-            *labels_drawn += 1;
-
-            angle += sweep;
+            *labels_drawn += self.draw_pie_text_block(&entry.label, ctx, offset_x, offset_y, false);
         }
     }
+
+    fn draw_pie_text_block<C: Canvas2dContext>(
+        &mut self,
+        block: &fm_layout::PieTextBlock,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        emphasized: bool,
+    ) -> usize {
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&format!(
+            "{}{}px {}",
+            if emphasized { "600 " } else { "" },
+            block.font_size,
+            self.config.font_family
+        ));
+        ctx.set_text_align(match block.align {
+            IrTextAlign::Start => TextAlign::Left,
+            IrTextAlign::Middle => TextAlign::Center,
+            IrTextAlign::End => TextAlign::Right,
+        });
+        ctx.set_text_baseline(TextBaseline::Middle);
+        for (text, point) in block.rows() {
+            ctx.fill_text(
+                text,
+                f64::from(point.x) + offset_x,
+                f64::from(point.y) + offset_y,
+            );
+            self.draw_calls += 1;
+        }
+        block.lines.len()
+    }
 }
-
-#[allow(clippy::too_many_arguments)]
-/// Left inset of an ER attribute row, mirroring the `row_width + 16.0` fm-layout reserves and the
-/// `x + 8.0` both SVG writers draw from.
-const ER_ROW_PADDING: f64 = 8.0;
-
-/// Lower bound on the ER attribute font size, mirroring `fm-layout`'s `ER_ATTR_FONT_FLOOR`.
-///
-/// Duplicated as a literal rather than imported because fm-layout keeps it private; the value is
-/// load-bearing in one direction only — it raises the size, which widens the box, so a disagreement
-/// here over-sizes rather than spills.
-const ER_ATTR_FONT_FLOOR: f32 = 8.0;
 
 fn draw_marker_primitive<C: Canvas2dContext>(
     ctx: &mut C,

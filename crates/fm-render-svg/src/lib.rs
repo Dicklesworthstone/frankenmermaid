@@ -2064,7 +2064,7 @@ fn render_scene_document_with_ir(
 ) -> String {
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
-    let planned_title = scene.root.children.iter().any(|item| {
+    let planned_title = scene.root.id.as_deref() == Some("pie-chart") || scene.root.children.iter().any(|item| {
         matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
     });
     let visible_title = ir
@@ -2318,8 +2318,34 @@ fn render_scene_item(
         RenderItem::Group(group) => {
             render_scene_group(group, config, ir, clip_defs, clip_id_counter)
         }
-        RenderItem::Path(path) => render_scene_path(path, config.include_source_spans, ir),
-        RenderItem::Text(text) => render_scene_text(text, config, ir),
+        RenderItem::Path(path) => {
+            let mut element = render_scene_path(path, config.include_source_spans, ir);
+            if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Pie) {
+                let theme = resolve_theme(Some(ir), config);
+                if path.fill.is_some()
+                    && let RenderSource::Node(index) = path.source
+                {
+                    element =
+                        element.fill(&theme.colors.accents[index % theme.colors.accents.len()]);
+                }
+                if path.stroke.is_some() {
+                    element = element.stroke(if path.fill.is_some() {
+                        &theme.colors.background
+                    } else {
+                        &theme.colors.text
+                    });
+                }
+            }
+            element
+        }
+        RenderItem::Text(text) => {
+            let element = render_scene_text(text, config, ir);
+            if let Some(ir) = ir.filter(|ir| ir.diagram_type == DiagramType::Pie) {
+                element.fill(&resolve_theme(Some(ir), config).colors.text)
+            } else {
+                element
+            }
+        }
     }
 }
 
@@ -4450,6 +4476,17 @@ fn svg_geometry(
         offset_x: padding - layout.bounds.x,
         offset_y: padding - layout.bounds.y + title_height,
     };
+    if let Some(meta) = ir.pie_meta.as_ref().filter(|meta| !meta.slices.is_empty()) {
+        let pie = fm_layout::PieChartLayout::new(
+            meta,
+            diagram_title(ir, meta.title.as_deref()),
+            &config.font_metrics(),
+            config.min_font_size,
+            config.avg_char_width,
+        );
+        frame.viewbox_width = pie.bounds.width + padding * 2.0;
+        frame.viewbox_height = pie.bounds.height + padding * 2.0;
+    }
     // The tier describes the layout's decoration budget; expanding a frame to retain text must
     // not feed back into tier selection or change the font used to measure that same text.
     let detail = resolve_detail_profile(frame.viewbox_width, frame.viewbox_height, config);
@@ -8387,6 +8424,38 @@ fn write_pie_text_into(
     f.push_str("</text>");
 }
 
+fn write_pie_block_into(
+    out: &mut String,
+    block: &fm_layout::PieTextBlock,
+    origin: (f32, f32),
+    config: &SvgRenderConfig,
+    fill: &str,
+    class: &str,
+    emphasized: bool,
+) {
+    let anchor = match block.align {
+        RenderTextAlign::Start => "start",
+        RenderTextAlign::Middle => "middle",
+        RenderTextAlign::End => "end",
+    };
+    for (text, point) in block.rows() {
+        write_pie_text_into(
+            out,
+            point.x + origin.0,
+            point.y + origin.1,
+            anchor,
+            true,
+            &config.font_family,
+            config.embed_theme_css,
+            block.font_size,
+            emphasized,
+            fill,
+            class,
+            text,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_pie_svg(
     mut doc: SvgDocument,
@@ -8400,38 +8469,18 @@ fn render_pie_svg(
 ) -> SvgDocument {
     use std::f32::consts::PI;
 
-    let bounds = &layout.bounds;
     let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
-    let legend_label_width = pie_meta
-        .slices
-        .iter()
-        .map(|slice| {
-            (slice.label.chars().count() as f32) * (config.avg_char_width * 0.9)
-                + if pie_meta.show_data { 88.0 } else { 0.0 }
-        })
-        .fold(0.0_f32, f32::max);
-    let legend_width = (legend_label_width + 56.0).clamp(136.0, 280.0);
-    let title = diagram_title(ir, pie_meta.title.as_deref());
-    let title_height = if title.is_some() {
-        config.font_size + 22.0
-    } else {
-        0.0
-    };
-    let chart_gap = 24.0;
-    let chart_left = bounds.x + offset_x;
-    let chart_top = bounds.y + offset_y + title_height;
-    let chart_width = (bounds.width - legend_width - chart_gap).max(160.0);
-    let chart_height = (bounds.height - title_height).max(160.0);
-    let cx = chart_left + chart_width / 2.0;
-    let cy = chart_top + chart_height / 2.0;
-    let radius = (chart_width.min(chart_height) / 2.0 - 36.0).max(40.0);
-
-    let total: f32 = pie_meta
-        .slices
-        .iter()
-        .map(|s| s.value.max(0.0))
-        .sum::<f32>()
-        .max(f32::EPSILON);
+    let pie = fm_layout::PieChartLayout::new(
+        pie_meta,
+        diagram_title(ir, pie_meta.title.as_deref()),
+        &config.font_metrics(),
+        config.min_font_size,
+        config.avg_char_width,
+    );
+    let origin = (layout.bounds.x + offset_x, layout.bounds.y + offset_y);
+    let cx = pie.center.x + origin.0;
+    let cy = pie.center.y + origin.1;
+    let radius = pie.radius;
 
     // Stream the whole pie (title + per-slice wedge+label + legend group) into ONE raw fragment instead
     // of ~4 `Element`s per slice + the legend group/box/title. Byte-identical: same element bytes/attr
@@ -8439,25 +8488,18 @@ fn render_pie_svg(
     // d>` keeps the same full-precision `format!`; label/legend `font-family` gated on `!embed`.
     use crate::attributes::write_escaped_attr;
     let text_fill = theme.colors.text.as_str();
-    let family = config.font_family.as_str();
-    let embed = config.embed_theme_css;
     let bg = theme.colors.background.as_str();
     let mut pie_svg = String::new();
 
-    if let Some(title) = title {
-        write_pie_text_into(
+    if let Some(title) = &pie.title {
+        write_pie_block_into(
             &mut pie_svg,
-            cx,
-            bounds.y + offset_y + config.font_size + 2.0,
-            "middle",
-            false,
-            family,
-            embed,
-            config.font_size + 4.0,
-            true,
+            title,
+            origin,
+            config,
             text_fill,
             "fm-pie-title",
-            title,
+            true,
         );
     }
 
@@ -8470,7 +8512,6 @@ fn render_pie_svg(
     use std::fmt::Write as _;
     let pie_head = format!("M {cx} {cy} L ");
     let pie_arc = format!(" A {radius} {radius} 0 ");
-    let mut angle = -PI / 2.0;
     // A normal wedge's END point (at `angle + sweep`) is the NEXT wedge's START point (at the
     // next `angle`, since `angle += sweep` below) — bit-for-bit the same float, so its
     // Grisu-formatted `"{x} {y}"` text is identical. Cache it and reuse it as the next wedge's
@@ -8481,15 +8522,17 @@ fn render_pie_svg(
     let mut have_prev_end = false;
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
-        let sweep = (value / total) * 2.0 * PI;
+        let placed = &pie.slices[i];
+        let angle = placed.start_angle;
+        let sweep = placed.sweep_angle;
         let color = accent_colors[i % accent_colors.len()];
 
-        if value <= f32::EPSILON {
+        if sweep <= 0.0 {
             pie_svg.push_str(
                 "<path d=\"\" fill=\"none\" stroke=\"none\" class=\"fm-pie-slice fm-pie-slice-zero\"/>",
             );
             have_prev_end = false;
-        } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
+        } else if sweep >= 2.0 * PI {
             pie_svg.push_str("<circle cx=\"");
             let _ = crate::attributes::write_number_into(&mut pie_svg, cx);
             pie_svg.push_str("\" cy=\"");
@@ -8549,53 +8592,47 @@ fn render_pie_svg(
             );
         }
 
-        let mid_angle = angle + sweep / 2.0;
-        let label_radius = radius + 24.0;
-        let lx = cx + label_radius * mid_angle.cos();
-        let ly = cy + label_radius * mid_angle.sin();
-        let pct = (value / total) * 100.0;
-        // ⚠️ THE SLICE IS LABELLED WITH ITS PERCENTAGE, as mermaid labels it. We drew the slice NAME
-        // and no percentage at all, so `pie "Apples" : 40` rendered `Apples` where mermaid renders
-        // `40%`. Measured on the pinned 11.15.0 bundle: 40/30/30 -> "40%","30%","30%"; 1/1/1 ->
-        // three "33%"; 2/1 -> "67%","33%". The name is not lost — the legend beside the chart
-        // carries it, which is also where mermaid puts it.
-        let label_text = pie_percent_label(pct);
-        let anchor = if mid_angle.cos() < -0.1 {
-            "end"
-        } else if mid_angle.cos() > 0.1 {
-            "start"
-        } else {
-            "middle"
-        };
-        write_pie_text_into(
+        if let Some(leader) = placed.leader {
+            let path = format!(
+                "M {} {} L {} {} L {} {}",
+                leader[0].x + origin.0,
+                leader[0].y + origin.1,
+                leader[1].x + origin.0,
+                leader[1].y + origin.1,
+                leader[2].x + origin.0,
+                leader[2].y + origin.1,
+            );
+            Element::path()
+                .d(&path)
+                .fill("none")
+                .stroke(text_fill)
+                .stroke_width(1.0)
+                .attr_num("stroke-opacity", 0.45)
+                .class("fm-pie-label-leader")
+                .write_to_string(&mut pie_svg);
+        }
+        write_pie_block_into(
             &mut pie_svg,
-            lx,
-            ly,
-            anchor,
-            true,
-            family,
-            embed,
-            clamp_font_size(config.font_size * 0.85, config.min_font_size),
-            false,
+            &placed.label,
+            origin,
+            config,
             text_fill,
             "fm-pie-label",
-            &label_text,
+            false,
         );
-        angle += sweep;
     }
 
-    let legend_x = chart_left + chart_width + chart_gap;
-    let legend_y = chart_top + 12.0;
-    let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 28.0).max(64.0);
+    let legend_x = pie.legend.x + origin.0;
+    let legend_y = pie.legend.y + origin.1;
 
     pie_svg.push_str("<g class=\"fm-pie-legend\"><rect x=\"");
     let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x);
     pie_svg.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(&mut pie_svg, legend_y);
     pie_svg.push_str("\" width=\"");
-    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_width);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, pie.legend.width);
     pie_svg.push_str("\" height=\"");
-    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_height);
+    let _ = crate::attributes::write_number_into(&mut pie_svg, pie.legend.height);
     pie_svg.push_str("\" rx=\"");
     let _ = crate::attributes::write_number_into(&mut pie_svg, config.rounded_corners.max(6.0));
     pie_svg.push_str("\" fill=\"");
@@ -8611,8 +8648,7 @@ fn render_pie_svg(
     // The rows move up by the caption's allotment and the box shrinks to match, so removing the text
     // does not leave a band of empty padding where it used to sit.
 
-    for (index, slice) in pie_meta.slices.iter().enumerate() {
-        let row_y = legend_y + 18.0 + index as f32 * 24.0;
+    for (index, entry) in pie.entries.iter().enumerate() {
         let color = accent_colors[index % accent_colors.len()];
         // ⚠️ `{label} [{value}]`, AND THE VALUE IS NOT ROUNDED. This read
         // `format!("{}: {:.0} ({:.1}%)", …)`, which was wrong twice over. mermaid 11.15.0 labels a
@@ -8628,33 +8664,27 @@ fn render_pie_svg(
         // `Display` is the shortest round-trip form and agrees with JavaScript's on every one of
         // those, so the value is written as the author wrote it and a whole number keeps no
         // trailing `.0`.
-        let entry_label = if pie_meta.show_data {
-            format!("{} [{}]", slice.label, slice.value.max(0.0))
-        } else {
-            slice.label.clone()
-        };
         pie_svg.push_str("<rect x=\"");
-        let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x + 14.0);
+        let _ = crate::attributes::write_number_into(&mut pie_svg, entry.swatch.x + origin.0);
         pie_svg.push_str("\" y=\"");
-        let _ = crate::attributes::write_number_into(&mut pie_svg, row_y - 9.0);
-        pie_svg.push_str("\" width=\"12\" height=\"12\" rx=\"2\" fill=\"");
+        let _ = crate::attributes::write_number_into(&mut pie_svg, entry.swatch.y + origin.1);
+        pie_svg.push_str("\" width=\"");
+        let _ = crate::attributes::write_number_into(&mut pie_svg, entry.swatch.width);
+        pie_svg.push_str("\" height=\"");
+        let _ = crate::attributes::write_number_into(&mut pie_svg, entry.swatch.height);
+        pie_svg.push_str("\" rx=\"2\" fill=\"");
         let _ = write_escaped_attr(&mut pie_svg, color);
         pie_svg.push_str("\" stroke=\"");
         let _ = write_escaped_attr(&mut pie_svg, bg);
         pie_svg.push_str("\" stroke-width=\"1\" class=\"fm-pie-legend-swatch\"/>");
-        write_pie_text_into(
+        write_pie_block_into(
             &mut pie_svg,
-            legend_x + 34.0,
-            row_y,
-            "start",
-            true,
-            family,
-            embed,
-            clamp_font_size(config.font_size * 0.8, config.min_font_size),
-            false,
+            &entry.label,
+            origin,
+            config,
             text_fill,
             "fm-pie-legend-entry",
-            &entry_label,
+            false,
         );
     }
     pie_svg.push_str("</g>");
@@ -8686,19 +8716,6 @@ fn render_pie_svg(
 ///
 /// Gated on `text_alternatives`, matching `uniform_a11y`'s `<title>` component: with a11y off the
 /// shape closes exactly as it did before, so that configuration is byte-identical.
-/// Format a pie slice's share the way mermaid labels it: a whole percent with a `%` suffix.
-///
-/// ⚠️ HALF ROUNDS AWAY FROM ZERO, NOT TO EVEN, and that is the whole reason this is a function.
-/// mermaid rounds in JavaScript, where `Math.round(12.5)` is `13`. Rust's `{:.0}` rounds half to
-/// EVEN and renders the same value as `12`. Measured against the bundle to be sure rather than
-/// reasoned about: `pie "A":1 "B":7` draws `13%` and `88%`, and 3/8 draws `38%`.
-///
-/// The difference shows up only on an exact half, which is why a `{:.0}` implementation passes every
-/// obvious fixture — 40/30/30, 1/1/1, 2/1 — and fails one input in a hundred.
-fn pie_percent_label(percent: f32) -> String {
-    format!("{}%", (f64::from(percent) + 0.5).floor() as i64)
-}
-
 fn write_pie_slice_accessible_name(
     out: &mut String,
     text_alternatives: bool,

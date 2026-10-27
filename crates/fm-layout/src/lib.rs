@@ -30,11 +30,13 @@ mod event_model;
 pub mod invariants;
 mod ishikawa;
 pub mod layout_lens;
+mod pie;
 mod tree_view;
 mod venn;
 mod wardley;
 use event_model::layout_diagram_event_model_traced;
 use ishikawa::layout_diagram_ishikawa_traced;
+pub use pie::{PieChartLayout, PieLegendEntry, PieSliceLayout, PieTextBlock};
 use tree_view::layout_diagram_tree_view_traced;
 use venn::layout_diagram_venn_traced;
 use wardley::layout_diagram_wardley_traced;
@@ -3682,6 +3684,9 @@ pub fn build_render_scene_with_metrics(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> RenderScene {
+    if ir.diagram_type == DiagramType::Pie && ir.pie_meta.is_some() {
+        return pie::build_pie_render_scene(ir, metrics);
+    }
     if ir.diagram_type == DiagramType::Gantt
         && let Some(meta) = ir.gantt_meta.as_ref()
     {
@@ -5917,7 +5922,13 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .unwrap_or(&fm_core::FontMetrics::default_metrics()),
             config.spacing,
         ),
-        LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
+        LayoutAlgorithm::Pie => layout_diagram_pie_traced(
+            ir,
+            config
+                .font_metrics
+                .as_ref()
+                .unwrap_or(&fm_core::FontMetrics::default_metrics()),
+        ),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
         LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
@@ -13442,84 +13453,53 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 }
 
 #[must_use]
-/// Lay out a pie chart: compute wedge angles and position label nodes around
-/// the perimeter.  Each node in the IR corresponds to one slice.
-fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+/// Lay out the actual pie, percentage labels and wrapped legend as one measured composition.
+fn layout_diagram_pie_traced(
+    ir: &MermaidDiagramIr,
+    metrics: &fm_core::FontMetrics,
+) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let metrics = fm_core::FontMetrics::default_metrics();
-    let spacing = LayoutSpacing::default();
     let node_count = ir.nodes.len();
-
-    // Adaptive sizing based on slice count and label dimensions.
-    let base_radius = 100.0_f32 + (node_count as f32 * 8.0).min(100.0);
-    let radius = base_radius.clamp(80.0, 220.0);
-    let label_radius = radius + 50.0;
-    let cx = radius + 70.0;
-    let cy = radius + 50.0;
-
-    // Compute total value from pie metadata (fall back to equal slices).
-    let values: Vec<f32> = if let Some(pie) = &ir.pie_meta {
-        pie.slices.iter().map(|s| s.value.max(0.0)).collect()
+    push_snapshot(&mut trace, "pie_layout", node_count, ir.edges.len(), 0, 0);
+    let fallback;
+    let meta = if let Some(meta) = &ir.pie_meta {
+        meta
     } else {
-        vec![1.0; node_count]
+        fallback = fm_core::IrPieMeta {
+            slices: ir
+                .nodes
+                .iter()
+                .map(|node| fm_core::IrPieSlice {
+                    label: display_node_label_ref(ir, node).to_string(),
+                    value: 1.0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        &fallback
     };
-    let total: f32 = values.iter().sum::<f32>().max(f32::EPSILON);
-
-    // Position each node at the midpoint angle of its wedge.
-    let mut nodes = Vec::with_capacity(node_count);
-    let mut angle_cursor = -PI / 2.0; // start at 12 o'clock
-
-    for (i, node) in ir.nodes.iter().enumerate() {
-        let value = values.get(i).copied().unwrap_or(1.0);
-        let sweep = (value / total) * 2.0 * PI;
-        let mid_angle = angle_cursor + sweep / 2.0;
-
-        let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
-        let node_w = label_w + 24.0;
-        let node_h = label_h + 16.0;
-
-        let node_x = cx + label_radius * mid_angle.cos() - node_w / 2.0;
-        let node_y = cy + label_radius * mid_angle.sin() - node_h / 2.0;
-
-        nodes.push(LayoutNodeBox {
-            node_index: i,
+    let pie = PieChartLayout::new(
+        meta,
+        ir.meta.title.as_deref().or(meta.title.as_deref()),
+        metrics,
+        8.0,
+        metrics.avg_char_width(),
+    );
+    // Semantic node boxes follow the readable legend entries, which are useful hit targets.
+    let nodes = ir
+        .nodes
+        .iter()
+        .zip(&pie.entries)
+        .enumerate()
+        .map(|(index, (node, entry))| LayoutNodeBox {
+            node_index: index,
             node_id: node.id.clone(),
             span: node.span_primary,
-            bounds: LayoutRect {
-                x: node_x,
-                y: node_y,
-                width: node_w,
-                height: node_h,
-            },
+            bounds: entry.bounds(),
             rank: 0,
-            order: i,
-        });
-
-        angle_cursor += sweep;
-    }
-
-    push_snapshot(&mut trace, "pie_layout", node_count, ir.edges.len(), 0, 0);
-
-    let mut bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
-    if let Some(pie) = &ir.pie_meta {
-        let legend_label_width = pie
-            .slices
-            .iter()
-            .map(|slice| metrics.estimate_dimensions(&slice.label).0)
-            .fold(0.0_f32, f32::max);
-        let legend_min = spacing.chart_legend_min_width;
-        let legend_max = spacing.chart_legend_max_width.max(legend_min);
-        let legend_width =
-            (legend_label_width + spacing.chart_legend_padding).clamp(legend_min, legend_max);
-        let title_height = if pie.title.is_some() {
-            spacing.chart_title_height
-        } else {
-            0.0
-        };
-        bounds.y -= title_height;
-        bounds.height += title_height;
-        bounds.width += legend_width + 28.0;
-    }
+            order: index,
+        })
+        .collect();
 
     TracedLayout {
         layout: Arc::new(DiagramLayout {
@@ -13527,7 +13507,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
             edges: Vec::new(),
-            bounds,
+            bounds: pie.bounds,
             stats: LayoutStats {
                 node_count,
                 ..LayoutStats::default()
@@ -38688,7 +38668,25 @@ mod tests {
         let layout = layout_diagram(&ir);
 
         assert!(layout.bounds.height > baseline_layout.bounds.height);
-        assert!(layout.bounds.y < baseline_layout.bounds.y);
+        let meta = ir.pie_meta.as_ref().unwrap();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let measured = super::PieChartLayout::new(
+            meta,
+            meta.title.as_deref(),
+            &metrics,
+            8.0,
+            metrics.avg_char_width(),
+        );
+        let title = measured
+            .title
+            .as_ref()
+            .expect("a declared title needs space");
+        assert!(title.bounds.y + title.bounds.height < measured.center.y - measured.radius);
+        assert!(title.bounds.y >= layout.bounds.y);
+        assert!(measured.legend.x + measured.legend.width <= layout.bounds.x + layout.bounds.width);
+        assert!(
+            measured.legend.y + measured.legend.height <= layout.bounds.y + layout.bounds.height
+        );
     }
 
     #[test]
