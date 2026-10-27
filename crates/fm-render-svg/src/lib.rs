@@ -2074,7 +2074,7 @@ fn render_scene_document_with_ir(
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
     let planned_title = scene.root.children.iter().any(|item| {
-        matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title")))
+        matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
     });
     let visible_title = ir
         .and_then(|diagram_ir| diagram_ir.meta.title.as_deref())
@@ -2595,15 +2595,30 @@ fn render_scene_text(
 
     elem = apply_fill_style(elem, &text.fill);
     if let Some(ir) = ir
-        && ir.diagram_type == DiagramType::Journey
+        && matches!(ir.diagram_type, DiagramType::Journey | DiagramType::Gantt)
     {
         let theme = resolve_theme(Some(ir), config);
-        let color = if let RenderSource::Node(index) = text.source {
+        let color = if let RenderSource::Node(index) = text.source
+            && (ir.diagram_type == DiagramType::Journey || text.align == RenderTextAlign::Middle)
+        {
             let declared = ir.resolved_node_style(index);
+            let semantic_fill = if ir.diagram_type == DiagramType::Gantt {
+                ir.gantt_meta.as_ref().map(|meta| {
+                    let flags = meta
+                        .tasks
+                        .iter()
+                        .find(|task| task.node.0 == index)
+                        .map(|task| task.flags)
+                        .unwrap_or_default();
+                    fm_layout::gantt_task_fill(flags)
+                })
+            } else {
+                fm_layout::journey_score_fill(ir, index)
+            };
             let fill = declared
                 .get("fill")
                 .map(String::as_str)
-                .or_else(|| fm_layout::journey_score_fill(ir, index))
+                .or(semantic_fill)
                 .unwrap_or("#ffffff");
             fm_core::readable_label_color(fill, &theme.colors.text, &theme.colors.background)
         } else {
@@ -2651,9 +2666,19 @@ fn apply_source_metadata(
         match source {
             RenderSource::Node(index) => {
                 if let Some(node) = diagram_ir.nodes.get(index) {
+                    let description = if let Some(meta) = diagram_ir.gantt_meta.as_ref()
+                        && diagram_ir.diagram_type == DiagramType::Gantt
+                    {
+                        gantt_bar_accessible_name(
+                            diagram_ir.node_display_text(node),
+                            meta.tasks.iter().find(|task| task.node.0 == index),
+                        )
+                    } else {
+                        crate::a11y::describe_node(node, diagram_ir)
+                    };
                     elem = elem
                         .attr("role", "graphics-symbol")
-                        .attr("aria-label", &crate::a11y::describe_node(node, diagram_ir));
+                        .attr("aria-label", &description);
                 }
             }
             RenderSource::Edge(index) => {
@@ -7690,17 +7715,6 @@ fn render_gantt_svg(
         }
     }
 
-    // Task bars with type-based coloring.
-    let task_color = |task_type: &fm_core::GanttTaskType| -> &str {
-        match task_type {
-            fm_core::GanttTaskType::Done => "#86efac",
-            fm_core::GanttTaskType::Active => "#94a3b8",
-            fm_core::GanttTaskType::Critical => "#fca5a5",
-            fm_core::GanttTaskType::Milestone => "#c4b5fd",
-            fm_core::GanttTaskType::Normal => "#93c5fd",
-        }
-    };
-
     // Stream all task bars/milestones/progress/labels into ONE raw fragment instead of ~2-3 `Element`s
     // per task (the dominant cost of gantt render). Byte-identical: the same `<rect>`/`<path>`/`<text>`
     // bytes in the same per-task order (bar/milestone, then progress, then label) the `Element` children
@@ -7726,7 +7740,7 @@ fn render_gantt_svg(
                 .unwrap_or_default();
             let task_type = task_flags.primary_type();
             let task_type = &task_type;
-            let fill = task_color(task_type);
+            let fill = fm_layout::gantt_task_fill(task_flags);
             let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
 
             if is_milestone {
@@ -21047,6 +21061,142 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn scene_backend_preserves_gantt_schedule_and_accessible_task_status() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n section Delivery\n\
+             Release :milestone, release, after build, 0d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 3);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        layout.nodes.reverse();
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            include_source_spans: true,
+            ..Default::default()
+        };
+        let svg = render_svg_with_layout(&ir, &layout, &config);
+        assert_eq!(svg, render_svg_with_layout(&ir, &layout, &config));
+        let text = issue14_drawn_text(&svg);
+        for label in [
+            "Release schedule",
+            "Design",
+            "Build",
+            "Release",
+            "Verification with a deliberately long name",
+        ] {
+            assert_eq!(
+                text.get(label),
+                Some(&1),
+                "{label} must appear exactly once"
+            );
+        }
+        assert_eq!(text.get("Delivery"), Some(&2));
+        for tick in &layout.extensions.axis_ticks {
+            assert_eq!(
+                text.get(tick.label.as_str()),
+                Some(&2),
+                "both date axes must survive"
+            );
+        }
+        let position = |id| {
+            svg.find(&format!("id=\"{id}\""))
+                .expect("Gantt scene layer")
+        };
+        let sections = &svg[position("gantt-sections")..position("gantt-axes")];
+        let dependencies = &svg[position("gantt-dependencies")..position("gantt-tasks")];
+        let tasks = &svg[position("gantt-tasks")..position("gantt-progress")];
+        let progress = &svg[position("gantt-progress")..position("gantt-labels")];
+        assert_eq!(sections.matches("<path").count(), 2);
+        assert_eq!(tasks.matches("<path").count(), 4);
+        assert_eq!(progress.matches("<path").count(), 2);
+        assert_eq!(
+            dependencies
+                .matches("marker-end=\"url(#arrow-end)\"")
+                .count(),
+            3
+        );
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "dependency markers require live definitions"
+        );
+        assert!(!tasks.contains(" marker-end="));
+        assert!(tasks.contains("fill=\"#c4b5fd\""), "milestone fill");
+        assert!(tasks.contains("fill=\"#86efac\""), "done status");
+        assert!(
+            tasks.contains("stroke=\"#dc2626\""),
+            "critical status survives done"
+        );
+        assert!(progress.contains("fill-opacity=\"0.22\""));
+        assert_eq!(tasks.matches("data-fm-source-span=").count(), 4);
+        assert!(tasks.contains("50% complete"));
+        assert!(tasks.contains("critical, done"));
+        assert!(tasks.contains("milestone"));
+        assert!(tasks.contains("starts 2026-02-06"));
+        assert!(
+            !svg.contains("id=\"nodes\""),
+            "generic graph boxes must not overpaint the schedule"
+        );
+    }
+
+    #[test]
+    fn scene_backend_preserves_gantt_label_contrast_on_dark_backgrounds() {
+        let ir = fm_parser::parse(
+            "gantt\n title Release schedule\n section Delivery\n\
+             Design :done, design, 2026-02-06, 4d\n\
+             Verification with a deliberately long name :verify, after design, 1d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(
+            layout.extensions.gantt_task_labels[0].placement,
+            fm_layout::GanttLabelPlacement::Inside
+        );
+        assert_ne!(
+            layout.extensions.gantt_task_labels[1].placement,
+            fm_layout::GanttLabelPlacement::Inside
+        );
+        let colors = ThemeColors::from_preset(ThemePreset::Dark);
+        let svg = render_svg_with_layout(
+            &ir,
+            &layout,
+            &SvgRenderConfig {
+                backend: SvgBackend::Scene,
+                theme: ThemePreset::Dark,
+                ..Default::default()
+            },
+        );
+        let text_element = |label: &str| {
+            svg.split("<text")
+                .find(|element| element.contains(&format!(">{label}<")))
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .split('>')
+                .next()
+                .unwrap()
+        };
+        assert!(
+            text_element("Design").contains(&format!("fill=\"{}\"", colors.background)),
+            "text inside a light status bar needs dark ink"
+        );
+        for label in [
+            "Release schedule",
+            "Verification with a deliberately long name",
+            "2026-02-06",
+        ] {
+            assert!(
+                text_element(label).contains(&format!("fill=\"{}\"", colors.text)),
+                "{label} sits on the dark page and needs the theme's text paint"
+            );
         }
     }
 

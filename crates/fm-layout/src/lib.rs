@@ -3680,6 +3680,11 @@ pub fn build_render_scene_with_metrics(
     layout: &DiagramLayout,
     metrics: &fm_core::FontMetrics,
 ) -> RenderScene {
+    if ir.diagram_type == DiagramType::Gantt
+        && let Some(meta) = ir.gantt_meta.as_ref()
+    {
+        return build_gantt_render_scene(ir, meta, layout, metrics);
+    }
     if ir.diagram_type == DiagramType::XyChart
         && let Some(meta) = ir.xy_chart_meta.as_ref()
     {
@@ -3731,6 +3736,343 @@ pub fn build_render_scene_with_metrics(
     RenderScene { bounds, root }
 }
 
+/// Status fills shared by direct SVG and target-agnostic Gantt scenes.
+#[must_use]
+pub const fn gantt_task_fill(flags: fm_core::GanttTaskFlags) -> &'static str {
+    match flags.primary_type() {
+        GanttTaskType::Done => "#86efac",
+        GanttTaskType::Active => "#94a3b8",
+        GanttTaskType::Critical => "#fca5a5",
+        GanttTaskType::Milestone => "#c4b5fd",
+        GanttTaskType::Normal => "#93c5fd",
+    }
+}
+
+/// A Gantt scene preserves the schedule already resolved by layout. Names, section captions and
+/// axis labels may enlarge its clip, but never resize a bar or move a date on the time axis.
+fn build_gantt_render_scene(
+    ir: &MermaidDiagramIr,
+    meta: &IrGanttMeta,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> RenderScene {
+    let mut bounds = Some(layout.bounds);
+    let font_size = metrics.font_size();
+    let mut sections = RenderGroup::new(Some(String::from("gantt-sections")));
+    let mut axes = RenderGroup::new(Some(String::from("gantt-axes")));
+    let mut labels = RenderGroup::new(Some(String::from("gantt-labels")));
+    let section_fills = ["#f0f4ff", "#fff8f0", "#f0fff4", "#fff0f8"];
+    for (index, band) in layout.extensions.bands.iter().enumerate() {
+        if band.kind != LayoutBandKind::Section {
+            continue;
+        }
+        include_packing_bounds(&mut bounds, band.bounds);
+        sections.children.push(scene_path(
+            RenderSource::Diagram,
+            rounded_rect_path(band.bounds, 4.0),
+            Some(FillStyle::Solid {
+                color: section_fills[index % section_fills.len()].to_owned(),
+                opacity: 0.5,
+            }),
+            None,
+        ));
+        append_gantt_scene_text(
+            &mut labels,
+            &mut bounds,
+            RenderText {
+                source: RenderSource::Diagram,
+                text: band.label.clone(),
+                x: band.bounds.x + 6.0,
+                y: band.bounds.y + font_size * 0.9,
+                font_size: font_size * 0.85,
+                align: TextAlign::Start,
+                baseline: TextBaseline::Alphabetic,
+                fill: FillStyle::Solid {
+                    color: "#1e293b".into(),
+                    opacity: 1.0,
+                },
+            },
+            metrics,
+        );
+    }
+    for axis in &layout.extensions.gantt_axis_rows {
+        for tick in &layout.extensions.axis_ticks {
+            axes.children.push(scene_line(
+                LayoutPoint {
+                    x: tick.position,
+                    y: axis.y + 4.0,
+                },
+                LayoutPoint {
+                    x: tick.position,
+                    y: axis.y + 16.0,
+                },
+                StrokeStyle::solid("#64748b", 1.0),
+            ));
+            include_packing_bounds(
+                &mut bounds,
+                LayoutRect {
+                    x: tick.position - 1.0,
+                    y: axis.y + 3.0,
+                    width: 2.0,
+                    height: 14.0,
+                },
+            );
+            append_gantt_scene_text(
+                &mut axes,
+                &mut bounds,
+                RenderText {
+                    source: RenderSource::Diagram,
+                    text: tick.label.clone(),
+                    x: tick.position + 3.0,
+                    y: axis.y,
+                    font_size: font_size * 0.72,
+                    align: TextAlign::Start,
+                    baseline: TextBaseline::Alphabetic,
+                    fill: FillStyle::Solid {
+                        color: "#1e293b".into(),
+                        opacity: 1.0,
+                    },
+                },
+                metrics,
+            );
+        }
+    }
+
+    let tasks: BTreeMap<_, _> = meta.tasks.iter().map(|task| (task.node.0, task)).collect();
+    let placements: BTreeMap<_, _> = layout
+        .extensions
+        .gantt_task_labels
+        .iter()
+        .map(|entry| (entry.node_index, entry))
+        .collect();
+    let mut bars = RenderGroup::new(Some(String::from("gantt-tasks")));
+    let mut progress = RenderGroup::new(Some(String::from("gantt-progress")));
+    for node in &layout.nodes {
+        let task = tasks.get(&node.node_index).copied();
+        let flags = task.map(|task| task.flags).unwrap_or_default();
+        let color = gantt_task_fill(flags);
+        let center = node.bounds.center();
+        let commands = if flags.milestone {
+            let radius = node.bounds.width.min(node.bounds.height) * 0.4;
+            vec![
+                PathCmd::MoveTo {
+                    x: center.x,
+                    y: center.y - radius,
+                },
+                PathCmd::LineTo {
+                    x: center.x + radius,
+                    y: center.y,
+                },
+                PathCmd::LineTo {
+                    x: center.x,
+                    y: center.y + radius,
+                },
+                PathCmd::LineTo {
+                    x: center.x - radius,
+                    y: center.y,
+                },
+                PathCmd::Close,
+            ]
+        } else {
+            rounded_rect_path(node.bounds, 3.0)
+        };
+        // Critical is independent of done/active/milestone. Its border must survive the fill's
+        // primary-type precedence, or a completed critical task loses its critical-path meaning.
+        bars.children.push(scene_path(
+            RenderSource::Node(node.node_index),
+            commands,
+            Some(FillStyle::Solid {
+                color: color.to_owned(),
+                opacity: 1.0,
+            }),
+            Some(if flags.crit {
+                StrokeStyle::solid("#dc2626", 2.0)
+            } else {
+                StrokeStyle::solid("#7c8da5", if flags.milestone { 1.5 } else { 1.0 })
+            }),
+        ));
+        include_packing_bounds(
+            &mut bounds,
+            LayoutRect {
+                x: node.bounds.x - 1.0,
+                y: node.bounds.y - 1.0,
+                width: node.bounds.width + 2.0,
+                height: node.bounds.height + 2.0,
+            },
+        );
+        if !flags.milestone
+            && let Some(value) = task
+                .and_then(|task| task.progress)
+                .filter(|value| value.is_finite() && *value > 0.0)
+        {
+            progress.children.push(scene_path(
+                RenderSource::Node(node.node_index),
+                rounded_rect_path(
+                    LayoutRect {
+                        width: node.bounds.width * value.min(1.0),
+                        ..node.bounds
+                    },
+                    3.0,
+                ),
+                // A translucent copy of the same opaque bar color is invisible. A dark overlay
+                // makes the completed fraction visible while retaining the task's status color.
+                Some(FillStyle::Solid {
+                    color: "#0f172a".into(),
+                    opacity: 0.22,
+                }),
+                None,
+            ));
+        }
+        let placement = placements.get(&node.node_index);
+        append_gantt_scene_text(
+            &mut labels,
+            &mut bounds,
+            RenderText {
+                source: RenderSource::Node(node.node_index),
+                text: layout_label_text(ir, node.node_index).to_owned(),
+                x: placement.map_or(center.x, |entry| entry.x),
+                y: center.y + font_size * 0.3,
+                font_size: font_size * 0.8,
+                align: match placement.map(|entry| entry.placement) {
+                    Some(GanttLabelPlacement::OutsideRight) => TextAlign::Start,
+                    Some(GanttLabelPlacement::OutsideLeft) => TextAlign::End,
+                    _ => TextAlign::Middle,
+                },
+                baseline: TextBaseline::Middle,
+                fill: FillStyle::Solid {
+                    color: "#1e293b".into(),
+                    opacity: 1.0,
+                },
+            },
+            metrics,
+        );
+    }
+
+    let mut dependencies = RenderGroup::new(Some(String::from("gantt-dependencies")));
+    for edge in &layout.edges {
+        if edge.bundled
+            || ir
+                .edges
+                .get(edge.edge_index)
+                .is_some_and(|edge| edge.arrow == fm_core::ArrowType::Invisible)
+        {
+            continue;
+        }
+        let mut commands = Vec::new();
+        if edge_paths::emit_smoothed_path(
+            edge.points.len(),
+            |index| (edge.points[index].x, edge.points[index].y),
+            |command| commands.push(command),
+        )
+        .is_none()
+        {
+            continue;
+        }
+        for point in &edge.points {
+            include_packing_bounds(
+                &mut bounds,
+                LayoutRect {
+                    x: point.x - 10.0,
+                    y: point.y - 10.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            );
+        }
+        dependencies.children.push(RenderItem::Path(RenderPath {
+            source: RenderSource::Edge(edge.edge_index),
+            commands,
+            fill: None,
+            stroke: Some(StrokeStyle::solid("#64748b", 1.2)),
+            marker_start: MarkerKind::None,
+            marker_end: MarkerKind::Arrow,
+        }));
+    }
+    let mut title = RenderGroup::new(Some(String::from("gantt-title")));
+    if let Some(text) = ir.declared_title_if_drawn() {
+        let content_bounds = bounds.unwrap_or(layout.bounds);
+        append_gantt_scene_text(
+            &mut title,
+            &mut bounds,
+            RenderText {
+                source: RenderSource::Diagram,
+                text: text.to_owned(),
+                x: layout.bounds.x + layout.bounds.width / 2.0,
+                y: content_bounds.y - 12.0,
+                font_size: font_size + 4.0,
+                align: TextAlign::Middle,
+                baseline: TextBaseline::Alphabetic,
+                fill: FillStyle::Solid {
+                    color: "#1e293b".into(),
+                    opacity: 1.0,
+                },
+            },
+            metrics,
+        );
+    }
+    let bounds = RenderRect::from(bounds.unwrap_or(layout.bounds));
+    let mut root = RenderGroup::new(Some(String::from("diagram-root")));
+    root.clip = Some(RenderClip::Rect(bounds));
+    root.children.extend(
+        [sections, axes, dependencies, bars, progress, labels]
+            .into_iter()
+            .map(RenderItem::Group),
+    );
+    if !title.children.is_empty() {
+        root.children.push(RenderItem::Group(title));
+    }
+    RenderScene { bounds, root }
+}
+
+fn append_gantt_scene_text(
+    layer: &mut RenderGroup,
+    bounds: &mut Option<LayoutRect>,
+    label: RenderText,
+    metrics: &fm_core::FontMetrics,
+) {
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        font_size: label.font_size,
+        ..metrics.config().clone()
+    });
+    let count = label.text.lines().count();
+    for (index, line) in label.text.lines().enumerate() {
+        let row = index as f32
+            - if label.baseline == TextBaseline::Middle {
+                count.saturating_sub(1) as f32 / 2.0
+            } else {
+                0.0
+            };
+        let y = label.y + row * metrics.line_height_px();
+        let width = metrics.estimate_width(line) * 1.15;
+        let x = label.x
+            - match label.align {
+                TextAlign::Start => 0.0,
+                TextAlign::Middle => width / 2.0,
+                TextAlign::End => width,
+            };
+        let top = y - label.font_size
+            * if label.baseline == TextBaseline::Middle {
+                0.65
+            } else {
+                1.0
+            };
+        include_packing_bounds(
+            bounds,
+            LayoutRect {
+                x: x - 2.0,
+                y: top - 2.0,
+                width: width + 4.0,
+                height: label.font_size * 1.3 + 4.0,
+            },
+        );
+        layer.children.push(RenderItem::Text(RenderText {
+            text: line.to_owned(),
+            y,
+            ..label.clone()
+        }));
+    }
+}
+
 /// Quantitative charts cannot use the graph scene: their nodes are data marks, their edges
 /// connect samples, and their labels belong on axes rather than inside every mark. Keep the
 /// layout's domain and mark geometry while projecting chart furniture into ordinary primitives.
@@ -3746,7 +4088,7 @@ fn build_xychart_render_scene(
     let (min, max) = resolve_xychart_y_domain(meta);
     let mut bounds = layout.bounds;
     let mut plot_layer = RenderGroup::new(Some(String::from("xychart-plot")));
-    plot_layer.children.push(xychart_scene_path(
+    plot_layer.children.push(scene_path(
         RenderSource::Diagram,
         rounded_rect_path(plot, 0.0),
         Some(FillStyle::Solid {
@@ -3783,7 +4125,7 @@ fn build_xychart_render_scene(
                 TextAlign::End,
             )
         };
-        axes.children.push(xychart_scene_line(
+        axes.children.push(scene_line(
             from,
             to,
             StrokeStyle {
@@ -3792,7 +4134,7 @@ fn build_xychart_render_scene(
                 ..StrokeStyle::solid("#94a3b8", 1.0)
             },
         ));
-        axes.children.push(xychart_scene_line(
+        axes.children.push(scene_line(
             from,
             tick_end,
             StrokeStyle::solid("#1e293b", 1.0),
@@ -3806,13 +4148,13 @@ fn build_xychart_render_scene(
             align,
         );
     }
-    axes.children.push(xychart_scene_line(
+    axes.children.push(scene_line(
         LayoutPoint { x: left, y: top },
         LayoutPoint { x: left, y: bottom },
         StrokeStyle::solid("#64748b", 1.5),
     ));
     let axis_y = if meta.horizontal { top } else { bottom };
-    axes.children.push(xychart_scene_line(
+    axes.children.push(scene_line(
         LayoutPoint { x: left, y: axis_y },
         LayoutPoint {
             x: right,
@@ -3853,11 +4195,8 @@ fn build_xychart_render_scene(
                 TextAlign::Middle,
             )
         };
-        axes.children.push(xychart_scene_line(
-            from,
-            to,
-            StrokeStyle::solid("#1e293b", 1.0),
-        ));
+        axes.children
+            .push(scene_line(from, to, StrokeStyle::solid("#1e293b", 1.0)));
         append_xychart_scene_label(
             &mut labels,
             &mut bounds,
@@ -3941,7 +4280,7 @@ fn build_xychart_render_scene(
     RenderScene { bounds, root }
 }
 
-fn xychart_scene_path(
+fn scene_path(
     source: RenderSource,
     commands: Vec<PathCmd>,
     fill: Option<FillStyle>,
@@ -3957,8 +4296,8 @@ fn xychart_scene_path(
     })
 }
 
-fn xychart_scene_line(from: LayoutPoint, to: LayoutPoint, stroke: StrokeStyle) -> RenderItem {
-    xychart_scene_path(
+fn scene_line(from: LayoutPoint, to: LayoutPoint, stroke: StrokeStyle) -> RenderItem {
+    scene_path(
         RenderSource::Diagram,
         vec![
             PathCmd::MoveTo {
@@ -4069,7 +4408,7 @@ fn build_xychart_scene_data(
         };
         if series.kind == IrXySeriesKind::Bar {
             for node in nodes {
-                bars.children.push(xychart_scene_path(
+                bars.children.push(scene_path(
                     RenderSource::Node(node.node_index),
                     rounded_rect_path(node.bounds, 0.0),
                     Some(FillStyle::Solid {
@@ -4115,7 +4454,7 @@ fn build_xychart_scene_data(
                 }
             });
             commands.push(PathCmd::Close);
-            areas.children.push(xychart_scene_path(
+            areas.children.push(scene_path(
                 RenderSource::Diagram,
                 commands,
                 Some(FillStyle::Solid {
@@ -4131,7 +4470,7 @@ fn build_xychart_scene_data(
             let source = edge_indices
                 .get(&(pair[0].node_index, pair[1].node_index))
                 .map_or(RenderSource::Diagram, |&index| RenderSource::Edge(index));
-            lines.children.push(xychart_scene_path(
+            lines.children.push(scene_path(
                 source,
                 vec![
                     PathCmd::MoveTo {
@@ -4149,7 +4488,7 @@ fn build_xychart_scene_data(
             ));
         }
         for node in nodes {
-            points.children.push(xychart_scene_path(
+            points.children.push(scene_path(
                 RenderSource::Node(node.node_index),
                 node_path(node.bounds, fm_core::NodeShape::Circle),
                 Some(FillStyle::Solid {
@@ -30974,6 +31313,313 @@ mod tests {
         let first = build_render_scene(&ir, &layout);
         let second = build_render_scene(&ir, &layout);
         assert_eq!(first, second);
+    }
+
+    const GANTT_SCENE_SOURCE: &str = "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+        gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+        section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+        Build :active, build, after design, 3d, 25%\n section Delivery\n\
+        Release :milestone, release, after build, 0d\n\
+        Verification with a deliberately long name :verify, after build, 1d\n";
+
+    fn gantt_scene_group<'a>(scene: &'a super::RenderScene, id: &str) -> &'a super::RenderGroup {
+        scene
+            .root
+            .children
+            .iter()
+            .find_map(|item| match item {
+                RenderItem::Group(group) if group.id.as_deref() == Some(id) => Some(group),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {id}"))
+    }
+
+    fn gantt_scene_paths(group: &super::RenderGroup) -> Vec<&super::RenderPath> {
+        group
+            .children
+            .iter()
+            .filter_map(|item| match item {
+                RenderItem::Path(path) => Some(path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn gantt_scene_path_extents(path: &super::RenderPath) -> LayoutRect {
+        let mut points = Vec::new();
+        for command in &path.commands {
+            match *command {
+                super::PathCmd::MoveTo { x, y } | super::PathCmd::LineTo { x, y } => {
+                    points.push((x, y))
+                }
+                super::PathCmd::QuadTo { cx, cy, x, y } => points.extend([(cx, cy), (x, y)]),
+                super::PathCmd::CubicTo {
+                    c1x,
+                    c1y,
+                    c2x,
+                    c2y,
+                    x,
+                    y,
+                } => {
+                    points.extend([(c1x, c1y), (c2x, c2y), (x, y)]);
+                }
+                super::PathCmd::Close => {}
+            }
+        }
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        LayoutRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        }
+    }
+
+    #[test]
+    fn render_scene_gantt_preserves_schedule_status_and_dependency_geometry() {
+        use super::{FillStyle, MarkerKind, PathCmd, TextAlign, TextBaseline};
+
+        let ir = parse(GANTT_SCENE_SOURCE).ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 3);
+        assert_eq!(layout.extensions.bands.len(), 2);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        assert!(
+            layout
+                .extensions
+                .gantt_task_labels
+                .iter()
+                .any(|label| { label.placement != super::GanttLabelPlacement::Inside })
+        );
+        // Consumer-supplied layouts can reorder their node storage. Task flags belong to node IDs,
+        // so the release diamond and critical border must not move to unrelated tasks.
+        layout.nodes.reverse();
+        let scene = build_render_scene(&ir, &layout);
+        assert_eq!(scene, build_render_scene(&ir, &layout));
+        assert_eq!(scene.root.clip, Some(RenderClip::Rect(scene.bounds)));
+        let bars = gantt_scene_paths(gantt_scene_group(&scene, "gantt-tasks"));
+        assert_eq!(bars.len(), 4);
+        for path in bars {
+            let RenderSource::Node(index) = path.source else {
+                panic!("task provenance");
+            };
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == index)
+                .unwrap();
+            assert_eq!(path.marker_start, MarkerKind::None);
+            assert_eq!(path.marker_end, MarkerKind::None);
+            let actual = gantt_scene_path_extents(path);
+            if index == 2 {
+                assert_eq!(path.commands.len(), 5, "milestone must be a closed diamond");
+                assert!(matches!(path.commands.last(), Some(PathCmd::Close)));
+                let center = node.bounds.center();
+                assert!((actual.center().x - center.x).abs() < 0.001);
+                assert!((actual.center().y - center.y).abs() < 0.001);
+                assert!((actual.width - actual.height).abs() < 0.001);
+                assert!(
+                    (actual.width - node.bounds.height.min(node.bounds.width) * 0.8).abs() < 0.001
+                );
+            } else {
+                assert_eq!(
+                    actual, node.bounds,
+                    "bar extent is the resolved calendar span"
+                );
+            }
+            let expected = ["#86efac", "#94a3b8", "#c4b5fd", "#93c5fd"][index];
+            assert!(
+                matches!(path.fill.as_ref(), Some(FillStyle::Solid { color, opacity })
+                if color == expected && *opacity == 1.0)
+            );
+            if index == 0 {
+                let stroke = path.stroke.as_ref().unwrap();
+                assert_eq!(
+                    stroke.color, "#dc2626",
+                    "done must not erase critical status"
+                );
+                assert_eq!(stroke.width, 2.0);
+            }
+        }
+        let progress = gantt_scene_paths(gantt_scene_group(&scene, "gantt-progress"));
+        assert_eq!(progress.len(), 2);
+        for path in progress {
+            let RenderSource::Node(index) = path.source else {
+                panic!("progress provenance");
+            };
+            let bar = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == index)
+                .unwrap()
+                .bounds;
+            let actual = gantt_scene_path_extents(path);
+            assert_eq!(
+                (actual.x, actual.y, actual.height),
+                (bar.x, bar.y, bar.height)
+            );
+            assert!((actual.width / bar.width - if index == 0 { 0.5 } else { 0.25 }).abs() < 0.001);
+            assert!(
+                matches!(path.fill.as_ref(), Some(FillStyle::Solid { color, opacity })
+                if color == "#0f172a" && *opacity > 0.0 && *opacity < 1.0)
+            );
+        }
+        let dependencies = gantt_scene_paths(gantt_scene_group(&scene, "gantt-dependencies"));
+        assert_eq!(dependencies.len(), 3);
+        for path in dependencies {
+            let RenderSource::Edge(index) = path.source else {
+                panic!("dependency provenance");
+            };
+            let edge = layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == index)
+                .unwrap();
+            let endpoints = super::edge_paths::path_endpoints(&path.commands).unwrap();
+            assert_eq!(endpoints.start.point, edge.points[0]);
+            assert_eq!(endpoints.end.point, *edge.points.last().unwrap());
+            assert_eq!(
+                (path.marker_start, path.marker_end),
+                (MarkerKind::None, MarkerKind::Arrow)
+            );
+        }
+        let axes = gantt_scene_group(&scene, "gantt-axes");
+        assert_eq!(
+            gantt_scene_paths(axes).len(),
+            layout.extensions.axis_ticks.len() * 2
+        );
+        for axis in &layout.extensions.gantt_axis_rows {
+            for tick in &layout.extensions.axis_ticks {
+                assert!(
+                    axes.children
+                        .iter()
+                        .any(|item| matches!(item, RenderItem::Text(text)
+                    if text.text == tick.label && text.x == tick.position + 3.0 && text.y == axis.y
+                        && text.baseline == TextBaseline::Alphabetic))
+                );
+            }
+        }
+        let labels = gantt_scene_group(&scene, "gantt-labels");
+        assert_eq!(
+            labels
+                .children
+                .iter()
+                .filter(|item| matches!(item, RenderItem::Text(text)
+            if text.text == "Delivery"))
+                .count(),
+            2,
+            "repeated section captions remain distinct"
+        );
+        for placement in &layout.extensions.gantt_task_labels {
+            let expected_align = match placement.placement {
+                super::GanttLabelPlacement::Inside => TextAlign::Middle,
+                super::GanttLabelPlacement::OutsideRight => TextAlign::Start,
+                super::GanttLabelPlacement::OutsideLeft => TextAlign::End,
+            };
+            assert!(
+                labels
+                    .children
+                    .iter()
+                    .any(|item| matches!(item, RenderItem::Text(text)
+                if text.source == RenderSource::Node(placement.node_index)
+                    && text.x == placement.x && text.align == expected_align))
+            );
+        }
+    }
+
+    #[test]
+    fn render_scene_gantt_expands_text_clip_without_rescaling_schedule() {
+        let mut ir = parse(GANTT_SCENE_SOURCE).ir;
+        let mut layout = layout_diagram(&ir);
+        let baseline = build_render_scene(&ir, &layout);
+        let label = ir.nodes[3].label.unwrap();
+        ir.labels[label.0].text =
+            "A very long task name whose entire text must remain visible ".repeat(8);
+        layout.extensions.bands[0].label = "A long section caption ".repeat(20);
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size: 48.0,
+            ..Default::default()
+        });
+        let scene = super::build_render_scene_with_metrics(&ir, &layout, &metrics);
+        assert!(scene.bounds.width > baseline.bounds.width);
+        for id in ["gantt-tasks", "gantt-progress", "gantt-dependencies"] {
+            assert_eq!(
+                gantt_scene_group(&scene, id),
+                gantt_scene_group(&baseline, id),
+                "{id} must keep its original schedule geometry"
+            );
+        }
+        for group in [&scene.root]
+            .into_iter()
+            .chain(scene.root.children.iter().filter_map(|item| {
+                if let RenderItem::Group(group) = item {
+                    Some(group)
+                } else {
+                    None
+                }
+            }))
+        {
+            for item in &group.children {
+                let RenderItem::Text(text) = item else {
+                    continue;
+                };
+                let font = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                    font_size: text.font_size,
+                    ..Default::default()
+                });
+                let width = font.estimate_width(&text.text);
+                let left = text.x
+                    - match text.align {
+                        super::TextAlign::Start => 0.0,
+                        super::TextAlign::Middle => width / 2.0,
+                        super::TextAlign::End => width,
+                    };
+                assert!(left >= scene.bounds.x);
+                assert!(left + width <= scene.bounds.x + scene.bounds.width);
+                assert!(text.y >= scene.bounds.y && text.y <= scene.bounds.y + scene.bounds.height);
+            }
+        }
+        assert_eq!(scene.root.clip, Some(RenderClip::Rect(scene.bounds)));
+    }
+
+    #[test]
+    fn render_scene_gantt_handles_empty_metadata_and_invalid_progress() {
+        let empty = parse("gantt\n title Empty schedule\n").ir;
+        let scene = build_render_scene(&empty, &layout_diagram(&empty));
+        assert!(gantt_scene_paths(gantt_scene_group(&scene, "gantt-tasks")).is_empty());
+        assert!(scene.bounds.width.is_finite() && scene.bounds.height.is_finite());
+        let mut ir = parse("gantt\n Task :a, 2026-02-06, 2d\n").ir;
+        let layout = layout_diagram(&ir);
+        for progress in [f32::NAN, f32::INFINITY, -0.5, 0.0, 2.0] {
+            ir.gantt_meta.as_mut().unwrap().tasks[0].progress = Some(progress);
+            let scene = build_render_scene(&ir, &layout);
+            let paths = gantt_scene_paths(gantt_scene_group(&scene, "gantt-progress"));
+            if progress == 2.0 {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(gantt_scene_path_extents(paths[0]), layout.nodes[0].bounds);
+            } else {
+                assert!(
+                    paths.is_empty(),
+                    "invalid/empty progress has no painted extent"
+                );
+            }
+        }
     }
 
     #[test]

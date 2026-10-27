@@ -6402,6 +6402,173 @@ mod tests {
     }
 
     #[test]
+    fn canvas_scene_preserves_gantt_schedule_status_and_date_axes() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n section Delivery\n\
+             Release :milestone, release, after build, 0d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 3);
+        assert_eq!(layout.extensions.gantt_axis_rows.len(), 2);
+        let scene = build_render_scene(&ir, &layout);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1600.0, 1000.0);
+        let result = crate::render_scene_to_canvas(&scene, &mut ctx, &config);
+        assert_eq!((result.nodes_drawn, result.edges_drawn), (4, 3));
+        let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+        crate::render_scene_to_canvas(&scene, &mut repeated, &config);
+        assert_eq!(ctx.operations(), repeated.operations());
+
+        let mut baseline = TextBaseline::Alphabetic;
+        let mut align = TextAlign::Left;
+        let mut text = Vec::new();
+        let mut color = String::new();
+        let mut alpha = 1.0;
+        let mut points = Vec::new();
+        let mut fills = Vec::new();
+        for operation in ctx.operations() {
+            match operation {
+                DrawOperation::SetTextBaseline(value) => baseline = *value,
+                DrawOperation::SetTextAlign(value) => align = *value,
+                DrawOperation::FillText(label, x, y) => {
+                    text.push((label.as_str(), *x, *y, align, baseline));
+                }
+                DrawOperation::SetFillStyle(value) => color.clone_from(value),
+                DrawOperation::SetGlobalAlpha(value) => alpha = *value,
+                DrawOperation::BeginPath => points.clear(),
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => {
+                    points.extend([(*cx, *cy), (*x, *y)])
+                }
+                DrawOperation::BezierCurveTo(cx1, cy1, cx2, cy2, x, y) => {
+                    points.extend([(*cx1, *cy1), (*cx2, *cy2), (*x, *y)]);
+                }
+                DrawOperation::Fill => fills.push((color.clone(), alpha, points.clone())),
+                _ => {}
+            }
+        }
+        for label in [
+            "Release schedule",
+            "Design",
+            "Build",
+            "Release",
+            "Verification with a deliberately long name",
+        ] {
+            assert_eq!(
+                text.iter().filter(|entry| entry.0 == label).count(),
+                1,
+                "{label}"
+            );
+        }
+        assert_eq!(text.iter().filter(|entry| entry.0 == "Delivery").count(), 2);
+        for axis in &layout.extensions.gantt_axis_rows {
+            for tick in &layout.extensions.axis_ticks {
+                assert!(
+                    text.iter().any(|(label, x, y, align, baseline)| {
+                        *label == tick.label
+                            && (*x + f64::from(scene.bounds.x) - f64::from(tick.position + 3.0))
+                                .abs()
+                                < 0.002
+                            && (*y + f64::from(scene.bounds.y) - f64::from(axis.y)).abs() < 0.002
+                            && *align == TextAlign::Left
+                            && *baseline == TextBaseline::Alphabetic
+                    }),
+                    "date tick must share the layout's baseline and day position"
+                );
+            }
+        }
+        for placement in &layout.extensions.gantt_task_labels {
+            let label = ir.node_display_text(&ir.nodes[placement.node_index]);
+            let expected = match placement.placement {
+                fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
+                fm_layout::GanttLabelPlacement::OutsideLeft => TextAlign::Right,
+                fm_layout::GanttLabelPlacement::OutsideRight => TextAlign::Left,
+            };
+            assert!(text.iter().any(|entry| entry.0 == label
+                && entry.3 == expected
+                && (entry.1 + f64::from(scene.bounds.x) - f64::from(placement.x)).abs() < 0.002));
+        }
+        let extent = |points: &[(f64, f64)]| {
+            let left = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::INFINITY, f64::min);
+            let right = points
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let top = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::INFINITY, f64::min);
+            let bottom = points
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::NEG_INFINITY, f64::max);
+            (left, top, right - left, bottom - top)
+        };
+        for (index, color) in ["#86efac", "#94a3b8", "#c4b5fd", "#93c5fd"]
+            .into_iter()
+            .enumerate()
+        {
+            let (_, alpha, points) = fills
+                .iter()
+                .find(|fill| fill.0 == color)
+                .expect("task status fill");
+            assert_eq!(*alpha, 1.0);
+            let actual = extent(points);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| node.node_index == index)
+                .unwrap();
+            if index == 2 {
+                assert_eq!(points.len(), 4, "milestone requires four diamond vertices");
+                assert!((actual.2 - actual.3).abs() < 0.002);
+                assert!(
+                    (actual.0 + actual.2 / 2.0 + f64::from(scene.bounds.x)
+                        - f64::from(node.bounds.center().x))
+                    .abs()
+                        < 0.002
+                );
+            } else {
+                assert!((actual.2 - f64::from(node.bounds.width)).abs() < 0.002);
+                assert!((actual.3 - f64::from(node.bounds.height)).abs() < 0.002);
+            }
+        }
+        let progress: Vec<_> = fills.iter().filter(|fill| fill.0 == "#0f172a").collect();
+        assert_eq!(progress.len(), 2);
+        for (fill, fraction) in progress.iter().zip([0.5, 0.25]) {
+            assert!((fill.1 - 0.22).abs() < 0.001);
+            let bounds = extent(&fill.2);
+            let node = layout
+                .nodes
+                .iter()
+                .find(|node| {
+                    (f64::from(node.bounds.y) - bounds.1 - f64::from(scene.bounds.y)).abs() < 0.002
+                })
+                .expect("progress must cover its own bar");
+            assert!((bounds.2 / f64::from(node.bounds.width) - fraction).abs() < 0.002);
+        }
+        assert!(
+            ctx.operations().iter().any(|operation| {
+                matches!(operation, DrawOperation::SetStrokeStyle(color) if color == "#dc2626")
+            }),
+            "completed critical tasks retain their critical border"
+        );
+    }
+
+    #[test]
     fn canvas_scene_draws_xychart_data_and_matches_direct_axis_labels() {
         fn text_operations(ctx: &MockCanvas2dContext) -> Vec<(String, f64, f64, TextBaseline)> {
             let mut baseline = TextBaseline::Alphabetic;
