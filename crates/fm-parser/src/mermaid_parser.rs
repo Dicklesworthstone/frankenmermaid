@@ -10590,7 +10590,9 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 (period.trim(), events.trim())
             });
         let period_id = format!("timeline-period-{line_number}");
-        let period_node = builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
+        let period_label = replace_br_with_newlines(period_text);
+        let period_node =
+            builder.intern_node(&period_id, Some(&period_label), NodeShape::Rect, span);
         current_period = period_node.map(|id| (id, current_section, current_section_subgraph));
         let Some(period_node_id) = period_node else {
             continue;
@@ -10650,9 +10652,10 @@ fn parse_timeline_events(
         // remain separate, including captions whose normalized spellings would collide.
         let event_id = format!("timeline-event-{line_number}-{event_index}");
 
-        // Create event node and link to period. Entity codes decode here as in every other label
-        // position (bd-j06n2); the pinned mermaid-11.15.0 draws `#35;` as `#` in a timeline event.
-        let event_label = decode_mermaid_entities(event_text);
+        // Normalize display text after splitting the authored events: a line break stays in
+        // its event, and an entity-encoded colon must not create another event. Store the same
+        // newline text that layout measures so renderers never draw the break tag literally.
+        let event_label = decode_mermaid_entities(&replace_br_with_newlines(event_text));
         if let Some(event_node_id) =
             builder.intern_node(&event_id, Some(&event_label), NodeShape::Rounded, span)
         {
@@ -22350,6 +22353,69 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 4);
         // 3 edges from period to each event
         assert_eq!(parsed.ir.edges.len(), 3);
+    }
+
+    #[test]
+    fn timeline_line_breaks_preserve_event_count_and_colon_semantics() {
+        for tag in ["<br>", "<br/>", "<br />"] {
+            let parsed = parse_mermaid(&format!(
+                concat!(
+                    "timeline\n",
+                    "  Q{tag}1 : First{tag}Second : Keep #58; colon\n",
+                    "         : Again{tag}Later : Ignore<brx/>marker\n",
+                    "  Q2 : Final\n",
+                ),
+                tag = tag
+            ));
+            assert!(parsed.warnings.is_empty(), "{tag}: {:?}", parsed.warnings);
+            let ir = &parsed.ir;
+            let labels: Vec<_> = ir
+                .nodes
+                .iter()
+                .map(|node| ir.node_display_text(node).trim())
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    "Q\n1",
+                    "First\nSecond",
+                    "Keep : colon",
+                    "Again\nLater",
+                    "Ignore<brx/>marker",
+                    "Q2",
+                    "Final"
+                ],
+                "{tag}: line breaks must remain inside their original period or event"
+            );
+            assert_eq!(
+                ir.nodes.len(),
+                7,
+                "two periods and five events must survive"
+            );
+            let edges: Vec<_> = ir
+                .edges
+                .iter()
+                .map(|edge| {
+                    let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to)
+                    else {
+                        panic!("timeline entries are node endpoints");
+                    };
+                    (from.0, to.0, edge.arrow)
+                })
+                .collect();
+            assert_eq!(
+                edges,
+                [
+                    (0, 1, ArrowType::Line),
+                    (0, 2, ArrowType::Line),
+                    (0, 3, ArrowType::Line),
+                    (0, 4, ArrowType::Line),
+                    (0, 5, ArrowType::Arrow),
+                    (5, 6, ArrowType::Line),
+                ],
+                "{tag}: continuation ownership and colon-separated event identity must stay intact"
+            );
+        }
     }
 
     #[test]
