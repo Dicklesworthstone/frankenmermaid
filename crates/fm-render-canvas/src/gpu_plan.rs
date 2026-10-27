@@ -2637,12 +2637,19 @@ impl GpuRenderPlan {
                 if label.is_empty() {
                     continue;
                 }
+                let center = ir_node
+                    .shape
+                    .label_region(node.bounds.width, node.bounds.height)
+                    .map_or_else(
+                        || node.bounds.center(),
+                        |region| fm_layout::LayoutPoint {
+                            x: node.bounds.x + region.x + region.width / 2.0,
+                            y: node.bounds.y + region.y + region.height / 2.0,
+                        },
+                    );
                 labelled.push((
                     node.node_index.try_into().unwrap_or(u32::MAX),
-                    [
-                        node.bounds.x + (node.bounds.width * 0.5),
-                        node.bounds.y + (node.bounds.height * 0.5),
-                    ],
+                    [center.x, center.y],
                     label,
                 ));
             }

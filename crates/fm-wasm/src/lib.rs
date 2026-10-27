@@ -414,6 +414,7 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
         &svg,
     );
     let parsed = parse(input);
+    let canvas = resolve_canvas_source_theme(canvas, &svg, &parsed.ir);
     let layout = fm_layout::layout_diagram_with_config(
         &parsed.ir,
         LayoutConfig {
@@ -1349,6 +1350,7 @@ fn apply_canvas_theme_preset(
     preset: ThemePreset,
 ) -> CanvasRenderConfig {
     let colors = ThemeColors::from_preset(preset);
+    canvas.background = Some(colors.background);
     canvas.node_fill = colors.node_fill;
     canvas.node_stroke = colors.node_stroke;
     canvas.edge_stroke = colors.edge;
@@ -1357,6 +1359,32 @@ fn apply_canvas_theme_preset(
     canvas.label_color = colors.text;
     canvas.accents = colors.accents;
     canvas.semantic_colors = matches!(preset, ThemePreset::Default | ThemePreset::Dark);
+    canvas
+}
+
+/// Match SVG's source-theme precedence for raster previews and GPU plans. Keep the resolved
+/// palette local to the current diagram; committing it to the runtime would recolor the next
+/// unrelated source after removing an init directive.
+fn resolve_canvas_source_theme(
+    mut canvas: CanvasRenderConfig,
+    svg: &SvgRenderConfig,
+    ir: &fm_core::MermaidDiagramIr,
+) -> CanvasRenderConfig {
+    let source_preset = ir
+        .meta
+        .theme_overrides
+        .theme
+        .as_deref()
+        .and_then(|name| name.parse::<ThemePreset>().ok());
+    if let Some(preset) = source_preset {
+        canvas = apply_canvas_theme_preset(canvas, preset);
+    }
+    canvas.semantic_colors = svg.semantic_colors
+        && matches!(
+            source_preset.unwrap_or(svg.theme),
+            ThemePreset::Default | ThemePreset::Dark
+        );
+    canvas.apply_theme_variables(&ir.meta.theme_overrides.theme_variables);
     canvas
 }
 
@@ -2704,6 +2732,8 @@ impl Diagram {
         let next_renderer = merge_renderer_kind(self.renderer, overrides.renderer);
         let parse_start = Instant::now();
         let parsed = parse(input);
+        let effective_canvas =
+            resolve_canvas_source_theme(next_canvas.clone(), &next_svg, &parsed.ir);
         budget_broker.record_parse(
             parse_start
                 .elapsed()
@@ -2757,7 +2787,7 @@ impl Diagram {
                 self.session.set_diagram(
                     parsed.ir,
                     Arc::clone(&traced_layout.layout),
-                    next_canvas.clone(),
+                    effective_canvas,
                 );
                 self.redraw_canvas()
                     .ok_or_else(|| js_error("canvas backing store must have nonzero dimensions"))?
@@ -2836,7 +2866,11 @@ impl Diagram {
             apply_canvas_theme_preset(self.canvas_config.clone(), preset),
             &self.svg_config,
         );
-        self.session.set_render_config(self.canvas_config.clone());
+        let effective_canvas = self.session.diagram_ir().map_or_else(
+            || self.canvas_config.clone(),
+            |ir| resolve_canvas_source_theme(self.canvas_config.clone(), &self.svg_config, ir),
+        );
+        self.session.set_render_config(effective_canvas);
         Ok(())
     }
 
@@ -2941,7 +2975,8 @@ mod tests {
         hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
         merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
         render_deck, render_svg_js, render_worker_request, requested_theme_preset,
-        resolve_renderer, validate_config_json, validate_init_directives_js, write_runtime_config,
+        resolve_canvas_source_theme, resolve_renderer, validate_config_json,
+        validate_init_directives_js, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3584,10 +3619,119 @@ mod tests {
         assert_eq!(themed.node_stroke, "#64748b");
         assert_eq!(themed.edge_stroke, "#94a3b8");
         assert_eq!(themed.label_color, "#f8fafc");
+        assert_eq!(themed.background.as_deref(), Some("#0f172a"));
         assert_eq!(
             themed.accents,
             fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).accents
         );
+    }
+
+    #[test]
+    fn source_theme_reaches_raster_palette_with_the_same_precedence_as_svg() {
+        let svg = SvgRenderConfig {
+            theme: ThemePreset::Forest,
+            ..Default::default()
+        };
+        let base = align_canvas_typography_with_svg(
+            apply_canvas_theme_preset(CanvasRenderConfig::default(), svg.theme),
+            &svg,
+        );
+        for preset in [
+            ThemePreset::Default,
+            ThemePreset::Mermaid,
+            ThemePreset::Dark,
+            ThemePreset::Forest,
+            ThemePreset::Neutral,
+            ThemePreset::Corporate,
+            ThemePreset::Neon,
+            ThemePreset::Pastel,
+            ThemePreset::HighContrast,
+            ThemePreset::Monochrome,
+            ThemePreset::Blueprint,
+        ] {
+            let parsed = parse(&format!(
+                "%%{{init: {{'theme':'{}'}}}}%%\nflowchart LR\n A[Start] --> B[Finish]",
+                preset.as_str()
+            ));
+            assert_eq!(
+                parsed.ir.meta.theme_overrides.theme.as_deref(),
+                Some(preset.as_str())
+            );
+            let resolved = resolve_canvas_source_theme(base.clone(), &svg, &parsed.ir);
+            let expected = fm_render_svg::ThemeColors::from_preset(preset);
+            assert_eq!(
+                resolved.background.as_deref(),
+                Some(expected.background.as_str())
+            );
+            assert_eq!(resolved.node_fill, expected.node_fill);
+            assert_eq!(resolved.node_stroke, expected.node_stroke);
+            assert_eq!(resolved.edge_stroke, expected.edge);
+            assert_eq!(resolved.cluster_fill, expected.cluster_fill);
+            assert_eq!(resolved.cluster_stroke, expected.cluster_stroke);
+            assert_eq!(resolved.label_color, expected.text);
+            assert_eq!(resolved.accents, expected.accents);
+            assert_eq!(
+                resolved.semantic_colors,
+                matches!(preset, ThemePreset::Default | ThemePreset::Dark)
+            );
+        }
+        assert_eq!(
+            base.node_fill,
+            fm_render_svg::ThemeColors::from_preset(ThemePreset::Forest).node_fill
+        );
+    }
+
+    #[test]
+    fn source_palette_variables_override_the_named_theme_without_enabling_disabled_roles() {
+        let parsed = parse(
+            "%%{init: {'theme':'dark','themeVariables': {'background':'transparent',\
+             'primaryColor':'#224466','primaryTextColor':'#ffffff',\
+             'lineColor':'url(https://example.com/image.svg)'}}}%%\nflowchart LR\n A{Choice} --> B[Result]",
+        );
+        let svg = SvgRenderConfig {
+            semantic_colors: false,
+            ..Default::default()
+        };
+        let base = apply_canvas_theme_preset(CanvasRenderConfig::default(), svg.theme);
+        let resolved = resolve_canvas_source_theme(base, &svg, &parsed.ir);
+        assert_eq!(resolved.background.as_deref(), Some("transparent"));
+        assert_eq!(resolved.node_fill, "#224466");
+        assert_eq!(resolved.label_color, "#ffffff");
+        assert_eq!(
+            resolved.edge_stroke,
+            fm_render_svg::ThemeColors::from_preset(ThemePreset::Dark).edge
+        );
+        assert!(!resolved.semantic_colors);
+    }
+
+    #[test]
+    fn raster_geometry_applies_source_theme_without_changing_the_next_diagram() {
+        let _serial = config_guard();
+        let baseline = build_diagram_geometry("flowchart LR\n A[Plain] --> B[Next]", None).unwrap();
+        let themed = build_diagram_geometry(
+            "%%{init: {'theme':'dark','themeVariables': {'primaryColor':'#123456'}}}%%\n\
+             flowchart LR\n A[Source theme] --> B[Preview]",
+            None,
+        )
+        .unwrap();
+        assert_eq!(themed.canvas.background.as_deref(), Some("#0f172a"));
+        assert_eq!(themed.canvas.node_fill, "#123456");
+        assert_eq!(themed.canvas.label_color, "#f8fafc");
+        let mut context = fm_render_canvas::MockCanvas2dContext::new(800.0, 600.0);
+        fm_render_canvas::render_to_canvas_with_layout(
+            &themed.ir,
+            &themed.layout,
+            &mut context,
+            &themed.canvas,
+        );
+        assert!(context.operations().windows(2).any(|pair| matches!(pair,
+            [fm_render_canvas::DrawOperation::SetFillStyle(color), fm_render_canvas::DrawOperation::FillRect(0.0, 0.0, 800.0, 600.0)]
+            if color == "#0f172a"
+        )));
+        let next = build_diagram_geometry("flowchart LR\n A[Plain] --> B[Next]", None).unwrap();
+        assert_eq!(next.canvas.background, baseline.canvas.background);
+        assert_eq!(next.canvas.node_fill, baseline.canvas.node_fill);
+        assert_eq!(next.canvas.label_color, baseline.canvas.label_color);
     }
 
     #[test]

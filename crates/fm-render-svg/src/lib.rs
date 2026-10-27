@@ -13198,6 +13198,18 @@ fn render_node(
         group = group.filter("url(#node-glow)");
     }
 
+    // A silhouette's bounding box includes space that is outside the shape. Keep text and
+    // icons together in the same inscribed region used to size triangles, pentagons and stars.
+    let label_region = shape
+        .label_region(w, h)
+        .unwrap_or(fm_core::NodeLabelRegion {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+        });
+    let label_center_x = x + label_region.x + label_region.width / 2.0;
+    let label_center_y = y + label_region.y + label_region.height / 2.0;
     let icon_size = clamp_font_size(node_font_size * 1.35, config.min_font_size + 2.0);
     let icon_reserved_height = node_icon.map_or(0.0, |_| match config.node_icon_position {
         NodeIconPosition::Above => icon_size + 10.0,
@@ -13213,16 +13225,16 @@ fn render_node(
             if detail.show_node_labels
                 && matches!(config.node_icon_position, NodeIconPosition::Left)
             {
-                x + (icon_reserved_width * 0.5) + 2.0
+                x + label_region.x + (icon_reserved_width * 0.5) + 2.0
             } else {
-                cx
+                label_center_x
             },
             if detail.show_node_labels
                 && matches!(config.node_icon_position, NodeIconPosition::Above)
             {
-                y + (icon_reserved_height * 0.5) + 2.0
+                y + label_region.y + (icon_reserved_height * 0.5) + 2.0
             } else {
-                cy
+                label_center_y
             },
             icon_size,
             config,
@@ -13321,10 +13333,10 @@ fn render_node(
         } else {
             let lines_count = label_text.lines().count().max(1) as f32;
             let total_text_height = (lines_count - 1.0) * node_font_size * config.line_height;
-            let content_left = x + icon_reserved_width;
-            let content_width = (w - icon_reserved_width).max(node_font_size);
-            let content_top = y + icon_reserved_height;
-            let content_height = (h - icon_reserved_height).max(node_font_size);
+            let content_left = x + label_region.x + icon_reserved_width;
+            let content_width = (label_region.width - icon_reserved_width).max(node_font_size);
+            let content_top = y + label_region.y + icon_reserved_height;
+            let content_height = (label_region.height - icon_reserved_height).max(node_font_size);
             let (label_width, label_height) = node_label_fit_dimensions(
                 shape,
                 (w, h),
@@ -14366,10 +14378,13 @@ fn node_label_may_overflow(
     font_size: f32,
     config: &SvgRenderConfig,
 ) -> bool {
+    let content_size = shape
+        .label_region(width, height)
+        .map_or((width, height), |region| (region.width, region.height));
     let (max_width, max_height) = node_label_fit_dimensions(
         shape,
         (width, height),
-        (width, height),
+        content_size,
         label,
         font_size,
         config,
@@ -20274,6 +20289,100 @@ mod tests {
                 fitted.text.lines().count() > 1,
                 "the long label needs wrapping room"
             );
+        }
+    }
+
+    #[test]
+    fn shaped_node_labels_use_the_inscribed_region_at_full_font_size() {
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for label in ["Authorize shipment", "Review shipment\nNotify fulfillment"] {
+                for font_size in [15.0, 30.0] {
+                    let mut ir = fm_parser::parse("flowchart TB\nA[Label]").ir;
+                    ir.nodes[0].shape = shape;
+                    let label_id = ir.nodes[0].label.unwrap();
+                    ir.labels[label_id.0].text = label.to_string();
+                    let config = SvgRenderConfig {
+                        font_size,
+                        avg_char_width: font_size / 2.0,
+                        ..Default::default()
+                    };
+                    let layout = fm_layout::layout_diagram_with_config(
+                        &ir,
+                        fm_layout::LayoutConfig {
+                            font_metrics: Some(config.font_metrics()),
+                            ..Default::default()
+                        },
+                    );
+                    let node = &layout.nodes[0];
+                    let region = shape
+                        .label_region(node.bounds.width, node.bounds.height)
+                        .unwrap();
+                    let detail =
+                        resolve_detail_profile(layout.bounds.width, layout.bounds.height, &config);
+                    let colors = ThemeColors::default();
+                    let centrality = HashMap::new();
+                    let mut streamed = String::new();
+                    render_node_into(
+                        &mut streamed,
+                        node,
+                        &ir,
+                        0.0,
+                        0.0,
+                        &config,
+                        detail,
+                        &colors,
+                        false,
+                        &centrality,
+                    );
+                    let slow = render_node(
+                        node,
+                        &ir,
+                        0.0,
+                        0.0,
+                        &config,
+                        detail,
+                        &colors,
+                        false,
+                        &centrality,
+                        false,
+                    )
+                    .render();
+                    assert_eq!(streamed, slow, "{shape:?} {font_size}px");
+                    assert!(!streamed.contains('…'), "{shape:?} truncated the label");
+                    for word in label.split_whitespace() {
+                        assert!(streamed.contains(word), "{shape:?} omitted {word}");
+                    }
+                    let text = streamed
+                        .split_once("<text ")
+                        .unwrap()
+                        .1
+                        .split_once('>')
+                        .unwrap()
+                        .0;
+                    assert_eq!(edge_label_test_number(text, "font-size"), font_size);
+                    let drawn_x = edge_label_test_number(text, "x");
+                    let drawn_y = edge_label_test_number(text, "y");
+                    let measured_width = config.font_metrics().estimate_multiline_width(label);
+                    let text_span = label.lines().count().saturating_sub(1) as f32
+                        * font_size
+                        * config.line_height;
+                    assert!((drawn_x - node.bounds.x - region.x - region.width / 2.0).abs() < 0.02);
+                    assert!(drawn_x - measured_width / 2.0 >= node.bounds.x + region.x);
+                    assert!(
+                        drawn_x + measured_width / 2.0 <= node.bounds.x + region.x + region.width
+                    );
+                    assert!(drawn_y - font_size * 0.85 >= node.bounds.y + region.y);
+                    assert!(
+                        drawn_y + text_span + font_size * 0.25
+                            <= node.bounds.y + region.y + region.height
+                    );
+                }
+            }
         }
     }
 

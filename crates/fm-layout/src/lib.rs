@@ -5549,6 +5549,32 @@ fn build_label_layer(
             continue;
         }
 
+        if let Some(region) = node
+            .shape
+            .label_region(node_box.bounds.width, node_box.bounds.height)
+        {
+            let center_x = node_box.bounds.x + region.x + region.width / 2.0;
+            let center_y = node_box.bounds.y + region.y + region.height / 2.0;
+            let lines: Vec<&str> = label_text.split('\n').collect();
+            for (row, text) in lines.iter().enumerate() {
+                layer.children.push(RenderItem::Text(RenderText {
+                    source: RenderSource::Node(node_box.node_index),
+                    text: (*text).to_owned(),
+                    x: center_x,
+                    y: center_y
+                        + (row as f32 - (lines.len() - 1) as f32 / 2.0) * metrics.line_height_px(),
+                    font_size: metrics.font_size(),
+                    align: TextAlign::Middle,
+                    baseline: TextBaseline::Middle,
+                    fill: FillStyle::Solid {
+                        color: String::from("#0f172a"),
+                        opacity: 1.0,
+                    },
+                }));
+            }
+            continue;
+        }
+
         layer.children.push(RenderItem::Text(RenderText {
             source: RenderSource::Node(node_box.node_index),
             text: label_text,
@@ -17175,6 +17201,35 @@ fn compute_node_size(
                 let scale =
                     ((content_width + 24.0) / width + (content_height + 24.0) / height).max(1.0);
                 (width * scale, height * scale)
+            } else if node.shape.label_region(width, height).is_some() {
+                // The label occupies the interior of the drawn polygon, not its bounding box.
+                // Grow both extents before ranking/routing so full-size labels fit and neighboring
+                // nodes and connectors leave room for the actual shape.
+                let (shape_width, shape_height) = node
+                    .shape
+                    .label_container_dimensions(
+                        metrics
+                            .estimate_preserved_width(
+                                text,
+                                metrics.font_size(),
+                                metrics.avg_char_width(),
+                            )
+                            .max(content_width)
+                            + 16.0,
+                        content_height + 16.0,
+                    )
+                    .unwrap_or((width, height));
+                let width = width.max(shape_width);
+                let height = height.max(shape_height);
+                if matches!(
+                    node.shape,
+                    fm_core::NodeShape::Pentagon | fm_core::NodeShape::Star
+                ) {
+                    let side = width.max(height);
+                    (side, side)
+                } else {
+                    (width, height)
+                }
             } else {
                 (width, height)
             }
@@ -39821,6 +39876,87 @@ mod tests {
                         corner_radius + 12.0 <= radius,
                         "{shape:?}: {text:?} escapes its circle ({corner_radius} vs {radius})"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shaped_labels_have_room_before_layout_and_keep_scene_line_centers() {
+        use super::{RenderGroup, RenderText, build_render_scene_with_metrics};
+
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for text in [
+                "Review request",
+                "Review request\nApprove payment",
+                "注文を確認",
+            ] {
+                for font_size in [15.0, 28.0] {
+                    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                        font_size,
+                        ..Default::default()
+                    });
+                    let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+                    ir.labels.push(IrLabel {
+                        text: text.to_owned(),
+                        span: Span::default(),
+                    });
+                    ir.nodes.push(IrNode {
+                        id: "A".to_owned(),
+                        label: Some(IrLabelId(0)),
+                        shape,
+                        ..IrNode::default()
+                    });
+                    let layout = layout_diagram_with_config(
+                        &ir,
+                        LayoutConfig {
+                            font_metrics: Some(metrics.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    let bounds = layout.nodes[0].bounds;
+                    let region = shape.label_region(bounds.width, bounds.height).unwrap();
+                    let width = metrics.estimate_preserved_width(
+                        text,
+                        metrics.font_size(),
+                        metrics.avg_char_width(),
+                    );
+                    let (_, height) = metrics.estimate_dimensions(text);
+                    assert!(width + 15.9 <= region.width, "{shape:?}: {text}");
+                    assert!(height + 15.9 <= region.height, "{shape:?}: {text}");
+                    if matches!(shape, NodeShape::Pentagon | NodeShape::Star) {
+                        assert_eq!(bounds.width, bounds.height);
+                    }
+                    let scene = build_render_scene_with_metrics(&ir, &layout, &metrics);
+                    let mut rows = Vec::new();
+                    fn collect_rows<'a>(group: &'a RenderGroup, rows: &mut Vec<&'a RenderText>) {
+                        for item in &group.children {
+                            match item {
+                                RenderItem::Text(text) if text.source == RenderSource::Node(0) => {
+                                    rows.push(text);
+                                }
+                                RenderItem::Group(child) => collect_rows(child, rows),
+                                _ => {}
+                            }
+                        }
+                    }
+                    collect_rows(&scene.root, &mut rows);
+                    let source_lines: Vec<_> = text.lines().collect();
+                    assert_eq!(rows.len(), source_lines.len());
+                    for (row, source) in rows.iter().zip(source_lines) {
+                        assert_eq!(row.text, source);
+                        assert_eq!(row.font_size, font_size);
+                        assert!((row.x - (bounds.x + region.x + region.width / 2.0)).abs() < 0.01);
+                        assert!(row.y - font_size / 2.0 >= bounds.y + region.y);
+                        assert!(row.y + font_size / 2.0 <= bounds.y + region.y + region.height);
+                    }
+                    let average_y = rows.iter().map(|row| row.y).sum::<f32>() / rows.len() as f32;
+                    assert!((average_y - (bounds.y + region.y + region.height / 2.0)).abs() < 0.01);
                 }
             }
         }

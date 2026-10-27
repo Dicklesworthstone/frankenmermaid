@@ -2385,7 +2385,83 @@ pub const SLANTED_SHAPE_INSET_RATIO: f32 = 0.15;
 /// precision its callers use, which is what keeps the substitution byte-identical.
 pub const SLANTED_SHAPE_INSET_RATIO_F64: f64 = 0.15;
 
+/// A rectangular content region inside a node's drawn outline, relative to its layout bounds.
+///
+/// This is the space for both text and an optional icon, before applying ordinary label padding.
+/// It is shared by layout and renderers so a label is never measured against the empty corners
+/// of its shape's bounding box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodeLabelRegion {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 impl NodeShape {
+    /// Inscribed content rectangle for silhouettes whose bounding box substantially overstates
+    /// the space available to a label. Other shapes keep their existing label-fitting rules.
+    ///
+    /// Triangles place their text in the broad half, away from the apex. Regular pentagons and
+    /// stars are drawn in a centered square, even when the supplied layout bounds are rectangular.
+    /// Their content regions must use that same square rather than the entire bounding width.
+    #[must_use]
+    pub fn label_region(self, width: f32, height: f32) -> Option<NodeLabelRegion> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let (left, top, content_width, content_height) = match self {
+            Self::Triangle => (0.25, 0.5, 0.5, 0.5),
+            Self::FlippedTriangle => (0.25, 0.0, 0.5, 0.5),
+            Self::Pentagon => (0.2, 0.25, 0.6, 0.55),
+            Self::Star => (0.32, 0.35, 0.36, 0.25),
+            _ => return None,
+        };
+        let (shape_width, shape_height) = if matches!(self, Self::Pentagon | Self::Star) {
+            let side = width.min(height);
+            (side, side)
+        } else {
+            (width, height)
+        };
+        Some(NodeLabelRegion {
+            x: (width - shape_width) / 2.0 + left * shape_width,
+            y: (height - shape_height) / 2.0 + top * shape_height,
+            width: content_width * shape_width,
+            height: content_height * shape_height,
+        })
+    }
+
+    /// Minimum outer dimensions that hold a padded content rectangle at its measured size.
+    ///
+    /// Callers include text padding and icon reservations in the supplied dimensions. Growing the
+    /// shape here lets the renderer keep readable type instead of shrinking or clipping labels.
+    #[must_use]
+    pub fn label_container_dimensions(
+        self,
+        content_width: f32,
+        content_height: f32,
+    ) -> Option<(f32, f32)> {
+        if !content_width.is_finite()
+            || !content_height.is_finite()
+            || content_width < 0.0
+            || content_height < 0.0
+        {
+            return None;
+        }
+        let region = self.label_region(1.0, 1.0)?;
+        let width = content_width / region.width;
+        let height = content_height / region.height;
+        if !width.is_finite() || !height.is_finite() {
+            return None;
+        }
+        if matches!(self, Self::Pentagon | Self::Star) {
+            let side = width.max(height);
+            Some((side, side))
+        } else {
+            Some((width, height))
+        }
+    }
+
     /// How far in from the bounding box's left and right sides the DRAWN outline sits at
     /// mid-height, as a fraction of the node's width.
     ///
@@ -11074,6 +11150,104 @@ mod tests {
             super::readable_label_color("#fff", "#123456", "#123456"),
             "#123456"
         );
+    }
+
+    #[test]
+    fn shaped_label_regions_stay_inside_the_drawn_outlines() {
+        use super::NodeShape;
+
+        // Ray casting against the independently constructed outline also checks the star's
+        // concave valleys; checking the outer bounding box would miss the original defect.
+        let inside = |x: f32, y: f32, outline: &[(f32, f32)]| {
+            let mut result = false;
+            let mut previous = outline[outline.len() - 1];
+            for &(px, py) in outline {
+                if (py > y) != (previous.1 > y)
+                    && x < (previous.0 - px) * (y - py) / (previous.1 - py) + px
+                {
+                    result = !result;
+                }
+                previous = (px, py);
+            }
+            result
+        };
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for (width, height) in [(280.0_f32, 80.0_f32), (80.0, 280.0), (160.0, 160.0)] {
+                let outline = match shape {
+                    NodeShape::Triangle => vec![(width / 2.0, 0.0), (width, height), (0.0, height)],
+                    NodeShape::FlippedTriangle => {
+                        vec![(0.0, 0.0), (width, 0.0), (width / 2.0, height)]
+                    }
+                    _ => {
+                        let count = if shape == NodeShape::Star { 10 } else { 5 };
+                        (0..count)
+                            .map(|index| {
+                                let radius = width.min(height) / 2.0
+                                    * if shape == NodeShape::Star && index % 2 == 1 {
+                                        0.4
+                                    } else {
+                                        1.0
+                                    };
+                                let angle = -std::f32::consts::FRAC_PI_2
+                                    + index as f32 * std::f32::consts::TAU / count as f32;
+                                (
+                                    width / 2.0 + radius * angle.cos(),
+                                    height / 2.0 + radius * angle.sin(),
+                                )
+                            })
+                            .collect()
+                    }
+                };
+                let region = shape.label_region(width, height).unwrap();
+                for column in 0..=10 {
+                    for row in 0..=10 {
+                        let x = region.x + region.width * (0.001 + column as f32 * 0.0998);
+                        let y = region.y + region.height * (0.001 + row as f32 * 0.0998);
+                        assert!(
+                            inside(x, y, &outline),
+                            "{shape:?}: ({x}, {y}) outside {width}×{height}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shaped_label_sizing_holds_the_complete_padded_content() {
+        use super::NodeShape;
+
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            for (content_width, content_height) in [(180.0, 40.0), (60.0, 120.0)] {
+                let (width, height) = shape
+                    .label_container_dimensions(content_width, content_height)
+                    .unwrap();
+                let region = shape.label_region(width, height).unwrap();
+                assert!(region.width + 0.001 >= content_width);
+                assert!(region.height + 0.001 >= content_height);
+                if matches!(shape, NodeShape::Pentagon | NodeShape::Star) {
+                    assert_eq!(width, height);
+                }
+            }
+            for value in [f32::NAN, f32::INFINITY, -1.0] {
+                assert!(shape.label_region(value, 80.0).is_none());
+                assert!(shape.label_container_dimensions(80.0, value).is_none());
+            }
+        }
+        for shape in [NodeShape::Rect, NodeShape::Diamond, NodeShape::SmallCircle] {
+            assert!(shape.label_region(200.0, 80.0).is_none());
+            assert!(shape.label_container_dimensions(200.0, 80.0).is_none());
+        }
     }
 
     /// The two slant constants must stay separate literals, and must keep the exact values the

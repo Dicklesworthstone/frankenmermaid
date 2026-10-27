@@ -420,6 +420,13 @@ struct CanvasFrame {
 }
 
 impl CanvasSession {
+    /// The retained source IR, if a diagram has been supplied. Hosts can resolve source-local
+    /// theme declarations when changing the preview's base theme without parsing again.
+    #[must_use]
+    pub fn diagram_ir(&self) -> Option<&MermaidDiagramIr> {
+        self.frame.as_ref().map(|frame| &frame.ir)
+    }
+
     /// Replace the diagram without copying its layout. Retain selection by author ID when valid.
     /// The old pointer map becomes unusable immediately, before any new drawing occurs.
     pub fn set_diagram(

@@ -27,6 +27,9 @@ pub struct CanvasRenderConfig {
     pub line_height: f64,
     /// Padding around the diagram.
     pub padding: f64,
+    /// Optional document background. `None` keeps a standalone canvas transparent.
+    /// Browser theme adapters supply the theme's background so text stays readable on any host.
+    pub background: Option<String>,
     /// Node fill color.
     pub node_fill: String,
     /// Node stroke color.
@@ -62,6 +65,45 @@ pub struct CanvasRenderConfig {
 }
 
 impl CanvasRenderConfig {
+    /// Apply authored Mermaid palette variables without changing typography or fit settings.
+    /// Node, edge and cluster style declarations still take precedence when they are drawn.
+    pub fn apply_theme_variables(
+        &mut self,
+        variables: &std::collections::BTreeMap<String, String>,
+    ) {
+        let paint = |key: &str| {
+            variables
+                .get(key)
+                .and_then(|value| sanitize_canvas_paint(value))
+        };
+        if let Some(color) = paint("background") {
+            self.background = Some(color);
+        }
+        if let Some(color) = variables
+            .get("primaryTextColor")
+            .or_else(|| variables.get("textColor"))
+            .and_then(|value| sanitize_canvas_paint(value))
+        {
+            self.label_color = color;
+        }
+        for (key, target) in [
+            ("primaryColor", &mut self.node_fill),
+            ("primaryBorderColor", &mut self.node_stroke),
+            ("lineColor", &mut self.edge_stroke),
+            ("clusterBkg", &mut self.cluster_fill),
+            ("clusterBorder", &mut self.cluster_stroke),
+        ] {
+            if let Some(color) = paint(key) {
+                *target = color;
+            }
+        }
+        for (index, accent) in self.accents.iter_mut().enumerate() {
+            if let Some(color) = paint(&format!("pie{}", index + 1)) {
+                *accent = color;
+            }
+        }
+    }
+
     /// Get the font metrics based on this configuration.
     #[must_use]
     pub fn font_metrics(&self) -> fm_core::FontMetrics {
@@ -96,6 +138,7 @@ impl Default for CanvasRenderConfig {
             font_size: 15.0,
             line_height: 1.5,
             padding: 28.0,
+            background: None,
             node_fill: String::from("#f8fafc"),
             node_stroke: String::from("#7c8da5"),
             node_stroke_width: 1.5,
@@ -304,6 +347,46 @@ impl Canvas2dRenderer {
         ir: &MermaidDiagramIr,
         ctx: &mut C,
     ) -> CanvasRenderResult {
+        let variables = &ir.meta.theme_overrides.theme_variables;
+        if variables.is_empty() {
+            return self.render_diagram(layout, ir, ctx);
+        }
+        // Source palettes belong to this frame, not to the reusable renderer's defaults.
+        let mut effective = self.config.clone();
+        effective.apply_theme_variables(variables);
+        let base = std::mem::replace(&mut self.config, effective);
+        let result = self.render_diagram(layout, ir, ctx);
+        self.config = base;
+        result
+    }
+
+    fn clear_canvas<C: Canvas2dContext>(&mut self, ctx: &mut C, width: f64, height: f64) {
+        ctx.clear_rect(0.0, 0.0, width, height);
+        self.draw_calls += 1;
+        if let Some(background) = self
+            .config
+            .background
+            .as_deref()
+            .and_then(sanitize_canvas_paint)
+        {
+            // The background covers the backing store, independently of diagram zoom. Isolate
+            // its paint and alpha so it cannot change the caller's state or any later primitive.
+            ctx.save();
+            ctx.reset_transform();
+            ctx.set_global_alpha(1.0);
+            ctx.set_fill_style(&background);
+            ctx.fill_rect(0.0, 0.0, width, height);
+            ctx.restore();
+            self.draw_calls += 1;
+        }
+    }
+
+    fn render_diagram<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+    ) -> CanvasRenderResult {
         self.draw_calls = 0;
 
         let canvas_width = ctx.width();
@@ -366,8 +449,7 @@ impl Canvas2dRenderer {
         };
 
         // Clear canvas
-        ctx.clear_rect(0.0, 0.0, canvas_width, canvas_height);
-        self.draw_calls += 1;
+        self.clear_canvas(ctx, canvas_width, canvas_height);
 
         // Apply viewport transform
         ctx.save();
@@ -745,8 +827,7 @@ impl Canvas2dRenderer {
             Viewport::new(canvas_width, canvas_height)
         };
 
-        ctx.clear_rect(0.0, 0.0, canvas_width, canvas_height);
-        self.draw_calls += 1;
+        self.clear_canvas(ctx, canvas_width, canvas_height);
 
         ctx.save();
         let transform = viewport.transform();
@@ -3405,6 +3486,15 @@ impl Canvas2dRenderer {
                     // no arithmetic of its own and cannot drift from the SVG arm: OutsideRight is
                     // "start", OutsideLeft is "end", Inside is "middle" -- the exact three values the
                     // SVG writer uses.
+                    let label_region =
+                        shape.label_region(node_box.bounds.width, node_box.bounds.height);
+                    let (label_cx, label_cy) =
+                        label_region.map_or((x + w / 2.0, y + h / 2.0), |region| {
+                            (
+                                x + f64::from(region.x + region.width / 2.0),
+                                y + f64::from(region.y + region.height / 2.0),
+                            )
+                        });
                     let (cx, align) = match gantt_label {
                         Some(entry) => (
                             f64::from(entry.x) + offset_x,
@@ -3414,9 +3504,9 @@ impl Canvas2dRenderer {
                                 fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
                             },
                         ),
-                        None => (x + w / 2.0, TextAlign::Center),
+                        None => (label_cx, TextAlign::Center),
                     };
-                    let cy = y + h / 2.0;
+                    let cy = label_cy;
 
                     // ⚠️ THE FIFTH SITE, and the one that mattered most. When bd-lvj3 bound
                     // `label_fill` it converted the four COMPARTMENT label sites (class, ER,
@@ -5532,6 +5622,132 @@ mod tests {
     }
 
     #[test]
+    fn authored_palette_reaches_canvas_without_overriding_styles_or_leaking_between_frames() {
+        let ir = fm_parser::parse(
+            "%%{init: {'themeVariables': {'background':'#101820','primaryColor':'#dbeafe',\
+             'primaryBorderColor':'#1d4ed8','primaryTextColor':'#0f172a','lineColor':'#a855f7',\
+             'clusterBkg':'#e0e7ff','clusterBorder':'#818cf8'}}}%%\n\
+             flowchart LR\n subgraph group[Cluster]\n A[Palette] -->|Link| B[Custom]\n end\n\
+             style B fill:#fee2e2,color:#991b1b\n linkStyle 0 stroke:#22c55e,color:#065f46\n",
+        )
+        .ir;
+        assert_eq!(ir.nodes.len(), 2);
+        assert_eq!(ir.meta.theme_overrides.theme_variables.len(), 7);
+        let config = CanvasRenderConfig::default();
+        let mut renderer = Canvas2dRenderer::new(config.clone());
+        let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+        renderer.render(&layout_diagram(&ir), &ir, &mut ctx);
+        let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+        assert_eq!(fills[0].bounds, [0.0, 0.0, 800.0, 600.0]);
+        assert_eq!(fills[0].paint.fill, "#101820");
+        for color in ["#dbeafe", "#fee2e2", "#e0e7ff"] {
+            assert!(
+                fills.iter().any(|fill| fill.paint.fill == color),
+                "missing {color}"
+            );
+        }
+        for (label, color) in [
+            ("Palette", "#0f172a"),
+            ("Custom", "#991b1b"),
+            ("Link", "#065f46"),
+        ] {
+            assert_eq!(
+                text.iter()
+                    .find(|run| run.text == label)
+                    .unwrap()
+                    .paint
+                    .fill,
+                color
+            );
+        }
+        assert!(ctx.operations().iter().any(|operation| {
+            matches!(operation, DrawOperation::SetStrokeStyle(color) if color == "#22c55e")
+        }));
+
+        let plain = fm_parser::parse("flowchart LR\n A[Plain] --> B[Next]").ir;
+        let layout = layout_diagram(&plain);
+        let mut reused = MockCanvas2dContext::new(800.0, 600.0);
+        renderer.render(&layout, &plain, &mut reused);
+        let mut fresh = MockCanvas2dContext::new(800.0, 600.0);
+        Canvas2dRenderer::new(config).render(&layout, &plain, &mut fresh);
+        assert_eq!(
+            reused.operations(),
+            fresh.operations(),
+            "source palette leaked to another diagram"
+        );
+    }
+
+    #[test]
+    fn canvas_background_is_optional_safe_and_isolated_from_scene_paint() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let scene = build_render_scene(&ir, &layout_diagram(&ir));
+        for background in [
+            None,
+            Some("#0f172a"),
+            Some("transparent"),
+            Some("url(https://example.com/image.svg)"),
+        ] {
+            let mut ctx = MockCanvas2dContext::new(800.0, 600.0);
+            let config = CanvasRenderConfig {
+                background: background.map(str::to_owned),
+                ..Default::default()
+            };
+            let result = Canvas2dRenderer::new(config).render_scene(&scene, &mut ctx);
+            let (fills, _) = record_gantt_canvas_paint(ctx.operations());
+            let expected = background.filter(|paint| !paint.starts_with("url("));
+            assert_eq!(fills.len(), usize::from(expected.is_some()));
+            // The empty scene still applies its root clip in addition to clearing the canvas.
+            assert_eq!(result.draw_calls, 2 + usize::from(expected.is_some()));
+            if let Some(color) = expected {
+                assert_eq!(fills[0].bounds, [0.0, 0.0, 800.0, 600.0]);
+                assert_eq!(fills[0].paint.fill, color);
+                assert_eq!(fills[0].paint.alpha, 1.0);
+                assert!(ctx.operations().windows(5).any(|ops| matches!(
+                    ops,
+                    [
+                        DrawOperation::ResetTransform,
+                        DrawOperation::SetGlobalAlpha(1.0),
+                        DrawOperation::SetFillStyle(_),
+                        DrawOperation::FillRect(..),
+                        DrawOperation::Restore
+                    ]
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_theme_variables_match_svg_palette_and_reject_resource_paints() {
+        let variables = std::collections::BTreeMap::from([
+            ("background".to_owned(), "#112233".to_owned()),
+            ("primaryColor".to_owned(), "#aabbcc".to_owned()),
+            ("primaryBorderColor".to_owned(), "#334455".to_owned()),
+            ("primaryTextColor".to_owned(), "#010203".to_owned()),
+            ("textColor".to_owned(), "#ffffff".to_owned()),
+            ("lineColor".to_owned(), "#445566".to_owned()),
+            ("clusterBkg".to_owned(), "#ddeeff".to_owned()),
+            ("clusterBorder".to_owned(), "#667788".to_owned()),
+            ("pie1".to_owned(), "#123456".to_owned()),
+            (
+                "pie2".to_owned(),
+                "url(https://example.com/image.svg)".to_owned(),
+            ),
+        ]);
+        let mut canvas = CanvasRenderConfig::default();
+        canvas.apply_theme_variables(&variables);
+        let mut svg = fm_render_svg::ThemeColors::default();
+        svg.apply_overrides(&variables);
+        assert_eq!(canvas.background.as_deref(), Some(svg.background.as_str()));
+        assert_eq!(canvas.node_fill, svg.node_fill);
+        assert_eq!(canvas.node_stroke, svg.node_stroke);
+        assert_eq!(canvas.label_color, svg.text);
+        assert_eq!(canvas.edge_stroke, svg.edge);
+        assert_eq!(canvas.cluster_fill, svg.cluster_fill);
+        assert_eq!(canvas.cluster_stroke, svg.cluster_stroke);
+        assert_eq!(canvas.accents, svg.accents);
+    }
+
+    #[test]
     fn mindmap_defaults_follow_branches_and_preserve_author_channels() {
         let mut ir = fm_parser::parse(
             "mindmap\n  root((Root))\n    A[Research]\n      Child[Child]\n    B[Design]\n    Plain\n",
@@ -5824,6 +6040,98 @@ mod tests {
                 + f64::from(node.bounds.y)
                 + f64::from(node.bounds.height) * 0.5;
             assert!(((first.1 + second.1) * 0.5 - center).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn shaped_labels_fit_the_drawn_outline_and_gpu_uses_the_same_baselines() {
+        let inside = |x: f64, y: f64, outline: &[(f64, f64)]| {
+            let mut result = false;
+            let mut previous = outline[outline.len() - 1];
+            for &(px, py) in outline {
+                if (py > y) != (previous.1 > y)
+                    && x < (previous.0 - px) * (y - py) / (previous.1 - py) + px
+                {
+                    result = !result;
+                }
+                previous = (px, py);
+            }
+            result
+        };
+        for shape in [
+            NodeShape::Triangle,
+            NodeShape::FlippedTriangle,
+            NodeShape::Pentagon,
+            NodeShape::Star,
+        ] {
+            let mut ir = fm_parser::parse("flowchart TB\n A[\"Project<br/>approved\"]").ir;
+            ir.nodes[0].shape = shape;
+            let config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            let layout = fm_layout::layout_diagram_with_config(
+                &ir,
+                fm_layout::LayoutConfig {
+                    font_metrics: Some(config.font_metrics()),
+                    ..Default::default()
+                },
+            );
+            let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+            Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut ctx);
+            // Read the polygon actually submitted by Canvas, independently of label_region.
+            let mut outline = Vec::new();
+            for operation in ctx.operations() {
+                match operation {
+                    DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => {
+                        outline.push((*x, *y))
+                    }
+                    DrawOperation::Fill => break,
+                    _ => {}
+                }
+            }
+            assert!(outline.len() >= 3);
+            let (_, text) = record_gantt_canvas_paint(ctx.operations());
+            assert_eq!(text.len(), 2);
+            let plan = crate::GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+            let runs: Vec<_> = plan
+                .text_runs
+                .iter()
+                .filter(|run| run.source == crate::GpuTextSource::Node)
+                .collect();
+            assert_eq!(runs.len(), text.len());
+            for (run, glyphs) in text.iter().zip(runs) {
+                assert!(
+                    run.paint.font.starts_with("15px "),
+                    "type must stay readable for {shape:?}"
+                );
+                let half_width = f64::from(config.font_metrics().estimate_width(&run.text)) * 0.5;
+                for x in [run.x - half_width, run.x + half_width] {
+                    for y in [
+                        run.y - config.font_size * 0.5,
+                        run.y + config.font_size * 0.5,
+                    ] {
+                        assert!(
+                            inside(x, y, &outline),
+                            "{shape:?} label {:?} leaves its drawn outline at ({x}, {y})",
+                            run.text
+                        );
+                    }
+                }
+                let first = glyphs.first_quad as usize;
+                let quads = &plan.text_quads[first..first + glyphs.quad_count as usize];
+                assert!(!quads.is_empty());
+                for quad in quads {
+                    assert!(
+                        (f64::from(quad.center[1] - layout.bounds.y) - run.y).abs() < 0.001,
+                        "GPU and Canvas disagree on {shape:?} label placement"
+                    );
+                    assert!(
+                        (f64::from(quad.half_extent[1]) - config.font_size * 0.5).abs() < 0.001
+                    );
+                }
+            }
         }
     }
 
