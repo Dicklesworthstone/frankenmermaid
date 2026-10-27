@@ -7430,6 +7430,14 @@ fn directed_path_order(ir: &MermaidDiagramIr) -> Option<Vec<usize>> {
 }
 
 fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<LayoutAlgorithm> {
+    // A ranked graph layout does not preserve a mindmap's radial organization. The cost curves
+    // cross for medium-size maps, so a time estimate could otherwise change a 65-branch mindmap
+    // into a Sugiyama graph while keeping both smaller and larger maps radial. There is currently
+    // no cheaper radial strategy: retain this geometry and report the exceeded budget honestly.
+    // General algorithms explicitly selected for a mindmap still use the ordinary fallback list.
+    if ir.diagram_type == DiagramType::Mindmap && selected == LayoutAlgorithm::Radial {
+        return vec![selected];
+    }
     let mut candidates = vec![selected];
     let preferred = match ir.diagram_type {
         DiagramType::BlockBeta => [
@@ -8785,6 +8793,7 @@ fn size_radial_rings(
         levels[depth + depth_offset].push(node);
     }
     let gap = (spacing.node_spacing * 0.35).max(8.0);
+    let root_spokes = tree.roots.len() == 1 && tree.max_depth == 1;
     for (level, nodes) in levels.iter_mut().enumerate().skip(1) {
         sort_radial_ring(nodes, angles);
         // A very narrow subtree can exhaust f32 angular precision. Preserve cyclic order while
@@ -8798,13 +8807,19 @@ fn size_radial_rings(
             + diameters[level - 1] * 0.5
             + spacing.rank_spacing.max(0.0)
             + diameters[level] * 0.5;
-        let mut radius = inner.max(radial_ring_radius(nodes, node_sizes, angles, gap));
+        let mut radius = inner.max(radial_ring_radius(
+            nodes,
+            node_sizes,
+            angles,
+            gap,
+            root_spokes,
+        ));
 
         // Flat, broad mindmaps benefit from more labels beside the root and fewer above it.
         // Weight the polar angle by the measured label aspect ratio, then accept this candidate
         // only when its exact rectangle clearance needs a smaller radius. Multilevel trees use
         // a single shared remap below; remapping each ring independently would split subtrees.
-        if tree.roots.len() == 1 && tree.max_depth == 1 && (8..=64).contains(&nodes.len()) {
+        if root_spokes && (8..=64).contains(&nodes.len()) {
             let width = nodes
                 .iter()
                 .map(|node| node_sizes[*node].0)
@@ -8818,8 +8833,13 @@ fn size_radial_rings(
             for node in nodes.iter().copied() {
                 candidate[node] = (angles[node].sin() / aspect).atan2(angles[node].cos());
             }
-            let candidate_radius =
-                inner.max(radial_ring_radius(nodes, node_sizes, &candidate, gap));
+            let candidate_radius = inner.max(radial_ring_radius(
+                nodes,
+                node_sizes,
+                &candidate,
+                gap,
+                root_spokes,
+            ));
             if candidate_radius < radius {
                 radius = candidate_radius;
                 for node in nodes.iter().copied() {
@@ -8880,6 +8900,7 @@ fn size_radial_rings(
                 node_sizes,
                 &candidate_angles,
                 gap,
+                false,
             ))
             .mul_add(1.001, 1.0);
     }
@@ -8941,7 +8962,13 @@ fn radial_min_angle_gap(nodes: &[usize], angles: &[f32]) -> f32 {
         .fold(2.0 * PI - last + first, f32::min)
 }
 
-fn radial_ring_radius(nodes: &[usize], node_sizes: &[(f32, f32)], angles: &[f32], gap: f32) -> f32 {
+fn radial_ring_radius(
+    nodes: &[usize],
+    node_sizes: &[(f32, f32)],
+    angles: &[f32],
+    gap: f32,
+    root_spokes: bool,
+) -> f32 {
     if nodes.len() < 2 {
         return 0.0;
     }
@@ -8952,7 +8979,15 @@ fn radial_ring_radius(nodes: &[usize], node_sizes: &[(f32, f32)], angles: &[f32]
             .iter()
             .map(|node| node_sizes[*node].0.hypot(node_sizes[*node].1))
             .fold(0.0, f32::max);
-        return (diameter + gap) / (2.0 * (radial_min_angle_gap(nodes, angles) * 0.5).sin());
+        let angle_gap = radial_min_angle_gap(nodes, angles);
+        let radius = (diameter + gap) / (2.0 * (angle_gap * 0.5).sin());
+        return if root_spokes {
+            // Every forward pair is separated by at least this angle. The expanded rectangle
+            // fits inside a circle of this radius, including the router's obstacle clearance.
+            radius.max((diameter * 0.5 + gap * std::f32::consts::SQRT_2) / angle_gap.sin())
+        } else {
+            radius
+        };
     }
     let mut radius = 0.0_f32;
     for (index, left) in nodes.iter().copied().enumerate() {
@@ -8963,6 +8998,21 @@ fn radial_ring_radius(nodes: &[usize], node_sizes: &[(f32, f32)], angles: &[f32]
             let horizontal = ((node_sizes[left].0 + node_sizes[right].0) * 0.5 + gap) / dx;
             let vertical = ((node_sizes[left].1 + node_sizes[right].1) * 0.5 + gap) / dy;
             radius = radius.max(horizontal.min(vertical));
+
+            // Separate labels can still hide each other's spokes: a long box near the top of
+            // the ring may extend across its neighbor's ray from the root. Increasing the ring
+            // by the perpendicular support of that box keeps the original direct relationship
+            // visible instead of making the router insert unrelated orthogonal detours.
+            let angle_gap = angles[left] - angles[right];
+            if root_spokes && angle_gap.cos() > 0.0 {
+                let separation = angle_gap.sin().abs();
+                for (ray, obstacle) in [(left, right), (right, left)] {
+                    let (width, height) = node_sizes[obstacle];
+                    let clearance = (width * 0.5 + gap) * angles[ray].sin().abs()
+                        + (height * 0.5 + gap) * angles[ray].cos().abs();
+                    radius = radius.max(clearance / separation);
+                }
+            }
         }
     }
     radius
@@ -32926,6 +32976,53 @@ mod tests {
         }
     }
 
+    fn assert_radial_spokes_are_clear(ir: &MermaidDiagramIr, layout: &DiagramLayout) {
+        for path in &layout.edges {
+            let edge = &ir.edges[path.edge_index];
+            let from = super::endpoint_node_index(ir, edge.from).expect("source node");
+            let to = super::endpoint_node_index(ir, edge.to).expect("target node");
+            let blockers: Vec<_> = layout
+                .nodes
+                .iter()
+                .filter(|obstacle| obstacle.node_index != from && obstacle.node_index != to)
+                .filter(|obstacle| {
+                    super::cga_routing::segment_intersects_obstacles(
+                        path.points[0],
+                        *path.points.last().expect("branch endpoint"),
+                        &[obstacle.bounds],
+                        8.0,
+                    )
+                })
+                .map(|obstacle| (&obstacle.node_id, obstacle.bounds))
+                .collect();
+            assert_eq!(
+                path.points.len(),
+                2,
+                "branch {} of {} must stay direct; root {:?}; blockers {blockers:?}; points {:?}",
+                path.edge_index,
+                layout.edges.len(),
+                layout.nodes[from].bounds,
+                path.points,
+            );
+            for obstacle in &layout.nodes {
+                if obstacle.node_index == from || obstacle.node_index == to {
+                    continue;
+                }
+                assert!(
+                    !super::cga_routing::segment_intersects_obstacles(
+                        path.points[0],
+                        path.points[1],
+                        &[obstacle.bounds],
+                        8.0,
+                    ),
+                    "branch {} crosses the clearance around {}",
+                    path.edge_index,
+                    obstacle.node_id,
+                );
+            }
+        }
+    }
+
     #[test]
     fn radial_wide_mindmap_keeps_labels_readable_and_spokes_direct() {
         let branches: String = (0..24)
@@ -32943,7 +33040,50 @@ mod tests {
         // into a desktop viewport. This is a usable-size bound, not a snapshot of exact coordinates.
         assert!(layout.bounds.width < 1800.0, "{:?}", layout.bounds);
         assert!(layout.bounds.height < 1600.0, "{:?}", layout.bounds);
-        assert!(layout.edges.iter().all(|edge| edge.points.len() == 2));
+        assert_radial_spokes_are_clear(&ir, &layout);
+    }
+
+    #[test]
+    fn radial_spokes_clear_mixed_labels_and_large_rings() {
+        for count in [8, 24, 65, 129] {
+            let branches: String = (0..count)
+                .map(|index| {
+                    let label = match index % 3 {
+                        0 => format!("Platform engineering and operations {index}"),
+                        1 => format!("Review {index}<br/>Implementation<br/>Validation"),
+                        _ => format!("Release {index}"),
+                    };
+                    format!("    branch{index}[{label}]\n")
+                })
+                .collect();
+            let ir = parse(&format!("mindmap\n  root((Delivery planning))\n{branches}")).ir;
+            for font_metrics in [None, Some(fm_core::FontMetrics::monospace(24.0))] {
+                let config = LayoutConfig {
+                    font_metrics,
+                    ..LayoutConfig::default()
+                };
+                let traced = layout_diagram_traced_with_config_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Radial,
+                    config,
+                    LayoutGuardrails::default(),
+                );
+                assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
+                assert!(!traced.trace.guard.fallback_applied);
+                assert_eq!(
+                    traced.trace.guard.time_budget_exceeded,
+                    traced.trace.guard.estimated_layout_time_ms
+                        > LayoutGuardrails::default().max_layout_time_ms,
+                    "keeping radial geometry must not conceal an exceeded budget",
+                );
+                assert_eq!(traced.layout.nodes.len(), count + 1);
+                assert_eq!(traced.layout.edges.len(), count);
+                assert_radial_labels_are_separate(&traced.layout);
+                assert_radial_spokes_are_clear(&ir, &traced.layout);
+                assert!(traced.layout.bounds.width.is_finite());
+                assert!(traced.layout.bounds.height.is_finite());
+            }
+        }
     }
 
     #[test]
