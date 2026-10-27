@@ -3002,6 +3002,11 @@ impl Canvas2dRenderer {
                     .collect(),
             )
         };
+        let gantt_task_by_node: Option<std::collections::HashMap<usize, &fm_core::IrGanttTask>> =
+            ir.gantt_meta
+                .as_ref()
+                .filter(|_| ir.diagram_type == DiagramType::Gantt)
+                .map(|meta| meta.tasks.iter().map(|task| (task.node.0, task)).collect());
 
         for node_box in &layout.nodes {
             // Referenced composite states share their cluster's box. The cluster was already
@@ -3011,6 +3016,14 @@ impl Canvas2dRenderer {
             }
             let ir_node = ir.nodes.get(node_box.node_index);
             let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+            let gantt_task = gantt_task_by_node
+                .as_ref()
+                .and_then(|tasks| tasks.get(&node_box.node_index))
+                .copied();
+            let gantt_label = gantt_label_by_node
+                .as_ref()
+                .and_then(|placements| placements.get(&node_box.node_index))
+                .copied();
 
             let x = f64::from(node_box.bounds.x) + offset_x;
             let y = f64::from(node_box.bounds.y) + offset_y;
@@ -3026,6 +3039,14 @@ impl Canvas2dRenderer {
             // `style_refs` 11; this crate read all three ZERO times.
             let (fill, stroke) =
                 resolve_node_colors_with_defaults(ir, node_box.node_index, &self.config);
+            let (fill, stroke) = if let Some(task) = gantt_task {
+                (
+                    fill.or_else(|| Some(fm_layout::gantt_task_fill(task.flags).to_owned())),
+                    stroke.or_else(|| task.flags.crit.then(|| "#dc2626".to_owned())),
+                )
+            } else {
+                (fill, stroke)
+            };
             // Resolved ONCE for the whole node: the four label sites below (plain label, class
             // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
             // node, so they must agree about its colour. Resolving per-site would let a later
@@ -3040,7 +3061,12 @@ impl Canvas2dRenderer {
                 .as_deref()
                 .and_then(sanitize_canvas_paint);
             let label_fill = text_color.as_deref().unwrap_or_else(|| {
-                if ir.diagram_type == DiagramType::Journey {
+                if ir.diagram_type == DiagramType::Journey
+                    || (gantt_task.is_some()
+                        && gantt_label.is_none_or(|entry| {
+                            entry.placement == fm_layout::GanttLabelPlacement::Inside
+                        }))
+                {
                     fm_core::readable_label_color(
                         fill.as_deref().unwrap_or(&self.config.node_fill),
                         &self.config.label_color,
@@ -3054,8 +3080,13 @@ impl Canvas2dRenderer {
             // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
             // half landed, while every node border was drawn at the config width whatever the
             // author wrote. `unwrap_or` keeps the theme default when nothing was declared.
-            let stroke_width = resolve_node_stroke_width(ir, node_box.node_index)
-                .unwrap_or(self.config.node_stroke_width);
+            let default_stroke_width = if gantt_task.is_some_and(|task| task.flags.crit) {
+                2.0
+            } else {
+                self.config.node_stroke_width
+            };
+            let stroke_width =
+                resolve_node_stroke_width(ir, node_box.node_index).unwrap_or(default_stroke_width);
             // The BORDER DASH is the fourth channel, and the only one that has to be UNDONE.
             // `lineDash` is canvas STATE, not a draw argument: it persists until something sets it
             // again, so a dashed node would leave every later shape dashed too. Set only when the
@@ -3102,21 +3133,45 @@ impl Canvas2dRenderer {
             }
             let is_state_terminal =
                 ir.diagram_type == DiagramType::State && shape == NodeShape::DoubleCircle;
-            draw_shape(
-                ctx,
-                if is_state_terminal {
-                    NodeShape::Circle
+            if let Some(task) = gantt_task {
+                // Task bounds encode calendar time. A milestone is an instant centered on that
+                // date, so its glyph must not turn the layout's hit box into a duration bar.
+                let commands = if task.flags.milestone {
+                    let center = node_box.bounds.center();
+                    let radius = node_box.bounds.width.min(node_box.bounds.height) * 0.4;
+                    fm_layout::shapes::diamond_path(fm_layout::LayoutRect {
+                        x: center.x - radius,
+                        y: center.y - radius,
+                        width: radius * 2.0,
+                        height: radius * 2.0,
+                    })
                 } else {
-                    shape
-                },
-                x,
-                y,
-                w,
-                h,
-                fill.as_deref().unwrap_or(&self.config.node_fill),
-                stroke.as_deref().unwrap_or(&self.config.node_stroke),
-                stroke_width,
-            );
+                    fm_layout::shapes::rounded_rect_path(node_box.bounds, 3.0)
+                };
+                ctx.set_fill_style(fill.as_deref().unwrap_or(&self.config.node_fill));
+                ctx.set_stroke_style(stroke.as_deref().unwrap_or(&self.config.node_stroke));
+                ctx.set_line_width(stroke_width);
+                ctx.begin_path();
+                self.emit_path_commands(ctx, &commands, offset_x, offset_y);
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                draw_shape(
+                    ctx,
+                    if is_state_terminal {
+                        NodeShape::Circle
+                    } else {
+                        shape
+                    },
+                    x,
+                    y,
+                    w,
+                    h,
+                    fill.as_deref().unwrap_or(&self.config.node_fill),
+                    stroke.as_deref().unwrap_or(&self.config.node_stroke),
+                    stroke_width,
+                );
+            }
             if is_state_terminal {
                 // Draw the solid terminal disc once; ordinary double circles keep a hollow ring.
                 let radius = w.min(h) / 2.0;
@@ -3136,6 +3191,23 @@ impl Canvas2dRenderer {
                 ctx.set_line_dash(&[]);
             }
             self.draw_calls += 1;
+
+            if let Some(task) = gantt_task
+                && !task.flags.milestone
+                && let Some(progress) = task
+                    .progress
+                    .filter(|value| value.is_finite() && *value > 0.0)
+            {
+                // The current path is the task bar. Clip the quantitative overlay to its rounded
+                // outline, multiply the node opacity, then restore every paint state for its label.
+                ctx.save();
+                ctx.clip();
+                ctx.set_fill_style("#0f172a");
+                ctx.set_global_alpha(declared_opacity.unwrap_or(1.0) * 0.22);
+                ctx.fill_rect(x, y, w * f64::from(progress.min(1.0)), h);
+                ctx.restore();
+                self.draw_calls += 1;
+            }
 
             if let Some(step) = layout
                 .extensions
@@ -3514,10 +3586,7 @@ impl Canvas2dRenderer {
                     // no arithmetic of its own and cannot drift from the SVG arm: OutsideRight is
                     // "start", OutsideLeft is "end", Inside is "middle" -- the exact three values the
                     // SVG writer uses.
-                    let gantt = gantt_label_by_node
-                        .as_ref()
-                        .and_then(|map| map.get(&node_box.node_index));
-                    let (cx, align) = match gantt {
+                    let (cx, align) = match gantt_label {
                         Some(entry) => (
                             f64::from(entry.x) + offset_x,
                             match entry.placement {
@@ -6465,6 +6534,363 @@ mod tests {
             ctx.operations()
                 .iter()
                 .any(|operation| matches!(operation, DrawOperation::FillText(_, _, _)))
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct GanttCanvasPaint {
+        fill: String,
+        stroke: String,
+        line_width: f64,
+        alpha: f64,
+        dash: Vec<f64>,
+        font: String,
+        align: TextAlign,
+        baseline: TextBaseline,
+        clipped: bool,
+    }
+
+    #[derive(Debug)]
+    struct GanttCanvasFill {
+        paint: GanttCanvasPaint,
+        bounds: [f64; 4],
+        vertices: usize,
+    }
+
+    #[derive(Debug)]
+    struct GanttCanvasText {
+        paint: GanttCanvasPaint,
+        text: String,
+        x: f64,
+        y: f64,
+    }
+
+    fn record_gantt_canvas_paint(
+        operations: &[DrawOperation],
+    ) -> (Vec<GanttCanvasFill>, Vec<GanttCanvasText>) {
+        let mut paint = GanttCanvasPaint {
+            fill: String::new(),
+            stroke: String::new(),
+            line_width: 1.0,
+            alpha: 1.0,
+            dash: Vec::new(),
+            font: String::new(),
+            align: TextAlign::Left,
+            baseline: TextBaseline::Alphabetic,
+            clipped: false,
+        };
+        let mut stack = Vec::new();
+        let mut points = Vec::new();
+        let mut fills = Vec::new();
+        let mut text = Vec::new();
+        for operation in operations {
+            match operation {
+                DrawOperation::Save => stack.push(paint.clone()),
+                DrawOperation::Restore => paint = stack.pop().expect("balanced canvas state"),
+                DrawOperation::SetFillStyle(value) => paint.fill.clone_from(value),
+                DrawOperation::SetStrokeStyle(value) => paint.stroke.clone_from(value),
+                DrawOperation::SetLineWidth(value) => paint.line_width = *value,
+                DrawOperation::SetGlobalAlpha(value) => paint.alpha = *value,
+                DrawOperation::SetLineDash(value) => paint.dash.clone_from(value),
+                DrawOperation::SetFont(value) => paint.font.clone_from(value),
+                DrawOperation::SetTextAlign(value) => paint.align = *value,
+                DrawOperation::SetTextBaseline(value) => paint.baseline = *value,
+                DrawOperation::Clip => paint.clipped = true,
+                DrawOperation::BeginPath => points.clear(),
+                DrawOperation::MoveTo(x, y) | DrawOperation::LineTo(x, y) => points.push((*x, *y)),
+                DrawOperation::QuadraticCurveTo(cx, cy, x, y) => {
+                    points.extend([(*cx, *cy), (*x, *y)])
+                }
+                DrawOperation::Rect(x, y, w, h) => points.extend([(*x, *y), (*x + *w, *y + *h)]),
+                DrawOperation::Fill if !points.is_empty() => {
+                    let min_x = points
+                        .iter()
+                        .map(|point| point.0)
+                        .fold(f64::INFINITY, f64::min);
+                    let min_y = points
+                        .iter()
+                        .map(|point| point.1)
+                        .fold(f64::INFINITY, f64::min);
+                    let max_x = points
+                        .iter()
+                        .map(|point| point.0)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let max_y = points
+                        .iter()
+                        .map(|point| point.1)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    fills.push(GanttCanvasFill {
+                        paint: paint.clone(),
+                        bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
+                        vertices: points.len(),
+                    });
+                }
+                DrawOperation::FillRect(x, y, w, h) => fills.push(GanttCanvasFill {
+                    paint: paint.clone(),
+                    bounds: [*x, *y, *w, *h],
+                    vertices: 4,
+                }),
+                DrawOperation::FillText(value, x, y) => text.push(GanttCanvasText {
+                    paint: paint.clone(),
+                    text: value.clone(),
+                    x: *x,
+                    y: *y,
+                }),
+                _ => {}
+            }
+        }
+        assert!(stack.is_empty());
+        (fills, text)
+    }
+
+    #[test]
+    fn canvas_gantt_tasks_preserve_status_milestones_progress_and_labels() {
+        let ir = fm_parser::parse(
+            "%%{init: {\"gantt\": {\"topAxis\": true}}}%%\n\
+             gantt\n title Release schedule\n dateFormat YYYY-MM-DD\n excludes weekends\n\
+             section Delivery\n Design :crit, done, design, 2026-02-06, 2d, 50%\n\
+             Build :active, build, after design, 3d, 25%\n\
+             Release :milestone, release, after build, 0d, 80%\n\
+             Critical review :crit, review, after build, 2d\n\
+             Verification with a deliberately long name :verify, after build, 1d\n",
+        )
+        .ir;
+        let mut layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 5);
+        assert_eq!(layout.edges.len(), 4);
+        layout.nodes.reverse();
+        for dark in [false, true] {
+            let mut config = CanvasRenderConfig {
+                auto_fit: false,
+                padding: 0.0,
+                ..Default::default()
+            };
+            if dark {
+                config.node_fill = "#111827".to_owned();
+                config.label_color = "#f8fafc".to_owned();
+            }
+            let mut ctx = MockCanvas2dContext::new(1600.0, 1000.0);
+            let result = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            assert_eq!((result.nodes_drawn, result.edges_drawn), (5, 4));
+            let mut repeated = MockCanvas2dContext::new(1600.0, 1000.0);
+            crate::render_to_canvas_with_layout(&ir, &layout, &mut repeated, &config);
+            assert_eq!(ctx.operations(), repeated.operations());
+            let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+            for (index, color) in ["#86efac", "#94a3b8", "#c4b5fd", "#fca5a5", "#93c5fd"]
+                .into_iter()
+                .enumerate()
+            {
+                let fill = fills
+                    .iter()
+                    .find(|fill| fill.paint.fill == color)
+                    .expect("status-colored task");
+                let node = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == index)
+                    .unwrap();
+                let [x, y, w, h] = fill.bounds;
+                assert_eq!(fill.paint.alpha, 1.0);
+                assert!(
+                    (x + w / 2.0 + f64::from(layout.bounds.x) - f64::from(node.bounds.center().x))
+                        .abs()
+                        < 0.002
+                );
+                assert!(
+                    (y + h / 2.0 + f64::from(layout.bounds.y) - f64::from(node.bounds.center().y))
+                        .abs()
+                        < 0.002
+                );
+                if index == 2 {
+                    assert_eq!(
+                        fill.vertices, 4,
+                        "a milestone is a diamond, not a duration bar"
+                    );
+                    assert!((w - h).abs() < 0.002);
+                    assert!(
+                        (w - f64::from(node.bounds.width.min(node.bounds.height) * 0.8)).abs()
+                            < 0.002
+                    );
+                } else {
+                    assert!((w - f64::from(node.bounds.width)).abs() < 0.002);
+                    assert!((h - f64::from(node.bounds.height)).abs() < 0.002);
+                }
+                if index == 0 || index == 3 {
+                    assert_eq!(fill.paint.stroke, "#dc2626");
+                    assert_eq!(fill.paint.line_width, 2.0);
+                }
+            }
+            let progress: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == "#0f172a")
+                .collect();
+            assert_eq!(progress.len(), 2, "milestones have no duration to fill");
+            for (index, fraction) in [(0, 0.5), (1, 0.25)] {
+                let node = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == index)
+                    .unwrap();
+                let overlay = progress
+                    .iter()
+                    .find(|fill| {
+                        (fill.bounds[1] + f64::from(layout.bounds.y) - f64::from(node.bounds.y))
+                            .abs()
+                            < 0.002
+                    })
+                    .unwrap();
+                assert!(
+                    (overlay.bounds[2] / f64::from(node.bounds.width) - fraction).abs() < 0.002
+                );
+                assert_eq!(overlay.paint.alpha, 0.22);
+                assert!(
+                    overlay.paint.clipped,
+                    "progress must stay inside the task outline"
+                );
+            }
+            assert_eq!(
+                text.iter()
+                    .filter(|entry| entry.text == "Release schedule")
+                    .count(),
+                1
+            );
+            for placement in &layout.extensions.gantt_task_labels {
+                let label = ir.node_display_text(&ir.nodes[placement.node_index]);
+                let entry = text
+                    .iter()
+                    .find(|entry| entry.text == label)
+                    .expect("complete task name");
+                let expected_align = match placement.placement {
+                    fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
+                    fm_layout::GanttLabelPlacement::OutsideLeft => TextAlign::Right,
+                    fm_layout::GanttLabelPlacement::OutsideRight => TextAlign::Left,
+                };
+                assert_eq!(entry.paint.align, expected_align);
+                assert_eq!(entry.paint.baseline, TextBaseline::Middle);
+                assert!(
+                    (entry.x + f64::from(layout.bounds.x) - f64::from(placement.x)).abs() < 0.002
+                );
+                let expected_color =
+                    if dark && placement.placement == fm_layout::GanttLabelPlacement::Inside {
+                        &config.node_fill
+                    } else {
+                        &config.label_color
+                    };
+                assert_eq!(&entry.paint.fill, expected_color);
+            }
+            for axis in &layout.extensions.gantt_axis_rows {
+                for tick in &layout.extensions.axis_ticks {
+                    assert!(text.iter().any(|entry| {
+                        entry.text == tick.label
+                            && (entry.x + f64::from(layout.bounds.x)
+                                - f64::from(tick.position + 3.0))
+                            .abs()
+                                < 0.002
+                            && (entry.y + f64::from(layout.bounds.y) - f64::from(axis.y)).abs()
+                                < 0.002
+                            && entry.paint.baseline == TextBaseline::Alphabetic
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_gantt_tasks_preserve_declared_styles_and_isolate_progress_opacity() {
+        let mut ir = fm_parser::parse(
+            "gantt\n dateFormat YYYY-MM-DD\n section Delivery\n\
+             Styled :crit, done, styled, 2026-01-01, 4d, 50%\n\
+             Untouched :plain, after styled, 2d\n\
+             Marker :milestone, marker, after plain, 0d, 75%\n",
+        )
+        .ir;
+        let styled_index = ir.gantt_meta.as_ref().unwrap().tasks[0].node.0;
+        ir.nodes[styled_index].inline_style = Some(Box::new(fm_core::parse_style_string(
+            "fill:#123456;fill-opacity:0.6;stroke:#abcdef;stroke-width:4px;stroke-dasharray:7 3;opacity:0.4;color:#ff00ff;font-size:19px",
+        )));
+        let layout = layout_diagram(&ir);
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            node_stroke: "#fedcba".to_owned(),
+            node_stroke_width: 3.25,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+        let (fills, text) = record_gantt_canvas_paint(ctx.operations());
+        let styled = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "rgba(18, 52, 86, 0.6)")
+            .expect("authored fill and fill opacity");
+        assert_eq!(styled.paint.stroke, "#abcdef");
+        assert_eq!(styled.paint.line_width, 4.0);
+        assert_eq!(styled.paint.dash, [7.0, 3.0]);
+        assert_eq!(styled.paint.alpha, 0.4);
+        let overlay = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#0f172a")
+            .expect("visible progress on an authored fill");
+        assert!((overlay.paint.alpha - 0.088).abs() < 0.0001);
+        assert!(overlay.paint.clipped);
+        assert!((overlay.bounds[2] / styled.bounds[2] - 0.5).abs() < 0.002);
+        let label = text.iter().find(|entry| entry.text == "Styled").unwrap();
+        assert_eq!(label.paint.fill, "#ff00ff");
+        assert_eq!(label.paint.alpha, 0.4);
+        assert!(label.paint.font.contains("19px"));
+        assert!(
+            !label.paint.clipped,
+            "the task's clip must not trim an outside name"
+        );
+        let untouched = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#93c5fd")
+            .unwrap();
+        assert_eq!(untouched.paint.alpha, 1.0);
+        assert_eq!(untouched.paint.stroke, "#fedcba");
+        assert_eq!(untouched.paint.line_width, 3.25);
+        assert!(untouched.paint.dash.is_empty());
+        let milestone = fills
+            .iter()
+            .find(|fill| fill.paint.fill == "#c4b5fd")
+            .unwrap();
+        assert_eq!(milestone.paint.stroke, "#fedcba");
+        assert_eq!(milestone.paint.line_width, 3.25);
+        let following_label = text.iter().find(|entry| entry.text == "Untouched").unwrap();
+        assert_eq!(following_label.paint.alpha, 1.0);
+        assert!(!following_label.paint.font.contains("19px"));
+
+        for value in [f32::NAN, f32::INFINITY, -0.2, 0.0, 2.0] {
+            ir.gantt_meta.as_mut().unwrap().tasks[0].progress = Some(value);
+            let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+            crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &config);
+            let (fills, _) = record_gantt_canvas_paint(ctx.operations());
+            let overlays: Vec<_> = fills
+                .iter()
+                .filter(|fill| fill.paint.fill == "#0f172a")
+                .collect();
+            if value == 2.0 {
+                assert_eq!(overlays.len(), 1);
+                assert!((overlays[0].bounds[2] - styled.bounds[2]).abs() < 0.002);
+            } else {
+                assert!(
+                    overlays.is_empty(),
+                    "invalid/empty progress painted: {value}"
+                );
+            }
+        }
+
+        let mut graph = fm_parser::parse("flowchart LR\nA[Ordinary]-->B[Unchanged]\n").ir;
+        let graph_layout = layout_diagram(&graph);
+        let mut before = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas_with_layout(&graph, &graph_layout, &mut before, &config);
+        graph.gantt_meta = ir.gantt_meta;
+        let mut after = MockCanvas2dContext::new(800.0, 600.0);
+        crate::render_to_canvas_with_layout(&graph, &graph_layout, &mut after, &config);
+        assert_eq!(
+            before.operations(),
+            after.operations(),
+            "a foreign chart's metadata must not restyle a flowchart"
         );
     }
 

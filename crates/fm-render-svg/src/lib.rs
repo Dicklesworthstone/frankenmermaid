@@ -2354,9 +2354,23 @@ fn render_scene_path(
 
     if let Some(ir) = ir
         && let RenderSource::Node(index) = path.source
-        && let Some(style) = resolve_scene_node_inline_styles(ir, index).0
     {
-        elem = elem.attr("style", &style);
+        if ir.diagram_type == DiagramType::Gantt && path.stroke.is_none() {
+            // Gantt task outlines always carry a stroke; their unstroked Node paths are progress
+            // decorations. Keep those decorations' semantic paint: inheriting the task fill would
+            // make progress invisible, and its outline/dash would invent a second task boundary.
+            // Overall author opacity still applies independently of the overlay's fill-opacity.
+            if let Some(opacity) = ir
+                .resolved_node_style(index)
+                .get("opacity")
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|opacity| opacity.is_finite())
+            {
+                elem = elem.opacity(opacity.clamp(0.0, 1.0));
+            }
+        } else if let Some(style) = resolve_scene_node_inline_styles(ir, index).0 {
+            elem = elem.attr("style", &style);
+        }
     }
 
     if path.marker_start != MarkerKind::None {
@@ -19797,7 +19811,13 @@ mod tests {
                                 );
                             }
                             if labeled {
-                                assert!(streamed.contains("Approval &lt;&amp;&gt;"));
+                                // XML text preserves a plain `>`; only a closing `]]>` escapes it.
+                                // Inspect drawn text, so an accessible title cannot mask a lost label.
+                                assert_eq!(
+                                    issue14_drawn_text(&streamed).get("Approval &lt;&amp;>"),
+                                    Some(&1),
+                                    "global={global:?}, local={local:?}, {arrow:?}, {config:?}: {streamed}"
+                                );
                             }
                         }
                     }
@@ -21390,6 +21410,81 @@ mod tests {
             !svg.contains("id=\"nodes\""),
             "generic graph boxes must not overpaint the schedule"
         );
+    }
+
+    #[test]
+    fn scene_backend_styled_gantt_progress_retains_semantic_paint_and_node_opacity() {
+        for (opacity, expected) in [
+            ("0.4", Some("0.40")),
+            ("2", Some("1")),
+            ("-1", Some("0")),
+            ("NaN", None),
+            ("inf", None),
+        ] {
+            let source = format!(
+                "gantt\nTask :done,a,2026-01-01,4d,50%\n\
+                 classDef gantt-done fill:#ff0000,stroke:#00ff00,stroke-width:7px,stroke-dasharray:5 2,opacity:{opacity}\n"
+            );
+            let ir = fm_parser::parse(&source).ir;
+            let svg = render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend: SvgBackend::Scene,
+                    include_source_spans: true,
+                    ..Default::default()
+                },
+            );
+            let tasks = svg
+                .split_once("id=\"gantt-tasks\"")
+                .unwrap()
+                .1
+                .split_once("id=\"gantt-progress\"")
+                .unwrap()
+                .0;
+            let progress = svg
+                .split_once("id=\"gantt-progress\"")
+                .unwrap()
+                .1
+                .split_once("id=\"gantt-labels\"")
+                .unwrap()
+                .0;
+            assert_eq!(tasks.matches("<path").count(), 1);
+            assert_eq!(progress.matches("<path").count(), 1);
+            assert!(
+                tasks.contains("fill:#ff0000"),
+                "author task fill was lost: {tasks}"
+            );
+            assert!(
+                tasks.contains("stroke:#00ff00"),
+                "author task stroke was lost: {tasks}"
+            );
+            assert!(
+                tasks.contains("stroke-dasharray:5 2"),
+                "author task dash was lost: {tasks}"
+            );
+            assert!(progress.contains("fill=\"#0f172a\""));
+            assert!(progress.contains("fill-opacity=\"0.22\""));
+            assert!(progress.contains("stroke=\"none\""));
+            assert!(
+                !progress.contains(" style="),
+                "task CSS replaced progress paint: {progress}"
+            );
+            assert!(!progress.contains("stroke-dasharray"));
+            match expected {
+                Some(expected) => assert!(
+                    progress.contains(&format!(" opacity=\"{expected}\"")),
+                    "{progress}"
+                ),
+                None => assert!(
+                    !progress.contains(" opacity="),
+                    "non-finite author opacity leaked: {progress}"
+                ),
+            }
+            assert!(progress.contains("data-fm-source-kind=\"node\""));
+            assert!(progress.contains("data-fm-source-index=\"0\""));
+            assert!(progress.contains("data-fm-source-span="));
+            assert!(progress.contains("50% complete"));
+        }
     }
 
     #[test]
