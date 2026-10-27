@@ -335,8 +335,13 @@ impl Canvas2dRenderer {
                     &self.config.font_metrics(),
                 )
             });
-        let render_bounds = radar.as_ref().map_or_else(
-            || {
+        let treemap = (ir.diagram_type == DiagramType::Treemap && ir.treemap_meta.is_some())
+            .then(|| fm_layout::TreemapChartLayout::new(ir, layout, &self.config.font_metrics()));
+        let render_bounds = treemap
+            .as_ref()
+            .map(|chart| chart.bounds)
+            .or_else(|| radar.as_ref().map(|chart| chart.bounds))
+            .unwrap_or_else(|| {
                 pie.as_ref().map_or_else(
                     || {
                         self.edge_label_layout
@@ -345,9 +350,7 @@ impl Canvas2dRenderer {
                     },
                     |pie| pie.bounds,
                 )
-            },
-            |radar| radar.bounds,
-        );
+            });
 
         // Compute viewport to fit diagram
         let mut viewport = if self.config.auto_fit {
@@ -413,6 +416,20 @@ impl Canvas2dRenderer {
             };
         }
 
+        if let Some(treemap) = &treemap {
+            let labels_drawn = self.draw_treemap(treemap, ctx, offset_x, offset_y);
+            ctx.restore();
+            return CanvasRenderResult {
+                draw_calls: self.draw_calls,
+                nodes_drawn: treemap.tiles.len(),
+                edges_drawn: 0,
+                clusters_drawn: 0,
+                labels_drawn,
+                viewport,
+                hit_regions: crate::interaction::hit_regions(ir, layout),
+            };
+        }
+
         // XY marks are data, not labelled graph nodes. The generic path loses the numeric
         // scale and axis titles, paints every series alike, and never fills area series.
         if let Some(meta) = ir.xy_chart_meta.as_ref()
@@ -461,10 +478,7 @@ impl Canvas2dRenderer {
                 }
             }
         }
-        // Treemap tiles and the radar wheel (bd-dw450): both families keep their whole
-        // diagram in a layout extension only fm-render-svg read, so the canvas drew nothing
-        // at all for them. Both calls return immediately for every other diagram type.
-        self.draw_treemap(ir, layout, ctx, offset_x, offset_y);
+        // Radar uses the same measured wheel, legend and captions as the shared scene.
         labels_drawn += self.draw_radar(radar.as_ref(), ctx, offset_x, offset_y);
         if ir.diagram_type == DiagramType::Info {
             self.draw_info_version(ctx, offset_x, offset_y, &mut labels_drawn);
@@ -1400,72 +1414,19 @@ impl Canvas2dRenderer {
     }
 }
 
-/// Render a treemap value for a canvas caption: no trailing zeros on a whole number.
-///
-/// Deliberately the same rule the SVG and terminal surfaces apply, so the three never disagree
-/// about what a value IS — a `30` on one surface and `30.0` on another reads as two numbers.
-fn format_canvas_treemap_value(value: f64) -> String {
-    if (value - value.round()).abs() < 1e-9 {
-        format!("{}", value.round() as i64)
-    } else {
-        let text = format!("{value:.4}");
-        text.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
 impl Canvas2dRenderer {
-    /// Draw `treemap` tiles: a nested outline per tile with its label and value (bd-dw450).
-    ///
-    /// Outlines rather than fills, because a treemap nests: filling a section would bury every
-    /// child it contains under its own parent. The SVG surface can layer translucent fills to say
-    /// the same thing; here the outline carries it unambiguously.
+    /// Draw every tile's color, measured caption and value, retaining overflow in details.
     fn draw_treemap<C: Canvas2dContext>(
         &mut self,
-        ir: &MermaidDiagramIr,
-        layout: &DiagramLayout,
+        chart: &fm_layout::TreemapChartLayout,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
-    ) {
-        let Some(meta) = ir.treemap_meta.as_ref() else {
-            return;
-        };
-        if layout.extensions.treemap_tiles.is_empty() {
-            return;
-        }
-        let label_font = format!("{}px {}", self.config.font_size, self.config.font_family);
-        for tile in &layout.extensions.treemap_tiles {
-            let Some(item) = meta.nodes.get(tile.node) else {
-                continue;
-            };
-            let x = f64::from(tile.bounds.x) + offset_x;
-            let y = f64::from(tile.bounds.y) + offset_y;
-            let w = f64::from(tile.bounds.width);
-            let h = f64::from(tile.bounds.height);
-            if w <= 0.0 || h <= 0.0 {
-                continue;
-            }
-            ctx.set_stroke_style(&self.config.node_stroke);
-            ctx.set_line_width(1.0);
-            ctx.stroke_rect(x, y, w, h);
-            self.draw_calls += 1;
-
-            let caption = format!("{} {}", item.label, format_canvas_treemap_value(tile.value));
-            ctx.set_font(&label_font);
-            ctx.set_fill_style(&self.config.label_color);
-            // A leaf is captioned at its centre; a section just inside its top edge, where a
-            // container has room that its middle does not.
-            if tile.is_leaf {
-                ctx.set_text_align(TextAlign::Center);
-                ctx.set_text_baseline(TextBaseline::Middle);
-                ctx.fill_text(&caption, x + w / 2.0, y + h / 2.0);
-            } else {
-                ctx.set_text_align(TextAlign::Left);
-                ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(&caption, x + 4.0, y + 2.0);
-            }
-            self.draw_calls += 1;
-        }
+    ) -> usize {
+        let scene = chart.to_scene(&self.config.label_color, &self.config.node_stroke);
+        let mut stats = SceneRenderStats::default();
+        self.render_group(&scene.root, ctx, offset_x, offset_y, &mut stats);
+        stats.labels_drawn
     }
 
     /// Consume the shared wheel, measured captions and series legend in layout coordinates.

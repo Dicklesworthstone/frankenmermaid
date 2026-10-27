@@ -15,6 +15,331 @@ const DIAGRAM: &str = "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n 
 
 const RADAR: &str = "radar-beta\n  axis a[\"Reliability\"], b[\"Scale\"], c[\"Coverage\"]\n  curve current[\"Current platform\"]{1,2,3}\n  curve target[\"Target platform\"]{3,3,3}\n";
 
+fn treemap_gpu_rows(plan: &GpuRenderPlan) -> Vec<(fm_render_canvas::GpuTextSource, u32, String)> {
+    plan.text_runs
+        .iter()
+        .map(|run| {
+            let text = plan.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+                .iter()
+                .map(|quad| {
+                    plan.glyph_atlas
+                        .cells
+                        .iter()
+                        .find(|cell| {
+                            cell.uv_min[0] <= quad.uv_min[0] + 1e-6
+                                && cell.uv_min[1] <= quad.uv_min[1] + 1e-6
+                                && cell.uv_max[0] >= quad.uv_max[0] - 1e-6
+                                && cell.uv_max[1] >= quad.uv_max[1] - 1e-6
+                        })
+                        .expect("even a clipped glyph must sample its original atlas cell")
+                        .glyph
+                })
+                .collect();
+            (run.source, run.node_index, text)
+        })
+        .collect()
+}
+
+#[test]
+fn treemap_canvas_scene_and_gpu_keep_hierarchy_colors_labels_and_deep_totals() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation, GpuTextSource};
+    let source = "treemap\n\"Root\"\n    \"Group one\"\n        \"Alpha\": 10\n        \"Beta\": 20\n    \"Group two\"\n        \"Gamma\": 30\n";
+    let ir = fm_parser::parse(source).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let config = CanvasRenderConfig {
+        auto_fit: false,
+        padding: 0.0,
+        ..Default::default()
+    };
+    let scene = fm_layout::build_render_scene_with_metrics(&ir, &layout, &config.font_metrics());
+    let mut direct = MockCanvas2dContext::new(1400.0, 900.0);
+    let result = Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut direct);
+    let mut shared = MockCanvas2dContext::new(1400.0, 900.0);
+    Canvas2dRenderer::new(config.clone()).render_scene(&scene, &mut shared);
+    let painted_rows = |context: &MockCanvas2dContext| {
+        context
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                if let DrawOperation::FillText(text, x, y) = operation {
+                    Some((text.clone(), *x, *y))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(painted_rows(&direct), painted_rows(&shared));
+    assert_eq!(result.labels_drawn, 12);
+    assert_eq!(result.nodes_drawn, 6);
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    assert_eq!(plan.treemap_tile_instances.len(), 6);
+    assert!(plan.node_instances.is_empty());
+    assert!(plan.edge_segments.is_empty());
+    let rows = treemap_gpu_rows(&plan);
+    for (node, label, value) in [
+        (0, "Root", "60"),
+        (1, "Group one", "30"),
+        (2, "Alpha", "10"),
+        (3, "Beta", "20"),
+        (4, "Group two", "30"),
+        (5, "Gamma", "30"),
+    ] {
+        assert_eq!(
+            rows.iter()
+                .filter(
+                    |(source, index, _)| *source == GpuTextSource::TreemapLabel && *index == node
+                )
+                .map(|(_, _, text)| text.as_str())
+                .collect::<String>(),
+            label
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(
+                    |(source, index, _)| *source == GpuTextSource::TreemapValue && *index == node
+                )
+                .map(|(_, _, text)| text.as_str())
+                .collect::<String>(),
+            value
+        );
+    }
+    let meta = ir.treemap_meta.as_ref().unwrap();
+    for (instance, original) in plan
+        .treemap_tile_instances
+        .iter()
+        .zip(&layout.extensions.treemap_tiles)
+    {
+        assert_eq!(instance.node_index as usize, original.node);
+        assert_eq!(
+            instance.center,
+            [
+                original.bounds.x + original.bounds.width * 0.5,
+                original.bounds.y + original.bounds.height * 0.5
+            ]
+        );
+        assert_eq!(
+            instance.half_extent,
+            [original.bounds.width * 0.5, original.bounds.height * 0.5]
+        );
+        assert!(
+            instance.fill[3] > 0.0,
+            "the GPU must paint the grouping color"
+        );
+        if original.is_leaf {
+            let parent = meta.nodes[original.node].parent.unwrap();
+            let section = plan
+                .treemap_tile_instances
+                .iter()
+                .find(|tile| tile.node_index as usize == parent)
+                .unwrap();
+            assert_eq!(instance.fill[..3], section.fill[..3]);
+        }
+    }
+}
+
+#[test]
+fn treemap_gpu_retains_requested_paints_opacity_fonts_and_tile_clipping() {
+    use fm_render_canvas::{GpuTextSource, parse_paint_rgba};
+    let source = "treemap\n\"Root\"\n    \"Alpha\": 10:::hot\n    \"Beta\": 20:::invisible\nclassDef hot fill:#123456,stroke:#abcdef,stroke-width:3px,opacity:0.5,fill-opacity:0.8,stroke-opacity:0.6,color:#654321,font-size:24px\nclassDef invisible fill:none,stroke:none\n";
+    let ir = fm_parser::parse(source).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let config = CanvasRenderConfig::default();
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let alpha = plan
+        .treemap_tile_instances
+        .iter()
+        .find(|tile| tile.node_index == 1)
+        .unwrap();
+    let mut fill = parse_paint_rgba("#123456").unwrap();
+    fill[3] = 0.4;
+    let mut stroke = parse_paint_rgba("#abcdef").unwrap();
+    stroke[3] = 0.3;
+    assert_eq!(alpha.fill, fill);
+    assert_eq!(alpha.stroke, stroke);
+    assert_eq!(alpha.stroke_width, 3.0);
+    let invisible = plan
+        .treemap_tile_instances
+        .iter()
+        .find(|tile| tile.node_index == 2)
+        .unwrap();
+    assert_eq!(invisible.fill[3], 0.0);
+    assert_eq!(invisible.stroke[3], 0.0);
+    let rows = treemap_gpu_rows(&plan);
+    assert!(rows.contains(&(GpuTextSource::TreemapLabel, 1, "Alpha".to_owned())));
+    assert!(rows.contains(&(GpuTextSource::TreemapValue, 1, "10".to_owned())));
+    let tile = layout
+        .extensions
+        .treemap_tiles
+        .iter()
+        .find(|tile| tile.node == 1)
+        .unwrap();
+    let mut text_color = parse_paint_rgba("#654321").unwrap();
+    text_color[3] = 0.5;
+    for run in plan.text_runs.iter().filter(|run| run.node_index == 1) {
+        for quad in
+            &plan.text_quads[run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+        {
+            assert_eq!(quad.color, text_color);
+            assert_eq!(quad.half_extent[1], 12.0);
+            assert!(quad.center[0] - quad.half_extent[0] >= tile.bounds.x - 1e-4);
+            assert!(
+                quad.center[0] + quad.half_extent[0] <= tile.bounds.x + tile.bounds.width + 1e-4
+            );
+            assert!(quad.center[1] - quad.half_extent[1] >= tile.bounds.y - 1e-4);
+            assert!(
+                quad.center[1] + quad.half_extent[1] <= tile.bounds.y + tile.bounds.height + 1e-4
+            );
+        }
+    }
+}
+
+#[test]
+fn treemap_tiny_and_zero_entries_keep_full_text_values_and_title_outside_tile_area() {
+    use fm_render_canvas::{Canvas2dRenderer, DrawOperation, GpuTextSource};
+    let source = "treemap\ntitle Capacity\n\"Root\"\n    \"Tiny  区域  👩‍💻  café\": 0.00001\n    \"Large\": 100000\n    \"Zero\": 0\n";
+    let ir = fm_parser::parse(source).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let original = layout.extensions.treemap_tiles.clone();
+    let config = CanvasRenderConfig {
+        font_size: 24.0,
+        ..Default::default()
+    };
+    let chart = fm_layout::TreemapChartLayout::new(&ir, &layout, &config.font_metrics());
+    assert!(chart.details.iter().any(|detail| detail.node == 1));
+    assert!(chart.details.iter().any(|detail| detail.node == 3));
+    let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+    let rows = treemap_gpu_rows(&plan);
+    let details = rows
+        .iter()
+        .filter(|(source, node, _)| *source == GpuTextSource::TreemapDetail && *node == 1)
+        .map(|(_, _, text)| text.as_str())
+        .collect::<String>();
+    assert!(
+        details.contains("Root / Tiny  区域  👩‍💻  café"),
+        "{details:?}"
+    );
+    assert!(rows.contains(&(GpuTextSource::TreemapValue, 1, "0.00001".to_owned())));
+    assert!(rows.contains(&(GpuTextSource::TreemapValue, 3, "0".to_owned())));
+    assert_eq!(
+        rows.iter()
+            .filter(|(source, _, _)| *source == GpuTextSource::DiagramTitle)
+            .count(),
+        1
+    );
+    assert!(rows.contains(&(GpuTextSource::DiagramTitle, 0, "Capacity".to_owned())));
+    assert!(plan.bounds.width > layout.bounds.width);
+    let mut canvas = MockCanvas2dContext::new(1800.0, 1000.0);
+    let result = Canvas2dRenderer::new(config.clone()).render(&layout, &ir, &mut canvas);
+    let texts: Vec<_> = canvas
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            if let DrawOperation::FillText(text, _, _) = operation {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(texts.iter().filter(|text| **text == "Capacity").count(), 1);
+    assert!(texts.contains(&"0.00001"));
+    assert!(texts.concat().contains("Tiny  区域  👩‍💻  café"));
+    assert_eq!(result.labels_drawn, texts.len());
+    assert_eq!(layout.extensions.treemap_tiles, original);
+    assert_eq!(
+        plan,
+        GpuRenderPlan::from_layout_with_config(&ir, &layout, &config)
+    );
+    for quad in &plan.text_quads {
+        for value in quad.center.into_iter().chain(quad.half_extent) {
+            assert!(value.is_finite());
+        }
+        assert!(quad.center[0] - quad.half_extent[0] >= plan.bounds.x - 1e-4);
+        assert!(quad.center[1] - quad.half_extent[1] >= plan.bounds.y - 1e-4);
+        assert!(quad.center[0] + quad.half_extent[0] <= plan.bounds.x + plan.bounds.width + 1e-4);
+        assert!(quad.center[1] + quad.half_extent[1] <= plan.bounds.y + plan.bounds.height + 1e-4);
+    }
+}
+
+#[test]
+fn treemap_authored_courier_and_wide_fallback_glyphs_retain_every_character() {
+    use fm_render_canvas::GpuTextSource;
+    let label = "W".repeat(24);
+    let source = format!(
+        "treemap\n\"Root\"\n    \"{label}\": 10:::mono\nclassDef mono font-family:Courier New,font-size:28px\n"
+    );
+    let ir = fm_parser::parse(&source).ir;
+    for width in [180.0, 320.0, 640.0] {
+        let mut layout = fm_layout::layout_diagram(&ir);
+        let leaf = layout
+            .extensions
+            .treemap_tiles
+            .iter_mut()
+            .find(|tile| tile.node == 1)
+            .unwrap();
+        leaf.bounds.width = width;
+        leaf.bounds.height = 180.0;
+        let config = CanvasRenderConfig {
+            font_family: "Arial, sans-serif".to_owned(),
+            ..Default::default()
+        };
+        let chart = fm_layout::TreemapChartLayout::new(&ir, &layout, &config.font_metrics());
+        let plan = GpuRenderPlan::from_layout_with_config(&ir, &layout, &config);
+        let rows = treemap_gpu_rows(&plan);
+        let caption = rows
+            .iter()
+            .filter(|(source, node, _)| {
+                *node == 1
+                    && matches!(
+                        source,
+                        GpuTextSource::TreemapLabel | GpuTextSource::TreemapDetail
+                    )
+            })
+            .map(|(_, _, text)| text.as_str())
+            .collect::<String>();
+        assert!(
+            caption.contains(&label),
+            "width {width} lost glyphs: {caption:?}"
+        );
+        let block = chart
+            .text
+            .iter()
+            .find(|block| {
+                matches!(
+                    block.role,
+                    fm_layout::TreemapTextRole::Label(1)
+                        | fm_layout::TreemapTextRole::DetailPath(1)
+                )
+            })
+            .unwrap();
+        for run in plan.text_runs.iter().filter(|run| {
+            run.node_index == 1
+                && matches!(
+                    run.source,
+                    GpuTextSource::TreemapLabel | GpuTextSource::TreemapDetail
+                )
+        }) {
+            for quad in &plan.text_quads
+                [run.first_quad as usize..(run.first_quad + run.quad_count) as usize]
+            {
+                if let Some(clip) = block.clip {
+                    assert!(quad.center[0] - quad.half_extent[0] >= clip.x - 1e-4);
+                    assert!(quad.center[0] + quad.half_extent[0] <= clip.x + clip.width + 1e-4);
+                    assert!(quad.center[1] - quad.half_extent[1] >= clip.y - 1e-4);
+                    assert!(quad.center[1] + quad.half_extent[1] <= clip.y + clip.height + 1e-4);
+                } else {
+                    assert!(
+                        quad.center[0] + quad.half_extent[0]
+                            <= plan.bounds.x + plan.bounds.width + 1e-4
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn radar_gpu_rows(plan: &GpuRenderPlan) -> Vec<String> {
     plan.text_runs
         .iter()

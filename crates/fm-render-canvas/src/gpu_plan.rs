@@ -981,6 +981,54 @@ impl TextSink<'_> {
         }
     }
 
+    /// Crop only the row just emitted, preserving texture scale by interpolating its UVs.
+    /// Tile captions already fit measured bounds; this catches raster-cell overhang without
+    /// allowing a neighboring quantitative tile to receive another tile's glyph pixels.
+    fn clip_last_row(&mut self, first_quad: usize, clip: LayoutRect) {
+        if first_quad == self.quads.len() {
+            return;
+        }
+        let mut next = first_quad;
+        for index in first_quad..self.quads.len() {
+            let mut quad = self.quads[index];
+            let left = quad.center[0] - quad.half_extent[0];
+            let top = quad.center[1] - quad.half_extent[1];
+            let right = quad.center[0] + quad.half_extent[0];
+            let bottom = quad.center[1] + quad.half_extent[1];
+            let clipped_left = left.max(clip.x);
+            let clipped_top = top.max(clip.y);
+            let clipped_right = right.min(clip.x + clip.width);
+            let clipped_bottom = bottom.min(clip.y + clip.height);
+            if clipped_right <= clipped_left || clipped_bottom <= clipped_top {
+                continue;
+            }
+            if clipped_left != left || clipped_right != right {
+                let span = quad.uv_max[0] - quad.uv_min[0];
+                let origin = quad.uv_min[0];
+                quad.uv_min[0] = origin + span * (clipped_left - left) / (right - left);
+                quad.uv_max[0] = origin + span * (clipped_right - left) / (right - left);
+                quad.center[0] = (clipped_left + clipped_right) * 0.5;
+                quad.half_extent[0] = (clipped_right - clipped_left) * 0.5;
+            }
+            if clipped_top != top || clipped_bottom != bottom {
+                let span = quad.uv_max[1] - quad.uv_min[1];
+                let origin = quad.uv_min[1];
+                quad.uv_min[1] = origin + span * (clipped_top - top) / (bottom - top);
+                quad.uv_max[1] = origin + span * (clipped_bottom - top) / (bottom - top);
+                quad.center[1] = (clipped_top + clipped_bottom) * 0.5;
+                quad.half_extent[1] = (clipped_bottom - clipped_top) * 0.5;
+            }
+            self.quads[next] = quad;
+            next += 1;
+        }
+        self.quads.truncate(next);
+        if next == first_quad {
+            self.runs.pop();
+        } else if let Some(run) = self.runs.last_mut() {
+            run.quad_count = u32::try_from(next - first_quad).unwrap_or(u32::MAX);
+        }
+    }
+
     /// Emit source lines at a top-left text inset, matching state-note rendering.
     #[allow(clippy::too_many_arguments)]
     fn push_left_multiline(
@@ -1243,6 +1291,13 @@ pub enum GpuTextSource {
     /// An authored radar axis or series legend; indexes the corresponding radar metadata.
     RadarAxis,
     RadarLegend,
+    /// Treemap captions and quantities, indexed in `IrTreemapMeta::nodes`.
+    TreemapLabel,
+    TreemapValue,
+    /// Full ancestry for a caption moved into the external details column.
+    TreemapDetail,
+    /// Reference number inside a tile whose complete caption is in the details column.
+    TreemapReference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1312,10 +1367,8 @@ pub struct GpuRenderPlan {
     pub band_lane_segments: Vec<GpuEdgeSegment>,
     pub band_section_instances: Vec<GpuNodeInstance>,
     pub band_column_segments: Vec<GpuEdgeSegment>,
-    /// One rect instance per `treemap` tile (bd-dw450).
-    ///
-    /// Outlines, not fills: a treemap nests, so a filled section would bury every child inside it.
-    /// The instance carries a transparent fill and a visible stroke to say that on the GPU path.
+    /// Colored treemap tiles in parent-before-child order, followed by overflow-detail swatches.
+    /// `node_index` refers to the treemap metadata arena for both kinds of rectangle.
     pub treemap_tile_instances: Vec<GpuNodeInstance>,
     /// Graticule rings, spokes and series outlines of a `radar-beta` wheel, as line segments
     /// (bd-dw450). Rings are sampled polylines — the segment pipeline has no arc primitive.
@@ -1522,26 +1575,47 @@ impl GpuRenderPlan {
         // emitted beside the routed edges below as segments instead.
         let mut er_marker_segments = Vec::new();
 
-        // TREEMAP tiles and the RADAR wheel (bd-dw450). Both families keep their whole diagram in
-        // a layout extension that only fm-render-svg read, so the GPU plan emitted nothing for them
-        // and a `treemap` or `radar-beta` document reached the WebGPU surface as an empty scene.
+        let treemap_chart = (ir.diagram_type == fm_core::DiagramType::Treemap
+            && ir.treemap_meta.is_some())
+        .then(|| fm_layout::TreemapChartLayout::new(ir, layout, &metrics));
         let mut treemap_tile_instances = Vec::new();
-        for (tile_index, tile) in layout.extensions.treemap_tiles.iter().enumerate() {
-            if tile.bounds.width <= 0.0 || tile.bounds.height <= 0.0 {
-                continue;
+        if let Some(chart) = &treemap_chart {
+            for tile in &chart.tiles {
+                let mut fill = parse_paint_rgba(&tile.fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                fill[3] *= tile.fill_opacity;
+                let mut stroke =
+                    parse_paint_rgba(tile.stroke.as_deref().unwrap_or(&config.node_stroke))
+                        .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                stroke[3] *= tile.stroke_opacity;
+                treemap_tile_instances.push(GpuNodeInstance {
+                    center: [
+                        tile.bounds.x + tile.bounds.width * 0.5,
+                        tile.bounds.y + tile.bounds.height * 0.5,
+                    ],
+                    half_extent: [tile.bounds.width * 0.5, tile.bounds.height * 0.5],
+                    fill,
+                    stroke,
+                    stroke_width: tile.stroke_width,
+                    shape: GpuNodeShape::Rect as u32,
+                    node_index: u32::try_from(tile.node).unwrap_or(u32::MAX),
+                });
             }
-            treemap_tile_instances.push(GpuNodeInstance {
-                center: [
-                    tile.bounds.x + (tile.bounds.width * 0.5),
-                    tile.bounds.y + (tile.bounds.height * 0.5),
-                ],
-                half_extent: [tile.bounds.width * 0.5, tile.bounds.height * 0.5],
-                fill: [0.0, 0.0, 0.0, 0.0],
-                stroke: DEFAULT_NODE_STROKE_RGBA,
-                stroke_width: BAND_STROKE_WIDTH,
-                shape: GpuNodeShape::Rect as u32,
-                node_index: u32::try_from(tile_index).unwrap_or(u32::MAX),
-            });
+            for detail in &chart.details {
+                let mut fill = parse_paint_rgba(&detail.fill).unwrap_or(DEFAULT_NODE_FILL_RGBA);
+                fill[3] *= detail.opacity;
+                treemap_tile_instances.push(GpuNodeInstance {
+                    center: [
+                        detail.swatch.x + detail.swatch.width * 0.5,
+                        detail.swatch.y + detail.swatch.height * 0.5,
+                    ],
+                    half_extent: [detail.swatch.width * 0.5, detail.swatch.height * 0.5],
+                    fill,
+                    stroke: [0.0; 4],
+                    stroke_width: 0.0,
+                    shape: GpuNodeShape::Rect as u32,
+                    node_index: u32::try_from(detail.node).unwrap_or(u32::MAX),
+                });
+            }
         }
 
         let radar_chart = ir
@@ -1585,15 +1659,18 @@ impl GpuRenderPlan {
                     let mut color =
                         parse_paint_rgba(&stroke.color).unwrap_or(DEFAULT_NODE_STROKE_RGBA);
                     color[3] *= stroke.opacity;
-                    radar_segments.extend(segments.iter().map(|(from, to)| {
-                        xy_segment(
-                            [from.x, from.y],
-                            [to.x, to.y],
-                            color,
-                            stroke.width,
-                            [0.0, 0.0],
-                        )
-                    }));
+                    // Closed cubics already end at their start; omit zero-length strokes.
+                    radar_segments.extend(segments.iter().filter(|(from, to)| from != to).map(
+                        |(from, to)| {
+                            xy_segment(
+                                [from.x, from.y],
+                                [to.x, to.y],
+                                color,
+                                stroke.width,
+                                [0.0, 0.0],
+                            )
+                        },
+                    ));
                 }
                 if let Some(fm_layout::FillStyle::Solid { color, opacity }) = &path.fill {
                     let mut color = parse_paint_rgba(color).unwrap_or(DEFAULT_NODE_FILL_RGBA);
@@ -2684,6 +2761,11 @@ impl GpuRenderPlan {
                     .iter()
                     .flat_map(|chart| chart.text.iter().map(|block| block.font_size)),
             )
+            .chain(
+                treemap_chart
+                    .iter()
+                    .flat_map(|chart| chart.text.iter().map(|block| block.font_size)),
+            )
             .fold(font_px, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
@@ -2832,7 +2914,8 @@ impl GpuRenderPlan {
                     .chain(pie_text_blocks.iter().flat_map(|(block, _, _)| {
                         block.lines.iter().map(String::as_str)
                     }))
-                    .chain(radar_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str)))),
+                    .chain(radar_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str))))
+                    .chain(treemap_chart.iter().flat_map(|chart| chart.text.iter().flat_map(|block| block.lines.iter().map(String::as_str)))),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -3371,8 +3454,51 @@ impl GpuRenderPlan {
             }
         }
 
-        let mut bounds = radar_chart.as_ref().map_or_else(
-            || {
+        if let Some(chart) = &treemap_chart {
+            for block in &chart.text {
+                let (source, index) = match block.role {
+                    fm_layout::TreemapTextRole::Label(node) => (GpuTextSource::TreemapLabel, node),
+                    fm_layout::TreemapTextRole::Value(node) => (GpuTextSource::TreemapValue, node),
+                    fm_layout::TreemapTextRole::DetailPath(node) => {
+                        (GpuTextSource::TreemapDetail, node)
+                    }
+                    fm_layout::TreemapTextRole::Reference(node) => {
+                        (GpuTextSource::TreemapReference, node)
+                    }
+                    fm_layout::TreemapTextRole::Title => (GpuTextSource::DiagramTitle, 0),
+                };
+                let align = match block.align {
+                    fm_layout::TextAlign::Start => crate::TextAlign::Left,
+                    fm_layout::TextAlign::Middle => crate::TextAlign::Center,
+                    fm_layout::TextAlign::End => crate::TextAlign::Right,
+                };
+                let mut color =
+                    parse_paint_rgba(block.color.as_deref().unwrap_or(&config.label_color))
+                        .unwrap_or(DEFAULT_LABEL_RGBA);
+                color[3] *= block.opacity;
+                for (text, point) in block.rows() {
+                    let first_quad = sink.quads.len();
+                    sink.push_line(
+                        text,
+                        (point.x, point.y),
+                        block.font_size,
+                        color,
+                        source,
+                        index,
+                        align,
+                    );
+                    if let Some(clip) = block.clip {
+                        sink.clip_last_row(first_quad, clip);
+                    }
+                }
+            }
+        }
+
+        let mut bounds = treemap_chart
+            .as_ref()
+            .map(|chart| chart.bounds)
+            .or_else(|| radar_chart.as_ref().map(|chart| chart.bounds))
+            .unwrap_or_else(|| {
                 pie_layout.as_ref().map_or_else(
                     || {
                         graph_label_placer
@@ -3381,9 +3507,7 @@ impl GpuRenderPlan {
                     },
                     |pie| pie.bounds,
                 )
-            },
-            |radar| radar.bounds,
-        );
+            });
         if !graph_label_plates.is_empty() {
             edge_segments = clip_segments_around_labels(&edge_segments, &graph_label_plates);
         }

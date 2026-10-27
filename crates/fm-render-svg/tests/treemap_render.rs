@@ -268,3 +268,267 @@ fn a_whole_value_displays_as_an_integer() {
     assert!(svg.contains(">30</text>"), "the section sum is not '30'");
     assert!(!svg.contains(">30.0<"), "the section sum gained a decimal");
 }
+
+#[test]
+fn tiny_and_large_treemap_values_survive_both_svg_backends() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig};
+
+    for value in ["0.00001", "100000000000000000000"] {
+        let ir = fm_parser::parse(&format!("treemap\n\"Root\"\n    \"Capacity\": {value}\n")).ir;
+        for backend in [SvgBackend::LegacyLayout, SvgBackend::Scene] {
+            let svg = fm_render_svg::render_svg_with_config(
+                &ir,
+                &SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                svg.matches(&format!(">{value}</text>")).count(),
+                2,
+                "both the leaf and its section must retain {value} in {backend:?}"
+            );
+            assert!(
+                !svg.contains(">0</text>"),
+                "a positive quantity became zero"
+            );
+            assert!(
+                !svg.contains(">9223372036854775807</text>"),
+                "a large quantity saturated at the signed-integer limit"
+            );
+        }
+    }
+}
+
+fn scene_rows(svg: &str) -> Vec<(&str, &str)> {
+    svg.split("<text")
+        .skip(1)
+        .map(|element| {
+            let (tag, body) = element.split_once('>').expect("text opening tag");
+            let (text, _) = body.split_once("</text>").expect("text closing tag");
+            (tag, text)
+        })
+        .collect()
+}
+
+fn scene_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split_once(&format!(" {name}=\""))?.1.split('"').next()
+}
+
+fn scene_group<'a>(svg: &'a str, id: &str) -> &'a str {
+    let marker = format!("id=\"{id}\"");
+    svg.split("<g")
+        .skip(1)
+        .find(|group| group.split('>').next().unwrap_or("").contains(&marker))
+        .expect("the chart must retain the requested group")
+        .split("</g>")
+        .next()
+        .unwrap()
+}
+
+fn scene_node_rows(svg: &str, node: usize) -> Vec<(&str, &str)> {
+    let marker = format!("id=\"treemap-text-{node}-");
+    svg.split("<g")
+        .skip(1)
+        .filter(|group| group.split('>').next().unwrap_or("").contains(&marker))
+        .flat_map(|group| scene_rows(group.split("</g>").next().unwrap()))
+        .collect()
+}
+
+#[test]
+fn treemap_scene_keeps_hierarchy_values_theme_and_one_visible_title() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig, ThemeColors, ThemePreset};
+
+    let mut ir = fm_parser::parse(NESTED).ir;
+    ir.meta.title = Some("Capacity plan".to_owned());
+    let layout = fm_layout::layout_diagram(&ir);
+    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            theme,
+            ..Default::default()
+        };
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+        let rows = scene_rows(&svg);
+        for name in ["R", "G1", "a", "b", "G2", "c", "Capacity plan"] {
+            assert!(rows.iter().any(|(_, text)| *text == name), "missing {name}");
+        }
+        assert_eq!(rows.iter().filter(|(_, text)| *text == "60").count(), 1);
+        assert_eq!(rows.iter().filter(|(_, text)| *text == "30").count(), 3);
+        assert_eq!(rows.iter().filter(|(_, text)| *text == "20").count(), 1);
+        assert_eq!(rows.iter().filter(|(_, text)| *text == "10").count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|(_, text)| *text == "Capacity plan")
+                .count(),
+            1,
+            "the document title must not duplicate the measured title"
+        );
+        assert_eq!(svg.matches("id=\"treemap-tile-").count(), 6);
+        let root = scene_group(&svg, "treemap-chart")
+            .split('>')
+            .next()
+            .unwrap();
+        assert_eq!(scene_attribute(root, "xml:space"), Some("preserve"));
+        let colors = ThemeColors::from_preset(theme);
+        for (tag, _) in &rows {
+            assert_eq!(scene_attribute(tag, "fill"), Some(colors.text.as_str()));
+        }
+        assert!(!svg.contains("data-fm-source-kind=\"node\""));
+        assert!(!svg.contains("data-fm-source-kind=\"edge\""));
+    }
+}
+
+#[test]
+fn treemap_scene_retains_tiny_and_zero_entries_in_readable_bounded_details() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig};
+
+    let tiny = "Tiny  東京 service with complete regional coverage";
+    let zero = "Zero  capacity";
+    let source = format!(
+        "treemap\n\"Root\"\n    \"Dominant\": 1000000\n    \"{tiny}\": 0.000001\n    \"{zero}\": 0\n"
+    );
+    let parsed = fm_parser::parse(&source);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let mut ir = parsed.ir;
+    ir.meta.title = Some("Measured inventory".to_owned());
+    let layout = fm_layout::layout_diagram(&ir);
+    let original_tiles = layout.extensions.treemap_tiles.clone();
+    let meta = ir.treemap_meta.as_ref().unwrap();
+    for font_size in [15.0, 36.0] {
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            font_size,
+            font_family: "monospace".to_owned(),
+            ..Default::default()
+        };
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+        let rows = scene_rows(&svg);
+        let complete: String = rows.iter().map(|(_, text)| *text).collect();
+        assert!(complete.contains(&format!("Root / {tiny}")));
+        assert!(complete.contains(&format!("Root / {zero}")));
+        assert!(rows.iter().any(|(_, text)| *text == "0.000001"));
+        assert!(rows.iter().any(|(_, text)| *text == "0"));
+        assert!(!complete.contains('…'));
+        assert_eq!(
+            rows.iter()
+                .filter(|(_, text)| *text == "Measured inventory")
+                .count(),
+            1
+        );
+        for name in [tiny, zero] {
+            let node = meta
+                .nodes
+                .iter()
+                .position(|node| node.label == name)
+                .unwrap();
+            let details = scene_node_rows(&svg, node);
+            assert!(
+                details.iter().any(|(tag, _)| {
+                    scene_attribute(tag, "x").unwrap().parse::<f32>().unwrap()
+                        > layout.bounds.x + layout.bounds.width
+                }),
+                "{name} must remain readable outside its quantitative tile"
+            );
+        }
+        let root_tag = svg.split("<svg").nth(1).unwrap().split('>').next().unwrap();
+        let viewbox: Vec<f32> = scene_attribute(root_tag, "viewBox")
+            .unwrap()
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(viewbox.len(), 4);
+        assert!(viewbox.iter().all(|value| value.is_finite()));
+        assert!(viewbox[2] > 0.0 && viewbox[3] > 0.0);
+        let metrics = config.font_metrics();
+        for (tag, text) in rows {
+            let number = |name| scene_attribute(tag, name).unwrap().parse::<f32>().unwrap();
+            let x = number("x");
+            let y = number("y");
+            let size = number("font-size");
+            let width = metrics.estimate_preserved_width(text, size, metrics.avg_char_width());
+            let left = match scene_attribute(tag, "text-anchor") {
+                Some("middle") => x - width * 0.5,
+                Some("end") => x - width,
+                _ => x,
+            };
+            assert!(left >= viewbox[0] - 0.01, "text escapes left: {text}");
+            assert!(
+                left + width <= viewbox[0] + viewbox[2] + 0.01,
+                "text escapes right: {text}"
+            );
+            assert!(
+                y - size * 0.5 >= viewbox[1] - 0.01,
+                "text escapes top: {text}"
+            );
+            assert!(
+                y + size * 0.5 <= viewbox[1] + viewbox[3] + 0.01,
+                "text escapes bottom: {text}"
+            );
+        }
+        assert_eq!(layout.extensions.treemap_tiles, original_tiles);
+    }
+}
+
+#[test]
+fn treemap_scene_applies_author_typography_and_alpha_exactly_once() {
+    use fm_render_svg::{SvgBackend, SvgRenderConfig};
+
+    let source = "treemap\n\"Root\"\n    \"Priority\": 10:::hot\n    \"Other\": 20\nclassDef default font-family:serif,font-weight:400\nclassDef hot fill:#112233,fill-opacity:0.8,stroke:#aabbcc,stroke-opacity:0.5,stroke-width:2px,color:#fedcba,opacity:0.5,font-size:22px,font-family:monospace,font-weight:700,font-style:italic\n";
+    let parsed = fm_parser::parse(source);
+    assert!(
+        parsed.warnings.iter().all(|warning| warning == "style directives (classDef/style/linkStyle) are applied by the SVG and canvas renderers; terminal output has no colour channel and uses theme defaults"),
+        "{:?}",
+        parsed.warnings
+    );
+    let ir = parsed.ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let node = ir
+        .treemap_meta
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .position(|node| node.label == "Priority")
+        .unwrap();
+    let number =
+        |tag: &str, name: &str| scene_attribute(tag, name).unwrap().parse::<f64>().unwrap();
+    for embed_theme_css in [false, true] {
+        let config = SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            embed_theme_css,
+            ..Default::default()
+        };
+        let svg = fm_render_svg::render_svg_with_layout(&ir, &layout, &config);
+        let group = scene_group(&svg, &format!("treemap-tile-{node}"));
+        let opening = group.split('>').next().unwrap();
+        assert_eq!(scene_attribute(opening, "opacity"), None);
+        let path = group
+            .split("<path")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert_eq!(scene_attribute(path, "fill"), Some("#112233"));
+        assert_eq!(scene_attribute(path, "stroke"), Some("#aabbcc"));
+        assert_eq!(number(path, "stroke-width"), 2.0);
+        assert!((number(path, "fill-opacity") - 0.4).abs() < 1e-6);
+        assert!((number(path, "stroke-opacity") - 0.25).abs() < 1e-6);
+        assert_eq!(scene_attribute(path, "opacity"), None);
+        let rows = scene_node_rows(&svg, node);
+        assert_eq!(
+            rows.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
+            ["Priority", "10"]
+        );
+        for (tag, _) in rows {
+            assert_eq!(number(tag, "font-size"), 22.0);
+            assert_eq!(scene_attribute(tag, "font-family"), Some("monospace"));
+            assert_eq!(scene_attribute(tag, "font-weight"), Some("700"));
+            assert_eq!(scene_attribute(tag, "font-style"), Some("italic"));
+            assert_eq!(scene_attribute(tag, "fill"), Some("#fedcba"));
+            assert!((number(tag, "fill-opacity") - 0.5).abs() < 1e-6);
+            assert_eq!(scene_attribute(tag, "opacity"), None);
+        }
+    }
+}

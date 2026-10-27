@@ -722,6 +722,10 @@ fn render_svg_with_layout_impl_reusing(
                     &config.font_metrics(),
                 )
                 .to_scene(&theme.colors.text, &theme.colors.node_stroke)
+            } else if ir.diagram_type == DiagramType::Treemap && ir.treemap_meta.is_some() {
+                let theme = resolve_theme(Some(ir), config);
+                fm_layout::TreemapChartLayout::new(ir, layout, &config.font_metrics())
+                    .to_scene(&theme.colors.text, &theme.colors.node_stroke)
             } else {
                 build_render_scene_with_metrics(ir, layout, &config.font_metrics())
             };
@@ -2077,7 +2081,7 @@ fn render_scene_document_with_ir(
 ) -> String {
     let padding = config.padding;
     let theme = resolve_theme(ir, config);
-    let planned_title = matches!(scene.root.id.as_deref(), Some("pie-chart" | "radar-chart")) || scene.root.children.iter().any(|item| {
+    let planned_title = matches!(scene.root.id.as_deref(), Some("pie-chart" | "radar-chart" | "treemap-chart")) || scene.root.children.iter().any(|item| {
         matches!(item, RenderItem::Group(group) if matches!(group.id.as_deref(), Some("journey-title" | "xychart-title" | "gantt-title")))
     });
     let visible_title = ir
@@ -2287,7 +2291,7 @@ fn render_scene_group(
 
     if let Some(id) = &group.id {
         elem = elem.id(id);
-        if id == "radar-chart" {
+        if matches!(id.as_str(), "radar-chart" | "treemap-chart") {
             elem = elem.attr("xml:space", "preserve");
         }
         if let Some(ir) = ir
@@ -2338,17 +2342,71 @@ fn render_scene_group(
         elem = elem.clip_path_ref(&format!("url(#{clip_id})"));
     }
 
+    let treemap_typography =
+        ir.and_then(|ir| resolve_treemap_scene_typography(ir, group.id.as_deref()));
     for child in &group.children {
-        elem = elem.child(render_scene_item(
-            child,
-            config,
-            ir,
-            clip_defs,
-            clip_id_counter,
-        ));
+        let mut rendered = render_scene_item(child, config, ir, clip_defs, clip_id_counter);
+        if matches!(child, RenderItem::Text(_))
+            && let Some(typography) = &treemap_typography
+        {
+            // Size, color and opacity already belong to the measured scene. Attach only
+            // typography absent from RenderText, directly on text so standalone exports
+            // override TextBuilder's configured family as well as inherited theme CSS.
+            for (property, value) in typography {
+                rendered = rendered.attr(property.clone(), value.as_str());
+            }
+        }
+        elem = elem.child(rendered);
     }
 
     elem
+}
+
+fn resolve_treemap_scene_typography(
+    ir: &MermaidDiagramIr,
+    group_id: Option<&str>,
+) -> Option<BTreeMap<String, String>> {
+    if ir.diagram_type != DiagramType::Treemap {
+        return None;
+    }
+    let node_index = group_id?
+        .strip_prefix("treemap-text-")?
+        .split_once('-')?
+        .0
+        .parse::<usize>()
+        .ok()?;
+    let node = ir.treemap_meta.as_ref()?.nodes.get(node_index)?;
+    let mut style = BTreeMap::new();
+    for class in std::iter::once("default").chain(node.classes.iter().map(String::as_str)) {
+        if let Some(definition) = ir
+            .style_defs
+            .iter()
+            .find(|definition| definition.name == class)
+        {
+            style.extend(definition.properties.clone());
+        } else {
+            for reference in &ir.style_refs {
+                if matches!(&reference.target, fm_core::IrStyleTarget::Class(name) if name == class)
+                {
+                    style.extend(fm_core::parse_style_string(&reference.style).properties);
+                }
+            }
+        }
+    }
+    let typography: BTreeMap<_, _> = style
+        .into_iter()
+        .filter_map(|(property, value)| {
+            if !matches!(
+                property.as_str(),
+                "font-family" | "font-weight" | "font-style"
+            ) || value.contains(';')
+            {
+                return None;
+            }
+            fm_core::sanitize_style_value(&value).map(|value| (property, value))
+        })
+        .collect();
+    (!typography.is_empty()).then_some(typography)
 }
 
 fn render_scene_item(
@@ -6585,7 +6643,7 @@ fn write_treemap_tiles_into(
         let h = tile.bounds.height;
         let fill =
             TREEMAP_PALETTE[slots.get(&tile.node).copied().unwrap_or(0) % TREEMAP_PALETTE.len()];
-        let value = format_treemap_value(tile.value);
+        let value = fm_layout::format_treemap_value(tile.value);
 
         out.push_str("<g class=\"fm-treemap-tile fm-treemap-");
         out.push_str(if tile.is_leaf { "leaf" } else { "section" });
@@ -6672,19 +6730,6 @@ fn write_treemap_tiles_into(
             );
         }
         out.push_str("</g>");
-    }
-}
-
-/// Render a treemap value the way upstream displays it: no trailing zeros on a whole number.
-///
-/// Measured: `10.5` and `4.25` display as `10.5` and `4.25`, and their sum shows as `14.75`; a
-/// whole 30 shows as `30`, never `30.0`.
-fn format_treemap_value(value: f64) -> String {
-    if (value - value.round()).abs() < 1e-9 {
-        format!("{}", value.round() as i64)
-    } else {
-        let text = format!("{value:.4}");
-        text.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 

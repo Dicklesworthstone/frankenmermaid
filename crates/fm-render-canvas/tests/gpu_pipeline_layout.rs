@@ -517,7 +517,7 @@ fn parsed_diagram_furniture_reaches_executable_batches() {
         (
             "treemap",
             "treemap\n\"Root\"\n    \"Group\"\n        \"A\": 10\n        \"B\": 20\n",
-            &[Family::TreemapTile],
+            &[Family::TreemapTile, Family::Text],
         ),
         (
             "radar",

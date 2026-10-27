@@ -47,16 +47,81 @@ fn a_treemap_is_not_an_empty_gpu_scene() {
 /// THE NEGATIVE CASE on the GPU path for radar.
 #[test]
 fn a_radar_is_not_an_empty_gpu_scene() {
-    let radar = plan(RADAR);
+    use fm_render_canvas::GpuTextSource;
+
+    let ir = fm_parser::parse(RADAR).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let wheel = layout.extensions.radar.as_ref().unwrap();
+    let radar = GpuRenderPlan::from_layout(&ir, &layout, 1.5);
     assert!(
         !radar.radar_segments.is_empty(),
         "a radar still plans zero GPU segments"
     );
-    // 5 rings x 48 samples, 3 spokes, 3 curve edges.
+    // Adaptive subdivision follows the shared cubic geometry. Verify each authored
+    // component reaches the GPU without depending on a fixed sampling count.
+    for axis in &wheel.axes {
+        assert!(
+            radar.radar_segments.iter().any(|segment| {
+                segment.from == [wheel.center.x, wheel.center.y]
+                    && segment.to == [axis.tip.x, axis.tip.y]
+            }),
+            "a spoke is missing"
+        );
+    }
+    let grid_color = fm_render_canvas::parse_paint_rgba("#dedede").unwrap();
+    for &radius in &wheel.rings {
+        for point in [
+            [wheel.center.x + radius, wheel.center.y],
+            [wheel.center.x, wheel.center.y + radius],
+            [wheel.center.x - radius, wheel.center.y],
+            [wheel.center.x, wheel.center.y - radius],
+        ] {
+            assert!(
+                radar.radar_segments.iter().any(|segment| {
+                    segment.color == grid_color && (segment.from == point || segment.to == point)
+                }),
+                "a graticule ring lost its cardinal point: {point:?}"
+            );
+        }
+    }
+    let curve_color = fm_render_canvas::parse_paint_rgba("#8686ff").unwrap();
+    for point in &wheel.curves[0].points {
+        let point = [point.x, point.y];
+        assert!(
+            radar.radar_segments.iter().any(|segment| {
+                segment.color == curve_color && (segment.from == point || segment.to == point)
+            }),
+            "an authored series value vanished: {point:?}"
+        );
+    }
+    assert!(
+        radar.xy_area_triangles.iter().any(|triangle| {
+            let (a, b, c) = (triangle.a, triangle.b, triangle.c);
+            let area = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+            let x = (a[0] + b[0] + c[0]) / 3.0 - wheel.center.x;
+            let y = (a[1] + b[1] + c[1]) / 3.0 - wheel.center.y;
+            triangle.color[..3] == curve_color[..3]
+                && triangle.color[3] > 0.0
+                && area > 0.0
+                && x * x + y * y < wheel.outer_radius * wheel.outer_radius
+        }),
+        "the plotted series needs a real fill inside the wheel, beyond grid and legend paint"
+    );
     assert_eq!(
-        radar.radar_segments.len(),
-        5 * 48 + 3 + 3,
-        "the wheel is missing rings, spokes or curve edges"
+        radar
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::RadarAxis)
+            .count(),
+        wheel.axes.len()
+    );
+    assert_eq!(
+        radar
+            .text_runs
+            .iter()
+            .filter(|run| run.source == GpuTextSource::RadarLegend)
+            .count(),
+        wheel.curves.len()
     );
     for segment in &radar.radar_segments {
         assert!(
