@@ -11303,6 +11303,17 @@ fn layout_diagram_xychart_from_meta(
         .filter(|series| matches!(series.kind, IrXySeriesKind::Bar))
         .count()
         .max(1);
+    // Reserve one bounded group per category. A minimum width per bar makes large
+    // series sets spill into adjacent categories; instead keep a small gap inside
+    // each slot and let dense groups share the available space proportionally.
+    let bar_slot_width = band_width * 0.72 / bar_series_count as f32;
+    let bar_gap = if bar_series_count > 1 {
+        (bar_slot_width * 0.12).min(2.0)
+    } else {
+        0.0
+    };
+    let bar_thickness = bar_slot_width - bar_gap;
+    let group_offset = band_width * 0.14 + bar_gap / 2.0;
 
     let mut nodes = Vec::with_capacity(ir.nodes.len());
     let mut edges = Vec::new();
@@ -11328,13 +11339,10 @@ fn layout_diagram_xychart_from_meta(
                 let y_band_start = (point_index as f32).mul_add(band_width, plot_bounds.y);
                 let value_x = xychart_value_to_x(value, y_min, y_max, plot_bounds);
                 let node_bounds = if is_bar {
-                    let bar_thickness = (band_width * 0.72 / bar_series_count as f32)
-                        .clamp(10.0, (band_width * 0.78).max(10.0));
-                    let group_height = bar_thickness * bar_series_count as f32;
-                    let group_start = y_band_start + (band_width - group_height) / 2.0;
                     LayoutRect {
                         x: value_x.min(baseline_x),
-                        y: (local_bar_slot as f32).mul_add(bar_thickness, group_start),
+                        y: (local_bar_slot as f32)
+                            .mul_add(bar_slot_width, y_band_start + group_offset),
                         width: (value_x - baseline_x).abs().max(1.0),
                         height: bar_thickness,
                     }
@@ -11360,17 +11368,14 @@ fn layout_diagram_xychart_from_meta(
             let x_center = x_band_start + band_width / 2.0;
             let value_y = xychart_value_to_y(value, y_min, y_max, plot_bounds);
             let node_bounds = if is_bar {
-                let bar_width = (band_width * 0.72 / bar_series_count as f32)
-                    .clamp(10.0, (band_width * 0.78).max(10.0));
-                let group_width = bar_width * bar_series_count as f32;
-                let group_start = x_band_start + (band_width - group_width) / 2.0;
-                let x = (local_bar_slot as f32).mul_add(bar_width, group_start);
+                let x = (local_bar_slot as f32)
+                    .mul_add(bar_slot_width, x_band_start + group_offset);
                 let y = value_y.min(baseline_y);
                 let height = (baseline_y - value_y).abs().max(1.0);
                 LayoutRect {
                     x,
                     y,
-                    width: bar_width,
+                    width: bar_thickness,
                     height,
                 }
             } else {
@@ -11488,48 +11493,71 @@ fn xy_chart_category_count(xy_chart_meta: &IrXyChartMeta) -> usize {
 /// The value domain shared by XY chart layout and every rendering backend.
 #[must_use]
 pub fn resolve_xychart_y_domain(xy_chart_meta: &IrXyChartMeta) -> (f32, f32) {
-    let mut min_value = xy_chart_meta.y_axis.min.unwrap_or(f32::INFINITY);
-    let mut max_value = xy_chart_meta.y_axis.max.unwrap_or(f32::NEG_INFINITY);
-
-    if xy_chart_meta.y_axis.min.is_none() || xy_chart_meta.y_axis.max.is_none() {
-        for value in xy_chart_meta
-            .series
-            .iter()
-            .flat_map(|series| series.values.iter().copied())
-        {
-            min_value = min_value.min(value);
-            max_value = max_value.max(value);
+    let declared_min = xy_chart_meta.y_axis.min.filter(|value| value.is_finite());
+    let declared_max = xy_chart_meta.y_axis.max.filter(|value| value.is_finite());
+    let (observed_min, observed_max) = xy_chart_meta
+        .series
+        .iter()
+        .flat_map(|series| series.values.iter().copied())
+        .filter(|value| value.is_finite())
+        .fold((0.0_f32, 0.0_f32), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+    // Infer only an unspecified endpoint. Scanning data into both bounds silently
+    // discards a caller's explicit minimum or maximum on a partially specified axis.
+    let mut min_value = declared_min.unwrap_or(observed_min);
+    let mut max_value = declared_max.unwrap_or(observed_max);
+    if min_value > max_value {
+        if declared_min.is_none() {
+            min_value = max_value;
+        } else if declared_max.is_none() {
+            max_value = min_value;
+        } else {
+            std::mem::swap(&mut min_value, &mut max_value);
         }
     }
-
-    if !min_value.is_finite() || !max_value.is_finite() {
-        return (0.0, 1.0);
-    }
-    if xy_chart_meta.y_axis.min.is_none() && min_value > 0.0 {
-        min_value = 0.0;
-    }
-    if xy_chart_meta.y_axis.max.is_none() && max_value < 0.0 {
-        max_value = 0.0;
-    }
-    if (max_value - min_value).abs() < f32::EPSILON {
-        max_value += 1.0;
+    // A small nonzero range is meaningful (fractions, probabilities, measurements).
+    // Expand only an actually constant domain, using a representable finite span.
+    if min_value == max_value {
+        let padding = (f64::from(min_value).abs() * 0.05).max(1.0);
+        let lower = (f64::from(min_value) - padding).max(-f64::from(f32::MAX)) as f32;
+        let upper = (f64::from(max_value) + padding).min(f64::from(f32::MAX)) as f32;
+        if declared_min.is_none() && declared_max.is_some() {
+            min_value = lower;
+            if min_value == max_value {
+                max_value = upper;
+            }
+        } else {
+            max_value = upper;
+            if min_value == max_value {
+                min_value = lower;
+            }
+        }
     }
     (min_value, max_value)
+}
+
+fn xychart_value_ratio(value: f32, min: f32, max: f32) -> f32 {
+    // Subtract in f64: two finite f32 endpoints can have an overflowing f32 span,
+    // and clamping every range to f32::EPSILON flattens small but valid domains.
+    let range = f64::from(max) - f64::from(min);
+    if !range.is_finite() || range <= 0.0 || value.is_nan() {
+        return 0.0;
+    }
+    ((f64::from(value) - f64::from(min)) / range).clamp(0.0, 1.0) as f32
 }
 
 /// A value's y position on a vertical XY chart, clamped to its plot rectangle.
 #[must_use]
 pub fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
-    let range = (y_max - y_min).max(f32::EPSILON);
-    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    let ratio = xychart_value_ratio(value, y_min, y_max);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
 }
 
 /// A value's x position on a HORIZONTAL chart's value axis: minimum at the left edge.
 #[must_use]
 pub fn xychart_value_to_x(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRect) -> f32 {
-    let range = (y_max - y_min).max(f32::EPSILON);
-    let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
+    let ratio = xychart_value_ratio(value, y_min, y_max);
     ratio.mul_add(plot_bounds.width, plot_bounds.x)
 }
 
@@ -11573,22 +11601,20 @@ pub fn xychart_plot_bounds(meta: &IrXyChartMeta, bounds: LayoutRect) -> LayoutRe
 pub fn xychart_categories(meta: &IrXyChartMeta) -> Vec<String> {
     let count = xy_chart_category_count(meta);
     if meta.x_axis.categories.is_empty() {
-        let min = meta.x_axis.min.unwrap_or(0.0);
+        let min = meta.x_axis.min.filter(|value| value.is_finite()).unwrap_or(0.0);
         let max = meta
             .x_axis
             .max
+            .filter(|value| value.is_finite())
             .unwrap_or_else(|| count.saturating_sub(1) as f32);
-        let max = if (max - min).abs() < f32::EPSILON {
-            min + 1.0
-        } else {
-            max
-        };
         if count <= 1 {
             return vec![format_xychart_tick_value(min)];
         }
-        let step = (max - min) / (count.saturating_sub(1) as f32).max(1.0);
+        let step = (f64::from(max) - f64::from(min)) / (count - 1) as f64;
         return (0..count)
-            .map(|index| format_xychart_tick_value(min + step * index as f32))
+            .map(|index| {
+                format_xychart_tick_value(step.mul_add(index as f64, f64::from(min)) as f32)
+            })
             .collect();
     }
     let mut categories = meta.x_axis.categories.clone();
@@ -11649,10 +11675,14 @@ pub fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
 /// Format XY chart values consistently in axis labels and data-mark alternatives.
 #[must_use]
 pub fn format_xychart_tick_value(value: f32) -> String {
-    if (value - value.round()).abs() < 0.0001 {
-        format!("{value:.0}")
+    if value == 0.0 {
+        String::from("0")
+    } else if value.is_finite() && !(0.0001..1_000_000_000.0).contains(&value.abs()) {
+        format!("{value:e}")
     } else {
-        format!("{value:.1}")
+        // Keep the shortest decimal that preserves the value. One decimal place
+        // makes an entire 0..0.01 axis read "0.0" and mislabels its data marks too.
+        value.to_string()
     }
 }
 
@@ -29699,6 +29729,151 @@ mod tests {
             vertical.bounds,
         );
         assert_eq!((vertical_plot.x, vertical_plot.y), (88.0, 84.0));
+    }
+
+    #[test]
+    fn xychart_small_and_extreme_scales_use_the_full_plot() {
+        for (range, values) in [
+            ("0 --> 1e-9", "0, 5e-10, 1e-9"),
+            ("-3e38 --> 3e38", "-3e38, 0, 3e38"),
+        ] {
+            for horizontal in [false, true] {
+                let source = format!(
+                    "xychart-beta{}\n x-axis Samples [Low, Middle, High]\n\
+                     y-axis Measurement {range}\n line [{values}]",
+                    if horizontal { " horizontal" } else { "" },
+                );
+                let ir = parse(&source).ir;
+                let meta = ir.xy_chart_meta.as_ref().expect("XY metadata");
+                let layout = layout_diagram_xychart(&ir);
+                let plot = super::xychart_plot_bounds(meta, layout.bounds);
+                let (min, max) = super::resolve_xychart_y_domain(meta);
+                assert_eq!((Some(min), Some(max)), (meta.y_axis.min, meta.y_axis.max));
+                assert_eq!(layout.nodes.len(), 3);
+                for (index, node) in layout.nodes.iter().enumerate() {
+                    let center = node.bounds.center();
+                    let (actual, expected) = if horizontal {
+                        (center.x, plot.x + plot.width * index as f32 / 2.0)
+                    } else {
+                        (center.y, plot.y + plot.height * (1.0 - index as f32 / 2.0))
+                    };
+                    assert!(actual.is_finite(), "{source}");
+                    assert!((actual - expected).abs() < 0.001, "{source}: {actual} vs {expected}");
+                }
+                let tick_labels: Vec<_> = super::xychart_y_ticks(min, max)
+                    .into_iter()
+                    .map(super::format_xychart_tick_value)
+                    .collect();
+                assert!(tick_labels.len() >= 3);
+                assert_eq!(
+                    tick_labels.iter().collect::<BTreeSet<_>>().len(),
+                    tick_labels.len(),
+                    "different quantitative ticks must have different labels: {source}"
+                );
+                assert_eq!(layout, layout_diagram_xychart(&ir));
+            }
+        }
+    }
+
+    #[test]
+    fn xychart_infers_only_missing_domain_endpoints() {
+        let mut meta = parse("xychart-beta\n line [-5, 10]")
+            .ir
+            .xy_chart_meta
+            .expect("XY metadata");
+        meta.y_axis.min = Some(1.0);
+        assert_eq!(super::resolve_xychart_y_domain(&meta), (1.0, 10.0));
+        meta.y_axis.min = None;
+        meta.y_axis.max = Some(-1.0);
+        assert_eq!(super::resolve_xychart_y_domain(&meta), (-5.0, -1.0));
+
+        for (min, max) in [(Some(100.0), None), (None, Some(-100.0))] {
+            meta.y_axis.min = min;
+            meta.y_axis.max = max;
+            let (resolved_min, resolved_max) = super::resolve_xychart_y_domain(&meta);
+            assert!(resolved_min.is_finite() && resolved_max.is_finite());
+            assert!(resolved_max > resolved_min);
+            if let Some(min) = min {
+                assert_eq!(resolved_min, min);
+            }
+            if let Some(max) = max {
+                assert_eq!(resolved_max, max);
+            }
+        }
+        for value in [0.0, 100.0, f32::MAX, -f32::MAX] {
+            meta.y_axis.min = Some(value);
+            meta.y_axis.max = Some(value);
+            let (min, max) = super::resolve_xychart_y_domain(&meta);
+            assert!(min.is_finite() && max.is_finite() && max > min);
+            assert!(min <= value && max >= value);
+        }
+        meta.y_axis.min = Some(20.0);
+        meta.y_axis.max = Some(-10.0);
+        assert_eq!(super::resolve_xychart_y_domain(&meta), (-10.0, 20.0));
+        meta.y_axis.min = Some(f32::NAN);
+        meta.y_axis.max = Some(f32::INFINITY);
+        meta.series[0].values = vec![f32::NAN, f32::NEG_INFINITY, 2.0];
+        assert_eq!(super::resolve_xychart_y_domain(&meta), (0.0, 2.0));
+    }
+
+    #[test]
+    fn xychart_numeric_labels_preserve_fractional_values() {
+        for value in [
+            0.0, -0.0, 0.001, 0.002, -0.0003, 1.25, 1e-9, -1e-9, 3e38, f32::MIN_POSITIVE,
+        ] {
+            let label = super::format_xychart_tick_value(value);
+            assert_eq!(label.parse::<f32>().expect("numeric tick"), value, "{label}");
+        }
+        assert_eq!(super::format_xychart_tick_value(-0.0), "0");
+        assert_eq!(super::format_xychart_tick_value(1e-9), "1e-9");
+        let mut meta = parse("xychart-beta\n x-axis 0 --> 2e-9\n line [1, 2, 3]")
+            .ir
+            .xy_chart_meta
+            .expect("XY metadata");
+        assert_eq!(super::xychart_categories(&meta), ["0", "1e-9", "2e-9"]);
+        meta.x_axis.min = Some(5.0);
+        meta.x_axis.max = Some(5.0);
+        assert_eq!(super::xychart_categories(&meta), ["5", "5", "5"]);
+    }
+
+    #[test]
+    fn xychart_many_bar_series_stay_inside_their_category_bands() {
+        for horizontal in [false, true] {
+            let source = format!(
+                "xychart-beta{}\n x-axis [A, B, C, D]\n y-axis -10 --> 10\n{}",
+                if horizontal { " horizontal" } else { "" },
+                "bar [-10, 0, 5, 10]\n".repeat(16),
+            );
+            let ir = parse(&source).ir;
+            let meta = ir.xy_chart_meta.as_ref().expect("XY metadata");
+            let layout = layout_diagram_xychart(&ir);
+            let plot = super::xychart_plot_bounds(meta, layout.bounds);
+            assert_eq!(layout.nodes.len(), 64);
+            let (start, length) = if horizontal {
+                (plot.y, plot.height)
+            } else {
+                (plot.x, plot.width)
+            };
+            let band_width = length / 4.0;
+            for category in 0..4 {
+                let band_start = start + category as f32 * band_width;
+                let band_end = band_start + band_width;
+                let mut previous_end = band_start;
+                for series in &meta.series {
+                    let id = series.nodes[category];
+                    let node = layout.nodes.iter().find(|node| node.node_index == id.0).unwrap();
+                    let (mark_start, thickness) = if horizontal {
+                        (node.bounds.y, node.bounds.height)
+                    } else {
+                        (node.bounds.x, node.bounds.width)
+                    };
+                    assert!(thickness > 0.0);
+                    assert!(mark_start > previous_end, "series need distinct visible slots");
+                    assert!(mark_start + thickness < band_end, "{source}");
+                    previous_end = mark_start + thickness;
+                }
+            }
+        }
     }
 
     #[test]

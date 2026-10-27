@@ -16665,11 +16665,21 @@ fn parse_xychart_axis(raw: &str) -> IrXyAxis {
     }
 
     if let Some(categories) = bracket_contents(remaining) {
+        if axis.label.is_none()
+            && let Some((label, _)) = remaining.split_once('[')
+        {
+            axis.label = clean_label(Some(label));
+        }
         axis.categories = parse_chart_value_list(categories);
         return axis;
     }
 
-    if let Some((range_start, range_end)) = parse_axis_range(remaining) {
+    if let Some((label, range_start, range_end)) = parse_axis_range(remaining)
+        && (axis.label.is_none() || label.is_empty())
+    {
+        if axis.label.is_none() {
+            axis.label = clean_label(Some(label));
+        }
         axis.min = Some(range_start);
         axis.max = Some(range_end);
         return axis;
@@ -16682,11 +16692,17 @@ fn parse_xychart_axis(raw: &str) -> IrXyAxis {
     axis
 }
 
-fn parse_axis_range(raw: &str) -> Option<(f32, f32)> {
+fn parse_axis_range(raw: &str) -> Option<(&str, f32, f32)> {
     let (start, end) = raw.split_once("-->")?;
-    let start = start.trim().parse::<f32>().ok()?;
+    // An unquoted axis title precedes the lower bound. Split at its last whitespace,
+    // not its first, so titles containing spaces retain their complete text.
+    let (label, start) = start
+        .trim()
+        .rsplit_once(char::is_whitespace)
+        .unwrap_or(("", start.trim()));
+    let start = start.parse::<f32>().ok()?;
     let end = end.trim().parse::<f32>().ok()?;
-    Some((start, end))
+    (start.is_finite() && end.is_finite()).then_some((label.trim(), start, end))
 }
 
 fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
@@ -28156,6 +28172,56 @@ Rel_Back(db, app, "Responds")"#,
 
         assert_eq!(xy_meta.x_axis.label.as_deref(), Some("Quarter"));
         assert_eq!(xy_meta.x_axis.categories, vec!["Q1", "Q2", "Q3"]);
+    }
+
+    #[test]
+    fn xychart_axes_keep_unquoted_titles_and_signed_numeric_ranges() {
+        for (category_title, value_title) in [
+            ("Fiscal quarter", "Revenue in USD"),
+            ("\"Fiscal quarter\"", "\"Revenue in USD\""),
+        ] {
+            let input = format!(
+                "xychart-beta\n x-axis {category_title} [Q1, Q2, Q3]\n\
+                 y-axis {value_title} -2.5e-3 --> +5e-3\n line [-0.002, 0, 0.004]"
+            );
+            let parsed = parse_mermaid(&input);
+            let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+            assert_eq!(meta.x_axis.label.as_deref(), Some("Fiscal quarter"));
+            assert_eq!(meta.x_axis.categories, ["Q1", "Q2", "Q3"]);
+            assert_eq!(meta.y_axis.label.as_deref(), Some("Revenue in USD"));
+            assert_eq!(meta.y_axis.min, Some(-0.0025));
+            assert_eq!(meta.y_axis.max, Some(0.005));
+            assert_eq!(meta.series[0].values, [-0.002, 0.0, 0.004]);
+        }
+
+        let parsed = parse_mermaid(
+            "xychart-beta horizontal\n x-axis Financial year 2025 --> 2027\n\
+             y-axis -10 --> 20\n bar [-5, 0, 10]",
+        );
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+        assert_eq!(meta.x_axis.label.as_deref(), Some("Financial year"));
+        assert_eq!((meta.x_axis.min, meta.x_axis.max), (Some(2025.0), Some(2027.0)));
+        assert_eq!(meta.y_axis.label, None);
+        assert_eq!((meta.y_axis.min, meta.y_axis.max), (Some(-10.0), Some(20.0)));
+    }
+
+    #[test]
+    fn xychart_axes_reject_non_finite_numeric_bounds() {
+        for range in ["NaN --> 10", "0 --> inf", "-inf --> 1", "0 --> 1e100"] {
+            let parsed = parse_mermaid(&format!(
+                "xychart-beta\n x-axis [A, B]\n y-axis Amount {range}\n bar [2, 4]"
+            ));
+            let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+            assert_eq!(meta.y_axis.min, None, "{range}");
+            assert_eq!(meta.y_axis.max, None, "{range}");
+            assert_eq!(meta.series[0].values, [2.0, 4.0]);
+        }
+        let parsed = parse_mermaid(
+            "xychart-beta\n y-axis \"Revenue\" unexpected 0 --> 10\n bar [2, 4]",
+        );
+        let meta = parsed.ir.xy_chart_meta.as_ref().expect("XY metadata");
+        assert_eq!(meta.y_axis.label.as_deref(), Some("Revenue"));
+        assert_eq!((meta.y_axis.min, meta.y_axis.max), (None, None));
     }
 
     #[test]
