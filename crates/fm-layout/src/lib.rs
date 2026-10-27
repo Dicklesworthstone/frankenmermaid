@@ -18976,6 +18976,66 @@ fn bk_horizontal_compaction(
     x
 }
 
+/// Project an invalid rank onto its minimum center-to-center separations. Subtracting the
+/// cumulative required gaps turns these inequalities into a nondecreasing sequence; pooling
+/// adjacent violations gives its least-squares projection in linear time. This shares correction
+/// between both sides of an overlap, preserves reflection symmetry, and leaves valid ranks alone.
+fn project_rank_separation(
+    coordinates: &mut [f32],
+    node_sizes: &[(f32, f32)],
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    node_spacing: f32,
+    horizontal_ranks: bool,
+) {
+    let extent = |node: usize| {
+        let (width, height) = node_sizes.get(node).copied().unwrap_or((84.0, 44.0));
+        f64::from(if horizontal_ranks { height } else { width })
+    };
+    let separation =
+        |left: usize, right: usize| (extent(left) + extent(right)) / 2.0 + f64::from(node_spacing);
+    for nodes in ordering_by_rank.values() {
+        // Do not disturb correct alignment merely to absorb subpixel f32 rounding.
+        if !nodes.windows(2).any(|pair| {
+            f64::from(coordinates[pair[1]]) - f64::from(coordinates[pair[0]]) + 0.001
+                < separation(pair[0], pair[1])
+        }) {
+            continue;
+        }
+        let mut offsets = Vec::with_capacity(nodes.len());
+        let mut offset = 0.0_f64;
+        for (index, &node) in nodes.iter().enumerate() {
+            if index > 0 {
+                offset += separation(nodes[index - 1], node);
+            }
+            offsets.push(offset);
+        }
+        // Blocks store their half-open rank interval and the sum of desired shifted centers.
+        let mut blocks: Vec<(usize, usize, f64)> = Vec::with_capacity(nodes.len());
+        for (index, &node) in nodes.iter().enumerate() {
+            blocks.push((
+                index,
+                index + 1,
+                f64::from(coordinates[node]) - offsets[index],
+            ));
+            while blocks.len() > 1 {
+                let last = blocks.len() - 1;
+                let (left, right) = (blocks[last - 1], blocks[last]);
+                if left.2 / (left.1 - left.0) as f64 <= right.2 / (right.1 - right.0) as f64 {
+                    break;
+                }
+                blocks[last - 1] = (left.0, right.1, left.2 + right.2);
+                blocks.pop();
+            }
+        }
+        for (start, end, sum) in blocks {
+            let center = sum / (end - start) as f64;
+            for index in start..end {
+                coordinates[nodes[index]] = (center + offsets[index]) as f32;
+            }
+        }
+    }
+}
+
 /// Run Brandes-Köpf algorithm: four alignment passes, then take the median.
 fn brandes_kopf_secondary_coords(
     ir: &MermaidDiagramIr,
@@ -19160,6 +19220,18 @@ fn brandes_kopf_secondary_coords(
         // Median of 4 values: average of the two middle values.
         result[v] = f32::midpoint(vals[1], vals[2]);
     }
+
+    // Competing alignment-block shifts can violate a rank's separation constraints. Taking
+    // their median does not repair an infeasible pass: 100px boxes could end up only 70px apart.
+    // Enforce the measured gaps before node boxes and routes are constructed, without changing
+    // the coordinates of ranks whose existing alignment already satisfies them.
+    project_rank_separation(
+        &mut result,
+        node_sizes,
+        ordering_by_rank,
+        spacing.node_spacing,
+        horizontal_ranks,
+    );
 
     result
 }
@@ -36819,6 +36891,100 @@ mod tests {
     }
 
     // --- Brandes-Köpf coordinate assignment tests ---
+
+    #[test]
+    fn bk_rank_projection_preserves_valid_ranks_and_measured_gaps() {
+        let ordering = BTreeMap::from([(0, vec![0, 1, 2]), (1, vec![3, 4])]);
+        let mirrored_ordering = ordering
+            .iter()
+            .map(|(&rank, nodes)| (rank, nodes.iter().rev().copied().collect()))
+            .collect();
+        let sizes = [
+            (100.0, 32.0),
+            (180.0, 52.0),
+            (60.0, 90.0),
+            (150.0, 24.0),
+            (90.0, 84.0),
+        ];
+        let original = [0.0, 20.0, 30.0, 400.0, 900.0];
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            let horizontal = matches!(direction, GraphDirection::LR | GraphDirection::RL);
+            let mut coordinates = original;
+            super::project_rank_separation(&mut coordinates, &sizes, &ordering, 40.0, horizontal);
+            assert_eq!(
+                &coordinates[3..],
+                &original[3..],
+                "valid ranks must not move: {direction:?}"
+            );
+            for pair in ordering[&0].windows(2) {
+                let extent = |node: usize| {
+                    if horizontal {
+                        sizes[node].1
+                    } else {
+                        sizes[node].0
+                    }
+                };
+                let gap = coordinates[pair[1]]
+                    - coordinates[pair[0]]
+                    - (extent(pair[0]) + extent(pair[1])) / 2.0;
+                assert!(gap + 0.001 >= 40.0, "{direction:?}: measured gap {gap}");
+            }
+            assert!(
+                (coordinates[..3].iter().sum::<f32>() - 50.0).abs() < 0.001,
+                "the correction must share displacement instead of pushing the entire rank sideways"
+            );
+            let projected = coordinates;
+            super::project_rank_separation(&mut coordinates, &sizes, &ordering, 40.0, horizontal);
+            assert_eq!(
+                coordinates, projected,
+                "a valid projection must remain unchanged"
+            );
+
+            let mut reflected = original.map(|coordinate| -coordinate);
+            super::project_rank_separation(
+                &mut reflected,
+                &sizes,
+                &mirrored_ordering,
+                40.0,
+                horizontal,
+            );
+            for (&coordinate, &mirror) in coordinates.iter().zip(&reflected) {
+                assert!(
+                    (coordinate + mirror).abs() < 0.001,
+                    "{direction:?}: reflection symmetry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bk_rank_projection_repairs_reported_node_overlaps() {
+        // Minimized property failure: N7 is isolated, and the flat shared-rank placement put it
+        // 70px from N1 although both boxes are 100px wide. There are only three components.
+        let ir = random_dag(19, 24, 1);
+        assert_eq!(super::component_packing_groups(&ir).len(), 3);
+        let traced = layout_diagram_traced(&ir);
+        // Check every node pair, including conflicts within the same connected component.
+        for (index, left) in traced.layout.nodes.iter().enumerate() {
+            for right in &traced.layout.nodes[index + 1..] {
+                assert!(
+                    !rects_overlap(left.bounds, right.bounds),
+                    "{} overlaps {}: {:?}, {:?}",
+                    left.node_id,
+                    right.node_id,
+                    left.bounds,
+                    right.bounds
+                );
+            }
+        }
+        assert_eq!(traced.layout, layout_diagram_traced(&ir).layout);
+
+    }
 
     #[test]
     fn bk_asymmetric_branches_are_mirror_symmetric_with_variable_node_sizes() {

@@ -379,17 +379,31 @@ impl Canvas2dRenderer {
 
         let mut labels_drawn = 0;
 
-        // Timeline bands tint the same frames whose cluster pass draws the section headings.
-        // Paint the tint first so it cannot wash over the one retained caption.
-        if ir.diagram_type == DiagramType::Timeline {
-            self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
-        }
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
-        if ir.diagram_type != DiagramType::Timeline {
-            self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        // Timeline bands tint the whole section frame. Keep the same background submission
+        // order as the GPU, then paint its one cluster caption above the tint.
+        if ir.diagram_type == DiagramType::Timeline {
+            let mut cluster_label_font = None;
+            for cluster_box in &layout.clusters {
+                let opacity = resolve_cluster_opacity(ir, cluster_box.cluster_index);
+                if let Some(alpha) = opacity {
+                    ctx.set_global_alpha(alpha);
+                }
+                self.paint_cluster_caption(
+                    cluster_box,
+                    ir,
+                    ctx,
+                    (offset_x, offset_y),
+                    &mut cluster_label_font,
+                );
+                if opacity.is_some() {
+                    ctx.set_global_alpha(1.0);
+                }
+            }
         }
         // Treemap tiles and the radar wheel (bd-dw450): both families keep their whole
         // diagram in a layout extension only fm-render-svg read, so the canvas drew nothing
@@ -1138,55 +1152,14 @@ impl Canvas2dRenderer {
             }
             self.draw_calls += 2;
 
-            // Draw cluster label if present
-            let title_text = cluster_box.title.as_deref().or_else(|| {
-                ir.clusters
-                    .get(cluster_box.cluster_index)
-                    .and_then(|ir_cluster| ir_cluster.title)
-                    .and_then(|title_id| ir.labels.get(title_id.0))
-                    .map(|label| label.text.as_str())
-            });
-
-            if let Some(title_text) = title_text {
-                let declared_title_color =
-                    resolve_cluster_text_color(ir, cluster_box.cluster_index);
-                let title_color = declared_title_color
-                    .as_deref()
-                    .and_then(sanitize_canvas_paint);
-                ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
-                ctx.set_font(cluster_label_font.get_or_insert_with(|| {
-                    format!(
-                        "{}px {}",
-                        self.config.font_size * 0.9,
-                        self.config.font_family
-                    )
-                }));
-                ctx.set_text_align(TextAlign::Left);
-                ctx.set_text_baseline(TextBaseline::Top);
-                ctx.fill_text(title_text, x + 8.0, y + 4.0);
-                self.draw_calls += 1;
-
-                // THE C4 BOUNDARY TYPE ROW, which mermaid draws beneath the label and the SVG arm
-                // already draws. Nested inside the title branch on purpose: mermaid emits the type
-                // only as the second row of a captioned boundary, so a boundary with no label to
-                // sit under should not show a bracketed type floating on its own.
-                //
-                // The IR stores mermaid's bare token and each renderer adds the brackets, exactly
-                // as mermaid does — its `drawInsideBoundary` rewrites `l.type.text` to
-                // `"[" + l.type.text + "]"` before `drawBoundary` draws it.
-                if let Some(boundary_type) = ir
-                    .clusters
-                    .get(cluster_box.cluster_index)
-                    .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
-                    .filter(|value| !value.is_empty())
-                {
-                    ctx.fill_text(
-                        &format!("[{boundary_type}]"),
-                        x + 8.0,
-                        y + 4.0 + self.config.font_size * 1.25,
-                    );
-                    self.draw_calls += 1;
-                }
+            if ir.diagram_type != DiagramType::Timeline {
+                self.paint_cluster_caption(
+                    cluster_box,
+                    ir,
+                    ctx,
+                    (offset_x, offset_y),
+                    &mut cluster_label_font,
+                );
             }
 
             if cluster_opacity.is_some() {
@@ -1197,6 +1170,61 @@ impl Canvas2dRenderer {
         }
 
         count
+    }
+
+    /// Paint the caption independently so a later section tint cannot cover its lettering.
+    fn paint_cluster_caption<C: Canvas2dContext>(
+        &mut self,
+        cluster_box: &fm_layout::LayoutClusterBox,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset: (f64, f64),
+        cluster_label_font: &mut Option<String>,
+    ) {
+        let title_text = cluster_box.title.as_deref().or_else(|| {
+            ir.clusters
+                .get(cluster_box.cluster_index)
+                .and_then(|ir_cluster| ir_cluster.title)
+                .and_then(|title_id| ir.labels.get(title_id.0))
+                .map(|label| label.text.as_str())
+        });
+        let Some(title_text) = title_text else {
+            return;
+        };
+        let x = f64::from(cluster_box.bounds.x) + offset.0;
+        let y = f64::from(cluster_box.bounds.y) + offset.1;
+        let declared_title_color = resolve_cluster_text_color(ir, cluster_box.cluster_index);
+        let title_color = declared_title_color
+            .as_deref()
+            .and_then(sanitize_canvas_paint);
+        ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
+        ctx.set_font(cluster_label_font.get_or_insert_with(|| {
+            format!(
+                "{}px {}",
+                self.config.font_size * 0.9,
+                self.config.font_family
+            )
+        }));
+        ctx.set_text_align(TextAlign::Left);
+        ctx.set_text_baseline(TextBaseline::Top);
+        ctx.fill_text(title_text, x + 8.0, y + 4.0);
+        self.draw_calls += 1;
+
+        // C4 boundary types are the second row of a captioned boundary, so a boundary
+        // without a title must not gain a bracketed type floating on its own.
+        if let Some(boundary_type) = ir
+            .clusters
+            .get(cluster_box.cluster_index)
+            .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
+            .filter(|value| !value.is_empty())
+        {
+            ctx.fill_text(
+                &format!("[{boundary_type}]"),
+                x + 8.0,
+                y + 4.0 + self.config.font_size * 1.25,
+            );
+            self.draw_calls += 1;
+        }
     }
 
     /// Draw layout extension bands (sequence lifelines, gantt sections, etc.).
@@ -7301,11 +7329,18 @@ mod tests {
                 let mut strokes = Vec::new();
                 let mut start = 0;
                 let mut stroke_width = 1.0;
+                let mut saved_widths = Vec::new();
                 for (index, operation) in context.operations().iter().enumerate() {
                     match operation {
+                        DrawOperation::Save => saved_widths.push(stroke_width),
+                        DrawOperation::Restore => {
+                            stroke_width = saved_widths.pop().expect("balanced canvas state");
+                        }
                         DrawOperation::SetLineWidth(width) => stroke_width = *width as f32,
                         DrawOperation::BeginPath => start = index,
-                        DrawOperation::Stroke => strokes.push((
+                        // Connector paths use only the outer viewport save. Hollow feedback
+                        // markers add their own save/transform and stroke; they are not routes.
+                        DrawOperation::Stroke if saved_widths.len() == 1 => strokes.push((
                             first_stroked_path(&context.operations()[start..=index]),
                             stroke_width,
                         )),

@@ -6588,6 +6588,40 @@ mod tests {
                     matches!(operation, crate::DrawOperation::FillText(text, ..) if text == caption)
                 ).count(), expected, "scene={use_scene}: a section caption was lost or painted twice");
             }
+            if !use_scene {
+                let operations = context.operations();
+                let first_caption = operations
+                    .iter()
+                    .position(|operation| {
+                        matches!(operation, crate::DrawOperation::FillText(text, ..)
+                            if text == "Discovery" || text == "Delivery")
+                    })
+                    .expect("timeline section caption");
+                let tints: Vec<_> = operations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, operation)| {
+                        matches!(operation, crate::DrawOperation::FillRect(..)).then_some(index)
+                    })
+                    .collect();
+                assert_eq!(tints.len(), layout.extensions.bands.len());
+                assert!(
+                    tints.iter().all(|&index| index < first_caption),
+                    "all section tints must precede the visible captions"
+                );
+                let last_cluster_fill = operations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, operation)| {
+                        matches!(operation, crate::DrawOperation::Fill).then_some(index)
+                    })
+                    .nth(layout.clusters.len() - 1)
+                    .expect("cluster backgrounds");
+                assert!(
+                    last_cluster_fill < tints[0],
+                    "cluster backgrounds must precede band tints, matching GPU submission"
+                );
+            }
         }
     }
 
