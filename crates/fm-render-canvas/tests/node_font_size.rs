@@ -408,7 +408,7 @@ fn an_undeclared_class_diagram_keeps_its_derived_compartment_fonts() {
 
     assert_eq!(
         heading,
-        format!("bold {}px {}", config.font_size, config.font_family),
+        format!("600 {}px {}", config.font_size, config.font_family),
         "the derived compartment heading font changed"
     );
     assert_eq!(

@@ -379,11 +379,18 @@ impl Canvas2dRenderer {
 
         let mut labels_drawn = 0;
 
+        // Timeline bands tint the same frames whose cluster pass draws the section headings.
+        // Paint the tint first so it cannot wash over the one retained caption.
+        if ir.diagram_type == DiagramType::Timeline {
+            self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        }
         // Draw clusters (background)
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
-        self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        if ir.diagram_type != DiagramType::Timeline {
+            self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        }
         // Treemap tiles and the radar wheel (bd-dw450): both families keep their whole
         // diagram in a layout extension only fm-render-svg read, so the canvas drew nothing
         // at all for them. Both calls return immediately for every other diagram type.
@@ -1863,7 +1870,9 @@ impl Canvas2dRenderer {
                     // Gantt section: light background band.
                     ctx.set_fill_style("rgba(226,232,240,0.3)");
                     ctx.fill_rect(x, y, w, h);
-                    if !band.label.is_empty() {
+                    // Timeline sections have a titled cluster at these same bounds. The band
+                    // supplies decoration; its metadata is retained for terminal rendering.
+                    if !band.label.is_empty() && diagram_type != DiagramType::Timeline {
                         ctx.set_fill_style(&self.config.label_color);
                         ctx.set_font(section_label_font.get_or_insert_with(|| {
                             format!(

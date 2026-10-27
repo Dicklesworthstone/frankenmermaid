@@ -2558,11 +2558,11 @@ impl GpuRenderPlan {
                             .filter(|tick| !tick.label.is_empty())
                             .map(|tick| tick.label.as_str()),
                     )
-                    // BAND LABELS are only drawn for sections and non-sequence lanes. Sequence
-                    // lifeline names already come from their headers, so reproducing them here
-                    // would create a third visible participant name.
+                    // Band captions exclude timeline sections, already named by their cluster
+                    // titles, and sequence/journey lanes, already named by their headers.
                     .chain(layout.extensions.bands.iter().filter_map(|band| {
-                        let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                        let draw_label = (matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                            && ir.diagram_type != fm_core::DiagramType::Timeline)
                             || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
                                 && !matches!(ir.diagram_type, fm_core::DiagramType::Sequence | fm_core::DiagramType::Journey));
                         draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
@@ -2895,9 +2895,11 @@ impl GpuRenderPlan {
         }
 
         // BAND LABELS (bd-adabx). This follows the raster branch exactly: sections and named
-        // non-sequence lanes label themselves; columns and sequence lifelines do not.
+        // non-sequence lanes label themselves; timeline sections are named by their cluster
+        // titles, while columns and sequence lifelines do not carry captions.
         for (index, band) in layout.extensions.bands.iter().enumerate() {
-            let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+            let draw_label = (matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                && ir.diagram_type != fm_core::DiagramType::Timeline)
                 || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
                     && !matches!(
                         ir.diagram_type,
@@ -6495,6 +6497,97 @@ mod tests {
             let baseline = first_quad.center[1]
                 + (super::GLYPH_BASELINE_RATIO - 0.5) * super::AXIS_TICK_FONT_SIZE_PX;
             assert!((baseline - expected_y).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn timeline_section_captions_are_drawn_once_per_section_across_graphical_backends() {
+        let ir = fm_parser::parse(concat!(
+            "timeline\n",
+            "  section Discovery\n",
+            "    Q1 : Research\n",
+            "  section Delivery\n",
+            "    Q2 : Ship\n",
+            "  section Discovery\n",
+            "    Q3 : Learn\n",
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert_eq!(layout.clusters.len(), 3);
+        assert_eq!(
+            layout
+                .extensions
+                .bands
+                .iter()
+                .map(|band| band.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Discovery", "Delivery", "Discovery"],
+            "terminal consumers must retain every authored band caption"
+        );
+
+        let plan = super::GpuRenderPlan::from_layout_with_config(
+            &ir,
+            &layout,
+            &crate::CanvasRenderConfig::default(),
+        );
+        assert_eq!(
+            plan.band_section_instances.len(),
+            3,
+            "keep the section backgrounds"
+        );
+        assert!(
+            !plan
+                .text_runs
+                .iter()
+                .any(|run| run.source == super::GpuTextSource::Band)
+        );
+        for index in 0..3 {
+            assert_eq!(
+                plan.text_runs
+                    .iter()
+                    .filter(|run| run.source == super::GpuTextSource::Cluster
+                        && run.node_index == index)
+                    .count(),
+                1,
+                "each section needs its own heading, including repeated captions"
+            );
+        }
+
+        for backend in [
+            fm_render_svg::SvgBackend::LegacyLayout,
+            fm_render_svg::SvgBackend::Scene,
+        ] {
+            let svg = fm_render_svg::render_svg_with_layout(
+                &ir,
+                &layout,
+                &fm_render_svg::SvgRenderConfig {
+                    backend,
+                    ..Default::default()
+                },
+            );
+            for (caption, expected) in [("Discovery", 2), ("Delivery", 1)] {
+                assert_eq!(
+                    svg.matches(&format!(">{caption}</text>")).count(),
+                    expected,
+                    "{backend:?}: a section caption was lost or painted twice"
+                );
+            }
+        }
+
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        for use_scene in [false, true] {
+            let mut context = crate::MockCanvas2dContext::new(1200.0, 900.0);
+            let mut renderer = crate::Canvas2dRenderer::new(crate::CanvasRenderConfig::default());
+            if use_scene {
+                renderer.render_scene(&scene, &mut context);
+            } else {
+                renderer.render(&layout, &ir, &mut context);
+            }
+            for (caption, expected) in [("Discovery", 2), ("Delivery", 1)] {
+                assert_eq!(context.operations().iter().filter(|operation|
+                    matches!(operation, crate::DrawOperation::FillText(text, ..) if text == caption)
+                ).count(), expected, "scene={use_scene}: a section caption was lost or painted twice");
+            }
         }
     }
 

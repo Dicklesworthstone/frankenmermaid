@@ -4935,7 +4935,13 @@ fn render_layout_to_svg(
         );
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
-            if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {
+            // A timeline section already has its caption on the cluster frame. Keep its
+            // background band, but do not overprint a second caption in the same header.
+            let suppress_section_label = ir.diagram_type == fm_core::DiagramType::Timeline
+                && band.kind == fm_layout::LayoutBandKind::Section;
+            if (suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane)
+                || suppress_section_label
+            {
                 let mut unlabelled = band.clone();
                 unlabelled.label.clear();
                 write_layout_band_into(
