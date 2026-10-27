@@ -5762,23 +5762,19 @@ fn compute_traced_layout_with_config_and_guardrails(
                 .unwrap_or_else(fm_core::FontMetrics::default_metrics)
         });
     // Generic algorithms remain valid Journey overrides. Their task boxes and text rows must
-    // use the same metrics; the force layout currently always uses the default font metrics.
+    // use the same configured metrics.
     let journey_metrics = (ir.diagram_type == DiagramType::Journey).then(|| {
-        if guarded_dispatch.selected == LayoutAlgorithm::Force {
-            fm_core::FontMetrics::default_metrics()
-        } else {
-            config
-                .font_metrics
-                .clone()
-                .unwrap_or_else(fm_core::FontMetrics::default_metrics)
-        }
+        config
+            .font_metrics
+            .clone()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics)
     });
 
     let mut traced = match guarded_dispatch.selected {
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Auto => {
             layout_diagram_sugiyama_traced_with_config(ir, config)
         }
-        LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
+        LayoutAlgorithm::Force => layout_diagram_force_traced_impl(ir, &config),
         LayoutAlgorithm::Tree => {
             let metrics = config
                 .font_metrics
@@ -8341,15 +8337,18 @@ pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
 /// Lay out with force-directed algorithm and return tracing information.
 #[must_use]
 pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    let mut traced = layout_diagram_force_traced_impl(ir);
+    let mut traced = layout_diagram_force_traced_impl(ir, &LayoutConfig::default());
     attach_journey_content(ir, &mut traced, &fm_core::FontMetrics::default_metrics());
     traced
 }
 
-fn layout_diagram_force_traced_impl(ir: &MermaidDiagramIr) -> TracedLayout {
+fn layout_diagram_force_traced_impl(ir: &MermaidDiagramIr, config: &LayoutConfig) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = LayoutSpacing::default();
-    let metrics = fm_core::FontMetrics::default_metrics();
+    let spacing = spacing_with_source_hints(config.spacing, ir);
+    let metrics = config
+        .font_metrics
+        .clone()
+        .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
     let n = ir.nodes.len();
 
@@ -8386,8 +8385,9 @@ fn layout_diagram_force_traced_impl(ir: &MermaidDiagramIr) -> TracedLayout {
     let cluster_membership = force_cluster_membership(ir);
 
     // Fruchterman-Reingold iterations.
-    let area = (n as f32) * spacing.node_spacing * spacing.rank_spacing;
-    let k = (area / n as f32).sqrt(); // Optimal distance between nodes
+    // The force scale describes the free space between cards, not their centre distance.
+    // Each spring below adds the measured node footprints to its preferred separation.
+    let k = (spacing.node_spacing.max(1.0) * spacing.rank_spacing.max(1.0)).sqrt();
     let max_iterations = force_iteration_budget(n);
     let convergence_threshold = 0.5;
 
@@ -8403,6 +8403,7 @@ fn layout_diagram_force_traced_impl(ir: &MermaidDiagramIr) -> TracedLayout {
             &adjacency,
             &cluster_membership,
             k,
+            spacing.node_spacing.max(0.0),
             n,
         );
 
@@ -15856,7 +15857,14 @@ fn force_initial_positions(
 ) -> Vec<(f32, f32)> {
     let n = ir.nodes.len();
     let cols = ((n as f32).sqrt().ceil() as usize).max(1);
-    let cell_size = spacing.node_spacing + spacing.rank_spacing;
+    let gap = spacing.node_spacing.max(0.0);
+    let (max_width, max_height) = node_sizes
+        .iter()
+        .fold((0.0_f32, 0.0_f32), |(width, height), &(w, h)| {
+            (width.max(w), height.max(h))
+        });
+    let cell_width = max_width + gap;
+    let cell_height = max_height + gap;
 
     ir.nodes
         .iter()
@@ -15864,15 +15872,15 @@ fn force_initial_positions(
         .map(|(i, node)| {
             // Deterministic hash: FNV-1a on node ID bytes.
             let hash = fnv1a_hash(node.id.as_bytes());
-            // Small perturbation from hash to break symmetry.
-            let jitter_x = ((hash & 0xFF) as f32 / 255.0 - 0.5) * cell_size * 0.3;
-            let jitter_y = (((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5) * cell_size * 0.3;
+            // Break symmetry inside the gap without overlapping the measured cards initially.
+            let jitter_x = ((hash & 0xFF) as f32 / 255.0 - 0.5) * gap * 0.3;
+            let jitter_y = (((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5) * gap * 0.3;
 
             let col = i % cols;
             let row = i / cols;
             let (w, h) = node_sizes[i];
-            let x = (col as f32).mul_add(cell_size, jitter_x) + w / 2.0;
-            let y = (row as f32).mul_add(cell_size, jitter_y) + h / 2.0;
+            let x = (col as f32).mul_add(cell_width, jitter_x) + w / 2.0;
+            let y = (row as f32).mul_add(cell_height, jitter_y) + h / 2.0;
             (x, y)
         })
         .collect()
@@ -15932,11 +15940,13 @@ fn force_iteration_budget(n: usize) -> usize {
     (50 + n * 2).min(500)
 }
 
-/// Cooling schedule: linear decay from initial temperature.
+/// Quadratic cooling leaves a genuine settling phase within the fixed iteration budget.
+/// Linear cooling ended a small graph with an 8px step limit, so its final geometry depended
+/// on a last large oscillation that overlap removal then had to undo.
 fn force_temperature(iteration: usize, max_iterations: usize, k: f32) -> f32 {
     let t0 = k * 10.0; // Initial temperature
-    let progress = iteration as f32 / max_iterations.max(1) as f32;
-    t0 * (1.0 - progress)
+    let remaining = (1.0 - iteration as f32 / max_iterations.max(1) as f32).max(0.0);
+    t0 * remaining * remaining
 }
 
 /// Compute force displacements for all nodes.
@@ -15949,6 +15959,7 @@ fn force_compute_displacements(
     adjacency: &[Vec<usize>],
     cluster_membership: &[Option<usize>],
     k: f32,
+    node_gap: f32,
     n: usize,
 ) -> Vec<(f32, f32)> {
     let mut displacements = vec![(0.0_f32, 0.0_f32); n];
@@ -15970,9 +15981,23 @@ fn force_compute_displacements(
             let dx = positions[i].0 - positions[j].0;
             let dy = positions[i].1 - positions[j].1;
             let dist = dx.hypot(dy).max(1.0);
-            // Fruchterman-Reingold attractive force: d^2 / k
-            // Vector component: (dx / d) * (d^2 / k) = dx * d / k
-            let force_over_d = dist / k;
+            // The original point spring tried to put every connected pair about 51px apart,
+            // even when each entity table was 200px wide. It therefore crushed card interiors
+            // together; the final overlap pass destroyed the topology trying to separate them.
+            // Intersect this direction with the sum of the two half-boxes plus the requested
+            // gap. At that distance either the horizontal or vertical card faces are clear.
+            let (wi, hi) = node_sizes[i];
+            let (wj, hj) = node_sizes[j];
+            let preferred_x =
+                (f32::midpoint(wi, wj) + node_gap) * dist / dx.abs().max(f32::EPSILON);
+            let preferred_y =
+                (f32::midpoint(hi, hj) + node_gap) * dist / dy.abs().max(f32::EPSILON);
+            let preferred = preferred_x.min(preferred_y).max(k);
+            // Preserve the shared exact/Barnes-Hut repulsion. Scaling the attractive force by
+            // (k / preferred)^3 moves a two-body equilibrium from k to preferred without
+            // treating a large card as many repulsive point masses.
+            let ratio = k / preferred;
+            let force_over_d = (dist / k) * ratio * ratio * ratio;
             let fx = dx * force_over_d;
             let fy = dy * force_over_d;
             displacements[i].0 -= fx;
@@ -16246,7 +16271,7 @@ fn force_remove_overlaps(
     spacing: &LayoutSpacing,
 ) {
     let n = positions.len();
-    let gap = spacing.node_spacing * 0.25; // Minimum gap between nodes
+    let gap = spacing.node_spacing.max(0.0);
 
     for _pass in 0..20 {
         let mut any_overlap = false;
@@ -34682,6 +34707,145 @@ mod tests {
         let first = layout_diagram_force_traced(&ir);
         let second = layout_diagram_force_traced(&ir);
         assert_eq!(first, second, "Force layout must be deterministic");
+    }
+
+    #[test]
+    fn force_layout_springs_balance_at_clear_card_faces() {
+        let k = (40.0_f32 * 64.0).sqrt();
+        let adjacency = vec![vec![1], vec![0]];
+        // The unequal aspect ratios also exercise the Minkowski box: adding two separate
+        // centre-ray radii underestimates the clearance of a wide card beside a tall card.
+        for (sizes, direction, separation) in [
+            ([(180.0, 100.0), (300.0, 80.0)], (1.0, 0.0), 280.0),
+            ([(480.0, 60.0), (60.0, 480.0)], (1.0, 1.0), 310.0),
+            ([(180.0, 100.0), (300.0, 80.0)], (0.0, -1.0), 130.0),
+        ] {
+            for scale in [0.8, 1.0, 1.2] {
+                let delta = (
+                    direction.0 * separation * scale,
+                    direction.1 * separation * scale,
+                );
+                let forces = super::force_compute_displacements(
+                    &[(0.0, 0.0), delta],
+                    &sizes,
+                    &adjacency,
+                    &[None, None],
+                    k,
+                    40.0,
+                    2,
+                );
+                let toward_neighbor = forces[0].0 * delta.0 + forces[0].1 * delta.1;
+                if scale < 1.0 {
+                    assert!(toward_neighbor < 0.0, "overcrowded cards must repel");
+                } else if scale > 1.0 {
+                    assert!(toward_neighbor > 0.0, "distant linked cards must attract");
+                } else {
+                    assert!(
+                        forces[0].0.hypot(forces[0].1) < 0.001,
+                        "a 40px face gap must be an equilibrium: {forces:?}"
+                    );
+                }
+                assert_eq!(forces[0].0, -forces[1].0);
+                assert_eq!(forces[0].1, -forces[1].1);
+            }
+        }
+    }
+
+    #[test]
+    fn force_layout_auto_mesh_keeps_readable_card_clearance() {
+        let ir = fm_parser::parse(
+            "flowchart LR\n\
+             A[API gateway] --> B[Authentication]\n\
+             A --> C[Order service]\n\
+             A --> D[Product catalog]\n\
+             B --> C\n B --> E[Event broker]\n\
+             C --> D\n C --> E\n C --> F[Database]\n\
+             D --> E\n D --> F\n\
+             E --> A\n E --> B\n E --> C\n F --> C\n F --> D\n",
+        )
+        .ir;
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Auto);
+        // Exercise the real default, including time/route guardrails, not just an explicitly
+        // requested algorithm that the normal caller would silently replace.
+        assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Force);
+        assert!(!traced.trace.guard.fallback_applied);
+        assert_eq!(traced.layout.nodes.len(), 6);
+        assert_eq!(traced.layout.edges.len(), 15);
+        for (index, a) in traced.layout.nodes.iter().enumerate() {
+            for b in traced.layout.nodes.iter().skip(index + 1) {
+                let gap_x = (a.bounds.center().x - b.bounds.center().x).abs()
+                    - f32::midpoint(a.bounds.width, b.bounds.width);
+                let gap_y = (a.bounds.center().y - b.bounds.center().y).abs()
+                    - f32::midpoint(a.bounds.height, b.bounds.height);
+                assert!(
+                    gap_x.max(gap_y) >= 39.9,
+                    "{} and {} leave only {:.2}px for relationships",
+                    a.node_id,
+                    b.node_id,
+                    gap_x.max(gap_y)
+                );
+            }
+        }
+        let repeated = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Auto);
+        assert_eq!(traced.layout.nodes, repeated.layout.nodes);
+        assert_eq!(traced.layout.edges, repeated.layout.edges);
+    }
+
+    #[test]
+    fn force_layout_uses_configured_font_metrics_and_source_spacing() {
+        let mut ir = fm_parser::parse(
+            "flowchart LR\n A[Customer authentication] --> B[Payment authorization]\n",
+        )
+        .ir;
+        ir.meta.node_spacing = Some(96);
+        let metrics = fm_core::FontMetrics::monospace(28.0);
+        let config = LayoutConfig {
+            font_metrics: Some(metrics.clone()),
+            ..LayoutConfig::default()
+        };
+        let layout =
+            super::layout_diagram_traced_with_config(&ir, LayoutAlgorithm::Force, config).layout;
+        for node in &layout.nodes {
+            let text = super::display_node_label_ref(&ir, &ir.nodes[node.node_index]);
+            let (width, height) = metrics.estimate_dimensions(text);
+            assert!(
+                node.bounds.width >= width,
+                "configured glyphs must fit their card"
+            );
+            assert!(node.bounds.height >= height);
+        }
+        let (a, b) = (&layout.nodes[0].bounds, &layout.nodes[1].bounds);
+        let gap_x = (a.center().x - b.center().x).abs() - f32::midpoint(a.width, b.width);
+        let gap_y = (a.center().y - b.center().y).abs() - f32::midpoint(a.height, b.height);
+        assert!(
+            gap_x.max(gap_y) >= 95.9,
+            "authored node spacing was ignored"
+        );
+    }
+
+    #[test]
+    fn force_layout_zero_spacing_remains_finite() {
+        let mut ir = sample_er_ir();
+        ir.meta.node_spacing = Some(0);
+        ir.meta.rank_spacing = Some(0);
+        let layout = super::layout_diagram_traced_with_config(
+            &ir,
+            LayoutAlgorithm::Force,
+            LayoutConfig::default(),
+        )
+        .layout;
+        assert_eq!(layout.nodes.len(), ir.nodes.len());
+        assert_eq!(layout.edges.len(), ir.edges.len());
+        for node in &layout.nodes {
+            assert!(node.bounds.x.is_finite() && node.bounds.y.is_finite());
+        }
+        for edge in &layout.edges {
+            assert!(
+                edge.points
+                    .iter()
+                    .all(|point| point.x.is_finite() && point.y.is_finite())
+            );
+        }
     }
 
     #[test]
