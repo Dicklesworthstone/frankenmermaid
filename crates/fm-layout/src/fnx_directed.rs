@@ -334,7 +334,7 @@ pub struct DirectedCycle {
 pub struct DirectedCycleResult {
     /// Whether the graph has any directed cycles.
     pub has_cycles: bool,
-    /// All detected cycles, sorted by minimum node index.
+    /// Representative cycles, sorted by minimum node index.
     pub cycles: Vec<DirectedCycle>,
     /// Nodes that participate in at least one cycle.
     pub cyclic_nodes: BTreeSet<usize>,
@@ -345,13 +345,20 @@ pub struct DirectedCycleResult {
 /// Detect directed cycles in the graph using DFS.
 ///
 /// This finds cycles by detecting back edges during DFS traversal.
-/// Note: This may not find ALL cycles in complex graphs, but will detect
-/// if cycles exist and return a representative set.
+/// This returns a representative set rather than enumerating every cycle in
+/// complex graphs. The participating node and edge sets are complete: they are
+/// derived from strongly connected components, including edges outside the DFS
+/// witnesses.
 ///
 /// Output ordering contract:
 /// - Cycles are sorted by their minimum node index
 #[must_use]
 pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
+    let scc = compute_scc(ir);
+    detect_directed_cycles_with_scc(ir, &scc)
+}
+
+fn detect_directed_cycles_with_scc(ir: &MermaidDiagramIr, scc: &SccResult) -> DirectedCycleResult {
     let n = ir.nodes.len();
     if n == 0 {
         return DirectedCycleResult {
@@ -361,6 +368,17 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
             cyclic_edges: BTreeSet::new(),
         };
     }
+
+    // Every node in a non-trivial SCC lies on a cycle. An edge lies on a cycle
+    // exactly when its endpoints share an SCC: there is a return path from its
+    // target to its source. This includes self-loops and all parallel edges.
+    let cyclic_nodes: BTreeSet<_> = scc
+        .components
+        .iter()
+        .filter(|component| !component.is_trivial)
+        .flat_map(|component| component.nodes.iter().copied())
+        .collect();
+    let mut cyclic_edges = BTreeSet::new();
 
     // Build adjacency list with edge indices
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (target, edge_idx)
@@ -374,6 +392,9 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
         };
         if from_idx < n && to_idx < n {
             adj[from_idx].push((to_idx, edge_idx));
+            if scc.node_to_component[&from_idx] == scc.node_to_component[&to_idx] {
+                cyclic_edges.insert(edge_idx);
+            }
         }
     }
 
@@ -394,8 +415,6 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
     let mut parent: Vec<Option<usize>> = vec![None; n];
     let mut parent_edge: Vec<Option<usize>> = vec![None; n];
     let mut cycles: Vec<DirectedCycle> = Vec::new();
-    let mut cyclic_nodes = BTreeSet::new();
-    let mut cyclic_edges = BTreeSet::new();
 
     // Explicit DFS frames preserve the recursive traversal's successor order without
     // tying the largest supported graph to the caller's thread-stack limit.
@@ -433,13 +452,6 @@ pub fn detect_directed_cycles(ir: &MermaidDiagramIr) -> DirectedCycleResult {
 
                 cycle_nodes.reverse();
                 cycle_edges.reverse();
-
-                for &node in &cycle_nodes {
-                    cyclic_nodes.insert(node);
-                }
-                for &edge in &cycle_edges {
-                    cyclic_edges.insert(edge);
-                }
 
                 cycles.push(DirectedCycle {
                     nodes: cycle_nodes,
@@ -588,10 +600,12 @@ pub struct DirectedTopologySummary {
 /// Compute a complete [`DirectedTopologySummary`] for a diagram (`bd-l93qp`).
 #[must_use]
 pub fn analyze_directed_topology(ir: &MermaidDiagramIr) -> DirectedTopologySummary {
+    let scc = compute_scc(ir);
+    let cycles = detect_directed_cycles_with_scc(ir, &scc);
     DirectedTopologySummary {
-        scc: compute_scc(ir),
+        scc,
         wcc: compute_wcc(ir),
-        cycles: detect_directed_cycles(ir),
+        cycles,
         reachability: compute_reachability(ir),
     }
 }
@@ -894,6 +908,41 @@ mod tests {
     }
 
     #[test]
+    fn cycles_include_cross_and_parallel_edges_outside_dfs_witnesses() {
+        let ir = make_test_ir_with_edges(&[
+            (0, 1),
+            (1, 0),
+            (0, 2),
+            (2, 1),
+            (0, 1),
+            (2, 3),
+            (3, 4),
+            (4, 4),
+            (4, 5),
+        ]);
+        let result = detect_directed_cycles(&ir);
+
+        // DFS finishes node 1 before visiting node 2, so 2 -> 1 is a cross
+        // edge and the second 0 -> 1 is not a tree edge. Both still close
+        // cycles. The one-way bridges and the sink must remain excluded.
+        assert_eq!(result.cyclic_nodes, BTreeSet::from([0, 1, 2, 4]));
+        assert_eq!(result.cyclic_edges, BTreeSet::from([0, 1, 2, 3, 4, 7]));
+        assert_eq!(
+            result.cycles,
+            vec![
+                DirectedCycle {
+                    nodes: vec![0, 1],
+                    edges: vec![0, 1],
+                },
+                DirectedCycle {
+                    nodes: vec![4],
+                    edges: vec![7],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn directed_analysis_preserves_port_connectivity_and_ignores_invalid_endpoints() {
         // Two SCCs, a source, a sink, an isolated self-loop and a parallel edge.
         let nodes = make_test_ir_with_edges(&[
@@ -1013,6 +1062,28 @@ mod tests {
 
             let cycles = detect_directed_cycles(&ir);
             assert_eq!(cycles.has_cycles, (0..N).any(|node| reachable[node][node]));
+            let expected_nodes: BTreeSet<_> =
+                (0..N).filter(|&node| reachable[node][node]).collect();
+            assert_eq!(
+                cycles.cyclic_nodes, expected_nodes,
+                "cyclic node mismatch for mask {mask}"
+            );
+            let expected_edges: BTreeSet<_> = ir
+                .edges
+                .iter()
+                .enumerate()
+                .filter_map(|(index, edge)| {
+                    let (IrEndpoint::Node(from), IrEndpoint::Node(to)) = (edge.from, edge.to)
+                    else {
+                        unreachable!()
+                    };
+                    reachable[to.0][from.0].then_some(index)
+                })
+                .collect();
+            assert_eq!(
+                cycles.cyclic_edges, expected_edges,
+                "cyclic edge mismatch for mask {mask}"
+            );
             for cycle in &cycles.cycles {
                 assert_eq!(cycle.edges.len(), cycle.nodes.len());
                 assert!(!cycle.nodes.is_empty());
