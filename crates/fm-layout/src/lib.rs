@@ -5131,6 +5131,35 @@ fn compute_traced_layout_with_config_and_guardrails(
         && !config.collapse_cycle_clusters
         && edge_labels::can_refine_graph_label_spacing(ir))
     .then(|| config.clone());
+    let component_packing = (ir.nodes.len() > 4
+        && matches!(
+            guarded_dispatch.selected,
+            LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Tree | LayoutAlgorithm::Force
+        )
+        && matches!(
+            ir.diagram_type,
+            DiagramType::Flowchart
+                | DiagramType::State
+                | DiagramType::Class
+                | DiagramType::Er
+                | DiagramType::Requirement
+                | DiagramType::C4Context
+                | DiagramType::C4Container
+                | DiagramType::C4Component
+                | DiagramType::C4Dynamic
+                | DiagramType::C4Deployment
+        )
+        && ir.constraints.is_empty()
+        && !config.collapse_cycle_clusters)
+        .then(|| {
+            (
+                spacing_with_source_hints(config.spacing, ir),
+                config
+                    .font_metrics
+                    .clone()
+                    .unwrap_or_else(fm_core::FontMetrics::default_metrics),
+            )
+        });
 
     // Captured before `config` is moved into the dispatch arms; a caller that supplied custom
     // `font_metrics` must have its notes measured with them, not with the default preset.
@@ -5228,6 +5257,18 @@ fn compute_traced_layout_with_config_and_guardrails(
     }
     if let Some(config) = label_spacing_config {
         refine_graph_label_spacing(ir, &config, &mut traced);
+    }
+    if let Some((spacing, metrics)) = component_packing
+        && pack_disconnected_components(ir, Arc::make_mut(&mut traced.layout), spacing, &metrics)
+    {
+        push_snapshot(
+            &mut traced.trace,
+            "component_packing",
+            ir.nodes.len(),
+            ir.edges.len(),
+            traced.layout.stats.reversed_edges,
+            traced.layout.stats.crossing_count,
+        );
     }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
@@ -5329,6 +5370,403 @@ fn refine_graph_label_spacing(
         );
         *traced = candidate;
     }
+}
+
+/// Connectivity for packing includes authored containers: unrelated nodes inside one subgraph
+/// still form one visual unit. Composite-state routing nodes move with their contents as well.
+fn component_packing_groups(ir: &MermaidDiagramIr) -> Vec<Vec<usize>> {
+    let mut edges = resolved_edges(ir);
+    for cluster in &ir.clusters {
+        if let Some(first) = cluster.members.first() {
+            edges.extend(cluster.members.iter().skip(1).map(|member| OrientedEdge {
+                source: first.0,
+                target: member.0,
+                edge_index: usize::MAX,
+            }));
+        }
+    }
+    for subgraph in &ir.graph.subgraphs {
+        let members = ir.graph.subgraph_members_recursive(subgraph.id);
+        if let Some(first) = members.first() {
+            edges.extend(members.iter().skip(1).map(|member| OrientedEdge {
+                source: first.0,
+                target: member.0,
+                edge_index: usize::MAX,
+            }));
+        }
+    }
+    for (member, containers) in composite_containers(ir, ir.nodes.len()).iter().enumerate() {
+        edges.extend(containers.iter().map(|&container| OrientedEdge {
+            source: member,
+            target: container,
+            edge_index: usize::MAX,
+        }));
+    }
+    let mut groups = weakly_connected_components(ir.nodes.len(), &edges);
+    groups.sort_by_key(|members| {
+        members
+            .iter()
+            .filter_map(|&node| ir.nodes.get(node).map(|node| node.id.as_str()))
+            .min()
+            .unwrap_or("")
+    });
+    groups
+}
+
+fn include_packing_bounds(bounds: &mut Option<LayoutRect>, rect: LayoutRect) {
+    *bounds = Some(match *bounds {
+        None => rect,
+        Some(before) => {
+            let x = before.x.min(rect.x);
+            let y = before.y.min(rect.y);
+            LayoutRect {
+                x,
+                y,
+                width: (before.x + before.width).max(rect.x + rect.width) - x,
+                height: (before.y + before.height).max(rect.y + rect.height) - y,
+            }
+        }
+    });
+}
+
+/// Arrange many independent diagrams on balanced shelves, retaining every component's existing
+/// layout. Serial rank bands avoided a wide strip by producing an equally unreadable tall strip.
+/// Work after routing and annotation placement so loops, captions and notes all reserve space and
+/// travel with their component. A handful of parallel lanes keeps its familiar arrangement.
+fn pack_disconnected_components(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
+) -> bool {
+    if !ir.constraints.is_empty() {
+        return false;
+    }
+    let groups = component_packing_groups(ir);
+    if groups.len() <= 4 || !layout.cycle_clusters.is_empty() {
+        return false;
+    }
+    let mut owner = vec![usize::MAX; ir.nodes.len()];
+    for (group, members) in groups.iter().enumerate() {
+        for &node in members {
+            owner[node] = group;
+        }
+    }
+    let mut bounds = vec![None; groups.len()];
+    for node in &layout.nodes {
+        let Some(&group) = owner.get(node.node_index) else {
+            return false;
+        };
+        include_packing_bounds(&mut bounds[group], node.bounds);
+    }
+    let mut cluster_owner = vec![usize::MAX; ir.clusters.len()];
+    for cluster in &layout.clusters {
+        let Some(group) = ir
+            .clusters
+            .get(cluster.cluster_index)
+            .and_then(|cluster| cluster.members.first())
+            .and_then(|member| owner.get(member.0))
+            .copied()
+        else {
+            return false;
+        };
+        cluster_owner[cluster.cluster_index] = group;
+        include_packing_bounds(&mut bounds[group], cluster.bounds);
+    }
+    if layout.extensions.cluster_dividers.iter().any(|divider| {
+        cluster_owner
+            .get(divider.cluster_index)
+            .copied()
+            .unwrap_or(usize::MAX)
+            == usize::MAX
+    }) {
+        return false;
+    }
+    let mut note_owner = Vec::with_capacity(layout.extensions.state_notes.len());
+    for note in &layout.extensions.state_notes {
+        let group = owner.get(note.node_index).copied().unwrap_or_else(|| {
+            bounds.push(None);
+            bounds.len() - 1
+        });
+        note_owner.push(group);
+        include_packing_bounds(&mut bounds[group], note.bounds);
+        for point in [note.leader_start, note.leader_end] {
+            include_packing_bounds(
+                &mut bounds[group],
+                LayoutRect {
+                    x: point.x,
+                    y: point.y,
+                    width: 0.0,
+                    height: 0.0,
+                },
+            );
+        }
+    }
+    let mut edge_owner = Vec::with_capacity(layout.edges.len());
+    let mut label_sizes = vec![None; ir.edges.len()];
+    let mut has_labels = vec![false; bounds.len()];
+    for path in &layout.edges {
+        let Some(edge) = ir.edges.get(path.edge_index) else {
+            return false;
+        };
+        let Some(group) = endpoint_node_index(ir, edge.from).map(|node| owner[node]) else {
+            return false;
+        };
+        edge_owner.push(group);
+        for point in &path.points {
+            // Include marker/stroke clearance, including self-loops outside the node envelope.
+            include_packing_bounds(
+                &mut bounds[group],
+                LayoutRect {
+                    x: point.x - 12.0,
+                    y: point.y - 12.0,
+                    width: 24.0,
+                    height: 24.0,
+                },
+            );
+        }
+        if path.points.len() < 2 {
+            continue;
+        }
+        // SVG paints endpoint captions even when the route itself was bundled or hidden.
+        // Reserve them before skipping ordinary route labels so they cannot escape a shelf.
+        for (caption, end) in [
+            (edge.source_cardinality(), path.points.first()),
+            (edge.target_cardinality(), path.points.last()),
+        ] {
+            if let (Some(caption), Some(end)) = (caption, end) {
+                let width = metrics.estimate_multiline_width(caption) * 0.8 + 20.0;
+                let height = metrics.font_size() * 1.2 + 20.0;
+                include_packing_bounds(
+                    &mut bounds[group],
+                    LayoutRect {
+                        x: end.x - width,
+                        y: end.y - height,
+                        width: width * 2.0,
+                        height: height * 2.0,
+                    },
+                );
+            }
+        }
+        if path.bundled || edge.arrow == fm_core::ArrowType::Invisible {
+            continue;
+        }
+        if let Some(label) = edge.label.and_then(|label| ir.labels.get(label.0)) {
+            let style = edge_labels::edge_label_style(ir, path.edge_index);
+            let font_size = style
+                .get("font-size")
+                .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+                .unwrap_or(metrics.font_size() * 0.85);
+            let label_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+                font_size,
+                line_height: 1.2,
+                ..metrics.config().clone()
+            });
+            let width = label_metrics.estimate_multiline_width(&label.text) * 1.15 + 8.0;
+            let height = label.text.lines().count().max(1) as f32 * font_size * 1.2 + 4.0;
+            label_sizes[path.edge_index] = Some((width, height));
+            has_labels[group] = true;
+        }
+    }
+    let Some(mut bounds): Option<Vec<LayoutRect>> = bounds.into_iter().collect() else {
+        return false;
+    };
+    if has_labels.iter().any(|has_labels| *has_labels) {
+        // Partition once, retaining the original semantic indexes. Running the global placer
+        // for each label rescanned every unrelated node, connector and previous plate, making
+        // even thousands of independent two-node components quadratic. Each local copy below
+        // owns only its component's geometry; the expensive style/container tables are shared.
+        let mut components: Vec<_> = bounds
+            .iter()
+            .zip(&has_labels)
+            .map(|(&bounds, &has_labels)| {
+                has_labels.then(|| DiagramLayout {
+                    nodes: Vec::new(),
+                    clusters: Vec::new(),
+                    cycle_clusters: Vec::new(),
+                    edges: Vec::new(),
+                    bounds,
+                    stats: LayoutStats::default(),
+                    extensions: LayoutExtensions::default(),
+                    dirty_regions: Vec::new(),
+                })
+            })
+            .collect();
+        for node in &layout.nodes {
+            if let Some(component) = &mut components[owner[node.node_index]] {
+                component.nodes.push(node.clone());
+            }
+        }
+        for (path, &group) in layout.edges.iter().zip(&edge_owner) {
+            if let Some(component) = &mut components[group] {
+                component.edges.push(path.clone());
+            }
+        }
+        for (note, &group) in layout.extensions.state_notes.iter().zip(&note_owner) {
+            if let Some(component) = &mut components[group] {
+                component.extensions.state_notes.push(note.clone());
+            }
+        }
+        let shared = edge_labels::EdgeLabelPlacer::new(ir, layout, 20.0);
+        for (group, component) in components.iter().enumerate() {
+            let Some(component) = component else { continue };
+            let mut placer = shared.for_component(component);
+            for path in &component.edges {
+                if let Some((width, height)) = label_sizes[path.edge_index] {
+                    placer.place(path, width, height);
+                }
+            }
+            bounds[group] = placer.bounds();
+        }
+    }
+    if bounds.iter().any(|rect| {
+        ![rect.x, rect.y, rect.width, rect.height]
+            .into_iter()
+            .all(f32::is_finite)
+            || rect.width < 0.0
+            || rect.height < 0.0
+    }) {
+        return false;
+    }
+    let horizontal = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let extents: Vec<_> = bounds
+        .iter()
+        .map(|rect| {
+            if horizontal {
+                (rect.height, rect.width)
+            } else {
+                (rect.width, rect.height)
+            }
+        })
+        .collect();
+    let gap = spacing.node_spacing.max(spacing.rank_spacing).max(48.0);
+    if !gap.is_finite() {
+        return false;
+    }
+    let mut order: Vec<_> = (0..bounds.len()).collect();
+    order.sort_by(|&a, &b| {
+        extents[b]
+            .1
+            .total_cmp(&extents[a].1)
+            .then_with(|| extents[b].0.total_cmp(&extents[a].0))
+            .then_with(|| a.cmp(&b))
+    });
+    let widest = extents.iter().map(|size| size.0).fold(0.0_f32, f32::max);
+    let area: f64 = extents
+        .iter()
+        .map(|&(cross, primary)| {
+            (f64::from(cross) + f64::from(gap)) * (f64::from(primary) + f64::from(gap))
+        })
+        .sum();
+    let ideal = area.sqrt() as f32;
+    if !ideal.is_finite() {
+        return false;
+    }
+    let score = |width: f32, height: f32| {
+        let (width, height) = (f64::from(width), f64::from(height));
+        width * height + width.max(height).powi(2) * 0.35
+    };
+    let mut original = None;
+    for rect in &bounds {
+        include_packing_bounds(&mut original, *rect);
+    }
+    let Some(original) = original else {
+        return false;
+    };
+    let mut best_score = score(original.width, original.height);
+    let mut best = None;
+    // A fixed candidate count bounds the work even for thousands of isolated components.
+    for scale in [0.5, 0.65, 0.8, 1.0, 1.2, 1.5, 1.8, 2.2] {
+        let limit = (ideal * scale).max(widest);
+        let (mut cross, mut primary, mut shelf, mut max_cross) =
+            (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        let mut positions = vec![LayoutPoint { x: 0.0, y: 0.0 }; bounds.len()];
+        for &group in &order {
+            let (width, height) = extents[group];
+            if cross > 0.0 && cross + width > limit {
+                cross = 0.0;
+                primary += shelf + gap;
+                shelf = 0.0;
+            }
+            positions[group] = if horizontal {
+                LayoutPoint {
+                    x: primary,
+                    y: cross,
+                }
+            } else {
+                LayoutPoint {
+                    x: cross,
+                    y: primary,
+                }
+            };
+            max_cross = max_cross.max(cross + width);
+            cross += width + gap;
+            shelf = shelf.max(height);
+        }
+        let candidate_score = score(max_cross, primary + shelf);
+        if candidate_score.is_finite() && candidate_score < best_score {
+            best_score = candidate_score;
+            best = Some(positions);
+        }
+    }
+    let Some(positions) = best else { return false };
+    let offsets: Vec<_> = positions
+        .iter()
+        .zip(&bounds)
+        .map(|(position, bounds)| LayoutPoint {
+            x: position.x - bounds.x,
+            y: position.y - bounds.y,
+        })
+        .collect();
+    let shift_point = |point: &mut LayoutPoint, group: usize| {
+        point.x += offsets[group].x;
+        point.y += offsets[group].y;
+    };
+    let shift_rect = |rect: &mut LayoutRect, group: usize| {
+        rect.x += offsets[group].x;
+        rect.y += offsets[group].y;
+    };
+    for node in &mut layout.nodes {
+        shift_rect(&mut node.bounds, owner[node.node_index]);
+    }
+    for cluster in &mut layout.clusters {
+        shift_rect(&mut cluster.bounds, cluster_owner[cluster.cluster_index]);
+    }
+    for (path, &group) in layout.edges.iter_mut().zip(&edge_owner) {
+        for point in &mut path.points {
+            shift_point(point, group);
+        }
+    }
+    for divider in &mut layout.extensions.cluster_dividers {
+        let group = cluster_owner[divider.cluster_index];
+        shift_point(&mut divider.start, group);
+        shift_point(&mut divider.end, group);
+    }
+    for (note, &group) in layout.extensions.state_notes.iter_mut().zip(&note_owner) {
+        shift_rect(&mut note.bounds, group);
+        shift_point(&mut note.leader_start, group);
+        shift_point(&mut note.leader_end, group);
+    }
+    let mut packed_bounds = Some(compute_bounds(
+        &layout.nodes,
+        &layout.clusters,
+        &layout.edges,
+        spacing,
+    ));
+    for (group, mut rect) in bounds.into_iter().enumerate() {
+        shift_rect(&mut rect, group);
+        include_packing_bounds(&mut packed_bounds, rect);
+    }
+    if let Some(bounds) = packed_bounds {
+        layout.bounds = bounds;
+    }
+    let (total, reversed) = compute_edge_length_metrics(&layout.edges);
+    layout.stats.total_edge_length = total;
+    if layout.stats.reversed_edges > 0 {
+        layout.stats.reversed_edge_total_length = reversed;
+    }
+    true
 }
 
 impl IncrementalLayoutEngine {
@@ -5858,15 +6296,15 @@ impl IncrementalLayoutEngine {
             }
         }
 
-        // Corridor refinement couples rank gaps across this small graph. A geometry-changing
-        // edit must rerun it; the size-stable text-only fast path above remains valid.
+        // Corridor refinement and component shelves couple geometry across regions. A change in
+        // component size or connectivity must rerun them; size-stable text-only reuse above is valid.
         if edge_labels::can_refine_graph_label_spacing(ir)
-            || cached_layout
-                .traced
-                .trace
-                .snapshots
-                .iter()
-                .any(|snapshot| snapshot.stage == "edge_label_spacing")
+            || (ir.constraints.is_empty()
+                && !config.collapse_cycle_clusters
+                && component_packing_groups(ir).len() > 4)
+            || cached_layout.traced.trace.snapshots.iter().any(|snapshot| {
+                matches!(snapshot.stage, "edge_label_spacing" | "component_packing")
+            })
         {
             return None;
         }
@@ -30779,6 +31217,381 @@ mod tests {
             layout.bounds.width,
             layout.bounds.height,
         );
+    }
+
+    #[test]
+    fn disconnected_components_fill_a_balanced_canvas_in_every_direction() {
+        for direction in ["TB", "BT", "LR", "RL"] {
+            for count in [5, 20] {
+                let mut source = format!("flowchart {direction}\n");
+                for index in 0..count {
+                    source.push_str(&format!(
+                        "A{index}[Queue {index}] --> B{index}[Worker {index}]\n"
+                    ));
+                }
+                let ir = parse(&source).ir;
+                let traced = layout_diagram_traced(&ir);
+                let layout = &traced.layout;
+                let repeated = layout_diagram(&ir);
+                assert_eq!(layout.nodes, repeated.nodes);
+                assert_eq!(layout.edges, repeated.edges);
+                assert_eq!(layout.bounds, repeated.bounds);
+                assert_eq!(layout.nodes.len(), count * 2);
+                assert_eq!(layout.edges.len(), count);
+                assert!(layout.geometry_violations().is_empty());
+                assert!(
+                    traced
+                        .trace
+                        .snapshots
+                        .iter()
+                        .any(|stage| stage.stage == "component_packing")
+                );
+                let aspect = layout.bounds.width.max(layout.bounds.height)
+                    / layout.bounds.width.min(layout.bounds.height);
+                assert!(
+                    aspect < 2.0,
+                    "{direction}, {count} components: {:?}",
+                    layout.bounds
+                );
+                for (index, left) in layout.nodes.iter().enumerate() {
+                    for right in &layout.nodes[index + 1..] {
+                        assert!(!rects_overlap(left.bounds, right.bounds));
+                    }
+                }
+                for index in 0..count {
+                    let from = node_bounds(layout, &format!("A{index}")).center();
+                    let to = node_bounds(layout, &format!("B{index}")).center();
+                    let along = match direction {
+                        "TB" => to.y - from.y,
+                        "BT" => from.y - to.y,
+                        "LR" => to.x - from.x,
+                        _ => from.x - to.x,
+                    };
+                    assert!(along > 40.0, "component {index} lost {direction} direction");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn component_packing_preserves_mixed_component_routes_and_internal_geometry() {
+        let mut source = String::from("flowchart TB\n");
+        for group in 0..7 {
+            let length = 2 + group % 4;
+            for node in 0..length {
+                let text = if group == 3 {
+                    "A much wider processing step"
+                } else {
+                    "Step"
+                };
+                source.push_str(&format!("N{group}_{node}[{text}]\n"));
+                if node > 0 {
+                    source.push_str(&format!("N{group}_{} --> N{group}_{node}\n", node - 1));
+                }
+            }
+        }
+        source.push_str("N0_0 -->|retry| N0_0\nN5_0 -->|a descriptive handoff| N5_1\n");
+        let ir = parse(&source).ir;
+        let raw = super::layout_diagram_sugiyama_traced_with_config(&ir, LayoutConfig::default());
+        let before = raw.layout.as_ref();
+        let mut packed = before.clone();
+        assert!(super::pack_disconnected_components(
+            &ir,
+            &mut packed,
+            LayoutSpacing::default(),
+            &fm_core::FontMetrics::default_metrics()
+        ));
+        assert!(
+            packed.bounds.width.max(packed.bounds.height)
+                < before.bounds.width.max(before.bounds.height) * 0.7
+        );
+        for group in 0..7 {
+            let anchor = format!("N{group}_0");
+            let old_anchor = node_bounds(before, &anchor);
+            let new_anchor = node_bounds(&packed, &anchor);
+            let (dx, dy) = (new_anchor.x - old_anchor.x, new_anchor.y - old_anchor.y);
+            for old in &before.nodes {
+                if !old.node_id.starts_with(&format!("N{group}_")) {
+                    continue;
+                }
+                let new = node_bounds(&packed, &old.node_id);
+                assert!((new.x - old.bounds.x - dx).abs() < 0.01);
+                assert!((new.y - old.bounds.y - dy).abs() < 0.01);
+                assert_eq!(
+                    (new.width, new.height),
+                    (old.bounds.width, old.bounds.height)
+                );
+            }
+        }
+        for (old, new) in before.edges.iter().zip(&packed.edges) {
+            let edge = &ir.edges[old.edge_index];
+            let source = super::endpoint_node_index(&ir, edge.from).unwrap();
+            let a = before.nodes[source].bounds;
+            let b = packed.nodes[source].bounds;
+            assert_eq!(old.points.len(), new.points.len());
+            for (old_point, new_point) in old.points.iter().zip(&new.points) {
+                assert!((new_point.x - old_point.x - (b.x - a.x)).abs() < 0.01);
+                assert!((new_point.y - old_point.y - (b.y - a.y)).abs() < 0.01);
+            }
+        }
+        assert!(packed.geometry_violations().is_empty());
+    }
+
+    #[test]
+    fn component_packing_reserves_cardinalities_on_bundled_class_relations() {
+        let mut source = String::from("classDiagram\ndirection TB\n");
+        for group in 0..8 {
+            source.push_str(&format!("A{group} --> B{group}\n"));
+        }
+        let caption = "all currently authorized account holders ".repeat(4);
+        source.push_str(&format!("A0 \"{caption}\" --> B0\n"));
+        let ir = parse(&source).ir;
+        let raw = super::layout_diagram_sugiyama_traced_with_config(&ir, LayoutConfig::default());
+        let mut packed = raw.layout.as_ref().clone();
+        let edge_index = packed
+            .edges
+            .iter()
+            .find_map(|path| {
+                (path.bundled && ir.edges[path.edge_index].source_cardinality().is_some())
+                    .then_some(path.edge_index)
+            })
+            .expect("fixture must put the caption on a bundled route");
+        let metrics = fm_core::FontMetrics::default_metrics();
+        assert!(super::pack_disconnected_components(
+            &ir,
+            &mut packed,
+            LayoutSpacing::default(),
+            &metrics,
+        ));
+        let path = packed
+            .edges
+            .iter()
+            .find(|path| path.edge_index == edge_index)
+            .unwrap();
+        let start = path.points[0];
+        let next = path.points[1];
+        assert!((next.y - start.y).abs() > (next.x - start.x).abs());
+        // SVG places vertical-route cardinalities six pixels right of the port at 70% size.
+        // Their visible right edge must fit even though the route was absorbed by bundling.
+        let text_right = start.x + 6.0 + metrics.estimate_multiline_width(&caption) * 0.7;
+        assert!(
+            text_right <= packed.bounds.x + packed.bounds.width + 0.01,
+            "bundled cardinality extends to {text_right}, beyond {:?}",
+            packed.bounds,
+        );
+    }
+
+    #[test]
+    fn component_packing_reserves_labels_across_many_independent_components() {
+        let mut source = String::from("flowchart TB\n");
+        for group in 0..64 {
+            source.push_str(&format!(
+                "A{group}[Queue {group}] -->|Validate the incoming request {group}| B{group}[Worker {group}]\n"
+            ));
+        }
+        let ir = parse(&source).ir;
+        let traced = layout_diagram_traced(&ir);
+        assert!(
+            traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        let layout = &traced.layout;
+        assert_eq!(layout.edges.len(), 64);
+        assert!(
+            layout.bounds.width.max(layout.bounds.height)
+                / layout.bounds.width.min(layout.bounds.height)
+                < 2.0
+        );
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let font_size = metrics.font_size() * 0.85;
+        let label_metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            font_size,
+            line_height: 1.2,
+            ..metrics.config().clone()
+        });
+        // Render-time placement still sees the complete packed diagram. Its actual plates must
+        // stay within the envelope measured from local components, without covering any card.
+        let mut placer = super::edge_labels::EdgeLabelPlacer::new(&ir, layout, 20.0);
+        let mut plates = Vec::new();
+        for path in &layout.edges {
+            let label = &ir.labels[ir.edges[path.edge_index].label.unwrap().0];
+            let width = label_metrics.estimate_multiline_width(&label.text) * 1.15 + 8.0;
+            let height = font_size * 1.2 + 4.0;
+            let center = placer.place(path, width, height);
+            let plate = LayoutRect {
+                x: center.x - width / 2.0,
+                y: center.y - height / 2.0,
+                width,
+                height,
+            };
+            assert!(plate.x >= layout.bounds.x - 0.01);
+            assert!(plate.y >= layout.bounds.y - 0.01);
+            assert!(plate.x + width <= layout.bounds.x + layout.bounds.width + 0.01);
+            assert!(plate.y + height <= layout.bounds.y + layout.bounds.height + 0.01);
+            assert!(
+                layout
+                    .nodes
+                    .iter()
+                    .all(|node| !rects_overlap(plate, node.bounds))
+            );
+            assert!(
+                plates
+                    .iter()
+                    .all(|&previous| !rects_overlap(plate, previous))
+            );
+            plates.push(plate);
+        }
+    }
+
+    #[test]
+    fn component_packing_keeps_nested_clusters_and_state_notes_with_their_nodes() {
+        let mut source = String::from("stateDiagram-v2\n");
+        for group in 0..6 {
+            source.push_str(&format!(
+                "state S{group} {{\n  state Inner{group} {{\n    A{group} --> B{group}\n  }}\n}}\nS{group} --> S{group}\nS{group} --> T{group}\nnote right of B{group}: Processing details {group}\n"
+            ));
+        }
+        let ir = parse(&source).ir;
+        let traced = layout_diagram_traced(&ir);
+        let layout = &traced.layout;
+        assert!(
+            traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        assert_eq!(layout.extensions.state_notes.len(), 6);
+        for cluster in &layout.clusters {
+            for member in &ir.clusters[cluster.cluster_index].members {
+                let node = layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == member.0)
+                    .unwrap();
+                assert!(node.bounds.x >= cluster.bounds.x - 0.1);
+                assert!(node.bounds.y >= cluster.bounds.y - 0.1);
+                assert!(
+                    node.bounds.x + node.bounds.width
+                        <= cluster.bounds.x + cluster.bounds.width + 0.1
+                );
+                assert!(
+                    node.bounds.y + node.bounds.height
+                        <= cluster.bounds.y + cluster.bounds.height + 0.1
+                );
+            }
+        }
+        for note in &layout.extensions.state_notes {
+            let target = &layout.nodes[note.node_index];
+            assert!((note.leader_start.y - target.bounds.center().y).abs() < 0.1);
+            for node in &layout.nodes {
+                assert!(
+                    !rects_overlap(note.bounds, node.bounds),
+                    "note overlaps {}",
+                    node.node_id
+                );
+            }
+        }
+        let outer: Vec<_> = layout
+            .clusters
+            .iter()
+            .filter(|cluster| {
+                cluster
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with('S'))
+            })
+            .collect();
+        assert_eq!(outer.len(), 6);
+        for (index, left) in outer.iter().enumerate() {
+            for right in &outer[index + 1..] {
+                assert!(!rects_overlap(left.bounds, right.bounds));
+            }
+        }
+    }
+
+    #[test]
+    fn component_packing_keeps_explicit_pins_and_small_parallel_lanes() {
+        let mut source = String::from("flowchart TB\n");
+        for index in 0..6 {
+            source.push_str(&format!("A{index} --> B{index}\n"));
+        }
+        let mut ir = parse(&source).ir;
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "A0".into(),
+            x: 120.0,
+            y: 240.0,
+            span: Span::default(),
+        });
+        let traced = layout_diagram_traced(&ir);
+        assert!(
+            !traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        let pinned = node_bounds(&traced.layout, "A0");
+        assert!((pinned.x - 120.0).abs() < 1.0 && (pinned.y - 240.0).abs() < 1.0);
+
+        let lanes = parse("flowchart TB\nA --> B\nC --> D\nE --> F\nG --> H\n").ir;
+        let traced = layout_diagram_traced(&lanes);
+        assert!(
+            !traced
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        let a = node_bounds(&traced.layout, "A");
+        let c = node_bounds(&traced.layout, "C");
+        assert!((a.y - c.y).abs() < 0.1);
+    }
+
+    #[test]
+    fn component_packing_incremental_size_and_topology_edits_match_full_layout() {
+        let mut source = String::from("flowchart TB\n");
+        for group in 0..10 {
+            source.push_str(&format!(
+                "A{group} --> B{group} --> C{group} --> D{group} --> E{group} --> F{group}\n"
+            ));
+        }
+        let initial = parse(&source).ir;
+        let mut engine = IncrementalLayoutEngine::default();
+        let render = |engine: &mut IncrementalLayoutEngine, ir: &MermaidDiagramIr| {
+            engine.layout_diagram_traced_with_config_and_guardrails(
+                ir,
+                LayoutAlgorithm::Sugiyama,
+                LayoutConfig::default(),
+                LayoutGuardrails::default(),
+            )
+        };
+        let first = render(&mut engine, &initial);
+        assert!(
+            first
+                .trace
+                .snapshots
+                .iter()
+                .any(|stage| stage.stage == "component_packing")
+        );
+        for edit in [
+            format!("{source}\nC3[A significantly wider component changes shelf dimensions]\n"),
+            format!("{source}\nF2 --> A3\nF3 --> A4\n"),
+        ] {
+            let ir = parse(&edit).ir;
+            let warm = render(&mut engine, &ir);
+            let cold = super::layout_diagram_traced_with_config(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                LayoutConfig::default(),
+            );
+            assert_eq!(warm.layout.nodes, cold.layout.nodes);
+            assert_eq!(warm.layout.edges, cold.layout.edges);
+            assert_eq!(warm.layout.bounds, cold.layout.bounds);
+        }
     }
 
     #[test]

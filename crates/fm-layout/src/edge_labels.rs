@@ -9,6 +9,7 @@ use crate::{
 };
 use fm_core::{ArrowType, DiagramType, IrStyleTarget, MermaidDiagramIr};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Diagrams whose labels annotate routed graph edges rather than a specialized chart axis.
 #[must_use]
@@ -47,8 +48,8 @@ pub struct EdgeLabelPlacer<'a> {
     padding: f32,
     routes: Vec<(usize, EdgeLabelObstacle)>,
     plates: Vec<LayoutRect>,
-    containers: Vec<Vec<usize>>,
-    stroke_widths: Vec<f32>,
+    containers: Arc<Vec<Vec<usize>>>,
+    stroke_widths: Arc<Vec<f32>>,
 }
 
 impl<'a> EdgeLabelPlacer<'a> {
@@ -61,27 +62,45 @@ impl<'a> EdgeLabelPlacer<'a> {
             padding,
             routes: graph_edge_label_route_obstacles(ir, layout),
             plates: Vec::new(),
-            containers: crate::composite_containers(ir, ir.nodes.len()),
-            stroke_widths: ir
-                .edges
-                .iter()
-                .enumerate()
-                .map(|(index, edge)| {
-                    let default = if matches!(
-                        edge.arrow,
-                        ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine
-                    ) {
-                        2.5
-                    } else {
-                        1.5
-                    };
-                    edge_label_style(ir, index)
-                        .get("stroke-width")
-                        .and_then(|width| width.trim_end_matches("px").parse::<f32>().ok())
-                        .filter(|width| width.is_finite() && *width > 0.0)
-                        .unwrap_or(default)
-                })
-                .collect(),
+            containers: Arc::new(crate::composite_containers(ir, ir.nodes.len())),
+            stroke_widths: Arc::new(
+                ir.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(index, edge)| {
+                        let default = if matches!(
+                            edge.arrow,
+                            ArrowType::ThickArrow
+                                | ArrowType::DoubleThickArrow
+                                | ArrowType::ThickLine
+                        ) {
+                            2.5
+                        } else {
+                            1.5
+                        };
+                        edge_label_style(ir, index)
+                            .get("stroke-width")
+                            .and_then(|width| width.trim_end_matches("px").parse::<f32>().ok())
+                            .filter(|width| width.is_finite() && *width > 0.0)
+                            .unwrap_or(default)
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Measure one disconnected component without rescanning the rest of the diagram for every
+    /// label. Its layout retains the original node/edge indexes, so semantic container and style
+    /// lookups can be shared unchanged. Routes and previous plates stay local to this component.
+    pub(crate) fn for_component<'b>(&'b self, layout: &'b DiagramLayout) -> EdgeLabelPlacer<'b> {
+        EdgeLabelPlacer {
+            ir: self.ir,
+            layout,
+            padding: self.padding,
+            routes: graph_edge_label_route_obstacles(self.ir, layout),
+            plates: Vec::new(),
+            containers: Arc::clone(&self.containers),
+            stroke_widths: Arc::clone(&self.stroke_widths),
         }
     }
 
