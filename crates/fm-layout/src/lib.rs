@@ -16684,6 +16684,7 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
     // layout is chosen for small-to-medium graphs, so the scan is cheap; if a large force graph
     // ever shows up in a profile, the index can be added behind the same threshold.
     let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|node| node.bounds).collect();
+    let self_loops = build_self_loop_paths(ir, nodes, &obstacle_bounds, false);
     ir.edges
         .iter()
         .enumerate()
@@ -16699,15 +16700,13 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             // centre-to-centre line when both centres are the SAME point yields two identical
             // points — `clip_to_shape_border` returns `from` unchanged for a zero-length direction
             // — so the edge existed in the layout but had no extent and rendered as nothing. The
-            // Sugiyama builder already routes these through `route_self_loop`; this path did not,
+            // Sugiyama builder already had a self-loop route; this path did not,
             // and ER diagrams (`EMPLOYEE ||--o{ EMPLOYEE : manages`) are laid out here.
             if from_idx == to_idx {
                 return Some(LayoutEdgePath {
                     edge_index: ei,
                     span: edge.span,
-                    // Force layout has no rank orientation, so use the same vertical loop the
-                    // Sugiyama path draws for a top-to-bottom graph.
-                    points: route_self_loop(&nodes[from_idx], false),
+                    points: self_loops.get(&ei)?.clone(),
                     reversed: false,
                     is_self_loop: true,
                     parallel_offset: 0.0,
@@ -22753,6 +22752,7 @@ fn build_edge_paths_with_orientation(
         .map(|cluster| cluster.bounds)
         .chain(nodes.iter().map(|n| n.bounds))
         .collect();
+    let self_loops = build_self_loop_paths(ir, nodes, &obstacle_bounds, horizontal_ranks);
     // A composite state's node has its cluster's box (`anchor_composite_state_nodes`), so as an
     // obstacle it walls in its own contents: every route between two of its members was nudged out
     // of the box and back. Each node's enclosing composites are parked with its edges' endpoints.
@@ -22851,7 +22851,7 @@ fn build_edge_paths_with_orientation(
             };
 
             let points = if is_self_loop {
-                route_self_loop(source_box, horizontal_ranks)
+                self_loops.get(&edge_index)?.clone()
             } else {
                 // An end written to a subgraph (`one --> two`) is drawn to the subgraph's box, as
                 // mermaid draws it: it leaves or enters the box's face instead of the member the
@@ -23061,58 +23061,167 @@ fn subgraph_rank_axis(ir: &MermaidDiagramIr, source: usize, target: usize) -> Op
         .map(|(_, direction)| matches!(direction, GraphDirection::LR | GraphDirection::RL))
 }
 
-/// Route a self-loop edge: goes out one side and returns on another.
-fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> EdgePoints {
-    let b = &node_box.bounds;
-    let loop_size = 24.0_f32;
-
-    if horizontal_ranks {
-        // Loop goes out the right side and returns from the top.
-        let start = LayoutPoint {
-            x: b.x + b.width,
-            y: b.height.mul_add(0.4, b.y),
-        };
-        let corner1 = LayoutPoint {
-            x: b.x + b.width + loop_size,
-            y: b.height.mul_add(0.4, b.y),
-        };
-        let corner2 = LayoutPoint {
-            x: b.x + b.width + loop_size,
-            y: b.y - loop_size,
-        };
-        let corner3 = LayoutPoint {
-            x: b.width.mul_add(0.6, b.x),
-            y: b.y - loop_size,
-        };
-        let end = LayoutPoint {
-            x: b.width.mul_add(0.6, b.x),
-            y: b.y,
-        };
-        smallvec![start, corner1, corner2, corner3, end]
-    } else {
-        // Loop goes out the bottom and returns from the right.
-        let start = LayoutPoint {
-            x: b.width.mul_add(0.6, b.x),
-            y: b.y + b.height,
-        };
-        let corner1 = LayoutPoint {
-            x: b.width.mul_add(0.6, b.x),
-            y: b.y + b.height + loop_size,
-        };
-        let corner2 = LayoutPoint {
-            x: b.x + b.width + loop_size,
-            y: b.y + b.height + loop_size,
-        };
-        let corner3 = LayoutPoint {
-            x: b.x + b.width + loop_size,
-            y: b.height.mul_add(0.4, b.y),
-        };
-        let end = LayoutPoint {
-            x: b.x + b.width,
-            y: b.height.mul_add(0.4, b.y),
-        };
-        smallvec![start, corner1, corner2, corner3, end]
+/// Route a node's self references together, with separate ports and nested outer lanes.
+///
+/// A fixed corner loop drew every self transition on top of the first one, attached circular and
+/// diamond nodes outside their outlines, and could pass through a neighbouring node. Try the four
+/// faces in a stable order, preferring the side across the rank direction so ordinary incoming and
+/// outgoing edges keep their main ports. The whole family shares a face to preserve nesting.
+fn build_self_loop_paths(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    obstacles: &[LayoutRect],
+    horizontal_ranks: bool,
+) -> BTreeMap<usize, EdgePoints> {
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, edge) in ir.edges.iter().enumerate() {
+        if let Some(source) = endpoint_node_index(ir, edge.from)
+            && Some(source) == endpoint_node_index(ir, edge.to)
+        {
+            groups.entry(source).or_default().push(index);
+        }
     }
+    let mut output = BTreeMap::new();
+    if groups.is_empty() {
+        return output;
+    }
+    let metrics = fm_core::FontMetrics::default_metrics();
+    for (source, indexes) in groups {
+        let Some(node) = nodes.get(source) else {
+            continue;
+        };
+        let shape = node_shape_at(ir, node);
+        let bounds = node_outline_bounds(node.bounds, shape);
+        let center = bounds.center();
+        let horizontal = subgraph_rank_axis(ir, source, source).unwrap_or(horizontal_ranks);
+        // (horizontal attachment axis, positive side): right/left for TB, top/bottom for LR.
+        let sides = if horizontal {
+            [(false, false), (false, true), (true, true), (true, false)]
+        } else {
+            [(true, true), (true, false), (false, true), (false, false)]
+        };
+        let (label_width, label_height) = indexes
+            .iter()
+            .filter_map(|&index| ir.edges[index].label.and_then(|id| ir.labels.get(id.0)))
+            .map(|label| metrics.estimate_dimensions(&label.text))
+            .fold((0.0_f32, 0.0_f32), |(width, height), (w, h)| {
+                (width.max(w), height.max(h))
+            });
+        let mut best: Option<(usize, Vec<EdgePoints>)> = None;
+        for (horizontal_side, positive) in sides {
+            let lane_step = if horizontal_side {
+                label_width.mul_add(1.4, 20.0).max(24.0)
+            } else {
+                (label_height + 20.0).max(24.0)
+            };
+            // Leave room for the caption's half plate on the node-facing side of the lane.
+            // Otherwise a short loop's label is forced off its connector to avoid its own node.
+            let initial_reach = if horizontal_side {
+                label_width.mul_add(0.7, 18.0).max(24.0)
+            } else {
+                label_height.mul_add(0.5, 18.0).max(24.0)
+            };
+            let extent = if horizontal_side {
+                bounds.height
+            } else {
+                bounds.width
+            };
+            let nominal = if horizontal_side {
+                LayoutPoint {
+                    x: if positive {
+                        bounds.x + bounds.width
+                    } else {
+                        bounds.x
+                    },
+                    y: center.y,
+                }
+            } else {
+                LayoutPoint {
+                    x: center.x,
+                    y: if positive {
+                        bounds.y + bounds.height
+                    } else {
+                        bounds.y
+                    },
+                }
+            };
+            let paths: Vec<_> = (0..indexes.len())
+                .map(|index| {
+                    let spread = extent * (0.15 + 0.25 * (index + 1) as f32 / indexes.len() as f32);
+                    let start =
+                        parallel_edge_anchor(nominal, node.bounds, shape, horizontal_side, -spread);
+                    let end =
+                        parallel_edge_anchor(nominal, node.bounds, shape, horizontal_side, spread);
+                    let reach = initial_reach + index as f32 * lane_step;
+                    let outside = if horizontal_side {
+                        nominal.x
+                    } else {
+                        nominal.y
+                    } + if positive { reach } else { -reach };
+                    let (first, last) = if horizontal_side {
+                        (
+                            LayoutPoint {
+                                x: outside,
+                                y: start.y,
+                            },
+                            LayoutPoint {
+                                x: outside,
+                                y: end.y,
+                            },
+                        )
+                    } else {
+                        (
+                            LayoutPoint {
+                                x: start.x,
+                                y: outside,
+                            },
+                            LayoutPoint {
+                                x: end.x,
+                                y: outside,
+                            },
+                        )
+                    };
+                    smallvec![start, first, last, end]
+                })
+                .collect();
+            let collisions = obstacles
+                .iter()
+                // The source and its enclosing cluster/composite are not obstacles to their own
+                // loop. Other nodes and unrelated clusters still reserve their entire footprint.
+                .filter(|obstacle| {
+                    !(center.x >= obstacle.x
+                        && center.x <= obstacle.x + obstacle.width
+                        && center.y >= obstacle.y
+                        && center.y <= obstacle.y + obstacle.height)
+                })
+                .map(|obstacle| {
+                    paths
+                        .iter()
+                        .filter(|path| {
+                            path.windows(2).any(|segment| {
+                                cga_routing::segment_intersects_obstacles(
+                                    segment[0],
+                                    segment[1],
+                                    std::slice::from_ref(obstacle),
+                                    8.0,
+                                )
+                            })
+                        })
+                        .count()
+                })
+                .sum();
+            if best.as_ref().is_none_or(|(count, _)| collisions < *count) {
+                best = Some((collisions, paths));
+            }
+            if collisions == 0 {
+                break;
+            }
+        }
+        if let Some((_, paths)) = best {
+            output.extend(indexes.into_iter().zip(paths));
+        }
+    }
+    output
 }
 
 /// Keep a fan's ports inside the central 80% of both endpoint outlines.
@@ -35409,6 +35518,172 @@ mod tests {
              under the node and cannot be seen: {:?}",
             path.points
         );
+    }
+
+    #[test]
+    fn self_loops_keep_distinct_lanes_and_attach_to_drawn_outlines() {
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::BT,
+            GraphDirection::LR,
+            GraphDirection::RL,
+        ] {
+            for shape in [
+                NodeShape::Rect,
+                NodeShape::Diamond,
+                NodeShape::Circle,
+                NodeShape::Stadium,
+            ] {
+                let mut ir = parse("flowchart TD\n A[Queue]\n A -->|retry| A\n A -->|refresh| A\n A -->|resume| A\n").ir;
+                ir.direction = direction;
+                ir.nodes[0].shape = shape;
+                for algorithm in [LayoutAlgorithm::Sugiyama, LayoutAlgorithm::Force] {
+                    let traced = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    let layout = &traced.layout;
+                    assert_eq!(layout.edges.len(), 3);
+                    let repeated = layout_diagram_traced_with_algorithm(&ir, algorithm);
+                    assert_eq!(layout.edges, repeated.layout.edges);
+                    let bounds = layout.nodes[0].bounds;
+                    let center = bounds.center();
+                    for (index, path) in layout.edges.iter().enumerate() {
+                        assert!(path.is_self_loop && !path.bundled);
+                        assert!(
+                            path.points
+                                .iter()
+                                .all(|p| p.x.is_finite() && p.y.is_finite())
+                        );
+                        for segment in path.points.windows(2) {
+                            assert!(
+                                (segment[0].x - segment[1].x).abs() < 0.01
+                                    || (segment[0].y - segment[1].y).abs() < 0.01,
+                                "self-loop must keep orthogonal terminal stubs: {path:?}"
+                            );
+                        }
+                        for port in [path.points[0], *path.points.last().unwrap()] {
+                            let dx = (port.x - center.x).abs();
+                            let dy = (port.y - center.y).abs();
+                            let on_outline = match shape {
+                                NodeShape::Circle => {
+                                    (dx.hypot(dy) - bounds.width.min(bounds.height) / 2.0).abs()
+                                        < 0.01
+                                }
+                                NodeShape::Diamond => {
+                                    (dx / (bounds.width / 2.0) + dy / (bounds.height / 2.0) - 1.0)
+                                        .abs()
+                                        < 0.001
+                                }
+                                NodeShape::Stadium => {
+                                    let radius = bounds.width.min(bounds.height) / 2.0;
+                                    let cap_x = (dx - (bounds.width / 2.0 - radius)).max(0.0);
+                                    let cap_y = (dy - (bounds.height / 2.0 - radius)).max(0.0);
+                                    (cap_x.hypot(cap_y) - radius).abs() < 0.01
+                                }
+                                _ => {
+                                    (dx - bounds.width / 2.0).abs() < 0.01
+                                        || (dy - bounds.height / 2.0).abs() < 0.01
+                                }
+                            };
+                            assert!(
+                                on_outline,
+                                "{shape:?} loop port floats off its outline: {port:?}, {bounds:?}"
+                            );
+                        }
+                        for other in layout.edges.iter().skip(index + 1) {
+                            assert_ne!(
+                                path.points, other.points,
+                                "self transitions must remain individually visible"
+                            );
+                            assert_ne!(
+                                path.points.first(),
+                                other.points.first(),
+                                "departures need distinct ports"
+                            );
+                            assert_ne!(
+                                path.points.last(),
+                                other.points.last(),
+                                "arrowheads need distinct ports"
+                            );
+                            let a = super::edge_label_position(path);
+                            let b = super::edge_label_position(other);
+                            assert!(
+                                (a.x - b.x).hypot(a.y - b.y) >= 24.0,
+                                "loop labels need separate lanes: {a:?}, {b:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn self_loop_families_choose_a_clear_side_around_neighbors() {
+        let ir = parse(
+            "flowchart TD\n A -->|retry| A\n A -->|resume| A\n B[Right]\n C[Left]\n D[Below]\n",
+        )
+        .ir;
+        let bounds = [
+            LayoutRect {
+                x: 100.0,
+                y: 100.0,
+                width: 100.0,
+                height: 80.0,
+            },
+            LayoutRect {
+                x: 210.0,
+                y: 60.0,
+                width: 80.0,
+                height: 160.0,
+            },
+            LayoutRect {
+                x: 10.0,
+                y: 60.0,
+                width: 80.0,
+                height: 160.0,
+            },
+            LayoutRect {
+                x: 60.0,
+                y: 190.0,
+                width: 180.0,
+                height: 80.0,
+            },
+        ];
+        let nodes: Vec<_> = ir
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(node_index, node)| LayoutNodeBox {
+                node_index,
+                node_id: node.id.clone(),
+                rank: 0,
+                order: node_index,
+                span: node.span_primary,
+                bounds: bounds[node_index],
+            })
+            .collect();
+        for paths in [
+            build_edge_paths(&ir, &nodes, &[], &BTreeSet::new(), EdgeRouting::Orthogonal),
+            super::force_build_edge_paths(&ir, &nodes),
+        ] {
+            assert_eq!(paths.len(), 2);
+            for path in paths {
+                assert!(
+                    path.points.iter().any(|point| point.y < bounds[0].y),
+                    "the only clear face is above the source: {path:?}"
+                );
+                for segment in path.points.windows(2) {
+                    assert!(
+                        !super::cga_routing::segment_intersects_obstacles(
+                            segment[0],
+                            segment[1],
+                            &bounds[1..],
+                            8.0,
+                        ),
+                        "self-loop runs through an unrelated node: {path:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
